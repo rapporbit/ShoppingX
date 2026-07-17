@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <title>ShoppingX —— 会帮你比价挑货的购物 Agent</title>
+    <meta
+      name="description"
+      content="用一句话说出你的购物需求，ShoppingX 跨平台检索、算到手价（含税含运）、按你的长期偏好精挑，最后给一份带选购理由的清单。"
+    />
+    <meta name="theme-color" content="#14c08a" />
+
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/favicon.svg" />
+
+    <!-- 分享到微信 / Slack / Twitter 时的卡片。缺了它，链接发出去就是一条光秃秃的裸 URL——
+         比「做得丑」更像没做完。og:image 要绝对 URL：抓卡片的是各家服务器，不是用户浏览器，
+         相对路径它们无从解析。图的源稿在 frontend/design/og.html（改完用 Chrome headless 重渲染，
+         命令见该文件顶部注释）。 -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="ShoppingX" />
+    <meta property="og:title" content="ShoppingX —— 会帮你比价挑货的购物 Agent" />
+    <meta
+      property="og:description"
+      content="一句话说出需求，跨平台检索 + 到手价比价 + 按偏好精挑，给你一份带选购理由的清单。"
+    />
+    <meta property="og:url" content="https://shopx.oiuu.de/" />
+    <meta property="og:image" content="https://shopx.oiuu.de/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="ShoppingX —— 把「想买点什么」交给它，你只管挑。" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:image" content="https://shopx.oiuu.de/og.png" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

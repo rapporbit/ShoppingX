@@ -1,0 +1,33 @@
+# globex 后端（FastAPI + AgentLoop）生产镜像。
+# 本地构建后端镜像不现实（VPS 是 amd64、Mac 是 arm64），故在 VPS 上直接 build。
+FROM python:3.11-slim
+
+# uv：与本地同一套依赖解析（uv.lock 锁定），保证线上线下依赖一致。
+COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+# 依赖层单独 COPY：改代码不重装依赖，重建秒级。
+COPY pyproject.toml uv.lock ./
+# redis 已是主依赖（事件回放不再是可选降级路径），无需再点名 extra。
+RUN uv sync --frozen --no-dev --no-install-project
+
+# 应用代码（data/ 与 .env 走挂载，不进镜像——数据大且含密钥）
+COPY app/ ./app/
+COPY prompt/ ./prompt/
+COPY scripts/ ./scripts/
+# 数据库迁移（M17）。**漏了这两行 = 容器起不来**：启动时 init_db() 要跑 alembic upgrade，
+# 找不到 alembic.ini / migrations/ 就直接抛。它俩必须跟着代码一起进镜像、一起版本化——
+# 「镜像里的代码」与「它期望的表结构」本就是一件事，分开发布就会出现代码要新列、库还没升的窗口。
+COPY alembic.ini ./
+COPY migrations/ ./migrations/
+
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1
+
+EXPOSE 8000
+
+# 单 worker 是硬约束：active_tasks / 任务队列 / 幂等窗口都是进程内状态，
+# 多 worker 会让「取消任务」和「重复提交去重」静默失效（请求落到别的进程就找不到 task）。
+# 不加 --reload：生产不需要热重载，且 reload 会多开一个 watcher 进程白吃内存。
+CMD ["uvicorn", "app.api.server:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

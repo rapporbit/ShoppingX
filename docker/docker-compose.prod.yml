@@ -1,0 +1,125 @@
+# globex 生产编排（gcjp / shopx.oiuu.de）。与 docker-compose.yml（开发）的三点关键差异：
+#
+#   1. **不发布任何端口到宿主**。开发版的 "6333:6333" 会绑 0.0.0.0，而 Docker 直接写 iptables、
+#      绕过 ufw —— 等于把无鉴权的 Qdrant / OpenSearch / Redis 挂公网。这里服务间只走内部网络，
+#      互相用服务名寻址；唯一入口是 Caddy。
+#   2. backend / frontend 额外接入 vaultwarden_web（Caddy 所在的既有网络），供 Caddy 反代。
+#   3. 全部 restart: unless-stopped，VPS 重启后自动拉起。
+#
+# 起停：docker compose -f docker/docker-compose.prod.yml --env-file .env up -d
+
+name: globex
+
+# 日志轮转。**不配这个，磁盘迟早被日志打满，然后全站一起挂**——Docker 的 json-file driver 默认
+# 无上限，一个话痨容器（OpenSearch 尤其）几周就能写掉几个 G，而 VPS 的盘就那么大。这是自建部署
+# 最经典、也最不该发生的死法：不是被攻击，是自己把自己撑死的。
+#
+# 每个容器最多 3 × 10MB = 30MB，五个容器封顶 150MB。用 YAML 锚点复用，免得漏配某个服务——漏掉的
+# 那个恰好就是话痨的概率，从来不低。
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  qdrant:
+    # 必须与打 snapshot 的本地 Qdrant 同版本：snapshot 内嵌 RocksDB 备份，跨大版本恢复会报
+    # "failed to restore RocksDB backup: NotFound"。固定版本而非 latest，避免重启即静默升级。
+    image: qdrant/qdrant:v1.18.2
+    container_name: globex-qdrant
+    restart: unless-stopped
+    logging: *default-logging
+    volumes:
+      - qdrant-data:/qdrant/storage
+      - qdrant-snapshots:/qdrant/snapshots
+    networks: [internal]
+
+  opensearch:
+    image: opensearchproject/opensearch:2.13.0
+    container_name: globex-opensearch
+    restart: unless-stopped
+    logging: *default-logging # 它是这里最话痨的一个：慢查询 / GC / 索引日志一刻不停
+    environment:
+      - discovery.type=single-node
+      - DISABLE_SECURITY_PLUGIN=true # 无鉴权可接受：不出内部网络，宿主与公网都够不着
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+    volumes:
+      - os-data:/usr/share/opensearch/data
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: globex-redis
+    restart: unless-stopped
+    logging: *default-logging
+    command: ["redis-server", "--appendonly", "yes"] # AOF：重启不丢长期偏好
+    volumes:
+      - redis-data:/data
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    image: globex-backend:latest
+    container_name: globex-backend
+    restart: unless-stopped
+    logging: *default-logging
+    env_file: [../.env] # 密钥不进镜像、不进 git，只在 VPS 上这一份
+    volumes:
+      - ../data:/app/data:ro # 品类卡片 / 评测集等只读语料
+      - output:/app/output # 每会话产物
+      - uploaded:/app/uploaded
+      # 账户与会话归属库（M16 的 SQLite：users / threads）。**漏了这行 = 容器一重建，注册用户全没**。
+      # 必须单独挂一个卷：上面的 data 是 :ro 只读（放语料），而 SQLite 要写；output 是会话产物、
+      # 语义也不同。库文件路径由 DATABASE_URL 决定，缺省即 /app/var/globex.db。
+      - appdb:/app/var
+    depends_on:
+      opensearch: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    networks: [internal, vaultwarden_web] # 后者供 Caddy 反代
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8000/docs')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  frontend:
+    image: nginx:alpine # 仿 interview-site：静态托管 vite build 产物，Caddy 反代它
+    container_name: globex-frontend
+    restart: unless-stopped
+    logging: *default-logging
+    volumes:
+      - ../frontend/dist:/usr/share/nginx/html:ro
+      - ./nginx-spa.conf:/etc/nginx/conf.d/default.conf:ro
+    networks: [vaultwarden_web]
+
+networks:
+  internal: # 仅本 compose 内部，不与 Caddy 网络互通
+  vaultwarden_web:
+    external: true
+
+volumes:
+  qdrant-data:
+  qdrant-snapshots:
+  os-data:
+  redis-data:
+  output:
+  uploaded:
+  appdb: # 账户库（M16）：注册用户与会话归属的唯一真源，丢了没法从别处重建

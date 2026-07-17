@@ -1,0 +1,75 @@
+# ShoppingX 开发期中间件（按需起，平时各组件走进程内回退，无需容器）。
+#
+# 两个有状态服务：
+#   - opensearch：RAG 品类知识库的应用层向量栈（refdocs 04-1 / 13），引擎层 Hybrid（KNN+BM25）。
+#   - redis：仅服务 AGUI 事件回放（主依赖已含 redis 客户端；本服务不起则熔断降级、无回放）。
+#
+# 起停（可只起其一）：
+#   docker compose -f docker/docker-compose.yml up -d                # 全起
+#   docker compose -f docker/docker-compose.yml up -d redis          # 只起 redis
+#   docker compose -f docker/docker-compose.yml down
+#
+# 接入：
+#   - OpenSearch：.env 放开 OPENSEARCH_HOST=localhost，跑 scripts/build_category_kb.py 灌卡片，
+#     category_insight 自动走引擎层 Hybrid（否则走进程内本地回退）。
+#   - Redis：只服务 AGUI 事件回放（每 thread 一条 Stream，断线重连补发缺口事件）。.env 设
+#     EVENT_REDIS_URL=redis://localhost:6380/2；不起也行，降级为「只直播、无回放」。
+#     长期偏好 / 历史 / 收藏**不再走 Redis**，它们在关系库里（DATABASE_URL，缺省 SQLite）。
+#
+# 注：开发环境 OpenSearch **关闭 security 插件**（免 SSL / 初始密码）、Redis **无密码**，仅限本机。
+# 生产务必开 TLS + 鉴权。OpenSearch 未装 analysis-ik 中文分词器——本项目语料是英文 Amazon 商品，
+# 索引用内置 english 分析器，中文 query 的跨语言匹配靠 KNN 向量兜底（见 app/recall/kb_client.py）。
+
+services:
+  opensearch:
+    image: opensearchproject/opensearch:2.13.0
+    container_name: shoppingx-opensearch
+    environment:
+      - discovery.type=single-node
+      - DISABLE_SECURITY_PLUGIN=true # 开发免鉴权；生产删除此行并配 TLS + 强密码
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "9200:9200"
+    volumes:
+      - globex-os-data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: shoppingx-redis
+    command: ["redis-server", "--appendonly", "yes"] # AOF 持久化，重启不丢偏好
+    ports:
+      - "6380:6379"
+    volumes:
+      - globex-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:latest # 召回向量库；生产请固定具体版本（与 qdrant-client 对齐）
+    container_name: shoppingx-qdrant
+    ports:
+      - "6333:6333" # REST / HTTP（QDRANT_URL 用这个）
+      - "6334:6334" # gRPC
+    volumes:
+      - globex-qdrant-data:/qdrant/storage
+
+volumes:
+  globex-os-data:
+  globex-redis-data:
+  globex-qdrant-data:

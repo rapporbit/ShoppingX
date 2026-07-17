@@ -1,0 +1,62 @@
+# Data (large; reproducible via scripts/)
+# Ignore data/ contents but keep the directory's documentation tracked.
+/data/*
+!data/DATASET_REPORT.md
+# 清洗数据集说明（数据本身 products.jsonl 仍忽略，只追踪 README）。
+!data/platforms/
+data/platforms/*
+!data/platforms/clean/
+data/platforms/clean/*
+!data/platforms/clean/README.md
+*.zip
+*.csv
+*.parquet
+*.arrow
+
+# Secrets / local config
+.env
+!.env.example
+
+# Per-session artifacts (created at runtime)
+/output/
+/uploaded/
+
+# Frontend build / deps
+/frontend/node_modules/
+/frontend/dist/
+/frontend/*.tsbuildinfo
+# tsc 从 vite.config.ts 编出的产物（Vite 直接吃 .ts，不需要入库）
+/frontend/vite.config.js
+/frontend/vite.config.d.ts
+
+# Python env
+.venv/
+__pycache__/
+*.pyc
+
+# start.sh 运行时写的进程号文件（stop 时清理）
+/.pid_backend
+/.pid_frontend
+
+# OS / editor
+.DS_Store
+
+# Claude Code 本地工作区（worktrees 里各带一份 .venv，数百 MB）。
+# 将来若要共享项目级配置，用 !.claude/settings.json 反选。
+/.claude/
+
+# 不随公开仓库发布：教学参考资料与内部开发文档
+/refdocs/
+/docs/
+/CLAUDE.md
+/CONVENTIONS.md
+/ROADMAP.md
+
+# 编辑器本地配置
+/.sc/
+
+# 部署凭据（basic auth 口令等），绝不入库
+.deploy-credentials
+
+# M16：SQLite 库文件（账户 / 会话归属）——数据不入库，靠注册流程重建
+/var/

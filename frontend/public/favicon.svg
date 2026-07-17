@@ -1,0 +1,7 @@
+<!-- 站点图标：复用侧栏 logo 的「A」形三角（见 components/Sidebar.tsx）。
+     浏览器标签是用户看到的第一个像素——留白板等于宣告「这是个跑在本地的东西」。
+     深色底 + 品牌薄荷绿字形：favicon 只有 16×16，细描边会糊成一团，实心色块才认得出。 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <rect width="24" height="24" rx="5" fill="#1c1d1f" />
+  <path d="M12 4 3.6 20h3.9l4.5-9 4.5 9h3.9Z" fill="#14c08a" />
+</svg>

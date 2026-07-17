@@ -1,0 +1,102 @@
+[project]
+name = "shoppingx-agent"
+version = "0.1.0"
+description = "ShoppingX — 全球电商对话式购物 Agent（AgentLoop + 同质子 Agent fork）"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "langchain>=1.0",
+    "langchain-openai>=0.2.0",
+    "langgraph>=1.0",
+    "pydantic>=2.7",
+    "python-dotenv>=1.0",
+    "fastapi>=0.111",
+    "python-multipart>=0.0.9",
+    "uvicorn[standard]>=0.30",
+    "httpx>=0.27",
+    "pyyaml>=6.0",
+    "numpy>=1.26",
+    "opensearch-py>=2.6",
+    "langdetect>=1.0.9",
+    "qdrant-client>=1.18.0",
+    "ftfy>=6.3.1",
+    "langfuse>=4.12",
+    "dashscope[tokenizer]>=1.26.0",
+    "tenacity>=9.1.4",
+    "prometheus-client>=0.25.0",
+    "structlog>=26.1.0",
+    "cachetools>=7.1.4",
+    "pyjwt>=2.13.0",
+    "sqlalchemy[asyncio]>=2.0",
+    "aiosqlite>=0.22.1",
+    "bcrypt>=5.0.0",
+    "alembic>=1.18.5",
+    # 事件回放（app/api/event_log.py）唯一消费方。曾是可选 extra（--extra replay），但 uv sync
+    # 默认不装 extras——每个新环境的「刷新续看/断线补发」都会静默降级失效，且只在 DEBUG 日志里
+    # 留一行，根本发现不了（本地就这么瞎跑了很久）。回放是核心 UX，升为主依赖；真不想装 Redis
+    # 服务的部署照样能跑（连不上会熔断降级，语义不变）。
+    "redis>=5.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "types-pyyaml>=6.0",
+    "types-cachetools>=7.0.0.20260518",
+]
+
+[tool.uv]
+# 本项目是「应用」而非「库」：不构建/安装 app 为 wheel，从项目根直接 import。
+package = false
+
+# ---------------------------------------------------------------------------
+# 代码风格与质量门（开发准则 §三：风格用工具强制，不写文字约定）
+# 验收三道关之①「自动」：ruff check / ruff format --check / mypy / pytest 全绿。
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["refdocs", "data", ".venv"]
+
+[tool.ruff.lint]
+# E/F 基础错误，I import 排序，UP pyupgrade，B bugbear，ASYNC 异步陷阱
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI 的 Depends/File/Form/Query 等惯例就是在参数默认值里调用（依赖注入标记），
+# 不是 B008「可变默认值」那类陷阱——豁免掉，保留 B008 对其他真问题的检查。
+extend-immutable-calls = [
+    "fastapi.File",
+    "fastapi.Form",
+    "fastapi.Query",
+    "fastapi.Depends",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 离线 CLI 脚本（建库 / 评测）的 async main 里用同步文件 IO 是有意为之——这些是一次性
+# 入口、非服务热路径，引 trio/anyio 反而过度工程。仅在 scripts/ 放开 ASYNC 文件 IO 告警。
+"scripts/**" = ["ASYNC230", "ASYNC240"]
+# 测试里在 async 用例中用 pathlib（如断言落盘文件）是有意为之：测试非服务热路径，
+# 为它引 anyio.Path 纯属过度工程。仅在 tests/ 放开 ASYNC 文件 IO 告警。
+"tests/**" = ["ASYNC230", "ASYNC240"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.11"
+# 起步宽松档：不强制第三方 stub，核心模块（agent/、tools/）后续逐步收紧。
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = true
+exclude = ["refdocs/", "data/", "examples/"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+# app 不作为 wheel 安装（[tool.uv] package=false），让 pytest 把项目根加入 sys.path。
+pythonpath = ["."]
+addopts = "-ra"
