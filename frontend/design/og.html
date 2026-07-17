@@ -1,0 +1,80 @@
+<!doctype html>
+<!--
+  public/og.png 的源稿（社交分享卡，1200×630）。改完这里要重新渲染，否则线上那张图不会变：
+
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless --disable-gpu \
+      --screenshot=../public/og.png --window-size=1200,630 --default-background-color=1c1d1fff og.html
+
+  --default-background-color 不能省：headless Chrome 默认底色是透明，转 PNG 后深色文字会糊在
+  各家白色卡片背景上。这个文件不放 public/——它是构建材料，不是要发布出去的静态资源。
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body {
+        width: 1200px;
+        height: 630px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        padding: 0 88px;
+        background: #1c1d1f;
+        color: #fff;
+        font-family: "PingFang SC", "Helvetica Neue", sans-serif;
+        position: relative;
+        overflow: hidden;
+      }
+      /* 右下角一枚放大的品牌三角，做背景纹理——纯色底在信息流里会被当成加载失败的空图。 */
+      .ghost {
+        position: absolute;
+        right: -80px;
+        bottom: -140px;
+        opacity: 0.07;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 40px;
+      }
+      .brand span { font-size: 30px; font-weight: 600; letter-spacing: 0.5px; }
+      h1 {
+        font-size: 62px;
+        font-weight: 700;
+        line-height: 1.28;
+        letter-spacing: -1px;
+      }
+      .accent { color: #14c08a; }
+      p {
+        margin-top: 28px;
+        font-size: 27px;
+        line-height: 1.6;
+        color: #a3a6ac;
+      }
+      .url {
+        margin-top: 52px;
+        font-size: 22px;
+        color: #6f7379;
+        letter-spacing: 0.5px;
+      }
+    </style>
+  </head>
+  <body>
+    <svg class="ghost" width="520" height="520" viewBox="0 0 24 24">
+      <path d="M12 3 3 20h4l5-10 5 10h4Z" fill="#14c08a" />
+    </svg>
+
+    <div class="brand">
+      <svg width="34" height="34" viewBox="0 0 24 24">
+        <path d="M12 3 3 20h4l5-10 5 10h4Z" fill="#14c08a" />
+      </svg>
+      <span>ShoppingX</span>
+    </div>
+
+    <h1>把「想买点什么」交给它，<br />你<span class="accent">只管挑</span>。</h1>
+    <p>跨平台找货 · 算到手价（含税含运）· 按你的偏好精挑</p>
+    <div class="url">shopx.oiuu.de</div>
+  </body>
+</html>

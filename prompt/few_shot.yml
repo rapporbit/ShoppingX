@@ -1,0 +1,88 @@
+# few-shot 范例库（飞轮第三腿：高分轨迹沉淀为 in-context 示例，不改权重）。
+#
+# 注入 system prompt 的 <examples> 块（见 prompts.py:get_system_prompt → fewshot.render_fewshot）。
+# 设计口径：
+# - **全局固定一小组**（不随 query 变）：保住 prompt cache 前缀稳定（M6），主/子 Agent 同一份（同质）。
+# - **精短**：每条只展示「决策范式」不是完整轨迹，控住注入 token（整组目标 < 400 token）。
+# - **专打已诊断的高频失败**：① 信息够却过度澄清；② item_picker 后口头收尾不调工具；③ 非购物乱检索。
+#   这三条来自 M11 Rubric 评测定位的 bad case（q03 / q15 / q10），属上下文级飞轮的「定位→沉淀」闭环。
+# - 飞轮迭代：后续可由 scripts 从评测高分轨迹（is_high_score）自动蒸馏补充，替换/扩充本文件。
+
+examples:
+  - intent: 纯推荐·只做用户要的，别自作主张比价算关税
+    text: |
+      用户：给男友选运动健身的生日礼物，预算150美元。
+      ✅ planner 判 tasks=[recommend]（用户只要推荐、没提价格/到手价）→ 一次 parallel_dispatch_tool
+      跨 5 平台检索 → item_picker 精挑 → 调 shopping_summary 收尾给清单。**跳过 price_compare /
+      shipping_calc**——用户没要比价和关税运费。
+      ❌ 反例A：顺手把 price_compare + shipping_calc 也跑了——那是把轻推荐硬拖成全流程，用户没要。
+      ❌ 反例B：甩一张「拳击/跑步/球类…」分类表反问「你要哪项」——品类偏宽也按主流方向直接搜、
+      在精挑阶段覆盖多方向，不要为缩小范围停下来反问。
+
+  - intent: 意图组合·用户要比价到手价，才走完整链
+    text: |
+      用户：想买个降噪耳机，预算1000，帮我看哪个到手最划算。
+      ✅ planner 判 tasks=[recommend, price_compare, landed_cost]（明说「到手最划算」）→ 跨平台检索
+      → price_compare 归一比价 → shipping_calc 算到手价 → item_picker → shopping_summary。
+      这条链是对的——因为用户**明确要了**比价 + 到手价。
+      ❌ 反例：只要用户说「推荐个耳机」也照搬这条全链——比价/算关税是被要求时才做，不是默认动作。
+
+  - intent: 收尾·必须真调工具，别口头宣告
+    text: |
+      item_picker 返回 8 件精选之后：
+      ✅ 你的下一个动作就是**调用 shopping_summary 工具**（picks 原样传入、用户意图传 user_intent），
+      由它产出清单。
+      ❌ 反例：输出「精挑完成！现在为你生成清单 🎉」然后就停下——说要收尾＝立刻调工具，不是描述它。
+
+  - intent: 非购物·直接兜底，别强行带货
+    text: |
+      用户：今天天气怎么样？
+      ✅ 非购物意图 → 直接 chat_fallback 收尾，诚实说明能力边界（我是购物 Agent，帮不上天气）。
+      ❌ 反例：为了「有用」去调检索工具硬推防晒伞/雨衣——答非所问，且浪费检索预算。
+
+  - intent: 澄清·关键信息确实缺失时用 ask_user，别猜
+    text: |
+      用户：帮我找同款。
+      ✅ 关键信息完全缺失（全程未提过任何具体商品/型号/品牌）→ 调 ask_user 问一句
+      「请问您说的同款是指哪一件商品？可以告诉我品牌、型号或分享链接」，拿到回复后继续检索。
+      ❌ 反例A：瞎猜一个品类直接搜——用户意图不明确，搜出来大概率不是他要的同款。
+      ❌ 反例B：用 chat_fallback 收尾反问——这会终结循环，用户得重新发一轮才能继续。
+
+  - intent: 评价单品·给结论 + 顺带推荐替代品，走 shopping_summary
+    text: |
+      用户：Sony WH-1000XM5 这款降噪耳机值得买吗？
+      ✅ planner 判 tasks=[evaluate]、target_refs=[Sony WH-1000XM5]（点名了具体商品，evaluate 需要
+      对照品类基准判断，哪怕只点名 1 件也值得隔离）→ **不铺 5 平台**：先主流程 category_insight 拿
+      降噪耳机评分大盘 + 维度基准 → 对这 1 件调**一次 parallel_dispatch_tool**（demands_list 只有
+      1 项也用它，不必因为只有 1 件就改用 dispatch_tool）派子 Agent 定点调查：子 Agent
+      item_search（target_name=Sony WH-1000XM5，
+      expected_category=降噪耳机）定位该商品——target_name 让系统按型号过滤，语义相关但型号不符
+      的候选（如同品牌其它便宜型号）不算命中；expected_category 再过滤掉"型号对得上但其实是
+      配件"的假阳性（如 XM5 耳机壳、充电线——标题带型号但品类跟耳机本体不是一类）；
+      库里真没有（含只召回到配件、被品类过滤排除）则 web_search 补口碑 → 子回传该商品的价格 /
+      评分 / 口碑调查结果（或如实说未找到）
+      → 主流程拿到调查结果后再轻检索几件同价位替代品 →
+      item_picker → 调 shopping_summary：文案给「相对基准算不算好 + 命中/违反你偏好」的判断，picks
+      放「被评的 XM5 + 推荐替代品」的商品卡。
+      ❌ 反例A：只用 chat_fallback 甩一段文字结论、不给任何商品卡——评价场景要「评论 + 推荐卡」，走
+      shopping_summary。
+      ❌ 反例B：demands_list 传 5 条平台泛搜模板去铺 5 平台拉一堆耳机——用户点名了具体商品，
+      demands_list 该是「调查 Sony WH-1000XM5 这一件」，别写成泛搜任务（工具都是
+      parallel_dispatch_tool，错的是 demands 内容而非工具本身）。
+
+  - intent: 比较两件·定点定位两者，按需比价再对比收尾
+    text: |
+      用户：帮我比比 Anker 651 和 Belkin 3合1 这两个充电站哪个好。
+      ✅ planner 判 target_refs=[Anker 651, Belkin 3合1]（2 件）、tasks 视原话含 evaluate（哪个好）→
+      **一次 parallel_dispatch_tool**，demands_list=[调查 Anker 651 这一件, 调查 Belkin 3合1 这一件]
+      两项一起并行派发（不要拆成两次调用逐件等）：两个子 Agent 各自 item_search（target_name=自己
+      被分到的那件型号原文，expected_category=充电站）定位——系统按 demands 里没有平台名自动
+      把这批识别成定点调查、两个子任务的 web_search 门控各自独立（A 搜到了不连带拦 B）；
+      型号 + 品类双重过滤后真没有（含只召回到同型号的配件）才 web_search 补 → 两条调查结果回传
+      主流程合流 → price_compare 归一价格 → 主流程据两份调查结果给「两者优劣
+      对比 + 建议」→ shopping_summary，
+      picks 放这两件（+ 可选更优替代品）。
+      ❌ 反例A：demands_list 传「充电站」这个品类的 5 条平台泛搜模板——用户要比的是**点名的
+      这两件**，不是找一堆同类。
+      ❌ 反例B：期待某个子 Agent 自己说出「哪个更好」——子 Agent 只看得到自己被分到的那一件，看不到
+      另一件的调查结果，跨商品比较必须是主流程拿到两份调查结果合流后才能做。
