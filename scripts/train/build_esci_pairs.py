@@ -49,22 +49,35 @@ EASY_NEG_LABELS = {"I"}
 
 
 class QueryGroup:
-    """一条 query 在我们库内命中的商品，按用途分好组。"""
+    """一条 query 在我们库内命中的商品，按用途分好组。
 
-    __slots__ = ("query", "split", "pos", "hard_neg", "easy_neg")
+    ``sub``(Substitute) 与 ``comp``(Complement) 分开存而不是合成一个 hard_neg：训练时两者都当
+    难负例用，但**评测时只有 comp 能用来量「整机 query 召回了多少配件」**——那正是「搜手机出
+    配件」这个 bad case 的度量。混在一起就做不了专项评测。
+    """
+
+    __slots__ = ("query", "split", "pos", "sub", "comp", "easy_neg")
 
     def __init__(self, query: str, split: str) -> None:
         self.query = query
         self.split = split
         self.pos: list[str] = []
-        self.hard_neg: list[str] = []
+        self.sub: list[str] = []
+        self.comp: list[str] = []
         self.easy_neg: list[str] = []
+
+    @property
+    def hard_neg(self) -> list[str]:
+        """训练用的难负例：可替代品在前（信号更强），配件在后。"""
+        return [*self.sub, *self.comp]
 
     def add(self, asin: str, label: str) -> None:
         if label in POS_LABELS:
             self.pos.append(asin)
-        elif label in HARD_NEG_LABELS:
-            self.hard_neg.append(asin)
+        elif label == "S":
+            self.sub.append(asin)
+        elif label == "C":
+            self.comp.append(asin)
         elif label in EASY_NEG_LABELS:
             self.easy_neg.append(asin)
 
@@ -146,14 +159,16 @@ def write_dataset(
             if not g.pos:  # 没有正例的 query 训不了也评不了
                 continue
             if g.split == "test":
-                # 评测只需 id：候选池是**全库 137 万**，不是这几条命中商品——否则 Recall 虚高
+                # 评测只需 id：候选池是**全库 137 万**，不是这几条命中商品——否则 Recall 虚高。
+                # substitutes / complements 分开落：前者量「召回没召准」，后者量「整机搜出配件」。
                 fqrels.write(
                     json.dumps(
                         {
                             "query_id": qid,
                             "query": g.query,
                             "positives": g.pos,
-                            "hard_negatives": g.hard_neg,
+                            "substitutes": g.sub,
+                            "complements": g.comp,
                         },
                         ensure_ascii=False,
                     )
@@ -161,32 +176,39 @@ def write_dataset(
                 )
                 n_eval += 1
                 continue
-            negs = g.hard_neg[:max_neg]
-            neg_hard_used += len(negs)
-            if len(negs) < max_neg:
-                fill = g.easy_neg[: max_neg - len(negs)]
-                negs += fill
+            # 负例带来源标签：后续掺进 ann / bm25 挖的负例后，能按来源做消融
+            picked: list[tuple[str, str]] = [(a, "esci_S") for a in g.sub[:max_neg]]
+            picked += [(a, "esci_C") for a in g.comp[: max_neg - len(picked)]]
+            neg_hard_used += len(picked)
+            if len(picked) < max_neg:
+                fill = [(a, "esci_I") for a in g.easy_neg[: max_neg - len(picked)]]
+                picked += fill
                 neg_easy_used += len(fill)
             n_rand = 0
-            if len(negs) < max_neg and random_neg > 0:
-                need = min(random_neg, max_neg - len(negs))
-                banned = set(g.pos) | set(negs)
+            if len(picked) < max_neg and random_neg > 0:
+                need = min(random_neg, max_neg - len(picked))
+                banned = set(g.pos) | {a for a, _ in picked}
                 while n_rand < need:
                     cand = pool[rng.randrange(len(pool))]
                     if cand in banned:
                         continue
-                    negs.append(cand)
+                    picked.append((cand, "random"))
                     banned.add(cand)
                     n_rand += 1
                 neg_random_used += n_rand
-            if not negs:
+            if not picked:
                 continue
+            neg_ids = [a for a, _ in picked]
             ftrain.write(
                 json.dumps(
                     {
                         "query": g.query,
+                        "query_id": qid,
                         "pos": [texts[a] for a in g.pos],
-                        "neg": [texts[a] for a in negs],
+                        "neg": [texts[a] for a in neg_ids],
+                        "pos_ids": g.pos,
+                        "neg_ids": neg_ids,
+                        "neg_src": [s for _, s in picked],
                         "n_random_neg": n_rand,
                     },
                     ensure_ascii=False,
