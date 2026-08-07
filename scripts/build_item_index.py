@@ -38,15 +38,14 @@ load_dotenv()
 from app.recall.fx import to_base_or_none  # noqa: E402
 from app.recall.qdrant_store import QdrantRecall  # noqa: E402
 from app.recall.schemas import ItemRecord  # noqa: E402
-from app.recall.text import clip_sentence, tail_category  # noqa: E402
+from app.recall.text import embed_text  # noqa: E402
 from app.recall.towers import DEFAULT_LOCAL_DIM, TowerClient  # noqa: E402
-from app.utils.clean import PLATFORMS, CleanItem, clean_text  # noqa: E402
+from app.utils.clean import PLATFORMS, CleanItem  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CLEAN_DIR = PROJECT_ROOT / "data" / "platforms" / "clean" / "by_platform"
 MANIFEST_PATH = PROJECT_ROOT / "data" / "index" / "qdrant_manifest.json"
 
-DESC_EMBED_CLIP = 300  # 描述参与编码的截断长度（边界截断，防半句）
 EMBED_BATCH = 64
 # 流式建库：一个 chunk 编码完立刻 upsert 再丢弃，峰值内存 ≈ CHUNK_RECORDS × dim × 4B。
 # 4096 × 1024 × 4B ≈ 16MB；全量 137 万条不再需要 5.4GB × 2 的 vstack 峰值。
@@ -83,18 +82,6 @@ class _RateLimiter:
             await asyncio.sleep(wait)
 
 
-def _embed_text(item: CleanItem) -> str:
-    """dense 编码文本：title | brand | 尾3类 | 描述(边界截断)，整串轻量归一。"""
-    parts = [
-        item.title,
-        item.brand,
-        tail_category(item.category),
-        clip_sentence(item.description, DESC_EMBED_CLIP),
-    ]
-    composed = " | ".join(p for p in parts if p)
-    return clean_text(composed, strip_html=False)
-
-
 def _clean_to_record(item: CleanItem) -> ItemRecord:
     return ItemRecord(
         item_id=item.item_id,
@@ -109,7 +96,7 @@ def _clean_to_record(item: CleanItem) -> ItemRecord:
         url=item.url,
         image_url=item.image_url,
         price_usd=to_base_or_none(item.price, item.currency, "USD"),
-        embed_text=_embed_text(item),
+        embed_text=embed_text(item),
     )
 
 

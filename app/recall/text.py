@@ -7,9 +7,17 @@
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
+
+from app.utils.clean import clean_text
+
+if TYPE_CHECKING:  # 只为类型标注，避免运行期把清洗层的 pydantic 模型拖进召回层导入链
+    from app.utils.clean import CleanItem
 
 # category 取尾 N 层：泛词集中在顶 1-2 层，尾 3 层保留「叶+父+祖」上下文又不引泛词噪声。
 CATEGORY_TAIL = 3
+# 描述参与编码的截断长度（边界截断，防半句）
+DESC_EMBED_CLIP = 300
 # 描述截断：句末标点用于「防半句」。
 _SENT_END_RE = re.compile(r"[.!?]")
 
@@ -32,3 +40,21 @@ def clip_sentence(text: str, limit: int = 300, min_keep: int = 200) -> str:
         return head[: ends[-1]]
     space = head.rfind(" ")
     return head[:space] if space >= min_keep else head
+
+
+def embed_text(item: CleanItem) -> str:
+    """dense 编码文本：title | brand | 尾3类 | 描述(边界截断)，整串轻量归一。
+
+    **建索引和训练必须共用这一个函数。** 训练时喂给模型的商品文本，与线上入库编码的文本
+    只要差一个字段或一处归一，模型学到的就是另一种输入分布（train/serve skew）——离线指标
+    照涨，线上召回不动。原先它长在 ``scripts/build_item_index.py`` 里，为让 M21 的训练数据
+    管线复用而提到召回层。
+    """
+    parts = [
+        item.title,
+        item.brand,
+        tail_category(item.category),
+        clip_sentence(item.description, DESC_EMBED_CLIP),
+    ]
+    composed = " | ".join(p for p in parts if p)
+    return clean_text(composed, strip_html=False)

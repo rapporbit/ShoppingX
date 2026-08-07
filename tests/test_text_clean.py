@@ -6,8 +6,8 @@
 
 from __future__ import annotations
 
-from app.recall.text import clip_sentence, tail_category
-from app.utils.clean import clean_text
+from app.recall.text import clip_sentence, embed_text, tail_category
+from app.utils.clean import CleanItem, clean_text
 
 
 # ---------- clean_text ----------
@@ -70,3 +70,26 @@ def test_clip_sentence_prefers_sentence_then_word_boundary() -> None:
     nopunct = "alpha " * 100
     out2 = clip_sentence(nopunct, limit=300)
     assert len(out2) <= 300 and not out2.endswith(" ") and out2.split()[-1] == "alpha"
+
+
+# ---------- embed_text（建索引与训练数据的共用契约，M21） ----------
+def test_embed_text_composition_is_stable() -> None:
+    """字段顺序/分隔符是训练数据与线上索引之间的契约，动它等于让已训模型的输入分布漂移。"""
+    item = CleanItem(
+        platform="amazon",
+        item_id="B000TEST01",
+        title="Canvas Travel Backpack",
+        price=59.9,
+        currency="USD",
+        image_url="https://example.com/a.jpg",
+        url="https://example.com/dp/B000TEST01",
+        brand="Acme",
+        category="Clothing > Bags > Backpacks > Travel",
+        description="Water resistant fabric.",
+    )
+    assert embed_text(item) == (
+        "Canvas Travel Backpack | Acme | Bags > Backpacks > Travel | Water resistant fabric."
+    )
+    # 缺字段不留空档（不出现 " |  | "），否则同一商品有无品牌会编出两种前缀。
+    bare = item.model_copy(update={"brand": "", "category": "", "description": ""})
+    assert embed_text(bare) == "Canvas Travel Backpack"
