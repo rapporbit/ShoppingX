@@ -47,6 +47,14 @@ dev = [
     "types-pyyaml>=6.0",
     "types-cachetools>=7.0.0.20260518",
 ]
+# 训练数据管线（M21）。**刻意不含 torch / ms-swift**：训练在 GPU 机器上另建环境，按 CUDA 版本
+# 装；主仓这份只负责「把数据造出来、把指标算出来」，产物是 jsonl，跨机器传。这样部署镜像不会
+# 因为一条训练腿凭空背上几个 GB 的依赖（uv sync 默认只装 dev 组，train 要显式 --group train）。
+train = [
+    "datasets>=3.0",
+    "pyarrow>=17",
+    "huggingface-hub>=0.26",
+]
 
 [tool.uv]
 # 本项目是「应用」而非「库」：不构建/安装 app 为 wheel，从项目根直接 import。
