@@ -78,13 +78,13 @@ def sample_layers(ranked: list[str], exclude: set[str], rng: random.Random) -> l
     return out
 
 
-async def run(rows: list[dict], corpus: dict[str, str]) -> dict:
+async def run(rows: list[dict], corpus: dict[str, str], out_path: Path) -> dict:
     tower = TowerClient()
     client = make_client()
     rng = random.Random(SEED)
     stats = {"queries": 0, "ann": 0, "esci": 0, "no_text": 0}
 
-    with OUT_PATH.open("w", encoding="utf-8") as out:
+    with out_path.open("w", encoding="utf-8") as out:
         for i in range(0, len(rows), BATCH):
             chunk = rows[i : i + BATCH]
             vecs = await tower.encode_texts([r["query"] for r in chunk])
@@ -107,7 +107,9 @@ async def run(rows: list[dict], corpus: dict[str, str]) -> dict:
                 cands = sample_layers(ranked, set(row["pos_ids"]), rng)
                 stats["ann"] += len(cands)
                 # ESCI 标注的 S/C/I 负例：直接入选、标记 gated=False（下游不对它们执行假负闸）
-                for nid, src in zip(row["neg_ids"], row["neg_src"], strict=True):
+                # 合成 query（synth）没有 neg_src，负例全部来自 ANN 深池采样，走同一道假负闸
+                neg_ids, neg_src = row.get("neg_ids") or [], row.get("neg_src") or []
+                for nid, src in zip(neg_ids, neg_src, strict=True):
                     if src.startswith("esci"):
                         cands.append({"item_id": nid, "rank": 0, "source": src})
                         stats["esci"] += 1
@@ -136,9 +138,15 @@ async def run(rows: list[dict], corpus: dict[str, str]) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=0, help="只跑前 N 条（冒烟用，0=全跑）")
+    ap.add_argument(
+        "--input",
+        default=str(TRAIN_PATH),
+        help="训练 query 源。换 synth_train.jsonl 即为 M21 那批 LLM 合成 query（50% 中文）",
+    )
+    ap.add_argument("--out", default=str(OUT_PATH))
     args = ap.parse_args()
 
-    rows = [json.loads(x) for x in TRAIN_PATH.open(encoding="utf-8") if x.strip()]
+    rows = [json.loads(x) for x in Path(args.input).open(encoding="utf-8") if x.strip()]
     if args.limit:
         rows = rows[: args.limit]
     print(f"collection={COLLECTION}  query={len(rows)}  top_k={TOP_K}")
@@ -146,8 +154,8 @@ def main() -> None:
     corpus = load_corpus()
     print(f"  {len(corpus)} 条商品文本\n", flush=True)
 
-    stats = asyncio.run(run(rows, corpus))
-    print(f"\n{stats}\n已写 {OUT_PATH}")
+    stats = asyncio.run(run(rows, corpus, Path(args.out)))
+    print(f"\n{stats}\n已写 {args.out}")
 
 
 if __name__ == "__main__":
