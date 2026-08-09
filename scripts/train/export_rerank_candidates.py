@@ -151,6 +151,11 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=1000, help="抽样 query 数（0=全跑，慎用）")
     ap.add_argument("--out", default=str(OUT_PATH))
     ap.add_argument(
+        "--qrels",
+        default=str(QRELS_PATH),
+        help="金标路径。中英配对体检用 esci_eval_qrels_zh / _en_sub（同 query_id，M21 产）",
+    )
+    ap.add_argument(
         "--text-form",
         choices=("searchable", "embed"),
         default="searchable",
@@ -158,7 +163,7 @@ def main() -> None:
     )
     args = ap.parse_args()
 
-    rows = [json.loads(x) for x in QRELS_PATH.open(encoding="utf-8") if x.strip()]
+    rows = [json.loads(x) for x in Path(args.qrels).open(encoding="utf-8") if x.strip()]
     if args.limit and args.limit < len(rows):
         random.Random(SEED).shuffle(rows)
         rows = rows[: args.limit]
