@@ -39,6 +39,8 @@ CAND_PATH = DATA_DIR / "deep_neg_candidates.jsonl"
 
 SEED = 42
 VAL_RATIO = 0.02
+# refdocs §10.2 的 4 档相关性标注，对上 ESCI 的人工标签
+ESCI_GAIN = {"esci_S": 2, "esci_C": 1, "esci_I": 0}
 
 
 def quantile(values: list[float], q: float) -> float:
@@ -63,12 +65,36 @@ def to_row(query: str, pos_text: str, negs: list[str]) -> dict:
     }
 
 
+def to_graded_row(query: str, pos_text: str, negs: list[tuple[str, int]]) -> dict:
+    """分级格式：一组 = query + 一列 doc + 一列 gain（3/2/1/0）。
+
+    ms-swift 的 reranker 模板只吃 positive/negative 二值，表达不了 refdocs §10.2 的四档，
+    所以分级训练走自写的 ``train_reranker_graded.py``，格式也就不必迁就 swift 的三段式。
+    """
+    return {
+        "query": query,
+        "docs": [pos_text] + [t for t, _ in negs],
+        "labels": [3] + [g for _, g in negs],
+    }
+
+
 def build(
     cands: list[dict], scores: dict[int, dict], args: argparse.Namespace
 ) -> tuple[list, dict]:
     rng = random.Random(SEED)
     out: list[dict] = []
-    stats = {"queries": 0, "ann_kept": 0, "ann_gated": 0, "esci_kept": 0, "no_score": 0}
+    stats = {
+        "queries": 0,
+        "ann_kept": 0,
+        "ann_gated": 0,
+        "esci_kept": 0,
+        "no_score": 0,
+        # 组内最高负例档位的分布——它直接决定分级训练能学到多少「相关但不是最优」的信号。
+        # 全 0 就是「这组里除了正例全是不相关」，ApproxNDCG 在这种组上退化成 MRR。
+        "grade_0": 0,
+        "grade_1": 0,
+        "grade_2": 0,
+    }
 
     for row in cands:
         sc = scores.get(row["query_id"])
@@ -81,20 +107,26 @@ def build(
         # 分开收集：ESCI 人工负例优先占坑，ANN 负例按 rank 层轮询补位。
         # **不能收集完再 shuffle 截断**——那样 S/C 这些最贵的 hard negative 会被随机丢掉，
         # 而它们正是「可替代品 / 互补配件」这类模型最容易判错的样本。
-        esci_negs: list[str] = []
-        ann_layers: dict[str, list[str]] = {}
+        # 负例带档位一起收：(文本, gain)。gain 即 refdocs §10.2 的 4 档相关性——
+        # E=3 / S=2（可替代但不是要的那个）/ C=1（互补配件）/ I 与 ANN 挖的=0。
+        # 二值格式下 gain 只用来排优先级，分级格式下它直接进 loss。
+        esci_negs: list[tuple[str, int]] = []
+        ann_layers: dict[str, list[tuple[str, int]]] = {}
         for c in row["candidates"]:
             if c["source"].startswith("esci"):  # 人工标注的负例，不过闸
-                esci_negs.append(c["text"])
+                esci_negs.append((c["text"], ESCI_GAIN.get(c["source"], 0)))
                 stats["esci_kept"] += 1
                 continue
             s = by_id.get(c["item_id"])
             if s is not None and s > bar:
                 stats["ann_gated"] += 1  # 比该 query 所有已知正例都更像 → 疑似未标注的真正例
                 continue
-            ann_layers.setdefault(c["source"], []).append(c["text"])
+            ann_layers.setdefault(c["source"], []).append((c["text"], 0))
             stats["ann_kept"] += 1
 
+        # ESCI 档位高的先占坑：分级训练里 S/C 是唯一能教「相关但不是最优」的样本，
+        # 二值训练里它们也是最像正例的 hard negative，两种格式下都该优先。
+        esci_negs.sort(key=lambda t: -t[1])
         negs = esci_negs[: args.max_neg]
         # 轮询各 rank 层，保证浅/中/深三段都有代表——只喂浅层就退化成 M21 那种「近义干扰」数据集
         pools = [rng.sample(v, len(v)) for v in ann_layers.values()]
@@ -104,13 +136,18 @@ def build(
                     negs.append(p.pop())
         if len(negs) < args.min_neg:
             continue
+        stats[f"grade_{max((g for _, g in negs), default=0)}"] += 1
 
         seen: set[str] = set()
         for p in row["pos"][: args.max_pos]:  # 正例展开
             if p["text"] in seen:
                 continue
             seen.add(p["text"])
-            out.append(to_row(row["query"], p["text"], negs))
+            out.append(
+                to_graded_row(row["query"], p["text"], negs)
+                if args.format == "graded"
+                else to_row(row["query"], p["text"], [t for t, _ in negs])
+            )
         stats["queries"] += 1
 
     rng.shuffle(out)
@@ -126,6 +163,12 @@ def main() -> None:
     ap.add_argument("--max-pos", type=int, default=3, help="每 query 展开的正例数上限")
     ap.add_argument("--max-neg", type=int, default=15)
     ap.add_argument("--min-neg", type=int, default=4, help="负例太少的组，listwise CE 学不到东西")
+    ap.add_argument(
+        "--format",
+        choices=("swift", "graded"),
+        default="swift",
+        help="swift=ms-swift 三段式(二值)，graded=自写训练脚本用的四档分级",
+    )
     args = ap.parse_args()
 
     cands = [json.loads(x) for x in Path(args.candidates).open(encoding="utf-8") if x.strip()]
