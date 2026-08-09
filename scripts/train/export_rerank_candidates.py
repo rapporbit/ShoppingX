@@ -53,6 +53,23 @@ TOP_K = 1000  # 导最深一档，浅档在评测脚本里按 rank 截断即可�
 ENCODE_BATCH = 64  # 单条 payload 比 eval_recall 重（带文本），批小一点防单次响应过大
 SEED = 42
 PAYLOAD_FIELDS = ["item_id", "title", "brand", "category"]
+CORPUS_PATH = PROJECT_ROOT / "data" / "train" / "corpus.jsonl"
+
+
+def load_corpus_texts() -> dict[str, str]:
+    """``--text-form embed`` 用：item_id → ``embed_text`` 全库文本（建索引/embedding 训练同源）。
+
+    与 ``_searchable`` 的差别不在长度（实测中位 129 vs 146 字符，相当），在**组织方式**：
+    ``embed_text`` 是 ``title | brand | 尾3类 | 描述片段``，``_searchable`` 是 ``title brand
+    全路径品类`` 空格拼接。cross-encoder 吃的是 token 序列，这种差别值得量一次——毕竟它
+    零训练成本，而且训练该用哪个形态得由这个数来定。
+    """
+    texts: dict[str, str] = {}
+    with CORPUS_PATH.open(encoding="utf-8") as f:
+        for line in f:
+            rec = json.loads(line)
+            texts[rec["item_id"]] = rec["text"]
+    return texts
 
 
 def searchable(payload: dict) -> str:
@@ -67,10 +84,10 @@ def category_query(cands: list[dict], positives: set[str]) -> str:
     return Counter(cats).most_common(1)[0][0] if cats else ""
 
 
-async def run(rows: list[dict], out_path: Path) -> dict:
+async def run(rows: list[dict], out_path: Path, corpus: dict[str, str] | None = None) -> dict:
     tower = TowerClient()
     client = make_client()
-    n_with_cat = 0
+    n_with_cat = n_missing = 0
 
     with out_path.open("w", encoding="utf-8") as out:
         for i in range(0, len(rows), ENCODE_BATCH):
@@ -97,6 +114,13 @@ async def run(rows: list[dict], out_path: Path) -> dict:
                 ]
                 cat_q = category_query(cands, set(row["positives"]))
                 n_with_cat += bool(cat_q)
+                if corpus is not None:
+                    # corpus 缺这个 item_id 就退回 _searchable：不是所有点都在 e15 训练语料里，
+                    # 静默丢候选会让两份导出的候选池不同，A/B 就不是同一批东西了。
+                    for c in cands:
+                        alt = corpus.get(c["item_id"])
+                        n_missing += alt is None
+                        c["text"] = alt or c["text"]
                 slim = [{"item_id": c["item_id"], "text": c["text"]} for c in cands]
                 out.write(
                     json.dumps(
@@ -114,22 +138,39 @@ async def run(rows: list[dict], out_path: Path) -> dict:
             print(f"  {min(i + ENCODE_BATCH, len(rows))}/{len(rows)}", flush=True)
 
     await tower.aclose()
-    return {"queries": len(rows), "top_k": TOP_K, "with_category_query": n_with_cat}
+    return {
+        "queries": len(rows),
+        "top_k": TOP_K,
+        "with_category_query": n_with_cat,
+        "corpus_missing": n_missing,
+    }
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=1000, help="抽样 query 数（0=全跑，慎用）")
     ap.add_argument("--out", default=str(OUT_PATH))
+    ap.add_argument(
+        "--text-form",
+        choices=("searchable", "embed"),
+        default="searchable",
+        help="候选文本形态：searchable=线上 item_picker 用的，embed=建索引/embedding 训练用的",
+    )
     args = ap.parse_args()
 
     rows = [json.loads(x) for x in QRELS_PATH.open(encoding="utf-8") if x.strip()]
     if args.limit and args.limit < len(rows):
         random.Random(SEED).shuffle(rows)
         rows = rows[: args.limit]
-    print(f"collection={COLLECTION}  query={len(rows)}  top_k={TOP_K}\n")
+    print(f"collection={COLLECTION}  query={len(rows)}  top_k={TOP_K}  text={args.text_form}\n")
 
-    report = asyncio.run(run(rows, Path(args.out)))
+    corpus = None
+    if args.text_form == "embed":
+        print("加载 corpus.jsonl（138 万条）…", flush=True)
+        corpus = load_corpus_texts()
+        print(f"  已载入 {len(corpus)} 条商品文本\n", flush=True)
+
+    report = asyncio.run(run(rows, Path(args.out), corpus))
     print(f"\n{report}\n已写 {args.out}")
 
 

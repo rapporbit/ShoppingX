@@ -36,11 +36,9 @@ MAX_LEN = 320  # 与 score_negatives.py 一致：商品文本 p95 才 223 字符
 BATCH = 256
 
 
-def load_model() -> tuple:
-    tok = AutoTokenizer.from_pretrained(MODEL_NAME)
-    model = AutoModelForSequenceClassification.from_pretrained(
-        MODEL_NAME, torch_dtype=torch.float16
-    )
+def load_model(name: str = MODEL_NAME) -> tuple:
+    tok = AutoTokenizer.from_pretrained(name)
+    model = AutoModelForSequenceClassification.from_pretrained(name, torch_dtype=torch.float16)
     model.eval().cuda()
     return tok, model
 
@@ -69,10 +67,13 @@ def main() -> None:
     ap.add_argument("--input", default="rerank_candidates.jsonl")
     ap.add_argument("--output", default="rerank_scores.jsonl")
     ap.add_argument("--depth", type=int, default=1000, help="每条 query 只给前 N 个候选打分")
+    ap.add_argument("--no-category", action="store_true", help="跳过品类词形态（省一半时间）")
+    ap.add_argument("--model", default=MODEL_NAME, help="换成自训 checkpoint 路径即可做 A/B")
     args = ap.parse_args()
 
     rows = [json.loads(x) for x in Path(args.input).open(encoding="utf-8") if x.strip()]
-    tok, model = load_model()
+    print(f"模型：{args.model}")
+    tok, model = load_model(args.model)
     t0 = time.time()
     n_pairs = 0
 
@@ -86,7 +87,16 @@ def main() -> None:
                 "intent": score_pairs(tok, model, row["query"], docs),
             }
             n_pairs += len(docs)
-            cat_q = row.get("category_query") or ""
+            # 挖负例那份数据带 pos 字段：正例也打一遍分，好让下游做 query 内**相对**闸。
+            # 绝对阈值在这份数据上不可用——标定实测正例(E)分数中位仅 .55、p10 低到 .003，
+            # 拍一个 0.5 会连人工标注的 S/C 一起闸掉（S p90=.67、C p90=.89），
+            # 而那些正是最该留的 hard negative。
+            pos = row.get("pos") or []
+            if pos:
+                rec["pos_ids"] = [p["item_id"] for p in pos]
+                rec["pos_scores"] = score_pairs(tok, model, row["query"], [p["text"] for p in pos])
+                n_pairs += len(pos)
+            cat_q = "" if args.no_category else (row.get("category_query") or "")
             # 品类词缺失（top-K 内一个标注正例都没召回）→ 该条不参与形态 A/B，本地按 null 跳过
             if cat_q:
                 rec["category"] = score_pairs(tok, model, cat_q, docs)
