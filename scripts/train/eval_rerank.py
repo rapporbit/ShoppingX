@@ -276,6 +276,7 @@ def main() -> None:
     default_scores = PROJECT_ROOT / "data" / "train" / "rerank_scores.jsonl"
     ap.add_argument("--scores", default=str(default_scores))
     ap.add_argument("--out", default=str(OUT_PATH))
+    ap.add_argument("--qrels", default=str(QRELS_PATH), help="金标路径（中英体检换 _zh/_en_sub）")
     ap.add_argument("--dump-cases", type=int, default=0, help="并排打印前 N 条排序对比（人眼验货）")
     ap.add_argument(
         "--candidates", default=str(PROJECT_ROOT / "data" / "train" / "rerank_candidates.jsonl")
@@ -284,7 +285,7 @@ def main() -> None:
 
     qrels = {
         r["query_id"]: r
-        for r in (json.loads(x) for x in QRELS_PATH.open(encoding="utf-8") if x.strip())
+        for r in (json.loads(x) for x in Path(args.qrels).open(encoding="utf-8") if x.strip())
     }
     score_rows = [json.loads(x) for x in Path(args.scores).open(encoding="utf-8") if x.strip()]
     print(f"评测 query：{len(score_rows)}（qrels {len(qrels)} 条）")
