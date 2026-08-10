@@ -34,6 +34,7 @@ import time
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, get_scheduler
 
@@ -103,7 +104,19 @@ def listwise_ce_loss(scores: torch.Tensor, gains: torch.Tensor) -> torch.Tensor:
     return -(target * torch.log_softmax(scores, dim=0)).sum()
 
 
-def batch_loss(logits: torch.Tensor, enc: dict, loss_name: str) -> torch.Tensor:
+def pointwise_bce_loss(scores: torch.Tensor, gains: torch.Tensor) -> torch.Tensor:
+    """Pointwise BCE，目标 = gain/3（E=1 / S=.67 / C=.33 / 其余=0）。
+
+    **它在这里不是 refdocs §10.3 说的「热启」——那个理由对续训不成立——而是为了保住绝对分数
+    校准。** 纯 listwise 只约束组内相对序，绝对分数怎么漂都不影响 loss，实测 r3 训完分数分布
+    被压到 .17~.85（原版跨满 0~1），直接导致下游 ``item_picker`` 那道 ``PICK_RERANK_FLOOR=0.2``
+    的品类门失效：真实候选低于 .2 的比例从 base 的 58.9% 掉到 11.8%，门等于没开。
+    BCE 把分数钉回「相关度」的绝对语义上，排序腿仍由 listwise 负责。
+    """
+    return F.binary_cross_entropy_with_logits(scores, (gains / 3.0).clamp(0, 1))
+
+
+def batch_loss(logits: torch.Tensor, enc: dict, loss_name: str, bce_w: float = 0.0) -> torch.Tensor:
     """按组切开逐组算 loss 再平均——组是 listwise 的最小单位，跨组混算没有意义。"""
     losses = []
     off = 0
@@ -114,7 +127,10 @@ def batch_loss(logits: torch.Tensor, enc: dict, loss_name: str) -> torch.Tensor:
         g = enc["group_labels"][off : off + size].to(s.device, torch.float32)
         if g.max() > 0:  # 组内一个正例都没有（正例被截断）时跳过，否则 IDCG=0
             fn = approx_ndcg_loss if loss_name == "approxndcg" else listwise_ce_loss
-            losses.append(fn(s, g))
+            loss = fn(s, g)
+            if bce_w:  # 联合 loss：排序由 listwise 管，绝对校准由 BCE 管
+                loss = loss + bce_w * pointwise_bce_loss(s, g)
+            losses.append(loss)
         off += size
     if not losses:
         return logits.sum() * 0.0
@@ -122,7 +138,7 @@ def batch_loss(logits: torch.Tensor, enc: dict, loss_name: str) -> torch.Tensor:
 
 
 @torch.inference_mode()
-def evaluate(model, loader, loss_name: str) -> dict:
+def evaluate(model, loader, loss_name: str, bce_w: float = 0.0) -> dict:
     """val 集上的 loss + 组内 NDCG + 命中率（正例排到第一的比例）。"""
     model.eval()
     tot_loss = tot_ndcg = tot_hit = n = 0.0
@@ -133,7 +149,7 @@ def evaluate(model, loader, loss_name: str) -> dict:
                 input_ids=enc["input_ids"], attention_mask=enc["attention_mask"]
             ).logits.view(-1)
         logits = logits.float()
-        tot_loss += float(batch_loss(logits, enc, loss_name))
+        tot_loss += float(batch_loss(logits, enc, loss_name, bce_w))
         off = 0
         for size in enc["group_sizes"].tolist():
             s = logits[off : off + size].float()
@@ -168,6 +184,12 @@ def main() -> None:
     ap.add_argument("--batch", type=int, default=8, help="组数，不是 pair 数")
     ap.add_argument("--lr", type=float, default=1e-5)
     ap.add_argument("--max-len", type=int, default=MAX_LEN)
+    ap.add_argument(
+        "--bce-weight",
+        type=float,
+        default=0.0,
+        help="pointwise BCE 辅助权重（>0 即联合 loss，保住绝对分数校准）",
+    )
     args = ap.parse_args()
 
     tok = AutoTokenizer.from_pretrained(args.model)
@@ -192,7 +214,10 @@ def main() -> None:
     steps = len(train_loader) * args.epochs
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     sched = get_scheduler("linear", opt, int(steps * 0.05), steps)
-    print(f"loss={args.loss} graded={args.graded} steps={steps} groups={len(train_loader.dataset)}")
+    print(
+        f"loss={args.loss} bce_w={args.bce_weight} graded={args.graded} "
+        f"steps={steps} groups={len(train_loader.dataset)}"
+    )
 
     t0, done = time.time(), 0
     for ep in range(args.epochs):
@@ -202,7 +227,7 @@ def main() -> None:
                 logits = model(
                     input_ids=enc["input_ids"], attention_mask=enc["attention_mask"]
                 ).logits.view(-1)
-            loss = batch_loss(logits, enc, args.loss)
+            loss = batch_loss(logits, enc, args.loss, args.bce_weight)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
@@ -216,7 +241,7 @@ def main() -> None:
                     f"  {done}/{steps}  loss {float(loss):.4f}  {rate:.2f} it/s  ETA {eta:.0f}min",
                     flush=True,
                 )
-        m = evaluate(model, val_loader, args.loss)
+        m = evaluate(model, val_loader, args.loss, args.bce_weight)
         print(f"[epoch {ep + 1}] val {m}", flush=True)
         out = Path(args.out) / f"epoch-{ep + 1}"
         out.mkdir(parents=True, exist_ok=True)

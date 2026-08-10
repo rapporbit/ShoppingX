@@ -328,6 +328,7 @@ def _near_duplicate(a: ItemCandidate, b: ItemCandidate) -> bool:
 
 async def _category_relevance(
     survivors: list[ItemCandidate],
+    must_terms: list[str] | None = None,
 ) -> tuple[dict[str, float], bool, bool]:
     """候选 × **干净品类 query** 的 cross-encoder 相关性分（相关性门的信号源）。
 
@@ -336,7 +337,13 @@ async def _category_relevance(
     会让门**反着杀**（把真命中的沉底），此时 fail-open 不执法，比带错锚执法安全。
     三条硬约束（背包 badcase 实测踩出，勿破）：
     ① query 只用干净品类词——套装轮 = 槽 keywords（:func:`slot_query`），普通轮 = P_t 的英文
-       品类（planner 判的）；**绝不拼 prefer 偏好词**，拼了实测排序反转。
+       品类 **+ must_have 硬约束词**；**绝不拼 prefer 偏好词**，拼了实测排序反转。
+
+       ``must_terms`` 是 M22 加的：离线在 ESCI 上同分母实测，「品类 + 约束关键词」形态比
+       「纯品类词」多 +3.10pt vs +0.59pt（recall@8，n=868）——单个品类词把 cross-encoder
+       降级成了品类分类器，交叉注意力那点本事全浪费了。传进来的必须是 :func:`_split_specs`
+       之后的**普通词**（数值规格另有专道、且 refdocs 04-2 §10.1 明确数值不该进 reranker），
+       且已 ``normalize_terms`` 归一成英文（商品库是纯英文的）。prefer/deprioritize 一律不进。
     ② 任一批打分降级到本地 token 重叠（used_remote=False）→ 整门本轮停用：token 重叠会给
        蹭词垃圾打高分（标题真含 "water bottle"），反向执法比不执法更糟。
     ③ 分数随 query 回写登记表做增量缓存：补搜轮 picker 重跑只给新候选打分。
@@ -373,7 +380,9 @@ async def _category_relevance(
                     sorted(query_d),
                 )
                 return {}, False, True
-            jobs = [(category, list(survivors))]
+            # 锚核验只认 category（它才是与用户原文可互证的那个词）；约束词是在锚已可信之后
+            # 才拼上去补判别力的，不参与核验，也就不会把「合法但错的 must」变成新的错锚。
+            jobs = [(" ".join([category, *(must_terms or [])]), list(survivors))]
     if not jobs:
         return {}, False, False
 
@@ -549,7 +558,9 @@ async def item_picker(
     # 品类一致性相关性门：cross-encoder 对「干净品类 query」打分。召回是向量近邻，标题蹭词的
     # 跨品类垃圾（water bottle **stickers**）向量分和真品拉不开（实测 0.60 vs 0.67），字面匹配
     # 更拦不住（标题真含关键词）——只有 cross-encoder 拉得开（实测 0.97 vs 0.006）。
-    rerank_scores, rerank_on, anchor_conflict = await _category_relevance(survivors)
+    # must 已是 _split_specs 剥掉数值规格、normalize_terms 归一成英文的普通词，正是要拼进
+    # rerank query 的那部分（prefer 不能拼，见 _category_relevance 的硬约束①）。
+    rerank_scores, rerank_on, anchor_conflict = await _category_relevance(survivors, must)
     # 池内品类计数（补搜闸的污染信号，见 ItemPickerOutput 字段说明）。没拿到分的候选按品类
     # 相符算——判不了不定罪，与「rr < FLOOR 才沉底」的失效方向一致。
     oncat_count: int | None = None
