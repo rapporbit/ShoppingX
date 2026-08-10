@@ -87,6 +87,10 @@ def score_ranking(ranked: list[str], row: dict) -> dict[str, float]:
     # cross-encoder 若比 embedding 更会找语义真相关的东西，就会把未标注的好货排上来——
     # 表现为指标下降而 unlabeled 上升。这一列是区分「模型差」与「尺子量不了」的关键证据，
     # 它高本身不代表好或坏（可能是好货也可能是垃圾），必须配 --dump-cases 人眼看几条。
+    # comp@8：头部混进多少「人工标注的互补配件」——「搜手机出配件」这类 bad case 的直接度量，
+    # 越低越好。它与 recall/ndcg 正交：模型可以正例排得好、同时配件也混得多。
+    out[f"comp@{CUTS[0]}"] = float(len(comp & set(ranked[: CUTS[0]])))
+    out["has_comp"] = 1.0 if comp else 0.0
     labeled = pos | sub | comp
     head8 = ranked[: CUTS[0]]
     out[f"unlabeled@{CUTS[0]}"] = (
@@ -208,6 +212,7 @@ def print_table(report: dict) -> None:
         f"ndcg@{CUTS[0]}",
         f"recall@{CUTS[1]}",
         "mrr",
+        f"comp@{CUTS[0]}",
         f"unlabeled@{CUTS[0]}",
         "ceiling",
     ]
