@@ -205,7 +205,7 @@ async def test_item_picker_display_gate_drops_low_relevance(monkeypatch: Any) ->
     ]
     scores = {"G1": 0.9, "G2": 0.5, "G3": 0.05}  # peak 0.9 → floor 0.315，G3 低于门
 
-    async def fake_rel(survivors: Any) -> Any:
+    async def fake_rel(survivors: Any, must_terms: Any = None) -> Any:
         return {c.item_id: scores[c.item_id] for c in survivors}, True, False
 
     monkeypatch.setattr(mod, "_category_relevance", fake_rel)

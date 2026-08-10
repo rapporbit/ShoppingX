@@ -35,11 +35,9 @@ MAX_LEN = 320  # 商品文本 p95 才 223 字符，320 token 足够，短了省�
 BATCH = 256
 
 
-def load_model() -> tuple:
-    tok = AutoTokenizer.from_pretrained(MODEL_NAME)
-    model = AutoModelForSequenceClassification.from_pretrained(
-        MODEL_NAME, torch_dtype=torch.float16
-    )
+def load_model(name: str = MODEL_NAME) -> tuple:
+    tok = AutoTokenizer.from_pretrained(name)
+    model = AutoModelForSequenceClassification.from_pretrained(name, torch_dtype=torch.float16)
     model.eval().cuda()
     return tok, model
 
@@ -65,7 +63,7 @@ def score_pairs(tok, model, pairs: list[tuple[str, str]]) -> list[float]:
 
 def cmd_calibrate(args: argparse.Namespace) -> None:
     rows = [json.loads(x) for x in Path(args.pairs).open(encoding="utf-8") if x.strip()]
-    tok, model = load_model()
+    tok, model = load_model(args.model)
     groups: dict[str, list[float]] = {}
     for label in ("E", "S", "C", "I"):
         pairs = [(r["query"], r["text"]) for r in rows if r["label"] == label]
@@ -94,7 +92,7 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
 
 def cmd_score(args: argparse.Namespace) -> None:
     rows = [json.loads(x) for x in Path(args.input).open(encoding="utf-8") if x.strip()]
-    tok, model = load_model()
+    tok, model = load_model(args.model)
     total = kept = dropped = 0
 
     with Path(args.output).open("w", encoding="utf-8") as out:
@@ -121,6 +119,8 @@ def cmd_score(args: argparse.Namespace) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
+
+    ap.add_argument("--model", default=MODEL_NAME, help="换自训 checkpoint 即为新模型重标定")
 
     c = sub.add_parser("calibrate", help="用 ESCI 标注对标定阈值")
     c.add_argument("--pairs", default="calib_pairs.jsonl")
