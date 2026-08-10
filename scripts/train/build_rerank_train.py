@@ -36,6 +36,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data" / "train"
 CAND_PATH = DATA_DIR / "deep_neg_candidates.jsonl"
+CORPUS_PATH = DATA_DIR / "corpus.jsonl"
 
 SEED = 42
 VAL_RATIO = 0.02
@@ -78,8 +79,16 @@ def to_graded_row(query: str, pos_text: str, negs: list[tuple[str, int]]) -> dic
     }
 
 
+def load_corpus_texts() -> list[str]:
+    """全库商品文本，供随机负例采样（与挖掘/评测同源的 embed_text）。"""
+    return [json.loads(x)["text"] for x in CORPUS_PATH.open(encoding="utf-8") if x.strip()]
+
+
 def build(
-    cands: list[dict], scores: dict[int, dict], args: argparse.Namespace
+    cands: list[dict],
+    scores: dict[int, dict],
+    args: argparse.Namespace,
+    corpus_texts: list[str] | None = None,
 ) -> tuple[list, dict]:
     rng = random.Random(SEED)
     out: list[dict] = []
@@ -94,6 +103,7 @@ def build(
         "grade_0": 0,
         "grade_1": 0,
         "grade_2": 0,
+        "rand_kept": 0,
     }
 
     for row in cands:
@@ -127,7 +137,21 @@ def build(
         # ESCI 档位高的先占坑：分级训练里 S/C 是唯一能教「相关但不是最优」的样本，
         # 二值训练里它们也是最像正例的 hard negative，两种格式下都该优先。
         esci_negs.sort(key=lambda t: -t[1])
-        negs = esci_negs[: args.max_neg]
+        # 随机负例（easy negatives）先占坑。**这一层不能省**：M22 第一版 0% 随机负例，
+        # 负例全来自 e15 top-500（清一色向量相似的同品类候选），模型于是只学会「同品类内细排」、
+        # 丢掉了粗粒度判别的尺度感——真实 case 上 query="backpack" 给刺绣贴片 .3609、
+        # 真背包 .3512，挤成一团且排序反转。M21 的 embedding 训练配方里随机负例占 28.3%，
+        # reranker 这边当初漏了。gain 恒 0，且不过假负闸（全库随机撞上真相关的概率可忽略）。
+        n_rand = round(args.max_neg * args.random_neg) if corpus_texts else 0
+        pos_texts = {p["text"] for p in row["pos"]}
+        rand_negs = [
+            (t, 0)
+            for t in rng.sample(corpus_texts, min(n_rand * 3, len(corpus_texts)))
+            if t not in pos_texts
+        ][:n_rand]
+        stats["rand_kept"] += len(rand_negs)
+
+        negs = rand_negs + esci_negs[: max(0, args.max_neg - len(rand_negs))]
         # 轮询各 rank 层，保证浅/中/深三段都有代表——只喂浅层就退化成 M21 那种「近义干扰」数据集
         pools = [rng.sample(v, len(v)) for v in ann_layers.values()]
         while len(negs) < args.max_neg and any(pools):
@@ -164,6 +188,12 @@ def main() -> None:
     ap.add_argument("--max-neg", type=int, default=15)
     ap.add_argument("--min-neg", type=int, default=4, help="负例太少的组，listwise CE 学不到东西")
     ap.add_argument(
+        "--random-neg",
+        type=float,
+        default=0.0,
+        help="随机负例占 max-neg 的比例（M21 embedding 配方是 0.28；0=不加，即 M22 第一版）",
+    )
+    ap.add_argument(
         "--format",
         choices=("swift", "graded"),
         default="swift",
@@ -178,7 +208,12 @@ def main() -> None:
     }
     print(f"候选 query {len(cands)}，打分 query {len(scores)}")
 
-    rows, stats = build(cands, scores, args)
+    corpus_texts = None
+    if args.random_neg > 0:
+        print("加载 corpus.jsonl 供随机负例采样…", flush=True)
+        corpus_texts = load_corpus_texts()
+        print(f"  {len(corpus_texts)} 条\n", flush=True)
+    rows, stats = build(cands, scores, args, corpus_texts)
     n_val = max(1, int(len(rows) * VAL_RATIO))
     val, train = rows[:n_val], rows[n_val:]
 
