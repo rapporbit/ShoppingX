@@ -88,7 +88,13 @@ def check(obj: dict | None, meta: dict) -> list[str]:
 def field_accuracy(pred: dict, gold: dict) -> dict:
     """**附加观测，不是验收项**：字段对不对。口径比 reward 侧的 R_field 粗（品类只做子串匹配、
     不给部分分），够看趋势就行——真要比分数以 app/eval/planner_reward.py 为准，别拿这里的数
-    去和那边的对照。"""
+    去和那边的对照。
+
+    **gold 品类为空 → 该条弃权（返回 None），不算错**。dev 92 条里有 24 条是 S0-2 定的机制
+    弃权样本（无上文的追问碎片，品类判不出来），旧口径把它们一律记为「判错」，天花板被压到
+    68/92=0.739 —— 实测 0.522 因此被读成「一半都判错」，实际可判样本上是 0.706。
+    分母混进无解的题，得到的就不是判定能力。
+    """
     def _norm(s: object) -> str:
         return re.sub(r"[\s的]", "", str(s or "")).lower()
 
@@ -96,7 +102,7 @@ def field_accuracy(pred: dict, gold: dict) -> dict:
     pd_, gd = set(pred.get("domains") or []), set(gold.get("domains") or [])
     inter = len(pd_ & gd)
     return {
-        "category": bool(pc and gc and (pc == gc or pc in gc or gc in pc)),
+        "category": (bool(pc and (pc == gc or pc in gc or gc in pc)) if gc else None),
         "domains_f1": (2 * inter / (len(pd_) + len(gd))) if (pd_ or gd) else 1.0,
         "budget": pred.get("budget_amount") == gold.get("budget_amount"),
     }
@@ -172,6 +178,7 @@ def main() -> None:
     violations: Counter = Counter()
     ok = 0
     acc = {"category": 0, "domains_f1": 0.0, "budget": 0}
+    cat_n = 0  # 品类可判样本数（gold 为空的弃权样本不进分母）
     samples = []
     for r, g in zip(rows, gens, strict=True):
         obj = extract_json(g)
@@ -183,7 +190,9 @@ def main() -> None:
         gold = json.loads(r["messages"][2]["content"])
         if obj:
             a = field_accuracy(obj, gold)
-            acc["category"] += a["category"]
+            if a["category"] is not None:
+                acc["category"] += a["category"]
+                cat_n += 1
             acc["domains_f1"] += a["domains_f1"]
             acc["budget"] += a["budget"]
         if len(samples) < 5 and bad:
@@ -198,7 +207,8 @@ def main() -> None:
         "判定": "通过" if rate >= PASS_LINE else f"**未过**（差 {round(PASS_LINE - rate, 4)}）",
         "违规分布": dict(violations.most_common()),
         "字段准确（附加观测，非验收）": {
-            "category": round(acc["category"] / n, 3),
+            "category": round(acc["category"] / cat_n, 3) if cat_n else None,
+            "category 可判样本": f"{cat_n}/{n}（gold 品类为空的弃权样本不进分母）",
             "domains_f1": round(acc["domains_f1"] / n, 3),
             "budget": round(acc["budget"] / n, 3),
         },
