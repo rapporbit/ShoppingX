@@ -157,3 +157,26 @@ class TestFormatAndEcon:
 
 def test_parse_failure_is_vetoed() -> None:
     assert compute_reward(None, GOLD, "想买双肩包").total == PARSE_FAIL_REWARD
+
+
+class TestNoKeywords:
+    """「不给检索词」的两种情形必须分开处理——这是实测查出的 hacking 漏洞（M23 S3）。"""
+
+    def test_should_retrieve_but_no_keywords_scores_zero(self) -> None:
+        """gold 有锚 = 这轮本就该检索。不给词直接罚 0，不许弃权——否则模型只要闭嘴不输出
+        keywords，就能甩掉权重最大的那 45%，剩下 field/format 还特别好拿分。"""
+        plan = {"category": "双肩包", "domains": ["bags"], "keywords": [],
+                "exclude_terms": [], "budget_amount": 400.0, "clear_budget": False}
+        br = compute_reward(plan, GOLD, "想买双肩包，预算400", titles=None)
+        assert br.retrieval == 0.0
+        assert br.econ is None  # 没给词，经济性无从谈起
+
+    def test_no_anchor_and_no_keywords_abstains(self) -> None:
+        """追问澄清轮：gold 没锚、plan 也没词 —— 两维都弃权，权重顺延给 field/format。"""
+        gold = {k: v for k, v in GOLD.items() if k not in ("must_have", "category_anchor")}
+        plan = {"category": "双肩包", "domains": ["bags"], "keywords": [],
+                "exclude_terms": [], "budget_amount": 400.0, "clear_budget": False}
+        br = compute_reward(plan, gold, "不要皮革的", titles=None)
+        assert br.retrieval is None
+        assert br.econ is None
+        assert set(br.detail["参与计分的维度"]) == {"field", "format"}
