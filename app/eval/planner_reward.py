@@ -114,17 +114,22 @@ def score_format(plan: dict) -> tuple[float, list[str]]:
 
 
 # ── R_econ：检索词形态。它治的是「话说得对但搜不动」──────────────────────────────
-def score_econ(plan: dict) -> tuple[float, dict]:
+def score_econ(plan: dict) -> tuple[float | None, dict]:
     """条数落在 [2,6]、单词别超 4 token、别堆同义词。
 
     同义堆砌的判法是**词面重叠**（"laptop bag" 与 "laptop backpack" 共享 laptop）：dense 检索里
     堆同义词不会更准，只会把 query 向量拖向词表中心。这不是理论——M21 的「正例全展开」有效、
     「同义扩写」无效，是同一枚硬币的两面。
+
+    **无检索词 → 弃权（None），不是 0 分**。这条是实测倒逼改的：dev 92 条里 26 条（28%）
+    教师产出就没有 keywords（追问澄清轮本来就不该检索），旧口径给它们 0 分，直接把 econ
+    这一维的均值压到 0.50 —— 罚的不是「词写得差」，是「这轮不需要检索」。该不该检索由
+    R_retrieval 那一维管（见 compute_reward），这里只管「既然给了词，写得经济不经济」。
     """
     kws = [k for k in (plan.get("keywords") or []) if str(k).strip()]
     n = len(kws)
     if n == 0:
-        return 0.0, {"reason": "无检索词"}
+        return None, {"reason": "无检索词 → 本维弃权"}
 
     count_score = 1.0 if KW_MIN <= n <= KW_MAX else max(0.0, 1.0 - 0.25 * min(
         abs(n - KW_MIN), abs(n - KW_MAX)
@@ -282,9 +287,22 @@ def compute_reward(
     br.fmt, fmt_issues = score_format(plan)
     br.econ, econ_detail = score_econ(plan)
     br.field_score, field_detail = score_field(plan, gold)
-    br.retrieval, retr_detail = (
-        score_retrieval(titles, gold) if titles is not None else (None, {"reason": "未跑检索"})
-    )
+    # **「不给检索词」必须被 R_retrieval 罚，不能弃权** —— 这是实测查出来的 hacking 漏洞：
+    # 旧口径下 keywords 为空 → 环境侧传 titles=None → 这一维弃权，于是模型只要不输出
+    # keywords，就能一次性甩掉权重最大的 45%，剩下 field/format 两维还特别好拿分。
+    # 判据用 golden 的锚（must_have / category_anchor）：有锚 = 这轮本就该检索，不给词罚 0；
+    # 无锚 = 这轮本来就无从判（追问澄清轮），照旧弃权。
+    has_kw = any(str(k).strip() for k in (plan.get("keywords") or []))
+    gold_has_anchor = bool(gold.get("must_have") or gold.get("category_anchor"))
+    if not has_kw:
+        br.retrieval, retr_detail = (
+            (0.0, {"reason": "该检索却没给 keywords"}) if gold_has_anchor
+            else (None, {"reason": "本轮无锚可判，且未给检索词"})
+        )
+    elif titles is None:
+        br.retrieval, retr_detail = None, {"reason": "未跑检索"}
+    else:
+        br.retrieval, retr_detail = score_retrieval(titles, gold)
 
     # 门禁：先算分再打折，顺序不能反——打折的是「这一维的得分」，不是它的权重。
     if _is_copycat(plan, user_text):
