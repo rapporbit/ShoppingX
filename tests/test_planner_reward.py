@@ -78,7 +78,7 @@ class TestAntiHacking:
 
     def test_fabricated_evidence_zeroes_field(self) -> None:
         plan = {**GOOD_PLAN,
-                "exclude_terms": [{"term": "leather", "evidence": "用户说不要皮革"}]}
+                "exclude_terms": [{"word": "leather", "evidence": "用户说不要皮革"}]}
         br = compute_reward(plan, GOLD, "想买双肩包，预算400", titles=TITLES)
         assert br.field_score == 0.0
         assert any("evidence" in p for p in br.penalties)
@@ -86,7 +86,7 @@ class TestAntiHacking:
     def test_real_evidence_survives(self) -> None:
         text = "想买双肩包，不要皮革的，预算400"
         plan = {**GOOD_PLAN,
-                "exclude_terms": [{"term": "leather", "evidence": "不要皮革的"}]}
+                "exclude_terms": [{"word": "leather", "evidence": "不要皮革的"}]}
         br = compute_reward(plan, GOLD, text, titles=TITLES)
         assert br.field_score and br.field_score > 0.9
 

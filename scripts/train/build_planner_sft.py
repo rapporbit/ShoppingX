@@ -55,7 +55,7 @@ SFT_SYSTEM = """你是购物 Agent 的意图拆解器。把用户这轮的购物
 - clear_budget：用户明确取消/放开预算（「不限预算」「贵点也行」）为 true，只是没提填 false。
 - keywords：给商品检索用的英文关键词 2~6 个。**商品标题基本是英文**，中文词搜不到东西。
   别把整句塞进来，也别堆同义词。
-- exclude_terms：用户本轮说的「不要 X」里的 X，每项 {{"term": 英文词, "evidence": 用户原话片段}}。
+- exclude_terms：用户本轮说的「不要 X」里的 X，每项 {{"word": 英文词, "evidence": 用户原话片段}}。
   evidence 必须是原话里真有的片段。弱表达（「不太喜欢」「尽量别」）不算，留空数组。
 
 只输出 JSON，不要解释。"""
@@ -78,15 +78,22 @@ async def _teacher(row: dict) -> dict | None:
     from app.tools.planner import PlanOutput, get_planner_prompt
 
     prior = "".join(f"用户上一轮：{t}\n" for t in row.get("prior_turns") or [])
-    try:
-        structured = get_fast_llm().with_structured_output(PlanOutput, method="function_calling")
-        out = await asyncio.wait_for(
-            structured.ainvoke([("system", get_planner_prompt()), ("user", prior + row["text"])]),
-            timeout=REQ_TIMEOUT,
-        )
-        return out.model_dump() if hasattr(out, "model_dump") else dict(out)
-    except Exception:
-        return None
+    structured = get_fast_llm().with_structured_output(PlanOutput, method="function_calling")
+    # **必须重试**：首次全量跑（并发 16）教师失败 411/1621 = 25.4%，而 120 条 smoke 时是 0 ——
+    # 典型的限流/超时，不是这些样本本身有问题。失败直接丢等于白扔四分之一训练集。
+    for attempt in range(3):
+        try:
+            out = await asyncio.wait_for(
+                structured.ainvoke(
+                    [("system", get_planner_prompt()), ("user", prior + row["text"])]
+                ),
+                timeout=REQ_TIMEOUT,
+            )
+            return out.model_dump() if hasattr(out, "model_dump") else dict(out)
+        except Exception:
+            if attempt < 2:
+                await asyncio.sleep(2 * (attempt + 1))  # 退避：限流下立刻重试只会继续撞墙
+    return None
 
 
 def _target(row: dict, teacher: dict) -> dict:
@@ -107,9 +114,12 @@ def _target(row: dict, teacher: dict) -> dict:
         "clear_budget": bool(g.get("clear_budget")),
         "keywords": [str(k) for k in (teacher.get("keywords") or [])][:6],
         "exclude_terms": [
-            {"term": str(t.get("term", "")), "evidence": str(t.get("evidence", ""))}
+            # 字段名必须是 word——线上 ExcludeTerm 就叫 word。第一版写成 term，教师产出被
+            # 整批过滤成空（1621 条里 0 条带排除项），且真训出来字段名也对不上线上 schema，
+            # 双通道合并会直接失效。训练与线上共用一份 schema，不是共用「差不多的」。
+            {"word": str(t.get("word", "")), "evidence": str(t.get("evidence", ""))}
             for t in (teacher.get("exclude_terms") or [])
-            if str(t.get("term", "")).strip()
+            if str(t.get("word", "")).strip()
         ],
     }
     return tgt
@@ -120,6 +130,9 @@ async def main() -> None:
     ap.add_argument("--limit", type=int, default=0, help="只导前 N 条（0=全量）")
     ap.add_argument("--split", default="train")
     ap.add_argument("--out", default="")
+    ap.add_argument("--resume", action="store_true", help="跳过已导好的 id，只补失败的")
+    ap.add_argument("--concurrency", type=int, default=CONCURRENCY,
+                    help="教师并发。首次全量跑 16 并发触发限流、失败 25%%，补跑时调小")
     args = ap.parse_args()
 
     rows = [json.loads(x) for x in GOLDEN.open(encoding="utf-8") if x.strip()]
@@ -130,9 +143,21 @@ async def main() -> None:
     if args.limit:
         rows = rows[: args.limit]
 
-    system, sem = build_system(), asyncio.Semaphore(CONCURRENCY)
+    system, sem = build_system(), asyncio.Semaphore(args.concurrency)
     out_path = OUT_DIR / (args.out or f"planner_sft_{args.split}.jsonl")
-    fh = out_path.open("w", encoding="utf-8")
+    # resume：教师调用是花钱的，补跑失败样本时不该把已导好的重来一遍
+    done_ids: set[str] = set()
+    if args.resume and out_path.exists():
+        done_ids = {
+            json.loads(x)["id"] for x in out_path.open(encoding="utf-8") if x.strip()
+        }
+        rows = [r for r in rows if r["id"] not in done_ids]
+        print(f"resume：已有 {len(done_ids)} 条，补 {len(rows)} 条")
+    fh = out_path.open("a" if done_ids else "w", encoding="utf-8")
+    # 教师产出**原样落盘**：这次因为一个字段名写错（term/word）就得把 1600 次 API 全重跑一遍。
+    # 存下原始产出，以后改目标拼装只要重跑 _target，一分钱不用再花。
+    raw_path = OUT_DIR / f"planner_teacher_raw_{args.split}.jsonl"
+    raw_fh = raw_path.open("a" if done_ids else "w", encoding="utf-8")
     stat = {"ok": 0, "teacher_fail": 0}
 
     async def one(row: dict) -> None:
@@ -141,6 +166,7 @@ async def main() -> None:
         if teacher is None:
             stat["teacher_fail"] += 1
             return
+        raw_fh.write(json.dumps({"id": row["id"], "teacher": teacher}, ensure_ascii=False) + "\n")
         prior = "".join(f"用户上一轮：{t}\n" for t in row.get("prior_turns") or [])
         fh.write(json.dumps({
             "id": row["id"],
@@ -159,7 +185,25 @@ async def main() -> None:
     print(f"导 {len(rows)} 条（{args.split}，已排除 review），system prompt {len(system)} 字符")
     await asyncio.gather(*(one(r) for r in rows))
     fh.close()
+    raw_fh.close()
+
+    # 连 meta 一起导：GPU 机上没有本仓库的 app 包，格式检查器要有个地方读到「域枚举有哪些、
+    # 该有哪些字段」。硬编码进那边的脚本就有两份事实来源，改了枚举必忘同步一处。
+    meta = OUT_DIR / "planner_sft_meta.json"
+    meta.write_text(json.dumps({
+        "system": system,
+        "domains": [d for d in ALL_DOMAINS if d != "global"],
+        "forbidden_domains": ["global"],
+        "required_fields": ["category", "domains", "budget_amount", "clear_budget",
+                            "keywords", "exclude_terms"],
+        "field_types": {
+            "category": "str", "domains": "list[str]", "budget_amount": "float|null",
+            "clear_budget": "bool", "keywords": "list[str]",
+            "exclude_terms": "list[{word,evidence}]",
+        },
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"完成：{stat}\n→ {out_path.relative_to(PROJECT_ROOT)}")
+    print(f"→ {meta.relative_to(PROJECT_ROOT)}")
 
 
 if __name__ == "__main__":
