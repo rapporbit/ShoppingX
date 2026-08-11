@@ -31,6 +31,7 @@ RL 框架、不碰会话副作用——S3 换 ms-swift / verl / 自研 loop 都�
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -39,6 +40,14 @@ from app.memory.domains import ALL_DOMAINS
 from app.utils.terms import term_hits
 
 WEIGHTS = {"retrieval": 0.45, "field": 0.30, "format": 0.15, "econ": 0.10}
+# **配比消融用的旁路**：`PLANNER_REWARD_WEIGHTS='{"field":0.40,...}'` 可覆盖上面的默认值。
+# 为什么走环境变量而不是直接改常量：r1~r4 四轮训练都是按默认配比跑的，改常量会让那几轮
+# 的分数再也复现不出来。配比是 reward 的方向盘，换方向盘要留得下旧车的行车记录。
+if (_w := os.environ.get("PLANNER_REWARD_WEIGHTS")):
+    import json as _json
+
+    WEIGHTS = {**WEIGHTS, **{k: float(v) for k, v in _json.loads(_w).items() if k in WEIGHTS}}
+
 PARSE_FAIL_REWARD = -1.0
 
 # top20 里有一半命中 must_have 锚就算满分。要求 100% 是不现实的——库里同品类商品本来就
