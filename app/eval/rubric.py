@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from langchain_core.messages import AIMessage, AnyMessage
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # 顶层 import 安全：tracing 只在 TYPE_CHECKING 下反向引用本模块，运行时无循环依赖。
 from app.agent.tracing import record_rubric_scores
@@ -55,10 +55,40 @@ class RubricCriterion(BaseModel):
     )
 
 
+def _drop_incomplete(data: Any) -> Any:
+    """丢掉缺 ``criterion`` 的残缺细则，**而不是让整份 rubric 报废**。
+
+    实测：90 条评测里 8 条（8.9%）因为 judge 漏吐这一个字段，pydantic 校验失败 → 整条 query
+    判为 error。可那时候 Agent 早已跑完、token 全花了，就为一条细则残缺全部作废，太贵。
+
+    **刻意不拿 dimension 兜底填 criterion**：那会造出一条语义残缺的评分细则，judge 照着它打分，
+    污染是静默的。少一条细则，其余照常打——这个失效方向看得见（`dropped` 会记账）。
+    """
+    if not isinstance(data, dict):
+        return data
+    crit = data.get("criteria")
+    if not isinstance(crit, list):
+        return data
+
+    def _complete(c: Any) -> bool:
+        # **两种形态都要认**：judge 吐回来的是 dict，而缓存回读 / 代码里直接构造走的是
+        # RubricCriterion 对象。第一版只判 dict，导致对象形态被整批丢空——缓存命中时
+        # rubric 变成 0 条细则，且不报错。单测 test_generate_rubric_uses_cache 抓到的就是它。
+        if isinstance(c, dict):
+            return bool(str(c.get("criterion") or "").strip() and str(c.get("tier") or "").strip())
+        return bool(getattr(c, "criterion", "") and getattr(c, "tier", ""))
+
+    kept = [c for c in crit if _complete(c)]
+    return {**data, "criteria": kept, "dropped": len(crit) - len(kept)}
+
+
 class Rubric(BaseModel):
     """针对单条 query 动态生成的整套评分细则。"""
 
+    _fix_incomplete = model_validator(mode="before")(staticmethod(_drop_incomplete))
+
     criteria: list[RubricCriterion] = Field(default_factory=list)
+    dropped: int = Field(default=0, description="被丢掉的残缺细则条数（judge 漏吐字段）")
 
 
 class CriterionScore(BaseModel):
@@ -283,14 +313,26 @@ async def generate_rubric(
     # json_mode（非 function_calling）：本仓库 judge 走 DashScope/Qwen 兼容端点，不支持
     # tool_choice=required，故用 json_object 模式——prompt 里已自带 json 字样与结构说明。
     structured = get_judge_llm().with_structured_output(Rubric, method="json_mode")
-    result = await structured.ainvoke(
-        _GEN_PROMPT.format(
-            query=query, constraints=constraints or "（无）", intent_rule=intent_rule
-        )
+    prompt = _GEN_PROMPT.format(
+        query=query, constraints=constraints or "（无）", intent_rule=intent_rule
     )
-    rubric = result if isinstance(result, Rubric) else Rubric.model_validate(result)
-    if not rubric.criteria:
+    # 重试一次：`with_structured_output` 内部的 max_retries 只兜网络/限流，**吐回来的 JSON
+    # 结构不合格它不会重来**。judge 的字段遗漏是随机的，换一次采样多半就好了。
+    rubric: Rubric | None = None
+    for attempt in range(2):
+        try:
+            result = await structured.ainvoke(prompt)
+            rubric = result if isinstance(result, Rubric) else Rubric.model_validate(result)
+            if rubric.criteria:
+                break
+        except Exception as exc:  # noqa: BLE001 —— 结构不合格属预期内，换一次采样再试
+            if attempt == 1:
+                raise
+            logger.warning("rubric 生成第 %d 次失败，重试：%s", attempt + 1, exc)
+    if rubric is None or not rubric.criteria:
         raise ValueError(f"judge 未生成任何细则（query={query!r}）")
+    if rubric.dropped:
+        logger.warning("rubric 丢掉 %d 条残缺细则（query=%r）", rubric.dropped, query)
 
     _write_cached_rubric(cache_file, rubric)
     return rubric
