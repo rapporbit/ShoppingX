@@ -101,7 +101,7 @@ def score_format(plan: dict) -> tuple[float, list[str]]:
 
     for t in plan.get("exclude_terms") or []:
         if not (t.get("evidence") or "").strip():
-            issues.append(f"exclude_terms 缺 evidence：{t.get('term')}")
+            issues.append(f"exclude_terms 缺 evidence：{t.get('word')}")
             score -= 0.3
             break
 
