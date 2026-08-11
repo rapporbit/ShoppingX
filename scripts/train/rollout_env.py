@@ -198,20 +198,32 @@ def _selftest(args) -> None:
                 texts.append(r["text"])
         return comps, golds, texts, t_gen
 
-    def score_pass(comps, golds, texts) -> tuple[list[float], float]:
+    def score_pass(comps, golds, texts) -> tuple[list[float], list[Any], float]:
         t0 = time.perf_counter()
         brs = score_batch(comps, golds, texts, retriever, reward_mod)
-        return [b.total for b in brs], time.perf_counter() - t0
+        return [b.total for b in brs], brs, time.perf_counter() - t0
+
+    def dim_means(brs: list[Any]) -> dict:
+        """**分项均值**：总分不动时，得看是哪一维在动。四维的弃权样本数不同（category=None
+        的跳过 field、没 keywords 的跳过 retrieval），所以每一维只在**实际参与的样本**上取
+        均值，并把参与数一起报出来——不报参与数的话，0.8 是 92 条的还是 61 条的分不清。"""
+        out = {}
+        for key, attr in (("retrieval", "retrieval"), ("field", "field_score"),
+                          ("format", "fmt"), ("econ", "econ")):
+            vals = [v for b in brs if (v := getattr(b, attr, None)) is not None]
+            out[key] = {"均值": round(statistics.mean(vals), 4) if vals else None,
+                        "参与样本": len(vals)}
+        return out
 
     c1, golds, texts, t_gen1 = gen_pass()
-    r1, t_rw1 = score_pass(c1, golds, texts)
+    r1, brs1, t_rw1 = score_pass(c1, golds, texts)
     # **reward 复现性**（验收项）：同一批 completion 再打一遍，必须逐位一致。
-    r1b, _ = score_pass(c1, golds, texts)
+    r1b, _, _ = score_pass(c1, golds, texts)
     # **生成复现性**（观测项，不是验收项）：vLLM 即使固定 seed，两次调用的 batch 组合与
     # 前缀缓存状态不同，logits 会有浮点级差异、采样点可能分叉。GRPO 本来就要随机采样，
     # 这条不一致不影响训练；真正不能抖的是 reward 函数本身。
     c2, _, _, t_gen2 = gen_pass()
-    r2, t_rw2 = score_pass(c2, golds, texts)
+    r2, _, t_rw2 = score_pass(c2, golds, texts)
 
     g = args.group_size
     groups = [r1[i * g:(i + 1) * g] for i in range(len(rows))]
@@ -229,6 +241,7 @@ def _selftest(args) -> None:
         },
         "parse 失败率": round(sum(x == reward_mod.PARSE_FAIL_REWARD for x in r1) / max(n, 1), 4),
         "reward 均值": round(statistics.mean(r1), 4),
+        "分项均值": dim_means(brs1),
         "reward 全局 σ": round(statistics.pstdev(r1), 4),
         "组内 σ 均值": round(statistics.mean(within), 4) if within else None,
         "组内 σ 为 0 的组数": sum(s == 0 for s in within),
