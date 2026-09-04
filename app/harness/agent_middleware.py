@@ -653,7 +653,7 @@ class HarnessAgentMiddleware(AgentMiddleware):
             # 不再从模型可见文本里正则抠——文本截断 / 格式变化都伤不到信号。
             diag = consume_diagnostics("item_picker")
             if diag is not None:
-                self._last_picks = call_picks = int(diag.get("picks") or 0)
+                self._last_picks = call_picks = _as_opt_int(diag.get("picks")) or 0
                 self._last_must_hits = call_must_hits = _as_opt_int(diag.get("must_have_hits"))
                 self._last_oncat = call_oncat = _as_opt_int(diag.get("oncat_count"))
                 self._last_offcat = call_offcat = _as_opt_int(diag.get("offcat_count"))

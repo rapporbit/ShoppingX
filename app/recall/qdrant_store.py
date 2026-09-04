@@ -167,7 +167,6 @@ class QdrantRecall:
             out.append(RecallCandidate(**payload, score=float(p.score)))
         return out
 
-
     def similar(self, item_id: str, top_k: int = 8) -> list[RecallCandidate]:
         """「搜同款」：按已入库商品的向量找全库近邻（不重新 embed，向量在服务端取）。
 
@@ -181,9 +180,7 @@ class QdrantRecall:
         found, _ = self._client.scroll(
             COLLECTION,
             scroll_filter=models.Filter(
-                must=[
-                    models.FieldCondition(key="item_id", match=models.MatchValue(value=item_id))
-                ]
+                must=[models.FieldCondition(key="item_id", match=models.MatchValue(value=item_id))]
             ),
             limit=1,
             with_payload=False,

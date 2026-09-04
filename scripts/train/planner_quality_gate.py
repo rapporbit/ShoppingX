@@ -60,18 +60,30 @@ def _load(path: Path, source: str) -> list[dict]:
             continue
         d = json.loads(line)
         if source == "real":  # 锚文件是「一行一条 query」，其余两源是「一行一个会话」
-            rows.append({
-                "id": d["id"], "source": "real", "category": "", "family": "",
-                "dims": {}, "bucket": d.get("bucket", ""),
-                "turns": [{"turn": 0, "text": d["text"], "followup_type": None}],
-                "is_followup_fragment": d.get("is_followup", False),
-            })
+            rows.append(
+                {
+                    "id": d["id"],
+                    "source": "real",
+                    "category": "",
+                    "family": "",
+                    "dims": {},
+                    "bucket": d.get("bucket", ""),
+                    "turns": [{"turn": 0, "text": d["text"], "followup_type": None}],
+                    "is_followup_fragment": d.get("is_followup", False),
+                }
+            )
         else:
-            rows.append({
-                "id": d["id"], "source": source, "category": d.get("category", ""),
-                "family": d.get("family", ""), "dims": d.get("dims", {}),
-                "turns": d["turns"], "is_followup_fragment": False,
-            })
+            rows.append(
+                {
+                    "id": d["id"],
+                    "source": source,
+                    "category": d.get("category", ""),
+                    "family": d.get("family", ""),
+                    "dims": d.get("dims", {}),
+                    "turns": d["turns"],
+                    "is_followup_fragment": False,
+                }
+            )
     return rows
 
 
@@ -116,7 +128,7 @@ def _split(rows: list[dict], rng: random.Random) -> dict[str, list[dict]]:
     for r in rest:
         by_fam[r["family"] or "synth"].append(r)
     train, test = [], []
-    for fam, group in by_fam.items():
+    for group in by_fam.values():
         rng.shuffle(group)
         n_test = max(2, round(len(group) * 0.15)) if len(group) > 4 else 0
         test += group[:n_test]
@@ -136,8 +148,13 @@ def _profile(rows: list[dict]) -> dict:
         "首轮长度中位": lens[len(lens) // 2] if lens else 0,
         "首轮长度p90": lens[int(len(lens) * 0.9)] if lens else 0,
         "带追问轮比例": round((multi + frag) / n, 3),
-        "带预算比例": round(sum(1 for f in firsts if re.search(r"预算|不超|以内|以下|块|元|美元|人民币|\$", f)) / n, 3),
-        "带排除比例": round(sum(1 for f in firsts if re.search(r"不要|不想|别太|除了|不能", f)) / n, 3),
+        "带预算比例": round(
+            sum(1 for f in firsts if re.search(r"预算|不超|以内|以下|块|元|美元|人民币|\$", f)) / n,
+            3,
+        ),
+        "带排除比例": round(
+            sum(1 for f in firsts if re.search(r"不要|不想|别太|除了|不能", f)) / n, 3
+        ),
     }
 
 
@@ -173,11 +190,19 @@ def main() -> None:
         for split, group in splits.items():
             for r in group:
                 f.write(json.dumps({**r, "split": split}, ensure_ascii=False) + "\n")
-    REPORT.write_text(json.dumps({
-        "gate": dict(stats), "profile": prof,
-        "splits": {k: len(v) for k, v in splits.items()},
-        "families": dict(fam),
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    REPORT.write_text(
+        json.dumps(
+            {
+                "gate": dict(stats),
+                "profile": prof,
+                "splits": {k: len(v) for k, v in splits.items()},
+                "families": dict(fam),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
     print("\n切分：" + " / ".join(f"{k}={len(v)}" for k, v in splits.items()))
     print(f"→ {OUT.relative_to(PROJECT_ROOT)}（含 split 字段）")

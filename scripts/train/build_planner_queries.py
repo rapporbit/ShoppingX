@@ -53,9 +53,25 @@ DIMS: dict[str, list[tuple[str, int]]] = {
     # 必须占足量，让 RL 学会把它交给规则解析器的口径。
     "budget": [("none", 50), ("usd", 22), ("bare", 16), ("cny", 8), ("hard_limit", 4)],
     "exclude": [("none", 75), ("material", 12), ("color", 6), ("type", 4), ("brand", 3)],
-    "scene": [("none", 45), ("travel", 10), ("commute", 10), ("gift", 10), ("sport", 8), ("camping", 7), ("office", 5), ("home", 5)],
+    "scene": [
+        ("none", 45),
+        ("travel", 10),
+        ("commute", 10),
+        ("gift", 10),
+        ("sport", 8),
+        ("camping", 7),
+        ("office", 5),
+        ("home", 5),
+    ],
     "audience": [("self", 70), ("boyfriend", 8), ("girlfriend", 8), ("kid", 7), ("parent", 7)],
-    "soft": [("none", 40), ("durable", 15), ("value", 15), ("niche", 12), ("premium", 10), ("light", 8)],
+    "soft": [
+        ("none", 40),
+        ("durable", 15),
+        ("value", 15),
+        ("niche", 12),
+        ("premium", 10),
+        ("light", 8),
+    ],
     "platform": [("none", 82), ("cross_compare", 12), ("specific", 6)],
     "landed": [("none", 88), ("need_landed", 12)],  # 到手价：带收货国，触发四层解析
     "spec": [("none", 78), ("numeric", 22)],  # 16寸/256GB/12小时/M码——已知 bad case 族
@@ -78,8 +94,14 @@ FOLLOWUP_RATIO = 0.34  # 实测线上占比，见 build_planner_anchors.py
 
 # 可关闭的维度 → 它的「关闭值」。clarity 不在内：它是句子形态不是约束，永远有值。
 OPTIONAL_DIMS = {
-    "budget": "none", "exclude": "none", "scene": "none", "audience": "self",
-    "soft": "none", "platform": "none", "landed": "none", "spec": "none",
+    "budget": "none",
+    "exclude": "none",
+    "scene": "none",
+    "audience": "self",
+    "soft": "none",
+    "platform": "none",
+    "landed": "none",
+    "spec": "none",
 }
 
 # 单条 query 同时挂几个约束。**首轮试跑就是栽在没有这个**——8 个维度独立抽样，
@@ -96,8 +118,14 @@ ACTIVE_K: list[tuple[int, int]] = [(1, 34), (2, 36), (3, 22), (4, 8)]
 #
 # budget / exclude 锚定真实实测（50.0% / 24.5%），其余按经验分配剩下的 1.29 配额。
 DIM_TARGET: dict[str, float] = {
-    "budget": 0.50, "exclude": 0.25, "soft": 0.30, "scene": 0.25,
-    "audience": 0.20, "spec": 0.18, "platform": 0.20, "landed": 0.16,
+    "budget": 0.50,
+    "exclude": 0.25,
+    "soft": 0.30,
+    "scene": 0.25,
+    "audience": 0.20,
+    "spec": 0.18,
+    "platform": 0.20,
+    "landed": 0.16,
 }
 SPEC_OK_RATIO = 0.263  # 247 个品类里只有 26.3% 真的存在常见数值规格（实测）
 
@@ -190,7 +218,11 @@ def _load_cards() -> dict[str, dict]:
         cat = d["category"]
         c = cards.setdefault(cat, {"category": cat, "aliases": [], "evidence": [], "attrs": []})
         # 中文别名是造中文 query 的唯一来源（品类名本身全是英文）
-        c["aliases"] = list(dict.fromkeys(c["aliases"] + [a for a in d.get("aliases", []) if re.search(r"[一-鿿]", a)]))
+        c["aliases"] = list(
+            dict.fromkeys(
+                c["aliases"] + [a for a in d.get("aliases", []) if re.search(r"[一-鿿]", a)]
+            )
+        )
         if d.get("card_type") in ("bestseller", "price_range"):
             c["evidence"] += d.get("raw_evidence", [])[:5]
         elif d.get("card_type") in ("attribute", "attribute_schema"):
@@ -204,15 +236,22 @@ def _load_cards() -> dict[str, dict]:
 
 DIM_HINT = {
     "budget": {
-        "none": "不提预算", "usd": "明确写美元预算", "cny": "明确写人民币预算",
-        "bare": "只说数字不说币种（如「预算300」）", "hard_limit": "强调硬上限（如「必须5美元以内」）",
+        "none": "不提预算",
+        "usd": "明确写美元预算",
+        "cny": "明确写人民币预算",
+        "bare": "只说数字不说币种（如「预算300」）",
+        "hard_limit": "强调硬上限（如「必须5美元以内」）",
     },
     "exclude": {
-        "none": "无排除项", "material": "排除某材质", "color": "排除某颜色",
-        "type": "排除某子类型", "brand": "排除某品牌或「别太大众的牌子」",
+        "none": "无排除项",
+        "material": "排除某材质",
+        "color": "排除某颜色",
+        "type": "排除某子类型",
+        "brand": "排除某品牌或「别太大众的牌子」",
     },
     "clarity": {
-        "explicit": "直接说出品类名", "scene_only": "只说场景/用途，不出现品类词",
+        "explicit": "直接说出品类名",
+        "scene_only": "只说场景/用途，不出现品类词",
         "bundle": "要一套/一整套（多件搭配）",
     },
     "platform": {"none": "", "cross_compare": "要求跨平台比价", "specific": "指定某个平台"},
@@ -220,7 +259,8 @@ DIM_HINT = {
     "spec": {"none": "", "numeric": "带一个数值规格（如 16 寸 / 256GB / 保温12小时 / M码）"},
 }
 
-PROMPT = """你在为一个跨境电商购物 Agent 造训练数据。请针对下面这个商品品类，造 {n} 个**中文购物意图会话**。
+PROMPT = """\
+你在为一个跨境电商购物 Agent 造训练数据。请针对下面这个商品品类，造 {n} 个**中文购物意图会话**。
 
 品类：{category}（中文可称：{aliases}）
 该品类真实价位中位数：${price}
@@ -247,7 +287,11 @@ PROMPT = """你在为一个跨境电商购物 Agent 造训练数据。请针对�
 
 def _spec_text(idx: int, dims: dict[str, str], followups: list[str]) -> str:
     """把维度组合翻译成 LLM 看得懂的一行规格。"""
-    parts = [DIM_HINT["clarity"][dims["clarity"]], DIM_HINT["budget"][dims["budget"]], DIM_HINT["exclude"][dims["exclude"]]]
+    parts = [
+        DIM_HINT["clarity"][dims["clarity"]],
+        DIM_HINT["budget"][dims["budget"]],
+        DIM_HINT["exclude"][dims["exclude"]],
+    ]
     for k in ("platform", "landed", "spec"):
         if hint := DIM_HINT[k][dims[k]]:
             parts.append(hint)
@@ -276,12 +320,14 @@ def _plan_sessions(cards: dict[str, dict], limit: int, rng: random.Random) -> li
         n_follow = 0
         if rng.random() < FOLLOWUP_RATIO:
             n_follow = rng.choices([1, 2], weights=[75, 25], k=1)[0]
-        sessions.append({
-            "id": f"pq_{i:05d}",
-            "category": cat,
-            "dims": dims,
-            "followups": [_pick(rng, FOLLOWUPS) for _ in range(n_follow)],
-        })
+        sessions.append(
+            {
+                "id": f"pq_{i:05d}",
+                "category": cat,
+                "dims": dims,
+                "followups": [_pick(rng, FOLLOWUPS) for _ in range(n_follow)],
+            }
+        )
     return sessions
 
 
@@ -295,7 +341,9 @@ def _parse(text: str, expect: int) -> list[dict] | None:
         return None
     if not isinstance(arr, list) or len(arr) != expect:
         return None
-    if not all(isinstance(x, dict) and isinstance(x.get("turns"), list) and x["turns"] for x in arr):
+    if not all(
+        isinstance(x, dict) and isinstance(x.get("turns"), list) and x["turns"] for x in arr
+    ):
         return None
     return arr
 
@@ -316,10 +364,12 @@ async def generate(sessions: list[dict], cards: dict[str, dict], sink) -> int:
         card = cards[batch[0]["category"]]
         specs = "\n".join(_spec_text(i + 1, s["dims"], s["followups"]) for i, s in enumerate(batch))
         prompt = PROMPT.format(
-            n=len(batch), category=card["category"],
+            n=len(batch),
+            category=card["category"],
             aliases="、".join(card["aliases"][:6]) or card["category"],
             price=card["median_price"] if card["median_price"] is not None else "未知",
-            attrs=(card["attrs"][0][:180] if card["attrs"] else "无"), specs=specs,
+            attrs=(card["attrs"][0][:180] if card["attrs"] else "无"),
+            specs=specs,
         )
         async with sem:
             for _ in range(2):  # 只重试一次：解析失败多半是这批规格太拧巴，重试第二次也白搭
@@ -352,7 +402,11 @@ async def main() -> None:
     rng = random.Random(args.seed)
     sessions = _plan_sessions(cards, args.limit, rng)
     n_follow = sum(1 for s in sessions if s["followups"])
-    print(f"品类 {len(cards)} 个，排定 {len(sessions)} 个会话（含追问轮 {n_follow} 个 = {n_follow / len(sessions):.1%}）")
+    pct_follow = n_follow / len(sessions)
+    print(
+        f"品类 {len(cards)} 个，排定 {len(sessions)} 个会话"
+        f"（含追问轮 {n_follow} 个 = {pct_follow:.1%}）"
+    )
 
     out = OUT_DIR / args.out
     fh = out.open("w", encoding="utf-8")
@@ -365,13 +419,25 @@ async def main() -> None:
             if len(turns) < want:
                 r["followups"] = r["followups"][: len(turns) - 1]
             turns = turns[:want]
-            fh.write(json.dumps({
-                "id": r["id"], "category": r["category"], "dims": r["dims"],
-                "turns": [
-                    {"turn": i, "text": t, "followup_type": (r["followups"][i - 1] if i else None)}
-                    for i, t in enumerate(turns)
-                ],
-            }, ensure_ascii=False) + "\n")
+            fh.write(
+                json.dumps(
+                    {
+                        "id": r["id"],
+                        "category": r["category"],
+                        "dims": r["dims"],
+                        "turns": [
+                            {
+                                "turn": i,
+                                "text": t,
+                                "followup_type": (r["followups"][i - 1] if i else None),
+                            }
+                            for i, t in enumerate(turns)
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
         fh.flush()
 
     n = await generate(sessions, cards, sink)

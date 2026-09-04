@@ -73,7 +73,9 @@ def gpu_credentials() -> dict:
     try:
         raw = subprocess.run(
             ["nvidia-smi", f"--query-gpu={q}", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         ).stdout.strip()
     except Exception as e:  # noqa: BLE001
         raw = f"（nvidia-smi 不可用：{e}）"
@@ -81,20 +83,28 @@ def gpu_credentials() -> dict:
     return {"nvidia-smi 原文": raw.splitlines(), "CUDA_VISIBLE_DEVICES": visible}
 
 
-def make_llm(model: str, *, prefix_caching: bool, gpu_util: float, max_len: int,
-             adapter: str, lora_rank: int):
+def make_llm(
+    model: str, *, prefix_caching: bool, gpu_util: float, max_len: int, adapter: str, lora_rank: int
+):
     from vllm import LLM
 
-    kw = dict(model=model, dtype="bfloat16", max_model_len=max_len,
-              gpu_memory_utilization=gpu_util, enable_prefix_caching=prefix_caching,
-              enforce_eager=False, disable_log_stats=False)
+    kw = dict(
+        model=model,
+        dtype="bfloat16",
+        max_model_len=max_len,
+        gpu_memory_utilization=gpu_util,
+        enable_prefix_caching=prefix_caching,
+        enforce_eager=False,
+        disable_log_stats=False,
+    )
     if adapter:
         kw.update(enable_lora=True, max_lora_rank=lora_rank)
     return LLM(**kw)
 
 
-def run_batch(llm, prompts: list[str], *, n: int, max_tokens: int, adapter: str,
-              seed: int | None = None) -> dict:
+def run_batch(
+    llm, prompts: list[str], *, n: int, max_tokens: int, adapter: str, seed: int | None = None
+) -> dict:
     """跑一批（= GRPO 的一步 rollout），返回 wall / 吞吐。"""
     from vllm import SamplingParams
 
@@ -102,6 +112,7 @@ def run_batch(llm, prompts: list[str], *, n: int, max_tokens: int, adapter: str,
     lora = None
     if adapter:
         from vllm.lora.request import LoRARequest
+
         lora = LoRARequest("sft", 1, adapter)
     t0 = time.perf_counter()
     outs = llm.generate(prompts, sp, lora_request=lora, use_tqdm=False)
@@ -151,26 +162,53 @@ def gpu_mem_used_mib() -> list[int]:
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         ).stdout.split()
         return [int(x) for x in out]
     except Exception:  # noqa: BLE001
         return []
 
 
-def profile_variant(args, prompts: list[str], *, prefix_caching: bool, gpu_util: float,
-                    label: str) -> dict:
+def profile_variant(
+    args, prompts: list[str], *, prefix_caching: bool, gpu_util: float, label: str
+) -> dict:
     """一个变体 = 一个引擎配置。**同一批 prompt 连跑两轮**：第一轮冷（KV 全新算），第二轮热
     （前缀已在 cache 里）。GRPO 多个 epoch 会反复见到同一批 prompt，热轮才是稳态的真实成本。"""
-    llm = make_llm(args.model, prefix_caching=prefix_caching, gpu_util=gpu_util,
-                   max_len=args.max_len, adapter=args.adapter, lora_rank=args.lora_rank)
-    cold = run_batch(llm, prompts, n=args.group_size, max_tokens=args.gen_tokens,
-                     adapter=args.adapter, seed=args.seed)
-    warm = run_batch(llm, prompts, n=args.group_size, max_tokens=args.gen_tokens,
-                     adapter=args.adapter, seed=args.seed)
+    llm = make_llm(
+        args.model,
+        prefix_caching=prefix_caching,
+        gpu_util=gpu_util,
+        max_len=args.max_len,
+        adapter=args.adapter,
+        lora_rank=args.lora_rank,
+    )
+    cold = run_batch(
+        llm,
+        prompts,
+        n=args.group_size,
+        max_tokens=args.gen_tokens,
+        adapter=args.adapter,
+        seed=args.seed,
+    )
+    warm = run_batch(
+        llm,
+        prompts,
+        n=args.group_size,
+        max_tokens=args.gen_tokens,
+        adapter=args.adapter,
+        seed=args.seed,
+    )
     single = [
-        run_batch(llm, prompts[i: i + 1], n=args.group_size, max_tokens=args.gen_tokens,
-                  adapter=args.adapter, seed=args.seed)["wall_s"]
+        run_batch(
+            llm,
+            prompts[i : i + 1],
+            n=args.group_size,
+            max_tokens=args.gen_tokens,
+            adapter=args.adapter,
+            seed=args.seed,
+        )["wall_s"]
         for i in range(min(5, len(prompts)))
     ]
     res = {
@@ -184,8 +222,10 @@ def profile_variant(args, prompts: list[str], *, prefix_caching: bool, gpu_util:
         "显存占用 MiB": gpu_mem_used_mib(),
     }
     free_llm(llm)
-    print(f"[{label}] 冷 {cold['wall_s']}s / 热 {warm['wall_s']}s / "
-          f"吞吐 {warm['生成吞吐 tok/s']} tok/s")
+    print(
+        f"[{label}] 冷 {cold['wall_s']}s / 热 {warm['wall_s']}s / "
+        f"吞吐 {warm['生成吞吐 tok/s']} tok/s"
+    )
     return res
 
 
@@ -200,8 +240,12 @@ def main() -> None:
     ap.add_argument("--max-len", type=int, default=2048)
     ap.add_argument("--lora-rank", type=int, default=16)
     ap.add_argument("--gpu-util", type=float, default=0.85)
-    ap.add_argument("--colocate-util", type=float, default=0.45,
-                    help="模拟与训练共卡时留给 rollout 的显存比例；设 0 跳过该组")
+    ap.add_argument(
+        "--colocate-util",
+        type=float,
+        default=0.45,
+        help="模拟与训练共卡时留给 rollout 的显存比例；设 0 跳过该组",
+    )
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="rollout_profile.json")
     args = ap.parse_args()
@@ -219,18 +263,24 @@ def main() -> None:
 
     results = {}
     for label, pc, util in variants:
-        results[label] = profile_variant(args, prompts, prefix_caching=pc, gpu_util=util,
-                                         label=label)
+        results[label] = profile_variant(
+            args, prompts, prefix_caching=pc, gpu_util=util, label=label
+        )
 
     on, off = results["cache_on"]["热轮"], results["cache_off"]["热轮"]
     speedup = round(off["wall_s"] / on["wall_s"], 3) if on["wall_s"] else None
     import vllm
 
     report = {
-        "模型": args.model, "adapter": args.adapter or "（基座）",
+        "模型": args.model,
+        "adapter": args.adapter or "（基座）",
         "vllm 版本": vllm.__version__,
-        "采样配置": {"num_prompts": args.num_prompts, "group_size": args.group_size,
-                     "max_tokens": args.gen_tokens, "temperature": 1.0},
+        "采样配置": {
+            "num_prompts": args.num_prompts,
+            "group_size": args.group_size,
+            "max_tokens": args.gen_tokens,
+            "temperature": 1.0,
+        },
         "前缀分析": pstats,
         "各变体": results,
         "prefix caching 收益（热轮 wall 之比 off/on）": speedup,

@@ -71,7 +71,7 @@ def _summarize(rows: list[dict]) -> dict:
         "均分": round(statistics.mean(tot), 2) if tot else 0.0,
         "单条标准差": round(sd, 2),
         # 均值标准误才是 A/B 该比的尺度——单条 σ 大不代表均值不稳，它按 √n 收敛
-        "均值标准误": round(sd / (n ** 0.5), 2),
+        "均值标准误": round(sd / (n**0.5), 2),
         "P0 红线失败": sum(1 for r in ok if r["result"]["p0_failures"]),
         "overall_pass": f"{sum(1 for r in ok if r['result']['overall_pass'])}/{len(ok)}",
         "靶心族均分": round(statistics.mean(target), 2) if target else None,
@@ -116,9 +116,16 @@ def main() -> None:
     out = OUT_DIR / f"{args.name}.json"
     out.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    print(json.dumps({"环境指纹": doc["环境指纹"], "汇总": {
-        k: v for k, v in doc["汇总"].items() if k != "分桶"
-    }}, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            {
+                "环境指纹": doc["环境指纹"],
+                "汇总": {k: v for k, v in doc["汇总"].items() if k != "分桶"},
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     print(f"\n→ {out.relative_to(PROJECT_ROOT)}")
 
 

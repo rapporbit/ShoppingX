@@ -50,8 +50,11 @@ class PlannerReward(ORM):
         if LOG_EVERY and self.step % LOG_EVERY == 0:
             fail = sum(r == self.reward_mod.PARSE_FAIL_REWARD for r in rewards) / max(n, 1)
             sigma = statistics.pstdev(rewards) if n > 1 else 0.0
-            print(f"[planner_reward] step={self.step} n={n} mean={statistics.mean(rewards):.4f} "
-                  f"σ={sigma:.4f} parse_fail={fail:.2%}", flush=True)
+            print(
+                f"[planner_reward] step={self.step} n={n} mean={statistics.mean(rewards):.4f} "
+                f"σ={sigma:.4f} parse_fail={fail:.2%}",
+                flush=True,
+            )
         return rewards
 
 

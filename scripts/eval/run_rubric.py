@@ -50,6 +50,7 @@ async def _reset_thread(thread_id: str) -> None:
         await db.commit()
     shutil.rmtree(Path("output") / thread_id, ignore_errors=True)
 
+
 QUERIES_PATH = Path("data/eval/queries.jsonl")
 REPORT_PATH = Path("data/eval/rubric_report.json")
 

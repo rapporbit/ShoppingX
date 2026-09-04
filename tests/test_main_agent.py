@@ -797,9 +797,7 @@ async def test_model_call_forces_terminal_tool_when_missing_at_depth_zero() -> N
     # 生效的回复恒为最后一条 AIMessage。
     assert out.result[-1] is with_tool_calls
     assert out.result[0] is no_tool_calls
-    assert any(
-        isinstance(m, HumanMessage) and "必须真的调用工具" in m.content for m in out.result
-    )
+    assert any(isinstance(m, HumanMessage) and "必须真的调用工具" in m.content for m in out.result)
     nudge_texts = [m.content for m in calls[1].messages if isinstance(m, HumanMessage)]
     assert any("必须真的调用工具" in t for t in nudge_texts)
 

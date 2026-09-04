@@ -39,8 +39,9 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--split", default="train")
     ap.add_argument("--limit", type=int, default=0)
-    ap.add_argument("--keep-review", action="store_true",
-                    help="保留三票没谈拢的样本。默认排除——与 SFT 同口径")
+    ap.add_argument(
+        "--keep-review", action="store_true", help="保留三票没谈拢的样本。默认排除——与 SFT 同口径"
+    )
     ap.add_argument("--out", default="")
     args = ap.parse_args()
 
@@ -60,20 +61,31 @@ def main() -> None:
             gold = r["golden"]
             abstain["category"] += gold.get("category") is None
             abstain["budget"] += bool(gold.get("budget_uncertain"))
-            fh.write(json.dumps({
-                "id": r["id"],
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": USER_TMPL.format(prior=prior, text=r["text"])},
-                ],
-                "golden_json": json.dumps(gold, ensure_ascii=False),
-                "text": r["text"],
-                "family": r.get("family") or "",
-            }, ensure_ascii=False) + "\n")
+            fh.write(
+                json.dumps(
+                    {
+                        "id": r["id"],
+                        "messages": [
+                            {"role": "system", "content": system},
+                            {
+                                "role": "user",
+                                "content": USER_TMPL.format(prior=prior, text=r["text"]),
+                            },
+                        ],
+                        "golden_json": json.dumps(gold, ensure_ascii=False),
+                        "text": r["text"],
+                        "family": r.get("family") or "",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
 
     print(f"{args.split}: {len(rows)} 条 → {out_path.relative_to(PROJECT_ROOT)}")
-    print(f"  弃权样本（reward 会跳过对应维度）：category=None {abstain['category']} 条 / "
-          f"budget_uncertain {abstain['budget']} 条")
+    print(
+        f"  弃权样本（reward 会跳过对应维度）：category=None {abstain['category']} 条 / "
+        f"budget_uncertain {abstain['budget']} 条"
+    )
 
 
 if __name__ == "__main__":

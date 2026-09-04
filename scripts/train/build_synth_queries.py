@@ -127,7 +127,9 @@ async def main() -> None:
             covered.update(r.get("positives") or [])
     print(f"ESCI 已覆盖商品 {len(covered)} 个，从其余商品中采样")
 
-    corpus = [json.loads(x) for x in (DATA_DIR / "corpus.jsonl").open(encoding="utf-8") if x.strip()]
+    corpus = [
+        json.loads(x) for x in (DATA_DIR / "corpus.jsonl").open(encoding="utf-8") if x.strip()
+    ]
     pool = [c for c in corpus if c["item_id"] not in covered]
     rng = random.Random(args.seed)
     rng.shuffle(pool)
@@ -146,21 +148,29 @@ async def main() -> None:
                 if not q:
                     continue
                 state["qid"] += 1
-                fh.write(json.dumps({
-                    "query": q,
-                    "query_id": state["qid"],
-                    "pos": [p["item"]["text"]],
-                    "pos_ids": [p["item"]["item_id"]],
-                    "neg": [texts[rng.randrange(len(texts))] for _ in range(N_NEG)],
-                    "level": lv,
-                }, ensure_ascii=False) + "\n")
+                fh.write(
+                    json.dumps(
+                        {
+                            "query": q,
+                            "query_id": state["qid"],
+                            "pos": [p["item"]["text"]],
+                            "pos_ids": [p["item"]["item_id"]],
+                            "neg": [texts[rng.randrange(len(texts))] for _ in range(N_NEG)],
+                            "level": lv,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
                 state["rows"] += 1
         fh.flush()  # 每批刷盘，进程被杀也保得住已产出的部分
 
     ok = await synth(sample, sink)
     fh.close()
-    print(f"\n生成成功 {ok}/{len(sample)} 个商品，"
-          f"{state['rows']} 条训练对 → {out.name} ({out.stat().st_size / 1e6:.1f} MB)")
+    print(
+        f"\n生成成功 {ok}/{len(sample)} 个商品，"
+        f"{state['rows']} 条训练对 → {out.name} ({out.stat().st_size / 1e6:.1f} MB)"
+    )
 
 
 if __name__ == "__main__":

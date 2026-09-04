@@ -105,7 +105,9 @@ def _amounts(text: str) -> list[float]:
         if not suffix and _SPEC_UNIT.match(text[m.end(1) :]):
             continue  # 16寸 / 256GB / 12小时：规格不是钱
         is_money = bool(
-            _MONEY_AFTER.match(tail) or _MONEY_TAIL.match(tail) or _MONEY_BEFORE.search(head)
+            _MONEY_AFTER.match(tail)
+            or _MONEY_TAIL.match(tail)
+            or _MONEY_BEFORE.search(head)
             # 区间上限（「预算300到500」）：语境词只挂在区间左端，右端要靠连接符继承，
             # 否则上限被漏掉、golden 变成下限——预算标小了，reward 会去奖励更省的错答案。
             or (out and _RANGE_LINK.search(head))
@@ -117,8 +119,19 @@ def _amounts(text: str) -> list[float]:
     return out
 
 
-_CJK_DIGIT = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
-              "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+_CJK_DIGIT = {
+    "零": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
 _CJK_UNIT = {"十": 10, "百": 100, "千": 1000, "万": 10000}
 _CJK_RUN = re.compile(r"[零一二两三四五六七八九十百千万]{1,8}")
 
@@ -265,12 +278,14 @@ def _parse(text: str, n: int) -> list[dict] | None:
     for x in arr:
         doms = [d for d in (x.get("domains") or []) if d in ALL_DOMAINS and d != "global"]
         must = [str(w).strip().lower() for w in (x.get("must_have") or []) if str(w).strip()]
-        out.append({
-            "category": str(x.get("category") or "").strip(),
-            "category_en": str(x.get("category_en") or "").strip().lower(),
-            "domains": sorted(set(doms)),
-            "must_have": must[:3],
-        })
+        out.append(
+            {
+                "category": str(x.get("category") or "").strip(),
+                "category_en": str(x.get("category_en") or "").strip().lower(),
+                "domains": sorted(set(doms)),
+                "must_have": must[:3],
+            }
+        )
     return out
 
 
@@ -399,43 +414,54 @@ def _rows(session: dict, votes: list[list[dict]]) -> list[dict]:
             status = "agree"
         else:
             status = "review"
-        out.append({
-            "id": f"{session['id']}#t{turn['turn']}",
-            "session_id": session["id"],
-            "turn": turn["turn"],
-            "source": session["source"],
-            "split": session["split"],
-            "family": session.get("family", ""),
-            "dims": session.get("dims", {}),
-            # prior 是**用户原话序列**，不是线上 _render_prior_context() 的 P_t 渲染——那份要跑完
-            # 整条会话才有。S1 rollout 时用真实渲染，这里标 golden 只需让标注者/模型看得到上文。
-            "prior_turns": [t["text"] for t in session["turns"][:i]],
-            "text": text,
-            "is_fragment": bool(session.get("is_followup_fragment")),
-            "golden": {
-                **budget_golden(text),
-                # None ≠ 空串：None 是「这题无解，别计分」，空串是「确实没有品类（闲聊）」。
-                "category": None if no_context else cat,
-                "domains": None if no_context else [*dom, *evidence],
-                "must_have": must,
-                # 英文品类锚：默认用合成/对抗源自带的（来自 category_cards，是库里真实存在的
-                # 类目串，判品类纯度时与 payload 同词表）；**校验对不上句意就回落投票值**——
-                # 「出差旅行带点啥」挂在 gift wrapping supplies 名下，照用就是拿错锚去发 reward。
-                # 两个值都留着，reward 侧想换口径不用重标。
-                "category_anchor": (anchor if anchor_ok is not False else cat_en) or cat_en,
-                "category_anchor_raw": anchor,
-                "category_en_vote": cat_en,
-                "anchor_agrees": anchor_ok,
-                "exclude_expected": exclude_expected(text),
-            },
-            "vote": {
-                "n": len(votes), "category_agree": cat_ok, "domains_agree": dom_ok,
-                "must_have_strong": must_ok, "domains_reconciled": evidence,
-                "raw": {"category": cats, "category_en": cats_en, "domains": doms,
-                        "must_have": musts},
-            },
-            "status": status,
-        })
+        out.append(
+            {
+                "id": f"{session['id']}#t{turn['turn']}",
+                "session_id": session["id"],
+                "turn": turn["turn"],
+                "source": session["source"],
+                "split": session["split"],
+                "family": session.get("family", ""),
+                "dims": session.get("dims", {}),
+                # prior 是**用户原话序列**，不是线上 _render_prior_context() 的 P_t 渲染——那份要跑完
+                # 整条会话才有。S1 rollout 时用真实渲染，这里标 golden 只需让标注者/模型看得到上文。
+                "prior_turns": [t["text"] for t in session["turns"][:i]],
+                "text": text,
+                "is_fragment": bool(session.get("is_followup_fragment")),
+                "golden": {
+                    **budget_golden(text),
+                    # None ≠ 空串：None 是「这题无解，别计分」，空串是「确实没有品类（闲聊）」。
+                    "category": None if no_context else cat,
+                    "domains": None if no_context else [*dom, *evidence],
+                    "must_have": must,
+                    # 英文品类锚：默认用合成/对抗源自带的（来自 category_cards，是库里真实存在的
+                    # 类目串，判品类纯度时与 payload 同词表）；
+                    # **校验对不上句意就回落投票值**——
+                    # 「出差旅行带点啥」挂在 gift wrapping supplies 名下，
+                    # 照用就是拿错锚去发 reward。
+                    # 两个值都留着，reward 侧想换口径不用重标。
+                    "category_anchor": (anchor if anchor_ok is not False else cat_en) or cat_en,
+                    "category_anchor_raw": anchor,
+                    "category_en_vote": cat_en,
+                    "anchor_agrees": anchor_ok,
+                    "exclude_expected": exclude_expected(text),
+                },
+                "vote": {
+                    "n": len(votes),
+                    "category_agree": cat_ok,
+                    "domains_agree": dom_ok,
+                    "must_have_strong": must_ok,
+                    "domains_reconciled": evidence,
+                    "raw": {
+                        "category": cats,
+                        "category_en": cats_en,
+                        "domains": doms,
+                        "must_have": musts,
+                    },
+                },
+                "status": status,
+            }
+        )
     return out
 
 
@@ -446,9 +472,9 @@ async def annotate(sessions: list[dict], sink) -> dict:
 
     async def one(s: dict) -> None:
         async with sem:
-            votes = await asyncio.gather(*(
-                _one_vote(llm, s, cfg) for llm, cfg in zip(llms, VOTES, strict=True)
-            ))
+            votes = await asyncio.gather(
+                *(_one_vote(llm, s, cfg) for llm, cfg in zip(llms, VOTES, strict=True))
+            )
         ok = [v for v in votes if v]
         stat[f"votes_{len(ok)}"] += 1
         if len(ok) < 2:  # 一票不成投票，直接判失败（不硬编一个「唯一意见」当 golden）
@@ -552,7 +578,8 @@ async def main() -> None:
     ap.add_argument("--out", default=OUT.name)
     ap.add_argument("--resume", action="store_true", help="接着已有产物跑，跳过标完的会话")
     ap.add_argument(
-        "--report-only", action="store_true",
+        "--report-only",
+        action="store_true",
         help="不调 LLM：拿已有产物重算规则派生字段 + 报告（改了规则/校验后复算用）",
     )
     args = ap.parse_args()

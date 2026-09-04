@@ -36,7 +36,6 @@ OVERRIDES: dict[str, dict] = {
     "anchor_0053#t0": {"category": "", "domains": ["other"]},
     # 「照这张参考图找类似的」——品类在图里，文本判不出（线上由 image_understand 先解析）。
     "anchor_0068#t0": {"category": "", "domains": ["other"]},
-
     # ── test（对抗族 + 合成）─────────────────────────────────────────────────
     # 句中无品类词，只有规格与材质约束 → 弃权，不替模型补全。
     "adv_00159#t0": {"category": None, "domains": None},

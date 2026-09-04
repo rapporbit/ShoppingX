@@ -102,12 +102,10 @@ def _target(row: dict, teacher: dict) -> dict:
     tgt = {
         # golden 弃权（None）的样本，退回教师值——**不能填 null 当目标**，那会教模型
         # 在「上文缺失」时输出空品类，而线上那一轮是带 P_t 上文调用的，本该继承品类。
-        "category": g["category"] if g.get("category") is not None else (
-            teacher.get("category") or ""
-        ),
-        "domains": g["domains"] if g.get("domains") is not None else (
-            teacher.get("domains") or []
-        ),
+        "category": g["category"]
+        if g.get("category") is not None
+        else (teacher.get("category") or ""),
+        "domains": g["domains"] if g.get("domains") is not None else (teacher.get("domains") or []),
         "budget_amount": (
             teacher.get("budget_amount") if g.get("budget_uncertain") else g.get("budget_amount")
         ),
@@ -131,8 +129,12 @@ async def main() -> None:
     ap.add_argument("--split", default="train")
     ap.add_argument("--out", default="")
     ap.add_argument("--resume", action="store_true", help="跳过已导好的 id，只补失败的")
-    ap.add_argument("--concurrency", type=int, default=CONCURRENCY,
-                    help="教师并发。首次全量跑 16 并发触发限流、失败 25%%，补跑时调小")
+    ap.add_argument(
+        "--concurrency",
+        type=int,
+        default=CONCURRENCY,
+        help="教师并发。首次全量跑 16 并发触发限流、失败 25%%，补跑时调小",
+    )
     args = ap.parse_args()
 
     rows = [json.loads(x) for x in GOLDEN.open(encoding="utf-8") if x.strip()]
@@ -148,9 +150,7 @@ async def main() -> None:
     # resume：教师调用是花钱的，补跑失败样本时不该把已导好的重来一遍
     done_ids: set[str] = set()
     if args.resume and out_path.exists():
-        done_ids = {
-            json.loads(x)["id"] for x in out_path.open(encoding="utf-8") if x.strip()
-        }
+        done_ids = {json.loads(x)["id"] for x in out_path.open(encoding="utf-8") if x.strip()}
         rows = [r for r in rows if r["id"] not in done_ids]
         print(f"resume：已有 {len(done_ids)} 条，补 {len(rows)} 条")
     fh = out_path.open("a" if done_ids else "w", encoding="utf-8")
@@ -168,15 +168,26 @@ async def main() -> None:
             return
         raw_fh.write(json.dumps({"id": row["id"], "teacher": teacher}, ensure_ascii=False) + "\n")
         prior = "".join(f"用户上一轮：{t}\n" for t in row.get("prior_turns") or [])
-        fh.write(json.dumps({
-            "id": row["id"],
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": USER_TMPL.format(prior=prior, text=row["text"])},
-                {"role": "assistant",
-                 "content": json.dumps(_target(row, teacher), ensure_ascii=False)},
-            ],
-        }, ensure_ascii=False) + "\n")
+        fh.write(
+            json.dumps(
+                {
+                    "id": row["id"],
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {
+                            "role": "user",
+                            "content": USER_TMPL.format(prior=prior, text=row["text"]),
+                        },
+                        {
+                            "role": "assistant",
+                            "content": json.dumps(_target(row, teacher), ensure_ascii=False),
+                        },
+                    ],
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
         fh.flush()
         stat["ok"] += 1
         if stat["ok"] % 100 == 0:
@@ -190,18 +201,34 @@ async def main() -> None:
     # 连 meta 一起导：GPU 机上没有本仓库的 app 包，格式检查器要有个地方读到「域枚举有哪些、
     # 该有哪些字段」。硬编码进那边的脚本就有两份事实来源，改了枚举必忘同步一处。
     meta = OUT_DIR / "planner_sft_meta.json"
-    meta.write_text(json.dumps({
-        "system": system,
-        "domains": [d for d in ALL_DOMAINS if d != "global"],
-        "forbidden_domains": ["global"],
-        "required_fields": ["category", "domains", "budget_amount", "clear_budget",
-                            "keywords", "exclude_terms"],
-        "field_types": {
-            "category": "str", "domains": "list[str]", "budget_amount": "float|null",
-            "clear_budget": "bool", "keywords": "list[str]",
-            "exclude_terms": "list[{word,evidence}]",
-        },
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    meta.write_text(
+        json.dumps(
+            {
+                "system": system,
+                "domains": [d for d in ALL_DOMAINS if d != "global"],
+                "forbidden_domains": ["global"],
+                "required_fields": [
+                    "category",
+                    "domains",
+                    "budget_amount",
+                    "clear_budget",
+                    "keywords",
+                    "exclude_terms",
+                ],
+                "field_types": {
+                    "category": "str",
+                    "domains": "list[str]",
+                    "budget_amount": "float|null",
+                    "clear_budget": "bool",
+                    "keywords": "list[str]",
+                    "exclude_terms": "list[{word,evidence}]",
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     print(f"完成：{stat}\n→ {out_path.relative_to(PROJECT_ROOT)}")
     print(f"→ {meta.relative_to(PROJECT_ROOT)}")
 

@@ -59,7 +59,10 @@ def main() -> None:
     by_lv: dict[str, list[dict]] = {}
     for r in rows:
         by_lv.setdefault(r["level"], []).append(r)
-    print(f"总计 {len(rows)} 条，分档：" + "  ".join(f"{k}={len(v)}" for k, v in sorted(by_lv.items())))
+    print(
+        f"总计 {len(rows)} 条，分档："
+        + "  ".join(f"{k}={len(v)}" for k, v in sorted(by_lv.items()))
+    )
 
     # 1. 模板化率：取 query 前 3 个词作句式指纹，重复度过高即模板化
     heads = Counter()
@@ -99,8 +102,10 @@ def main() -> None:
         "leak": (leak_rate, THRESHOLDS["leak"], "<"),
     }
     names = {
-        "template": "模板化率", "copy": "标题照抄率",
-        "lang": "语言分档正确率", "leak": "L3 品类词泄漏率",
+        "template": "模板化率",
+        "copy": "标题照抄率",
+        "lang": "语言分档正确率",
+        "leak": "L3 品类词泄漏率",
     }
     print("\n=== 质量门 ===")
     failed = []
@@ -110,11 +115,15 @@ def main() -> None:
         if not ok:
             failed.append(names[k])
 
-    print("\n分档照抄率（L1 仅报告，不计入门禁）：" +
-          "  ".join(f"{lv}={v:.1%}" for lv, v in per_level.items()))
+    print(
+        "\n分档照抄率（L1 仅报告，不计入门禁）："
+        + "  ".join(f"{lv}={v:.1%}" for lv, v in per_level.items())
+    )
     if per_level.get("L1", 0) > 0.20:
         print("  ⚠️ L1 照抄率偏高——训练时建议降低 L1 权重或直接只用 L3/L4")
-    print("\n判定：" + ("✅ 全部通过，可进训练" if not failed else f"❌ 不通过：{'、'.join(failed)}"))
+    print(
+        "\n判定：" + ("✅ 全部通过，可进训练" if not failed else f"❌ 不通过：{'、'.join(failed)}")
+    )
     for lv in sorted(by_lv):
         print(f"\n[{lv}] 样例：" + " / ".join(r["query"][:34] for r in by_lv[lv][:3]))
 

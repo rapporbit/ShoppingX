@@ -64,7 +64,9 @@ async def translate(rows: list[dict]) -> list[dict]:
         queries = [r["query"] for r in batch]
         async with sem:
             for _ in range(2):  # 失败重试一次，仍失败则丢弃该批
-                resp = await llm.ainvoke(PROMPT.format(items=json.dumps(queries, ensure_ascii=False)))
+                resp = await llm.ainvoke(
+                    PROMPT.format(items=json.dumps(queries, ensure_ascii=False))
+                )
                 zh = _parse_array(str(resp.content), len(queries))
                 if zh:
                     return [{**r, "query_zh": z} for r, z in zip(batch, zh, strict=True)]
@@ -94,8 +96,12 @@ async def main() -> None:
         "xlingual_pairs.jsonl": [
             {"query_id": r["query_id"], "en": r["query"], "zh": r["query_zh"]} for r in out
         ],
-        "esci_eval_qrels_zh.jsonl": [{**{k: v for k, v in r.items() if k != "query_zh"}, "query": r["query_zh"]} for r in out],
-        "esci_eval_qrels_en_sub.jsonl": [{k: v for k, v in r.items() if k != "query_zh"} for r in out],
+        "esci_eval_qrels_zh.jsonl": [
+            {**{k: v for k, v in r.items() if k != "query_zh"}, "query": r["query_zh"]} for r in out
+        ],
+        "esci_eval_qrels_en_sub.jsonl": [
+            {k: v for k, v in r.items() if k != "query_zh"} for r in out
+        ],
     }
     for name, data in files.items():
         path = DATA_DIR / name

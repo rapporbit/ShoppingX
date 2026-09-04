@@ -53,8 +53,15 @@ class TestBudgetAmount:
 class TestChineseNumerals:
     @pytest.mark.parametrize(
         ("run", "value"),
-        [("十二", 12), ("三百", 300), ("一千五", 1500), ("两万", 20000),
-         ("一万五", 15000), ("一百二十三", 123), ("十", 10)],
+        [
+            ("十二", 12),
+            ("三百", 300),
+            ("一千五", 1500),
+            ("两万", 20000),
+            ("一万五", 15000),
+            ("一百二十三", 123),
+            ("十", 10),
+        ],
     )
     def test_parses_regular_forms(self, run: str, value: float) -> None:
         assert _cjk_value(run) == value

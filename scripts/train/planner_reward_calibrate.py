@@ -112,19 +112,26 @@ async def calibrate(rows: list[dict]) -> dict:
             br = compute_reward(plan, row["golden"], row["text"], titles=titles)
             rec["scores"][name] = br.total
             rec["detail"][name] = {
-                "retrieval": br.retrieval, "field": br.field_score,
-                "fmt": br.fmt, "econ": br.econ, "penalties": br.penalties,
+                "retrieval": br.retrieval,
+                "field": br.field_score,
+                "fmt": br.fmt,
+                "econ": br.econ,
+                "penalties": br.penalties,
             }
         out.append(rec)
-        print(f"  [{i}/{len(rows)}] {row['text'][:26]:30s} "
-              + "  ".join(f"{k}={v:.3f}" for k, v in rec["scores"].items()), flush=True)
+        print(
+            f"  [{i}/{len(rows)}] {row['text'][:26]:30s} "
+            + "  ".join(f"{k}={v:.3f}" for k, v in rec["scores"].items()),
+            flush=True,
+        )
 
     def _stat(name: str) -> dict:
         vals = [r["scores"][name] for r in out]
         return {
             "均值": round(statistics.mean(vals), 4),
             "标准差": round(statistics.pstdev(vals), 4),
-            "最低": round(min(vals), 4), "最高": round(max(vals), 4),
+            "最低": round(min(vals), 4),
+            "最高": round(max(vals), 4),
         }
 
     stats = {k: _stat(k) for k in ("strong", "copycat", "broken")}
@@ -152,18 +159,21 @@ async def main() -> None:
     rows = [json.loads(x) for x in GOLDEN.open(encoding="utf-8") if x.strip()]
     # 只挑「品类与锚都判得出」的样本：弃权样本本来就跳过大半维度，标不出区分度
     pool = [
-        r for r in rows
-        if r["split"] == args.split
-        and r["golden"].get("category") and r["golden"].get("must_have")
+        r
+        for r in rows
+        if r["split"] == args.split and r["golden"].get("category") and r["golden"].get("must_have")
     ][: args.limit]
     print(f"标定 {len(pool)} 条（{args.split}），每条跑 strong / copycat / broken 三档\n")
 
     report = await calibrate(pool)
     path = PROJECT_ROOT / "data" / "train" / args.out
     path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    print("\n" + json.dumps(
-        {k: report[k] for k in ("n", "分档统计", "差距", "判据")}, ensure_ascii=False, indent=2
-    ))
+    print(
+        "\n"
+        + json.dumps(
+            {k: report[k] for k in ("n", "分档统计", "差距", "判据")}, ensure_ascii=False, indent=2
+        )
+    )
     print(f"\n→ {path.relative_to(PROJECT_ROOT)}")
 
 

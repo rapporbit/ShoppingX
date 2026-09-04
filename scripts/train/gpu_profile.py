@@ -28,9 +28,15 @@ from pathlib import Path
 # **4090 D 必须排在 4090 前面**：它是中国特供版，CUDA 核心少一截（147.6 vs 165.2），
 # 而匹配是按 dict 顺序找子串——"4090" 先命中的话，MFU 会被系统性算低约 11%。
 PEAK_TFLOPS = {
-    "4090 D": 147.6, "4090D": 147.6, "4090": 165.2,
-    "A100": 312.0, "A800": 312.0, "H100": 989.0,
-    "3090": 71.0, "L40": 181.0, "V100": 125.0,
+    "4090 D": 147.6,
+    "4090D": 147.6,
+    "4090": 165.2,
+    "A100": 312.0,
+    "A800": 312.0,
+    "H100": 989.0,
+    "3090": 71.0,
+    "L40": 181.0,
+    "V100": 125.0,
 }
 
 
@@ -52,9 +58,9 @@ def gpu_env() -> dict:
         "cuda": torch.version.cuda,
         "卡数": torch.cuda.device_count(),
         "卡型号": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A",
-        "单卡显存GB": round(
-            torch.cuda.get_device_properties(0).total_memory / 1024**3, 1
-        ) if torch.cuda.is_available() else 0,
+        "单卡显存GB": round(torch.cuda.get_device_properties(0).total_memory / 1024**3, 1)
+        if torch.cuda.is_available()
+        else 0,
         "nvidia_smi_raw": raw,
         "采集时间": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
@@ -82,7 +88,7 @@ def load_batches(path: Path, tokenizer, batch: int, seq: int, need: int) -> list
         full = prompt + msgs[-1]["content"] + (tokenizer.eos_token or "")
         p_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
         f_ids = tokenizer(full, add_special_tokens=False)["input_ids"][:seq]
-        labels = [-100] * min(len(p_ids), len(f_ids)) + f_ids[len(p_ids):]
+        labels = [-100] * min(len(p_ids), len(f_ids)) + f_ids[len(p_ids) :]
         samples.append((f_ids, labels[: len(f_ids)]))
 
     out, pad = [], tokenizer.pad_token_id or 0
@@ -90,13 +96,15 @@ def load_batches(path: Path, tokenizer, batch: int, seq: int, need: int) -> list
         for i in range(0, len(samples) - batch + 1, batch):
             chunk = samples[i : i + batch]
             width = max(len(x[0]) for x in chunk)
-            out.append({
-                "input_ids": torch.tensor([x[0] + [pad] * (width - len(x[0])) for x in chunk]),
-                "labels": torch.tensor([x[1] + [-100] * (width - len(x[1])) for x in chunk]),
-                "attention_mask": torch.tensor(
-                    [[1] * len(x[0]) + [0] * (width - len(x[0])) for x in chunk]
-                ),
-            })
+            out.append(
+                {
+                    "input_ids": torch.tensor([x[0] + [pad] * (width - len(x[0])) for x in chunk]),
+                    "labels": torch.tensor([x[1] + [-100] * (width - len(x[1])) for x in chunk]),
+                    "attention_mask": torch.tensor(
+                        [[1] * len(x[0]) + [0] * (width - len(x[0])) for x in chunk]
+                    ),
+                }
+            )
             if len(out) >= need:
                 break
         if not samples:
@@ -120,18 +128,36 @@ def profile_train(args) -> dict:
         from transformers import BitsAndBytesConfig
 
         quant = BitsAndBytesConfig(
-            load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True,
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
         )
     model = AutoModelForCausalLM.from_pretrained(
-        args.model, torch_dtype=torch.bfloat16, quantization_config=quant,
-        attn_implementation=args.attn, trust_remote_code=True,
+        args.model,
+        torch_dtype=torch.bfloat16,
+        quantization_config=quant,
+        attn_implementation=args.attn,
+        trust_remote_code=True,
     ).cuda()
-    model = get_peft_model(model, LoraConfig(
-        r=args.lora_r, lora_alpha=args.lora_r * 2, lora_dropout=0.05, task_type="CAUSAL_LM",
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj",
-                        "down_proj"],
-    ))
+    model = get_peft_model(
+        model,
+        LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_r * 2,
+            lora_dropout=0.05,
+            task_type="CAUSAL_LM",
+            target_modules=[
+                "q_proj",
+                "k_proj",
+                "v_proj",
+                "o_proj",
+                "gate_proj",
+                "up_proj",
+                "down_proj",
+            ],
+        ),
+    )
     if args.grad_ckpt:
         model.gradient_checkpointing_enable()
         model.enable_input_require_grads()  # 不加这行，grad ckpt + LoRA 会「没有梯度可回传」
@@ -169,10 +195,15 @@ def profile_train(args) -> dict:
     achieved_tf = tok_s * flops_per_tok / 1e12
     return {
         "配置": {
-            "模型": args.model, "精度": "4bit-QLoRA" if args.qlora else "bf16-LoRA",
-            "lora_r": args.lora_r, "batch": args.batch, "max_seq": args.seq,
-            "grad_checkpointing": args.grad_ckpt, "attn": args.attn,
-            "总参数B": round(n_all / 1e9, 2), "可训参数M": round(n_trainable / 1e6, 2),
+            "模型": args.model,
+            "精度": "4bit-QLoRA" if args.qlora else "bf16-LoRA",
+            "lora_r": args.lora_r,
+            "batch": args.batch,
+            "max_seq": args.seq,
+            "grad_checkpointing": args.grad_ckpt,
+            "attn": args.attn,
+            "总参数B": round(n_all / 1e9, 2),
+            "可训参数M": round(n_trainable / 1e6, 2),
             "可训占比%": round(100 * n_trainable / n_all, 3),
         },
         "实测": {
@@ -182,9 +213,7 @@ def profile_train(args) -> dict:
             "samples/s": round(args.batch / step_s, 2),
             "序列tokens中位": int(sorted(tokens)[len(tokens) // 2] / args.batch),
             "显存峰值GB(torch allocated)": round(peak, 2),
-            "显存峰值GB(torch reserved)": round(
-                torch.cuda.max_memory_reserved() / 1024**3, 2
-            ),
+            "显存峰值GB(torch reserved)": round(torch.cuda.max_memory_reserved() / 1024**3, 2),
             "实测TFLOPS": round(achieved_tf, 1),
             "MFU%": round(100 * achieved_tf / peak_tf, 1) if peak_tf else None,
             "卡峰值TFLOPS(bf16稠密)": peak_tf,
@@ -198,18 +227,21 @@ def profile_rollout(args) -> dict:
     from vllm import LLM, SamplingParams
 
     rows = [json.loads(x) for x in Path(args.data).open(encoding="utf-8") if x.strip()]
-    prompts = [
-        r["messages"][0]["content"] + "\n\n" + r["messages"][1]["content"] for r in rows
-    ][: args.rollout_prompts]
+    prompts = [r["messages"][0]["content"] + "\n\n" + r["messages"][1]["content"] for r in rows][
+        : args.rollout_prompts
+    ]
     # GRPO 的一步 = 每个 prompt 采 group_size 条。这里照搬那个形状，量出来的才是 rollout 真实开销
     prompts = [p for p in prompts for _ in range(args.group)]
     sp = SamplingParams(temperature=1.0, max_tokens=args.gen_tokens, n=1)
 
     out = {}
-    for cache in ([False, True] if args.compare_cache else [True]):
+    for cache in [False, True] if args.compare_cache else [True]:
         llm = LLM(
-            model=args.model, dtype="bfloat16", gpu_memory_utilization=args.gpu_util,
-            enable_prefix_caching=cache, max_model_len=args.seq + args.gen_tokens,
+            model=args.model,
+            dtype="bfloat16",
+            gpu_memory_utilization=args.gpu_util,
+            enable_prefix_caching=cache,
+            max_model_len=args.seq + args.gen_tokens,
             enforce_eager=False,
         )
         llm.generate(prompts[: args.group], sp)  # warmup + 把公共前缀灌进 cache
@@ -229,6 +261,7 @@ def profile_rollout(args) -> dict:
         import gc
 
         import torch
+
         gc.collect()
         torch.cuda.empty_cache()
     return out

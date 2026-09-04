@@ -197,8 +197,12 @@ async def test_item_picker_display_gate_drops_low_relevance(monkeypatch: Any) ->
     import app.tools.item_picker as mod
 
     cands = [
-        ItemCandidate(item_id="G1", platform="a", title="laptop backpack", landed_usd=30, rating=4.5),
-        ItemCandidate(item_id="G2", platform="a", title="laptop sleeve bag", landed_usd=25, rating=4.3),
+        ItemCandidate(
+            item_id="G1", platform="a", title="laptop backpack", landed_usd=30, rating=4.5
+        ),
+        ItemCandidate(
+            item_id="G2", platform="a", title="laptop sleeve bag", landed_usd=25, rating=4.3
+        ),
         ItemCandidate(
             item_id="G3", platform="a", title="backpack keychain sticker", landed_usd=5, rating=4.0
         ),  # 品类蹭词货：标题含 backpack 但其实是钥匙扣贴纸
@@ -2327,6 +2331,7 @@ class TestStringifiedListCoercion:
 
         prop = item_picker.args_schema.model_json_schema()["properties"]["exclude_keywords"]
         assert {"items": {"type": "string"}, "type": "array"} in prop["anyOf"]
+
 
 class TestNullIsAbsent:
     """drop_none_values（app/tools/_args.py）：结构化输出的显式 null 归一为缺席。

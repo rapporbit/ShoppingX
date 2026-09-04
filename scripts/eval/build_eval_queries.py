@@ -1096,8 +1096,13 @@ QUERIES: list[dict] = [
         "intent": "shopping",
         "query": "买双跑鞋寄到美国，到手不超过120美元",
         "constraints": {"task": "landed_cost", "dest": "US", "budget": "120 USD（到手价口径）"},
-        "expected_path": ["planner", "item_search", "shipping_calc", "item_picker",
-                          "shopping_summary"],
+        "expected_path": [
+            "planner",
+            "item_search",
+            "shipping_calc",
+            "item_picker",
+            "shopping_summary",
+        ],
         "probe": "P0 **到手价**不超 120 美元（不是货值不超）；P1 拆解清楚；P2 关税规则的说明",
     },
     {
@@ -1150,8 +1155,11 @@ QUERIES: list[dict] = [
         "bucket": "外部事实",
         "intent": "shopping",
         "query": "想买个痛包，能装谷子的那种，预算200",
-        "constraints": {"category": "痛包（二次元展示包）", "budget": "200 CNY",
-                        "grounding": "web（圈层新说法）"},
+        "constraints": {
+            "category": "痛包（二次元展示包）",
+            "budget": "200 CNY",
+            "grounding": "web（圈层新说法）",
+        },
         "expected_path": ["planner", "web_search", "item_search", "shopping_summary"],
         "probe": (
             "P0 要真的理解「痛包/谷子」是什么再搜（探新说法的 web 接地）；"
@@ -1217,8 +1225,11 @@ QUERIES: list[dict] = [
         "bucket": "套装组合",
         "intent": "shopping",
         "query": "在家办公的桌面一套，显示器支架和键鼠都要，预算1500",
-        "constraints": {"bundle": True, "budget": "1500 CNY（总预算）",
-                        "slots_named": ["显示器支架", "键盘", "鼠标"]},
+        "constraints": {
+            "bundle": True,
+            "budget": "1500 CNY（总预算）",
+            "slots_named": ["显示器支架", "键盘", "鼠标"],
+        },
         "expected_path": ["planner", "item_search", "item_picker", "shopping_summary"],
         "probe": "P0 用户点名的三个槽位都要有且总价达标；P1 没点名的槽位若自行添加须说明理由",
     },

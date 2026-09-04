@@ -81,8 +81,10 @@ def main() -> None:
             for r in part:
                 out.write(json.dumps(r, ensure_ascii=False) + "\n")
         src_n = len(train_src) if name == "train" else len(val_src)
-        print(f"{name:6} {src_n:>6} query → {len(part):>6} 条  "
-              f"{path.stat().st_size / 1e6:6.1f} MB  → {path.name}")
+        print(
+            f"{name:6} {src_n:>6} query → {len(part):>6} 条  "
+            f"{path.stat().st_size / 1e6:6.1f} MB  → {path.name}"
+        )
 
     sample = parts["train"][0]
     print("\n样例（截断）:")
