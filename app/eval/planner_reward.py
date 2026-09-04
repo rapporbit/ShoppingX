@@ -43,7 +43,7 @@ WEIGHTS = {"retrieval": 0.45, "field": 0.30, "format": 0.15, "econ": 0.10}
 # **配比消融用的旁路**：`PLANNER_REWARD_WEIGHTS='{"field":0.40,...}'` 可覆盖上面的默认值。
 # 为什么走环境变量而不是直接改常量：r1~r4 四轮训练都是按默认配比跑的，改常量会让那几轮
 # 的分数再也复现不出来。配比是 reward 的方向盘，换方向盘要留得下旧车的行车记录。
-if (_w := os.environ.get("PLANNER_REWARD_WEIGHTS")):
+if _w := os.environ.get("PLANNER_REWARD_WEIGHTS"):
     import json as _json
 
     WEIGHTS = {**WEIGHTS, **{k: float(v) for k, v in _json.loads(_w).items() if k in WEIGHTS}}
@@ -76,7 +76,9 @@ class RewardBreakdown:
     # 下面两行的 field(default_factory=...) 直接 TypeError。踩过，别改回去。
     field_score: float | None = None
     fmt: float = 0.0
-    econ: float = 0.0
+    # 与 retrieval/field_score 同为可弃权维（score_econ 无词可判时返回 None）：
+    # 弃权走 total 里的权重重归一，不是当 0 分算。
+    econ: float | None = None
     penalties: list[str] = field(default_factory=list)
     detail: dict = field(default_factory=dict)
 
@@ -140,9 +142,11 @@ def score_econ(plan: dict) -> tuple[float | None, dict]:
     if n == 0:
         return None, {"reason": "无检索词 → 本维弃权"}
 
-    count_score = 1.0 if KW_MIN <= n <= KW_MAX else max(0.0, 1.0 - 0.25 * min(
-        abs(n - KW_MIN), abs(n - KW_MAX)
-    ))
+    count_score = (
+        1.0
+        if KW_MIN <= n <= KW_MAX
+        else max(0.0, 1.0 - 0.25 * min(abs(n - KW_MIN), abs(n - KW_MAX)))
+    )
     long_ratio = sum(1 for k in kws if len(_WORD.findall(str(k).lower())) > KW_TOKEN_MAX) / n
     # 重叠率：所有词的 token 总数 vs 去重后的 token 数，越接近 1 说明各词越独立
     all_toks = [t for k in kws for t in _tokens(str(k))]
@@ -150,7 +154,9 @@ def score_econ(plan: dict) -> tuple[float | None, dict]:
 
     score = count_score * (1 - 0.5 * long_ratio) * (1 - 0.6 * min(1.0, overlap * 2))
     return max(0.0, min(1.0, score)), {
-        "n": n, "长词占比": round(long_ratio, 2), "词面重叠": round(overlap, 2)
+        "n": n,
+        "长词占比": round(long_ratio, 2),
+        "词面重叠": round(overlap, 2),
     }
 
 
@@ -175,9 +181,13 @@ def _budget_match(plan: dict, gold: dict) -> float | None:
         return None
     gb, pb = gold.get("budget_amount"), plan.get("budget_amount")
     amount_ok = (
-        1.0 if gb is None and pb is None
-        else 0.0 if gb is None or pb is None
-        else 1.0 if abs(float(pb) - float(gb)) < 1e-6 else 0.0
+        1.0
+        if gb is None and pb is None
+        else 0.0
+        if gb is None or pb is None
+        else 1.0
+        if abs(float(pb) - float(gb)) < 1e-6
+        else 0.0
     )
     clear_ok = 1.0 if bool(plan.get("clear_budget")) == bool(gold.get("clear_budget")) else 0.0
     return round(0.7 * amount_ok + 0.3 * clear_ok, 3)
@@ -239,7 +249,10 @@ def score_retrieval(titles: Sequence[str], gold: dict) -> tuple[float | None, di
     else:
         score = pure
     return round(min(1.0, score), 3), {
-        "top_k": n, "命中数": hit, "命中率": round(hit_rate, 3), "品类纯度": round(pure, 3)
+        "top_k": n,
+        "命中数": hit,
+        "命中率": round(hit_rate, 3),
+        "品类纯度": round(pure, 3),
     }
 
 
@@ -305,7 +318,8 @@ def compute_reward(
     gold_has_anchor = bool(gold.get("must_have") or gold.get("category_anchor"))
     if not has_kw:
         br.retrieval, retr_detail = (
-            (0.0, {"reason": "该检索却没给 keywords"}) if gold_has_anchor
+            (0.0, {"reason": "该检索却没给 keywords"})
+            if gold_has_anchor
             else (None, {"reason": "本轮无锚可判，且未给检索词"})
         )
     elif titles is None:
@@ -323,14 +337,23 @@ def compute_reward(
         if br.field_score is not None:
             br.field_score = 0.0
 
-    scored = {k: v for k, v in
-              (("retrieval", br.retrieval), ("field", br.field_score),
-               ("format", br.fmt), ("econ", br.econ)) if v is not None}
+    scored = {
+        k: v
+        for k, v in (
+            ("retrieval", br.retrieval),
+            ("field", br.field_score),
+            ("format", br.fmt),
+            ("econ", br.econ),
+        )
+        if v is not None
+    }
     wsum = sum(WEIGHTS[k] for k in scored) or 1.0
     br.total = round(sum(WEIGHTS[k] * v for k, v in scored.items()) / wsum, 4)
     br.detail = {
-        "format_issues": fmt_issues, "econ": econ_detail,
-        "field": field_detail, "retrieval": retr_detail,
+        "format_issues": fmt_issues,
+        "econ": econ_detail,
+        "field": field_detail,
+        "retrieval": retr_detail,
         "参与计分的维度": sorted(scored),
     }
     return br

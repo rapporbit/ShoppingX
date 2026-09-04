@@ -50,7 +50,9 @@ def main() -> None:
     print(f"载入向量 {vecs.shape}，目标 collection = {COLLECTION}")
     # 守卫必须比对 **.env 里配置的那个线上名字**，而不是代码里的默认值——本仓库线上是
     # globex_items，代码默认值是 shoppingx_items，照默认值判会让守卫完全失效。
-    live = (dotenv_values(PROJECT_ROOT / ".env") or {}).get("QDRANT_COLLECTION") or "shoppingx_items"
+    live = (dotenv_values(PROJECT_ROOT / ".env") or {}).get(
+        "QDRANT_COLLECTION"
+    ) or "shoppingx_items"
     if COLLECTION == live:
         raise SystemExit(
             f"❌ 目标 collection ({COLLECTION}) 就是 .env 里的线上库，拒绝覆盖。\n"
@@ -103,7 +105,7 @@ def main() -> None:
     )
     for _ in range(120):  # 最多等 20 分钟
         info = recall.client.get_collection(COLLECTION)
-        if str(info.status) .endswith("green"):
+        if str(info.status).endswith("green"):
             print(f"索引就绪：status={info.status}，points={info.points_count}")
             return
         time.sleep(10)

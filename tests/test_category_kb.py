@@ -204,8 +204,11 @@ def _gate_env(monkeypatch, votes, rerank_score, used_remote):
     import app.tools.category_insight as ci
 
     card = CategoryCard(
-        card_id="cc_bs", category=votes[0][0], card_type="bestseller",
-        summary=f"{votes[0][0]}: Cleaner", aliases=["清洁剂"],
+        card_id="cc_bs",
+        category=votes[0][0],
+        card_type="bestseller",
+        summary=f"{votes[0][0]}: Cleaner",
+        aliases=["清洁剂"],
     )
 
     class FakeKB:
@@ -268,9 +271,17 @@ def test_insight_result_renders_data_note_first() -> None:
     from app.tools.category_insight import CategoryInsightOutput, _insight_result
 
     out = CategoryInsightOutput(
-        category="cat bed", matched_category="cat bed", resolution_confidence=0.8,
-        components=[], bestsellers=[], attributes=[], attribute_schema=[],
-        price_tiers=[], card_count=1, confidence=0.4, source="opensearch",
+        category="cat bed",
+        matched_category="cat bed",
+        resolution_confidence=0.8,
+        components=[],
+        bestsellers=[],
+        attributes=[],
+        attribute_schema=[],
+        price_tiers=[],
+        card_count=1,
+        confidence=0.4,
+        source="opensearch",
         data_note="库内该品类数据薄",
     )
     assert _insight_result(out).splitlines()[0].startswith("⚠ 库内该品类数据薄")

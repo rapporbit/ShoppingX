@@ -149,7 +149,7 @@ def _try_escape(gate: str, sig: HookRejectSignal, context: dict[str, Any]) -> bo
         return False
     guard = context.get("_guard")
     counts = getattr(guard, "gate_reject_counts", None)
-    if counts is None:
+    if guard is None or counts is None:
         return False  # 无 GuardState（异常路径）退回旧行为：始终拒绝
     key = f"{gate}:{sig.escape_key}"
     # 批次原子化：同一条 AI 消息的并行调用（同 think_step）按**批次起点**的计数统一裁决，

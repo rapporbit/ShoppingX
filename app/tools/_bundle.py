@@ -634,7 +634,8 @@ def refresh_report_prices(report: dict[str, Any], picks: list[ItemCandidate]) ->
     total = 0.0
     bare = 0  # 只有裸价、没算出到手价的件数（summary 已尽力补算后仍缺的，如实标口径）
     for r in rows:
-        c = by_id.get(r.get("item_id"))
+        item_id = r.get("item_id")
+        c = by_id.get(item_id) if isinstance(item_id, str) else None
         p = _price(c) if c is not None else r.get("price_usd")
         if p is not None:
             r["price_usd"] = round(p, 2)

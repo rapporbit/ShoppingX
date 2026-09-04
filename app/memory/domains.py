@@ -158,9 +158,7 @@ def infer_domains_from_text(text: str) -> set[PrefDomain]:
     from app.utils.terms import term_hits
 
     lowered = text.lower()
-    return {
-        d for d, terms in DOMAIN_TERMS.items() if any(term_hits(t, lowered) for t in terms)
-    }
+    return {d for d, terms in DOMAIN_TERMS.items() if any(term_hits(t, lowered) for t in terms)}
 
 
 def reconcile_domains(domains: list[PrefDomain], evidence_text: str) -> list[PrefDomain]:

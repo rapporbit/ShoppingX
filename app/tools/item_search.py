@@ -287,9 +287,9 @@ class ItemSearchOutput(BaseModel):
         single_platform = self.platform != "all"
         known = set(self.known_ids)
         fresh = [c for c in self.candidates if c.item_id not in known]
-        # 渲染收敛（与「进登记表的召回池」解耦）：召回池全量已进登记表供 item_picker 精排，模型上下文
-        # 只看头部 RENDER_CAP 条——模型不精挑，灌满整池纯烧 token。其余以 pooled_for_pick 计数告知，
-        # 让模型知道「池里还有货、已交给精挑」，不必自己在这里筛。
+        # 渲染收敛（与「进登记表的召回池」解耦）：召回池全量已进登记表供 item_picker 精排，
+        # 模型上下文只看头部 RENDER_CAP 条——模型不精挑，灌满整池纯烧 token。其余以
+        # pooled_for_pick 计数告知，让模型知道「池里还有货、已交给精挑」，不必自己在这里筛。
         shown = fresh[:RENDER_CAP]
         pooled = len(fresh) - len(shown)
         return json.dumps(

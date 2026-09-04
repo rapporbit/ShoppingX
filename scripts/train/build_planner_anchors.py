@@ -134,10 +134,14 @@ def main() -> None:
     followup = sum(r["is_followup"] for r in records)
     lens = sorted(r["length"] for r in records)
     print(f"锚样本 {n} 条 → {OUT_PATH.relative_to(PROJECT_ROOT)}")
-    print(f"  真实 {sum(r['source'] == 'real' for r in records)} / 种子 {sum(r['source'] == 'seed' for r in records)}")
+    n_real = sum(r["source"] == "real" for r in records)
+    n_seed = sum(r["source"] == "seed" for r in records)
+    print(f"  真实 {n_real} / 种子 {n_seed}")
     print(f"  追问轮 {followup} 条（{followup / n:.1%}）—— 合成数据必须复现这个比例")
     print(f"  长度 中位数 {lens[n // 2]} / p90 {lens[int(n * 0.9)]}")
-    print(f"  带预算 {sum(r['has_budget'] for r in records) / n:.1%} / 带排除 {sum(r['has_exclude'] for r in records) / n:.1%}")
+    pct_budget = sum(r["has_budget"] for r in records) / n
+    pct_exclude = sum(r["has_exclude"] for r in records) / n
+    print(f"  带预算 {pct_budget:.1%} / 带排除 {pct_exclude:.1%}")
 
 
 if __name__ == "__main__":

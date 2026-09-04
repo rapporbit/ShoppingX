@@ -98,9 +98,7 @@ async def _fetch(db: AsyncSession, thread_id: str) -> list[dict[str, Any]]:
 
 
 async def _count(db: AsyncSession, thread_id: str) -> int:
-    n = (
-        await db.execute(select(func.count()).where(Message.thread_id == thread_id))
-    ).scalar_one()
+    n = (await db.execute(select(func.count()).where(Message.thread_id == thread_id))).scalar_one()
     return int(n or 0)
 
 

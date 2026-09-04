@@ -35,8 +35,9 @@ GOOD_PLAN = {
     "keywords": ["laptop backpack", "travel daypack"],
     "exclude_terms": [],
 }
-TITLES = ([f"Travel Laptop Backpack {i}" for i in range(10)]
-          + [f"Random Gadget {i}" for i in range(10)])
+TITLES = [f"Travel Laptop Backpack {i}" for i in range(10)] + [
+    f"Random Gadget {i}" for i in range(10)
+]
 
 
 class TestAbstention:
@@ -77,16 +78,14 @@ class TestAntiHacking:
         assert br.retrieval < clean.retrieval
 
     def test_fabricated_evidence_zeroes_field(self) -> None:
-        plan = {**GOOD_PLAN,
-                "exclude_terms": [{"word": "leather", "evidence": "用户说不要皮革"}]}
+        plan = {**GOOD_PLAN, "exclude_terms": [{"word": "leather", "evidence": "用户说不要皮革"}]}
         br = compute_reward(plan, GOLD, "想买双肩包，预算400", titles=TITLES)
         assert br.field_score == 0.0
         assert any("evidence" in p for p in br.penalties)
 
     def test_real_evidence_survives(self) -> None:
         text = "想买双肩包，不要皮革的，预算400"
-        plan = {**GOOD_PLAN,
-                "exclude_terms": [{"word": "leather", "evidence": "不要皮革的"}]}
+        plan = {**GOOD_PLAN, "exclude_terms": [{"word": "leather", "evidence": "不要皮革的"}]}
         br = compute_reward(plan, GOLD, text, titles=TITLES)
         assert br.field_score and br.field_score > 0.9
 
@@ -95,9 +94,7 @@ class TestFieldScoring:
     def test_domains_f1_punishes_overfill(self) -> None:
         """多判要罚。只算交集/召回，模型会学会「把 20 个域全填上」白拿满分。"""
         one, _ = score_field({**GOOD_PLAN, "domains": ["bags"]}, GOLD)
-        many, _ = score_field(
-            {**GOOD_PLAN, "domains": ["bags", "apparel", "electronics"]}, GOLD
-        )
+        many, _ = score_field({**GOOD_PLAN, "domains": ["bags", "apparel", "electronics"]}, GOLD)
         assert many < one
 
     def test_category_loose_match(self) -> None:
@@ -142,15 +139,15 @@ class TestFormatAndEcon:
 
     def test_econ_punishes_synonym_stuffing(self) -> None:
         clean, _ = score_econ({"keywords": ["laptop backpack", "school bag"]})
-        stuffed, _ = score_econ({"keywords": [
-            "laptop backpack", "laptop bag", "laptop rucksack", "laptop daypack"
-        ]})
+        stuffed, _ = score_econ(
+            {"keywords": ["laptop backpack", "laptop bag", "laptop rucksack", "laptop daypack"]}
+        )
         assert stuffed < clean
 
     def test_econ_punishes_whole_sentence(self) -> None:
-        long_kw, _ = score_econ({"keywords": [
-            "a very large waterproof travel laptop backpack for men", "bag"
-        ]})
+        long_kw, _ = score_econ(
+            {"keywords": ["a very large waterproof travel laptop backpack for men", "bag"]}
+        )
         short, _ = score_econ({"keywords": ["travel backpack", "bag"]})
         assert long_kw < short
 
@@ -165,8 +162,14 @@ class TestNoKeywords:
     def test_should_retrieve_but_no_keywords_scores_zero(self) -> None:
         """gold 有锚 = 这轮本就该检索。不给词直接罚 0，不许弃权——否则模型只要闭嘴不输出
         keywords，就能甩掉权重最大的那 45%，剩下 field/format 还特别好拿分。"""
-        plan = {"category": "双肩包", "domains": ["bags"], "keywords": [],
-                "exclude_terms": [], "budget_amount": 400.0, "clear_budget": False}
+        plan = {
+            "category": "双肩包",
+            "domains": ["bags"],
+            "keywords": [],
+            "exclude_terms": [],
+            "budget_amount": 400.0,
+            "clear_budget": False,
+        }
         br = compute_reward(plan, GOLD, "想买双肩包，预算400", titles=None)
         assert br.retrieval == 0.0
         assert br.econ is None  # 没给词，经济性无从谈起
@@ -174,8 +177,14 @@ class TestNoKeywords:
     def test_no_anchor_and_no_keywords_abstains(self) -> None:
         """追问澄清轮：gold 没锚、plan 也没词 —— 两维都弃权，权重顺延给 field/format。"""
         gold = {k: v for k, v in GOLD.items() if k not in ("must_have", "category_anchor")}
-        plan = {"category": "双肩包", "domains": ["bags"], "keywords": [],
-                "exclude_terms": [], "budget_amount": 400.0, "clear_budget": False}
+        plan = {
+            "category": "双肩包",
+            "domains": ["bags"],
+            "keywords": [],
+            "exclude_terms": [],
+            "budget_amount": 400.0,
+            "clear_budget": False,
+        }
         br = compute_reward(plan, gold, "不要皮革的", titles=None)
         assert br.retrieval is None
         assert br.econ is None

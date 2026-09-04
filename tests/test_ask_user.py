@@ -82,6 +82,7 @@ async def test_task_cancel_propagates(tmp_path):
     若 ask_user 把任务级 CancelledError 当超时吞掉，Agent 会带着兜底文案继续跑，
     用户点了取消却取消不掉——这是本用例守住的行为。
     """
+
     async def _agent_like():
         with thread_scope(TID, tmp_path):
             await _invoke()

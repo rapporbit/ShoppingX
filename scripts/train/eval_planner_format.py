@@ -95,6 +95,7 @@ def field_accuracy(pred: dict, gold: dict) -> dict:
     68/92=0.739 —— 实测 0.522 因此被读成「一半都判错」，实际可判样本上是 0.706。
     分母混进无解的题，得到的就不是判定能力。
     """
+
     def _norm(s: object) -> str:
         return re.sub(r"[\s的]", "", str(s or "")).lower()
 
@@ -116,13 +117,19 @@ def generate(args, prompts: list[str]) -> list[str]:
     except ImportError:
         LLM = None
     if LLM is not None:
-        kw = {"model": args.model, "dtype": "bfloat16", "max_model_len": args.max_len,
-              "gpu_memory_utilization": args.gpu_util}
+        kw = {
+            "model": args.model,
+            "dtype": "bfloat16",
+            "max_model_len": args.max_len,
+            "gpu_memory_utilization": args.gpu_util,
+        }
         if args.adapter:
             from vllm.lora.request import LoRARequest
+
             llm = LLM(**kw, enable_lora=True, max_lora_rank=args.lora_rank)
             out = llm.generate(
-                prompts, SamplingParams(temperature=0, max_tokens=args.gen_tokens),
+                prompts,
+                SamplingParams(temperature=0, max_tokens=args.gen_tokens),
                 lora_request=LoRARequest("sft", 1, args.adapter),
             )
         else:
@@ -139,6 +146,7 @@ def generate(args, prompts: list[str]) -> list[str]:
     ).cuda()
     if args.adapter:
         from peft import PeftModel
+
         model = PeftModel.from_pretrained(model, args.adapter)
     model.eval()
     outs = []
@@ -146,7 +154,7 @@ def generate(args, prompts: list[str]) -> list[str]:
         ids = tok(p, return_tensors="pt").to("cuda")
         with torch.no_grad():
             g = model.generate(**ids, max_new_tokens=args.gen_tokens, do_sample=False)
-        outs.append(tok.decode(g[0][ids["input_ids"].shape[1]:], skip_special_tokens=True))
+        outs.append(tok.decode(g[0][ids["input_ids"].shape[1] :], skip_special_tokens=True))
     return outs
 
 
@@ -201,7 +209,9 @@ def main() -> None:
     n = len(rows)
     rate = ok / n
     report = {
-        "模型": args.model, "adapter": args.adapter or "（基座）", "样本数": n,
+        "模型": args.model,
+        "adapter": args.adapter or "（基座）",
+        "样本数": n,
         "格式正确率": round(rate, 4),
         "验收线": PASS_LINE,
         "判定": "通过" if rate >= PASS_LINE else f"**未过**（差 {round(PASS_LINE - rate, 4)}）",
@@ -215,8 +225,11 @@ def main() -> None:
         "失败样例": samples,
     }
     Path(args.out).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({k: v for k, v in report.items() if k != "失败样例"},
-                     ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            {k: v for k, v in report.items() if k != "失败样例"}, ensure_ascii=False, indent=2
+        )
+    )
     print(f"\n→ {args.out}")
 
 

@@ -89,8 +89,13 @@ class Retriever:
     ``input`` 支持 list，一次发完。
     """
 
-    def __init__(self, embed_url: str = EMBED_URL, qdrant_url: str = QDRANT_URL,
-                 collection: str = COLLECTION, top_k: int = TOP_K) -> None:
+    def __init__(
+        self,
+        embed_url: str = EMBED_URL,
+        qdrant_url: str = QDRANT_URL,
+        collection: str = COLLECTION,
+        top_k: int = TOP_K,
+    ) -> None:
         self.embed_url, self.qdrant_url = embed_url, qdrant_url.rstrip("/")
         self.collection, self.top_k = collection, top_k
         self.sess = requests.Session()
@@ -111,12 +116,17 @@ class Retriever:
         整步 rollout 的时间会被 reward 侧吃掉一半）——瓶颈全在 HTTP 往返，不在 Qdrant。"""
         if not vecs:
             return []
-        body = {"searches": [
-            {"query": v, "using": "dense", "limit": self.top_k, "with_payload": ["title"]}
-            for v in vecs
-        ]}
-        r = self.sess.post(f"{self.qdrant_url}/collections/{self.collection}/points/query/batch",
-                           json=body, timeout=HTTP_TIMEOUT)
+        body = {
+            "searches": [
+                {"query": v, "using": "dense", "limit": self.top_k, "with_payload": ["title"]}
+                for v in vecs
+            ]
+        }
+        r = self.sess.post(
+            f"{self.qdrant_url}/collections/{self.collection}/points/query/batch",
+            json=body,
+            timeout=HTTP_TIMEOUT,
+        )
         r.raise_for_status()
         return [
             [(p.get("payload") or {}).get("title", "") for p in res["points"]]
@@ -137,8 +147,13 @@ class Retriever:
         return out
 
 
-def score_batch(completions: list[str], golds: list[dict], texts: list[str],
-                retriever: Retriever | None, reward_mod: Any) -> list[Any]:
+def score_batch(
+    completions: list[str],
+    golds: list[dict],
+    texts: list[str],
+    retriever: Retriever | None,
+    reward_mod: Any,
+) -> list[Any]:
     """一批 rollout → 一批 RewardBreakdown。检索一次批量做完，再逐条打分。"""
     plans = [extract_json(c) for c in completions]
     if retriever is None:
@@ -169,11 +184,17 @@ def _selftest(args) -> None:
 
     from vllm import LLM, SamplingParams
 
-    kw: dict[str, Any] = dict(model=args.model, dtype="bfloat16", max_model_len=args.max_len,
-                              gpu_memory_utilization=args.gpu_util, enable_prefix_caching=True)
+    kw: dict[str, Any] = dict(
+        model=args.model,
+        dtype="bfloat16",
+        max_model_len=args.max_len,
+        gpu_memory_utilization=args.gpu_util,
+        enable_prefix_caching=True,
+    )
     lora = None
     if args.adapter:
         from vllm.lora.request import LoRARequest
+
         kw.update(enable_lora=True, max_lora_rank=args.lora_rank)
         lora = LoRARequest("sft", 1, args.adapter)
     llm = LLM(**kw)
@@ -182,8 +203,13 @@ def _selftest(args) -> None:
         f"<|im_start|>user\n{r['messages'][1]['content']}<|im_end|>\n<|im_start|>assistant\n"
         for r in rows
     ]
-    sp = SamplingParams(n=args.group_size, temperature=args.temperature, top_p=0.95,
-                        max_tokens=args.gen_tokens, seed=args.seed)
+    sp = SamplingParams(
+        n=args.group_size,
+        temperature=args.temperature,
+        top_p=0.95,
+        max_tokens=args.gen_tokens,
+        seed=args.seed,
+    )
 
     def gen_pass() -> tuple[list[str], list[dict], list[str], float]:
         t0 = time.perf_counter()
@@ -208,11 +234,17 @@ def _selftest(args) -> None:
         的跳过 field、没 keywords 的跳过 retrieval），所以每一维只在**实际参与的样本**上取
         均值，并把参与数一起报出来——不报参与数的话，0.8 是 92 条的还是 61 条的分不清。"""
         out = {}
-        for key, attr in (("retrieval", "retrieval"), ("field", "field_score"),
-                          ("format", "fmt"), ("econ", "econ")):
+        for key, attr in (
+            ("retrieval", "retrieval"),
+            ("field", "field_score"),
+            ("format", "fmt"),
+            ("econ", "econ"),
+        ):
             vals = [v for b in brs if (v := getattr(b, attr, None)) is not None]
-            out[key] = {"均值": round(statistics.mean(vals), 4) if vals else None,
-                        "参与样本": len(vals)}
+            out[key] = {
+                "均值": round(statistics.mean(vals), 4) if vals else None,
+                "参与样本": len(vals),
+            }
         return out
 
     c1, golds, texts, t_gen1 = gen_pass()
@@ -226,13 +258,17 @@ def _selftest(args) -> None:
     r2, _, t_rw2 = score_pass(c2, golds, texts)
 
     g = args.group_size
-    groups = [r1[i * g:(i + 1) * g] for i in range(len(rows))]
+    groups = [r1[i * g : (i + 1) * g] for i in range(len(rows))]
     within = [statistics.pstdev(x) for x in groups if len(x) > 1]
     n = len(c1)
     report = {
-        "样本": {"prompt 数": len(rows), "group_size": g, "temperature": args.temperature,
-                 "检索": "关闭（--no-retrieval）" if retriever is None else COLLECTION,
-                 "rollout 条数": n},
+        "样本": {
+            "prompt 数": len(rows),
+            "group_size": g,
+            "temperature": args.temperature,
+            "检索": "关闭（--no-retrieval）" if retriever is None else COLLECTION,
+            "rollout 条数": n,
+        },
         "耗时": {
             "生成 s": [round(t_gen1, 3), round(t_gen2, 3)],
             "打分 s（含检索）": [round(t_rw1, 3), round(t_rw2, 3)],

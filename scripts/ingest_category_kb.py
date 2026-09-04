@@ -22,7 +22,12 @@ load_dotenv()
 
 from app.recall.category_kb import CategoryCard  # noqa: E402
 from app.recall.kb_client import DEFAULT_CARDS_PATH  # noqa: E402
-from scripts.etl.os_setup import bulk_cards, make_client, recreate_index, register_pipeline  # noqa: E402
+from scripts.etl.os_setup import (  # noqa: E402
+    bulk_cards,
+    make_client,
+    recreate_index,
+    register_pipeline,
+)
 
 
 def main() -> None:

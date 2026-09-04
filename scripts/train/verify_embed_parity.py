@@ -82,8 +82,11 @@ async def main() -> None:
         ov_1.append(overlap(t_api, t_gpu, 1))
 
     def _s(xs: list[float]) -> dict:
-        return {"均值": round(statistics.mean(xs), 4), "最小": round(min(xs), 4),
-                "中位": round(statistics.median(xs), 4)}
+        return {
+            "均值": round(statistics.mean(xs), 4),
+            "最小": round(min(xs), 4),
+            "中位": round(statistics.median(xs), 4),
+        }
 
     report = {
         "样本数": len(queries),
@@ -92,8 +95,11 @@ async def main() -> None:
         f"top{args.top_k} 重合率": _s(ov_k),
         "top5 重合率": _s(ov_5),
         "top1 一致率": round(statistics.mean(ov_1), 4),
-        "判定": ("可用本地编码" if statistics.mean(ov_k) >= 0.95 and min(cos_list) >= 0.98
-                 else "**不等价**：rollout 的 query 编码必须走线上同一实现，否则 reward 失真"),
+        "判定": (
+            "可用本地编码"
+            if statistics.mean(ov_k) >= 0.95 and min(cos_list) >= 0.98
+            else "**不等价**：rollout 的 query 编码必须走线上同一实现，否则 reward 失真"
+        ),
     }
     Path(args.out).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2))
