@@ -36,6 +36,7 @@ dependencies = [
     # 留一行，根本发现不了（本地就这么瞎跑了很久）。回放是核心 UX，升为主依赖；真不想装 Redis
     # 服务的部署照样能跑（连不上会熔断降级，语义不变）。
     "redis>=5.0",
+    "agentscope>=2.0.7,<3",
 ]
 
 [dependency-groups]
