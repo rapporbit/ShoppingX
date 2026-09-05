@@ -23,13 +23,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from langchain_core.messages import SystemMessage
-
 from app.agent import model_router
 from app.agent.model_router import Tier
 from app.compress.breakpoint import DEFAULT_KEEP_RECENT
 from app.compress.compressor import DEFAULT_MAX_TOOL_TOKENS, mark_system_cache
 from app.compress.pipeline import post_step_compress
+from app.harness._msgcompat import system_message
 from app.harness.middleware import harness_hook
 from app.harness.state import GuardState
 from app.observability import metrics
@@ -93,7 +92,7 @@ async def route_by_budget(context: dict[str, Any]) -> dict[str, Any] | None:
         # 「进入过」等价于「此后每轮都看得到」。
         messages = context.get("messages")
         if isinstance(messages, list):
-            hint = SystemMessage(content=model_router.MINIMAL_HINT)
+            hint = system_message(model_router.MINIMAL_HINT, context)
             messages.append(hint)
             context.setdefault("persist_messages", []).append(hint)
     return context

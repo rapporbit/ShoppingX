@@ -24,9 +24,8 @@ import logging
 import time
 from typing import Any
 
-from langchain_core.messages import SystemMessage
-
 from app.agent.fork_guard import current_fork_depth
+from app.harness._msgcompat import system_message
 from app.harness.middleware import harness_hook
 from app.harness.signals import candidate_count
 from app.harness.state import GuardState
@@ -84,7 +83,7 @@ async def check_liveness(context: dict[str, Any]) -> dict[str, Any] | None:
     if guard.watchdog_nudged_at <= 0:
         guard.watchdog_nudged_at = now
         logger.warning("看门狗：%d 秒无实质进展，注入强制收敛指令", int(stall))
-        context["messages"] = [*context["messages"], SystemMessage(content=_CONVERGE_NOTICE)]
+        context["messages"] = [*context["messages"], system_message(_CONVERGE_NOTICE, context)]
         return context
 
     if now - guard.watchdog_nudged_at < WATCHDOG_GRACE_SEC:
