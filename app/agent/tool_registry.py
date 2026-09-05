@@ -8,9 +8,11 @@ M4 起集齐九大业务工具 + dispatch 元工具。主 / 子 Agent 必须用�
 ``TERMINAL_TOOLS`` 中的工具一旦被调用即终结循环（堵「不收尾死循环」）。
 """
 
+from agentscope.tool import FunctionTool, Toolkit
 from langchain_core.tools import BaseTool
 
 from app.agent.dispatch_tool import make_dispatch_tools
+from app.tools._as_tools import as_function_tool
 from app.tools.ask_user import ask_user
 from app.tools.category_insight import category_insight
 from app.tools.chat_fallback import chat_fallback
@@ -53,3 +55,58 @@ FULL_TOOL_SET: list[BaseTool] = list(_BUSINESS_TOOLS)
 dispatch_tool, parallel_dispatch_tool = make_dispatch_tools(lambda: FULL_TOOL_SET)
 
 FULL_TOOL_SET.extend([dispatch_tool, parallel_dispatch_tool])
+
+
+# ============================================================================
+# AgentScope 侧的工具发放（批 0 / L2，与上面的 FULL_TOOL_SET 并存）
+# ----------------------------------------------------------------------------
+# 与旧壳指向同一批实现函数（见 app/tools/_as_tools.py 的双包装说明）。批 0 三个 role 都
+# 发全集——读写切分是批 1 的事，这里先把「按角色发放」这个入口摆好，免得 L3 装配时又要动
+# 一次结构。**只读标记现在就要标准**：批 1 的 SearchAgent 靠它做结构性权限边界。
+# ============================================================================
+
+# 只读 = 不写任何持久状态、不与用户交互、可安全并发重放。
+# 反例说明（别凭感觉标）：ask_user 会挂起等用户回复，forget_preference 删长期偏好，
+# shopping_summary / chat_fallback 是终结工具（写会话产物 + 决定 loop 结束），都不是只读。
+_READ_ONLY_TOOLS = frozenset(
+    {
+        "planner",
+        "image_understand",
+        "item_search",
+        "price_compare",
+        "shipping_calc",
+        "category_insight",
+        "item_picker",
+        "web_search",
+    }
+)
+
+AS_TOOLS: list[FunctionTool] = [
+    as_function_tool(t, is_read_only=t.name in _READ_ONLY_TOOLS) for t in _BUSINESS_TOOLS
+]
+
+AS_TOOLS_BY_NAME: dict[str, FunctionTool] = {t.name: t for t in AS_TOOLS}
+
+# 角色 → 该角色能拿到的工具名。批 0 全是全集；批 1 改这张表即完成读写切分（SearchAgent 只拿
+# 只读子集、TradeAgent 只拿交易写工具），**切的是发放范围，不是实现**。
+_ROLE_TOOLS: dict[str, frozenset[str] | None] = {
+    "main": None,  # None = 全集
+    "search": None,
+    "trade": None,
+}
+
+
+async def build_toolkit(role: str = "main") -> Toolkit:
+    """按角色发一份 Toolkit（AgentScope 侧）。
+
+    每次调用**新建** Toolkit 实例但复用同一批 ``FunctionTool`` 对象：工具是无状态的，
+    共享省掉重复构造；Toolkit 带角色态（激活的 tool group 等），不能跨 Agent 共享。
+    """
+    if role not in _ROLE_TOOLS:
+        raise ValueError(f"未知角色 {role!r}，可选：{sorted(_ROLE_TOOLS)}")
+    allowed = _ROLE_TOOLS[role]
+    toolkit = Toolkit()
+    for tool_obj in AS_TOOLS:
+        if allowed is None or tool_obj.name in allowed:
+            await toolkit.add_tool(tool_obj)
+    return toolkit
