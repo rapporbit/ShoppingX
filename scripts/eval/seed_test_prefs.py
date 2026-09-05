@@ -28,10 +28,15 @@ EVAL_USER_ID = "eval_user"
 
 # 一条黑名单（dislike，带可硬过滤 keywords）+ 两条家居 like：让 q12 的「按我之前偏好」有内容，
 # 且 P0「违背黑名单（推了塑料家居）」有判定基准。
-SEED_PREFS = [
+# 注入是按域生效的（``injector._in_scope``：entry.domain == global 或落在本轮 planner 判出的域里）。
+# 「家居好物」planner 可能判成 home_kitchen 也可能判成 furniture，两个域都种一份才不会漏注入；
+# dedup_key = polarity:category:domain:slug 含 domain，同 slug 跨域不会互相覆盖。
+# 不用 global：那会让这些家居偏好在「买耳机」等无关 query 上也注入，污染其他评测条目。
+_HOME_DOMAINS = ("home_kitchen", "furniture")
+
+_PREF_TEMPLATES = [
     {
         "slug": "plastic",
-        "domain": "home",
         "content": "不接受塑料材质",
         "category": "material",
         "polarity": "dislike",
@@ -39,7 +44,6 @@ SEED_PREFS = [
     },
     {
         "slug": "natural_material",
-        "domain": "home",
         "content": "偏好原木 / 藤编等自然材质的家居",
         "category": "material",
         "polarity": "like",
@@ -47,7 +51,6 @@ SEED_PREFS = [
     },
     {
         "slug": "niche_designer",
-        "domain": "home",
         "content": "喜欢小众设计师品牌、不爱大路货",
         "category": "brand",
         "polarity": "like",
@@ -55,10 +58,12 @@ SEED_PREFS = [
     },
 ]
 
+SEED_PREFS = [{**tpl, "domain": d} for d in _HOME_DOMAINS for tpl in _PREF_TEMPLATES]
+
 
 async def main(clear: bool) -> None:
     store = get_store()
-    entries = [PreferenceEntry.create(**p) for p in SEED_PREFS]  # type: ignore[arg-type]
+    entries = [PreferenceEntry(**p) for p in SEED_PREFS]  # type: ignore[arg-type]
     if clear:
         for e in entries:
             await store.delete(EVAL_USER_ID, e.dedup_key)
