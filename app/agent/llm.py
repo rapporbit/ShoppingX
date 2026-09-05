@@ -1,19 +1,30 @@
 """统一的大模型工厂。
 
-同质 fork 的硬约束：主 loop 与所有 fork 出去的子 loop 必须用**完全相同**的模型与
-温度，子 Agent 才是主 loop 的真克隆。因此 :func:`get_llm` 全局只建一次实例
-（``lru_cache``），主/子共享，也避免每次 fork 重建连接池。
+主 Agent 与 worker 共用同一个模型实例（``lru_cache`` 全局只建一次），一来省掉每次派发重建
+连接池的开销，二来「同一批工具、同一个模型」是 Supervisor-Workers 里 worker 不降智的前提——
+切的是**工具发放范围**，不是模型能力。快档 :func:`get_fast_llm` 是唯一的例外，它同款模型只关
+思考（见该函数 docstring 的实测取舍）。
 
 模型、endpoint、温度全部走 ``.env``（见 ``.env.example``），代码里不写死。
 判官模型 :func:`get_judge_llm` 给 Rubric 评测用，默认更强、temperature=0 保证评分稳定。
+
+**本模块有两套并存的工厂**（批 0 迁移期）：上半部分 ``get_*`` 返回 LangChain 的
+``BaseChatModel``（旧运行时在用），下半部分 ``get_as_*`` 返回 AgentScope 的
+``ThrottledChatModel``（新运行时）。并存的理由与摘除时机见下半部分的分隔注释。
 """
 
 import os
 from functools import lru_cache
 
+from agentscope.agent import ModelConfig
+from agentscope.credential import OpenAICredential
+from agentscope.model import OpenAIChatModel
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
+from pydantic import SecretStr
+
+from app.agent.gateway import GatewayThrottle, ThrottledChatModel
 
 # 模块导入即加载 .env，使后续 os.environ 读取生效（已设置的环境变量优先，不覆盖）。
 load_dotenv()
@@ -58,11 +69,24 @@ def _load_params() -> None:
     只对**新任务**生效：进行中的 loop 早已持有旧实例的引用，中途换模型反而会让同一条任务前后
     半段用不同模型（同质 fork 的硬约束也就破了），故不追求「立刻换掉在跑的」。
     """
-    global LLM_REQUEST_TIMEOUT, LLM_MAX_RETRIES
+    global LLM_REQUEST_TIMEOUT, LLM_MAX_RETRIES, _as_throttle
     LLM_REQUEST_TIMEOUT = _env_float("LLM_REQUEST_TIMEOUT", 60.0)
     LLM_MAX_RETRIES = _env_int("LLM_MAX_RETRIES", 2)
-    for factory in (get_llm, get_fast_llm, get_vision_llm, get_judge_llm):
+    for factory in (
+        get_llm,
+        get_fast_llm,
+        get_vision_llm,
+        get_judge_llm,
+        get_as_llm,
+        get_as_fast_llm,
+        get_as_vision_llm,
+        get_as_judge_llm,
+        get_as_fallback_llm,
+    ):
         factory.cache_clear()
+    # 闸门也要重建：并发数 / 间隔改了，旧实例里的信号量容量是改不动的。
+    # 只影响**新建**的模型实例；在跑的任务仍持有旧闸门（同上：不追求「立刻换掉在跑的」）。
+    _as_throttle = None
 
 
 @lru_cache(maxsize=1)
@@ -179,3 +203,151 @@ def get_judge_llm() -> BaseChatModel:
         timeout=LLM_REQUEST_TIMEOUT,
         max_retries=LLM_MAX_RETRIES,
     )
+
+
+# ============================================================================
+# AgentScope 运行时的模型工厂（批 0 迁移期与上面的 LangChain 工厂**并存**）
+# ----------------------------------------------------------------------------
+# 为什么并存而不是原地改返回类型：旧运行时有 39 个文件、1042 个测试挂在上面的
+# ``get_llm()`` 上。原地换类型会让整仓一夜全红，「红的不许进下一层」的规矩就守不住了。
+# 所以新壳一律 ``get_as_*``（与工具层的 ``AS_TOOLS`` 同一命名口径），L8 摘掉 LangChain 时
+# 再把 ``as_`` 前缀去掉、占回本名。
+# ============================================================================
+
+_as_throttle: GatewayThrottle | None = None
+
+
+def get_gateway_throttle() -> GatewayThrottle:
+    """进程内共享的一份闸门（主 / 快档 / 判官 / 备用共用一个并发池）。
+
+    共享是刻意的：网关的 RPM 是按 API key 算的，分开各建各的池子等于把限流让给运气。
+    """
+    global _as_throttle
+    if _as_throttle is None:
+        _as_throttle = GatewayThrottle(
+            max_concurrency=_env_int("LLM_MAX_CONCURRENCY", 4),
+            min_interval=_env_float("LLM_MIN_INTERVAL_SECONDS", 0.0),
+        )
+    return _as_throttle
+
+
+def _as_credential(vision: bool = False) -> OpenAICredential:
+    """凭据：视觉档可用 ``VISION_*`` 单独指向别的供应商，其余复用 ``OPENAI_*``。
+
+    key 包成 ``SecretStr``——AgentScope 的凭据类型要求如此，顺带也让 key 不会因为某处
+    ``repr()`` / 异常回溯就明文躺进日志。
+    """
+    if vision:
+        return OpenAICredential(
+            api_key=SecretStr(os.environ.get("VISION_API_KEY") or os.environ["OPENAI_API_KEY"]),
+            base_url=os.environ.get("VISION_BASE_URL") or os.environ["OPENAI_BASE_URL"],
+        )
+    return OpenAICredential(
+        api_key=SecretStr(os.environ["OPENAI_API_KEY"]),
+        base_url=os.environ["OPENAI_BASE_URL"],
+    )
+
+
+def _build_as_model(
+    model: str,
+    *,
+    temperature: float,
+    role: str,
+    thinking: bool,
+    vision: bool = False,
+) -> ThrottledChatModel:
+    """统一装配：闸门 + 超时 + 重试 + hybrid 模型的思考开关。
+
+    ``max_retries`` 交给模型自己的重试环（``ChatModelBase.__call__``），Agent 层的
+    ``ModelConfig.max_retries`` 另设 0，避免两层重试相乘——同一个 429 被试 9 次那种。
+    """
+    return ThrottledChatModel(
+        credential=_as_credential(vision=vision),
+        model=model,
+        parameters=OpenAIChatModel.Parameters(temperature=temperature),
+        stream=True,
+        max_retries=LLM_MAX_RETRIES,
+        client_kwargs={"timeout": LLM_REQUEST_TIMEOUT},
+        # hybrid 模型（DashScope / Qwen / DeepSeek）经 OpenAI 兼容层读 extra_body 里的
+        # enable_thinking；不支持的供应商忽略该字段（无害）。口径与上面的 LangChain 档一致。
+        extra_body=None if thinking else {"enable_thinking": False},
+        throttle=get_gateway_throttle(),
+        role=role,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_as_llm() -> ThrottledChatModel:
+    """主 AgentLoop 的模型（AgentScope 侧），对应 :func:`get_llm`。"""
+    return _build_as_model(
+        os.environ["LLM_MAIN"],
+        temperature=_env_float("LLM_TEMPERATURE", 0.3),
+        role="main",
+        thinking=True,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_as_fast_llm() -> ThrottledChatModel:
+    """快档（AgentScope 侧），对应 :func:`get_fast_llm`——同款模型只关思考，不换弱模型。
+
+    L0 的 S2 spike 实测：同一条 planner 请求，主档 12.7~17.2s，关思考后 4.5~5.1s，
+    结构化结果质量无差。这一档的收益是实打实的解码时间，不是玄学。
+    """
+    return _build_as_model(
+        os.environ.get("LLM_FAST") or os.environ["LLM_MAIN"],
+        temperature=_env_float("LLM_FAST_TEMPERATURE", _env_float("LLM_TEMPERATURE", 0.3)),
+        role="fast",
+        thinking=_env_bool("LLM_FAST_REASONING", False),
+    )
+
+
+@lru_cache(maxsize=1)
+def get_as_vision_llm() -> ThrottledChatModel:
+    """看图档（AgentScope 侧），对应 :func:`get_vision_llm`。"""
+    return _build_as_model(
+        os.environ["LLM_VISION"],
+        temperature=_env_float("LLM_VISION_TEMPERATURE", 0.1),
+        role="vision",
+        thinking=_env_bool("LLM_VISION_REASONING", False),
+        vision=True,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_as_judge_llm() -> ThrottledChatModel:
+    """判官档（AgentScope 侧），对应 :func:`get_judge_llm`——temperature=0，尺子不能自己抖。"""
+    return _build_as_model(
+        os.environ.get("LLM_JUDGE") or os.environ["LLM_MAIN"],
+        temperature=_env_float("LLM_JUDGE_TEMPERATURE", 0.0),
+        role="judge",
+        thinking=True,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_as_fallback_llm() -> ThrottledChatModel | None:
+    """备用模型：主模型重试用尽后由 ``ModelConfig.fallback_model`` 接手。
+
+    **不配就返回 None**（不默默拿 ``LLM_MAIN`` 当备用）——同一个模型当自己的备用毫无意义，
+    主模型垮了通常是网关或该模型本身的问题，换个名字再撞一次只是多烧一次钱、多等一轮。
+    要用就在 ``.env`` 里配一个**真正不同**的模型（最好是不同系列或不同供应商）。
+    """
+    name = os.environ.get("LLM_FALLBACK_MODEL", "").strip()
+    if not name or name == os.environ.get("LLM_MAIN"):
+        return None
+    return _build_as_model(
+        name,
+        temperature=_env_float("LLM_TEMPERATURE", 0.3),
+        role="fallback",
+        thinking=True,
+    )
+
+
+def get_model_config() -> ModelConfig:
+    """挂到 Agent 的模型配置：备用模型 + Agent 层重试次数。
+
+    Agent 层 ``max_retries=0``：模型自己那层已经按 ``LLM_MAX_RETRIES`` 重试过了，两层相乘会把
+    「重试 2 次」变成 9 次请求——限流时这等于火上浇油。这里只负责「主模型彻底不行了就换备用」。
+    """
+    return ModelConfig(max_retries=0, fallback_model=get_as_fallback_llm())
