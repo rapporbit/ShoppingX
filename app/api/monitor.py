@@ -64,6 +64,10 @@ EVENT_SUMMARY_DELTA = "summary_delta"
 # **不瞬态**（进回放存档）：跑到一半刷新页面 / 断线重连时，卡片要能跟着 inflight 事件回放一起回来，
 # 否则用户会看着卡片凭空消失、再等收尾才重现。不进活动流（它不是「思考行」，是结果本身）。
 EVENT_ITEMS_PREVIEW = "items_preview"
+# 主模型垮到要换备用模型（``ModelConfig.fallback_model`` 被启用）。这件事必须让人看得见——
+# 否则「今天怎么变慢/变笨了」永远查不出根因。走 monitor_event 通道，前端已有兜底渲染，
+# 不动 AGUI 协议既有字段。**瞬态**：它是一次降级告警，不属于会话思考过程，不进活动流回看。
+EVENT_MODEL_FALLBACK = "model_fallback"
 
 # 事件里携带的自由文本（demands / preview / 最终答案）截断上限，避免单条事件灌爆前端。
 _MAX_TEXT = 2000
@@ -414,3 +418,13 @@ async def report_task_cancelled() -> None:
 async def report_error(error_type: str, message: str) -> None:
     """执行异常时上报（前端显示错误，便于定位卡在哪一步）。"""
     await _emit(EVENT_ERROR, "执行出错", {"error_type": error_type, "message": _clip(message)})
+
+
+async def report_model_fallback(model: str) -> None:
+    """主模型失败、启用备用模型时上报（一条任务里只报一次，由网关侧去重）。"""
+    await _emit(
+        EVENT_MODEL_FALLBACK,
+        "主模型不可用，已切到备用模型",
+        {"model": model},
+        transient=True,
+    )

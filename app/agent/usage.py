@@ -72,3 +72,45 @@ def summarize_usage(messages: Sequence[AnyMessage]) -> UsageSummary:
         cache_read_tokens=cache_read,
         cache_hit_rate=rate,
     )
+
+
+def summarize_usage_msgs(messages: Sequence[object]) -> UsageSummary:
+    """AgentScope 侧的同一件事：从 ``list[Msg]`` 聚合 token 用量。
+
+    与上面的 :func:`summarize_usage` 并存（批 0 迁移期，L8 摘 LangChain 时合并成一个）。
+    字段口径**刻意保持一致**，这样迁移前后的用量表可以直接对照——否则「迁移后 token 涨了」
+    这种结论根本没法判是真涨了还是换了口径。
+
+    数据来自 ``Msg.usage``（``agentscope.message._base.Usage``），AgentScope 在
+    ``OpenAIChatModel`` 里已经把 ``prompt_tokens_details.cached_tokens`` 映射进
+    ``cache_input_tokens``（L0 的 S1 spike 实测确认），不用自己解析响应。
+
+    只认带 ``usage`` 的 assistant 消息（一次模型调用一条）。任一字段缺失按 0，绝不抛——
+    观测是附属品，不能反噬主链路。
+    """
+    calls = 0
+    carried = 0
+    peak = 0
+    output = 0
+    cache_read = 0
+    for msg in messages:
+        if getattr(msg, "role", None) != "assistant":
+            continue
+        usage = getattr(msg, "usage", None)
+        if not usage:
+            continue
+        inp = int(getattr(usage, "input_tokens", 0) or 0)
+        calls += 1
+        carried += inp
+        peak = max(peak, inp)
+        output += int(getattr(usage, "output_tokens", 0) or 0)
+        cache_read += int(getattr(usage, "cache_input_tokens", 0) or 0)
+    rate = round(cache_read / carried, 4) if carried else 0.0
+    return UsageSummary(
+        model_calls=calls,
+        carried_input_tokens=carried,
+        peak_input_tokens=peak,
+        output_tokens=output,
+        cache_read_tokens=cache_read,
+        cache_hit_rate=rate,
+    )
