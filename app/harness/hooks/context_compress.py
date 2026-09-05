@@ -85,6 +85,11 @@ async def route_by_budget(context: dict[str, Any]) -> dict[str, Any] | None:
     model = model_router.tier_model(tier)
     if model is not None:
         context["model_override"] = model
+        # 两个运行时各读各的键：``model_override`` 是 LangChain 的模型**对象**，AgentScope 侧
+        # 塞不进去（它要 ``ChatModelBase``，塞错的症状是「'ChatOpenAI' object is not callable」）。
+        # 所以 Hook 再产一个**档位名**，由各自的适配器解析成本运行时的模型——这才符合
+        # 「Hook 只做决策、适配器落地」这条分工。
+        context["model_tier"] = "lite"
 
     if tier is Tier.MINIMAL and entered_new_tier:
         # 只在**进入** minimal 那一轮注入：hint 经 persist_messages 落 state 后长驻历史，

@@ -26,10 +26,28 @@ import json
 from typing import Any
 
 from agentscope.message import TextBlock
-from agentscope.tool import FunctionTool
+from agentscope.tool import FunctionTool, ToolMiddlewareBase
 from agentscope.tool._response import ToolChunk, ToolResultState
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel
+
+
+def _unwrap(out: Any) -> Any:
+    """LangChain 的 ``content_and_artifact`` 返回 ``(给模型看的文本, 结构化 artifact)``。
+
+    那边有两条通道（``ToolMessage.content`` 给模型、``.artifact`` 给程序），AgentScope 只有一条，
+    所以**取 artifact**：它是超集（``shopping_summary`` 的 artifact 里就含那段文案本身），
+    而且下游按 schema 解析的那些环节——收尾取商品卡、harness 的 schema 断言、前端 tool_end
+    payload——全都吃结构化那一份。
+
+    反过来取 content 的代价实测过一次：``_to_text`` 把整个元组 ``json.dumps(default=str)``，
+    模型收到 ``["文案", "summary='…' items=[…]"]`` 这种半 repr 的东西，清单照样写得出来，但
+    ``run_agent`` 再也解析不出 items——商品卡不出货、``result.json`` 不落盘、行为历史不记，
+    全是静默的。
+    """
+    if isinstance(out, tuple) and len(out) == 2 and isinstance(out[1], BaseModel):
+        return out[1]
+    return out
 
 
 def _to_text(out: Any) -> str:
@@ -49,6 +67,7 @@ def as_function_tool(
     *,
     is_read_only: bool = False,
     is_concurrency_safe: bool = True,
+    middlewares: list[ToolMiddlewareBase] | None = None,
 ) -> FunctionTool:
     """把一个现有的 LangChain 工具对象包成 ``FunctionTool``，共用它的实现与元数据。
 
@@ -57,6 +76,8 @@ def as_function_tool(
         is_read_only: 只读标记。**这是权限边界的依据**——批 1 的 SearchAgent 靠它与
             ``PermissionEngine`` 做结构性拦截，不是靠提示词劝退，所以不能凭感觉标。
         is_concurrency_safe: 能否被同轮并发调用（``task_dispatch`` 要 True）。
+        middlewares: 挂在这只工具上的中间件（harness 的工具适配器走这里）。**它持有 per-loop
+            的状态**，所以带中间件的工具实例不能跨 loop 复用——见 ``tool_registry._make_as_tools``。
     """
     impl = getattr(lc_tool, "coroutine", None)
     if impl is None:  # pragma: no cover - 本仓工具全是 async
@@ -72,7 +93,7 @@ def as_function_tool(
             # 先过 pydantic：StrListArg 这类 BeforeValidator 容错就活在这一步
             validated = schema.model_validate(kwargs)
             args = {name: getattr(validated, name) for name in type(validated).model_fields}
-            out = await impl(**args)
+            out = _unwrap(await impl(**args))
         except Exception as exc:  # noqa: BLE001 - 工具内部错误不外抛，见模块 docstring
             return ToolChunk(
                 content=[TextBlock(type="text", text=f"[error] {type(exc).__name__}: {exc}")],
@@ -92,4 +113,5 @@ def as_function_tool(
         input_schema=schema,
         is_read_only=is_read_only,
         is_concurrency_safe=is_concurrency_safe,
+        middlewares=middlewares,
     )

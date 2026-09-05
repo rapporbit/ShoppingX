@@ -79,6 +79,7 @@ def _load_params() -> None:
         get_judge_llm,
         get_as_llm,
         get_as_fast_llm,
+        get_as_lite_llm,
         get_as_vision_llm,
         get_as_judge_llm,
         get_as_fallback_llm,
@@ -299,6 +300,24 @@ def get_as_fast_llm() -> ThrottledChatModel:
         temperature=_env_float("LLM_FAST_TEMPERATURE", _env_float("LLM_TEMPERATURE", 0.3)),
         role="fast",
         thinking=_env_bool("LLM_FAST_REASONING", False),
+    )
+
+
+@lru_cache(maxsize=1)
+def get_as_lite_llm() -> ThrottledChatModel:
+    """便宜档（AgentScope 侧），对应 LangChain 的 ``model_router._lite_llm``。
+
+    预算降档时由 ``HarnessAgentAdapter`` 换上。默认就是快档（同模型关思考）；配了 ``LLM_LITE``
+    才真换一个更便宜的模型名——**换模型名会打断前缀缓存**，所以默认不换，只关思考。
+    """
+    name = os.environ.get("LLM_LITE", "").strip()
+    if not name:
+        return get_as_fast_llm()
+    return _build_as_model(
+        name,
+        temperature=_env_float("LLM_FAST_TEMPERATURE", _env_float("LLM_TEMPERATURE", 0.3)),
+        role="lite",
+        thinking=False,
     )
 
 

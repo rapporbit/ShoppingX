@@ -45,6 +45,16 @@ async def _boomer(x: str) -> _Out:
     raise RuntimeError(f"炸了：{x}")
 
 
+@tool(response_format="content_and_artifact")
+async def _artifact_probe(x: str) -> tuple[str, _Out]:
+    """content_and_artifact 型探针（形态同 shopping_summary）。
+
+    参数：
+      - x：随便。
+    """
+    return f"给模型看的文案：{x}", _Out(got=[x], n=7)
+
+
 async def _run(ft, **kwargs) -> ToolResponse:  # type: ignore[no-untyped-def]
     """走 Toolkit.call_tool——Agent 的真实路径，不是直接 await 工具函数。"""
     toolkit = Toolkit()
@@ -111,7 +121,10 @@ def test_as_tools_cover_all_business_tools_with_same_metadata() -> None:
     """新旧两副壳一一对应，元数据取自同一处——描述就是给模型看的 docstring，漂了就是两套行为。"""
     from app.agent.tool_registry import _BUSINESS_TOOLS, AS_TOOLS, AS_TOOLS_BY_NAME
 
-    assert len(AS_TOOLS) == len(_BUSINESS_TOOLS) == 12
+    # 12 个业务工具 + L3 加进来的派发入口 task_dispatch（它没有 LangChain 旧壳，是原生新工具）
+    assert len(_BUSINESS_TOOLS) == 12
+    assert len(AS_TOOLS) == 13
+    assert "task_dispatch" in AS_TOOLS_BY_NAME
     for lc in _BUSINESS_TOOLS:
         ft = AS_TOOLS_BY_NAME[lc.name]
         assert ft.description == lc.description
@@ -144,9 +157,22 @@ async def test_build_toolkit_roles_produce_schemas() -> None:
     for role in ("main", "search", "trade"):
         toolkit = await build_toolkit(role)
         schemas = await toolkit.get_tool_schemas()
-        # 批 0 三个角色都发全集（读写切分是批 1 的事）
-        assert len(schemas) == 12
+        # 批 0 三个角色都发全集：12 业务工具 + task_dispatch（读写切分是批 1 的事）
+        assert len(schemas) == 13
         assert all(s["function"]["description"] for s in schemas)
 
     with pytest.raises(ValueError):
         await build_toolkit("nope")
+
+
+async def test_content_and_artifact_tool_yields_structured_json() -> None:
+    """``content_and_artifact`` 型工具（shopping_summary）新壳必须吐**结构化那一份**。
+
+    取错通道不会报错，只会让 run_agent 解析不出 items——商品卡不出货、result.json 不落盘，
+    全程静默。L3 的真实 LLM 验收就是这么发现的，这里钉死。
+    """
+    resp = await _run(as_function_tool(_artifact_probe), x="买包")
+    assert resp.state == ToolResultState.SUCCESS
+    # 取的是 artifact 那一份（可解析回 schema），不是把元组 json.dumps 出来的半 repr
+    assert json.loads(_text(resp)) == {"got": ["买包"], "n": 7}
+    assert resp.metadata["schema"] == "_Out"
