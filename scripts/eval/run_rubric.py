@@ -36,6 +36,14 @@ from app.db.models import Message  # noqa: E402
 from app.db.session import session_factory  # noqa: E402
 from app.eval.rubric import RubricResult, evaluate  # noqa: E402
 
+# 单条 query 的墙钟上限（含所有铺垫轮 + 打分）。取 15 分钟：实测最慢的全链路 case 也在 4 分钟内，
+# 这个值只兜「永远回不来」的死挂，正常慢 case 碰不到。
+#
+# 为什么必须有：``_eval_one`` 的 except 只收得住**异常**，收不住**挂起**。2026-09-05 留迁移基线时
+# 15 条里有 1 条卡住不动（0% CPU、无网络、29 分钟无任何写盘），而报告是 ``gather`` 全部返回后
+# 才落盘的——一条挂起把另外 14 条已跑完的结果连同 token 一起赔光。有了这道闸，挂起降级成单条失败。
+EVAL_QUERY_TIMEOUT_SEC = 900
+
 
 async def _reset_thread(thread_id: str) -> None:
     """评测线程回零：清 DB 对话历史 + 清 session_dir（候选池 / 产物）。
@@ -71,10 +79,11 @@ def _load_queries(only: set[str] | None, limit: int | None) -> list[dict]:
 
 
 async def _eval_one(q: dict, user_id: str | None, sem: asyncio.Semaphore, use_cache: bool) -> dict:
-    """跑一条 query 并打分；任何异常都收成一条「评测失败」记录，不拖垮整批。"""
+    """跑一条 query 并打分；异常**与挂起**都收成一条「评测失败」记录，不拖垮整批。"""
     async with sem:
         qid = q["id"]
-        try:
+
+        async def _run_and_score() -> tuple[dict, RubricResult]:
             # 稳定 thread_id：产物落 output/eval_<id>/，可复现、可回溯轨迹。开跑前回零。
             thread_id = f"eval_{qid}"
             await _reset_thread(thread_id)
@@ -84,9 +93,13 @@ async def _eval_one(q: dict, user_id: str | None, sem: asyncio.Semaphore, use_ca
             for warmup in turns[:-1]:
                 await run_agent(warmup, thread_id=thread_id, user_id=user_id)
             run = await run_agent(turns[-1], thread_id=thread_id, user_id=user_id)
-            result: RubricResult = await evaluate(
+            scored: RubricResult = await evaluate(
                 turns[-1], run, q.get("constraints"), q.get("intent", "shopping"), use_cache
             )
+            return run, scored
+
+        try:
+            run, result = await asyncio.wait_for(_run_and_score(), timeout=EVAL_QUERY_TIMEOUT_SEC)
             verdict = "PASS" if result.overall_pass else "FAIL"
             print(f"  [done] {qid:32s} {verdict} {result.total:5.1f}")
             return {
@@ -96,6 +109,17 @@ async def _eval_one(q: dict, user_id: str | None, sem: asyncio.Semaphore, use_ca
                 # 落进报告，让 bad case 能回溯到那条 Langfuse trace（分数已作为 score 挂在上面）。
                 "trace_id": run.get("trace_id"),
                 "result": result.model_dump(),
+            }
+        except TimeoutError:
+            # 单独一支：挂起和「工具报错」不是一回事，报告里要能一眼分开——前者是待查的 bug，
+            # 后者多半是这条 case 自己的问题。
+            msg = f"超过单条上限 {EVAL_QUERY_TIMEOUT_SEC}s 未返回（疑似挂起）"
+            print(f"  [timeout] {qid:32s} {msg}")
+            return {
+                "id": qid,
+                "bucket": q.get("bucket", ""),
+                "ok": False,
+                "error": f"EvalTimeout: {msg}",
             }
         except Exception as exc:  # noqa: BLE001 —— 单条失败不该中断整批评测
             print(f"  [error] {qid:32s} {type(exc).__name__}: {exc}")
