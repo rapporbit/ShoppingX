@@ -55,7 +55,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from app.agent.main_agent import run_agent
 from app.api import accounts, admin, dedup, event_log, monitor
 from app.api.auth import (
     auth_enabled,
@@ -99,6 +98,19 @@ from app.utils.terms import term_hits
 from app.utils.tokens import warm_tokenizer
 
 logger = logging.getLogger("shoppingx.server")
+
+# 主链路跑在哪个运行时（批 0 迁移期）：``agentscope`` = 新的 orchestrator，其余（默认）=
+# 原 LangChain 版 main_agent。两个实现签名逐字相同，API 层除了这一行之外一处不用改。
+#
+# **进程级、启动时读一次**，刻意不进后台热更新那套旋钮：换运行时会换掉 Agent 装配、事件流与
+# 会话恢复格式，跑到一半切过去只会得到一个半新半旧的会话。要切就重启进程——这与
+# ``config_overrides`` 那类「只盖运行中进程」的参数是两类东西，混在一起会让线上行为与 .env
+# 对不上（记忆 structured-output-method-must-be-pinned 就是这么踩的）。
+AGENT_RUNTIME = os.environ.get("AGENT_RUNTIME", "langchain").strip().lower()
+if AGENT_RUNTIME == "agentscope":
+    from app.agent.orchestrator import run_agent
+else:
+    from app.agent.main_agent import run_agent
 
 # 上传文件大小上限（参考图通常是截图；防一把超大文件打爆磁盘/内存）。
 # **与 image_understand 读同一个 env**：两处各写一个数字的话，中间地带的图会「传得上去却看不了」——

@@ -145,6 +145,24 @@ class HarnessSession:
             self.drift_state.token_history.append(delta)
 
 
+def _resolve_model_tier(tier: Any) -> Any | None:
+    """档位名 → 本运行时的模型对象。认不出的档位不换模型（失效方向是「照常跑」）。
+
+    延迟导入 ``llm``：本模块在 Agent 装配前就被 import，模块级拉模型工厂会把 ``.env`` 的读取
+    时机提前到 import 期，测试里 monkeypatch 环境变量就来不及了。
+    """
+    if not tier:
+        return None
+    from app.agent.llm import get_as_lite_llm, get_as_llm
+
+    if tier == "reasoning":
+        return get_as_llm()
+    if tier == "lite":
+        return get_as_lite_llm()
+    logger.warning("未知模型档位 %r，本轮不换模型", tier)
+    return None
+
+
 def _block_text(block: Any) -> str:
     """content block → 文本（非文本块给空串）。"""
     return getattr(block, "text", "") or ""
@@ -222,10 +240,12 @@ class HarnessAgentAdapter(MiddlewareBase):
             return ChatResponse(content=[TextBlock(type="text", text=fallback)], is_last=True)
 
         input_kwargs["messages"] = ctx["messages"]
-        # 降档换模型（lite / minimal）：Hook 只做决策，override 在这里落地。
-        model_override = ctx.get("model_override")
-        if model_override is not None:
-            input_kwargs["current_model"] = model_override
+        # 换档（第一轮开 reasoning / 预算降 lite）：Hook 只给**档位名**，模型对象在这里解析。
+        # 刻意不读 ``model_override``——那个键装的是 LangChain 模型对象，塞进 current_model
+        # 会在调用时炸「'ChatOpenAI' object is not callable」（L3 的冒烟测试抓到过）。
+        model = _resolve_model_tier(ctx.get("model_tier"))
+        if model is not None:
+            input_kwargs["current_model"] = model
 
         res = await next_handler(**input_kwargs)
         s.track_token_delta()
@@ -336,11 +356,14 @@ def _terminal_summary(messages: list[Msg]) -> str:
 
     从 ``ToolResultBlock`` 的 output 取而不是从截断后的文本取：截断 Hook 只改模型视野里的
     副本，这里要的是完整原文。chat_fallback 不走此路——闲聊收尾本就该由模型口吻说。
+
+    倒着找、且解析不出就继续往前找：同一轮里 ``shopping_summary`` 常被调好几次，前几次撞
+    阶段闸拿回的是哨兵文案（不是 JSON）。取到那次就等于把一段哨兵直出给用户。
     """
     import json
 
     for msg in reversed(messages):
-        for block in getattr(msg, "content", []) or []:
+        for block in reversed(list(getattr(msg, "content", []) or [])):
             if getattr(block, "type", None) != "tool_result":
                 continue
             if getattr(block, "name", None) != "shopping_summary":
@@ -350,8 +373,9 @@ def _terminal_summary(messages: list[Msg]) -> str:
             try:
                 summary = json.loads(text).get("summary")
             except (json.JSONDecodeError, ValueError, AttributeError):
-                return ""
-            return summary if isinstance(summary, str) else ""
+                continue
+            if isinstance(summary, str) and summary:
+                return summary
     return ""
 
 

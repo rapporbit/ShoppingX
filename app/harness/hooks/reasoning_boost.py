@@ -63,5 +63,8 @@ async def boost_first_round(context: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     context["model_override"] = get_llm()
+    # 档位名给 AgentScope 侧的适配器解析（``model_override`` 是 LangChain 模型对象，那边用不了）。
+    # 见 hooks/context_compress.py 里同一处的说明。
+    context["model_tier"] = "reasoning"
     logger.debug("主 loop 第一轮开 reasoning（编排决策轮）")
     return context
