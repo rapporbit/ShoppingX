@@ -38,7 +38,6 @@ import logging
 import re
 from typing import Annotated, NamedTuple
 
-from langchain_core.tools import InjectedToolArg, tool
 from pydantic import BaseModel
 
 from app.api import monitor
@@ -70,6 +69,7 @@ from app.tools._candidates import (
     update_fields,
 )
 from app.tools._diagnostics import report_diagnostics
+from app.tools._shell import InjectedToolArg, tool
 from app.tools.schemas import ItemCandidate
 from app.utils.env import env_float, env_int
 from app.utils.terms import (

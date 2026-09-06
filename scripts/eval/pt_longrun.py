@@ -22,11 +22,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from sqlalchemy import delete  # noqa: E402
 
-from app.agent.runtime import resolve_run_agent  # noqa: E402
+from app.agent.orchestrator import run_agent  # noqa: E402
 from app.db.models import Message  # noqa: E402
 from app.db.session import session_factory  # noqa: E402
-
-run_agent = resolve_run_agent()  # 运行时由 .env 的 AGENT_RUNTIME 定（批 0 迁移期）
 
 # 20 轮剧本：保温杯（1~6，含撤回粉色+软升硬花哨）→ 换题双肩包（7~12，含放宽预算+撤回皮革）
 # → 换题机械键盘（13~20，含 clear_budget+撤回白色）。每段都有「补充轮」验存续。

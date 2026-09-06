@@ -32,7 +32,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.agent.invoke import call_text  # noqa: E402
-from app.agent.llm import get_as_llm  # noqa: E402
+from app.agent.llm import get_llm  # noqa: E402
 
 DATA_DIR = PROJECT_ROOT / "data" / "train"
 BATCH = 8
@@ -86,7 +86,7 @@ async def synth(items: list[dict], sink) -> int:
     所以现在：① 每个请求套 ``wait_for`` 超时；② 每批一完成立刻写文件，进程随时可杀可续。
     长跑任务只要没有增量落盘，任何一个挂起点都会让全部产出归零。
     """
-    llm, sem = get_as_llm(), asyncio.Semaphore(CONCURRENCY)
+    llm, sem = get_llm(), asyncio.Semaphore(CONCURRENCY)
     batches = [items[i : i + BATCH] for i in range(0, len(items), BATCH)]
     done_n = [0]
 

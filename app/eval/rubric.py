@@ -12,7 +12,7 @@
 **为什么 Rubric 要动态生成：** 换一条 query（「工业螺丝批量采购」vs「送闺蜜伴手礼」）红线与维度
 完全不同，通用模板打分会失真。所以每条 query 先让 judge 生成专属细则，再据此打分。
 
-judge 调用全走 :func:`app.agent.llm.get_as_judge_llm`（更强、temperature=0，评分稳定可复现）。
+judge 调用全走 :func:`app.agent.llm.get_judge_llm`（更强、temperature=0，评分稳定可复现）。
 生成与打分各一次结构化输出（``invoke.call_structured``），与 ``planner`` 等工具同款。
 """
 
@@ -292,7 +292,7 @@ async def generate_rubric(
     ``use_cache=True``：命中缓存直接返回；未命中生成后写缓存。``use_cache=False``：跳过读、强制
     重新生成并覆盖写（``--refresh-rubric`` 走这条，用于刷新尺子）。
     """
-    from app.agent.llm import get_as_judge_llm
+    from app.agent.llm import get_judge_llm
 
     cache_file = cache_dir / f"{_rubric_cache_key(query, constraints, intent)}.json"
     if use_cache:
@@ -310,7 +310,7 @@ async def generate_rubric(
     rubric: Rubric | None = None
     for attempt in range(2):
         try:
-            rubric = await call_structured(get_as_judge_llm(), prompt, Rubric)
+            rubric = await call_structured(get_judge_llm(), prompt, Rubric)
             if rubric.criteria:
                 break
         except Exception as exc:  # noqa: BLE001 —— 结构不合格属预期内，换一次采样再试
@@ -330,11 +330,11 @@ async def score_against_rubric(
     query: str, rubric: Rubric, agent_output: str
 ) -> list[CriterionScore]:
     """调 judge 模型，按细则给 Agent 回答逐条打分，并把 dimension 回填到每条打分上。"""
-    from app.agent.llm import get_as_judge_llm
+    from app.agent.llm import get_judge_llm
 
     rubric_text, by_id = _enumerate_rubric(rubric)
     sheet = await call_structured(
-        get_as_judge_llm(),
+        get_judge_llm(),
         _SCORE_PROMPT.format(query=query, rubric_text=rubric_text, agent_output=agent_output),
         _ScoreSheet,
     )

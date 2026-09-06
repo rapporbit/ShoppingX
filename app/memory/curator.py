@@ -27,7 +27,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 from app.agent.invoke import call_structured
-from app.agent.llm import get_as_fast_llm
+from app.agent.llm import get_fast_llm
 from app.agent.prompts import get_memory_curator_prompt
 from app.api.context import get_session_domains
 from app.memory.domains import DOMAIN_OTHER, PrefDomain, domain_menu
@@ -153,7 +153,7 @@ async def curate_turn(
     )
     try:
         curation = await call_structured(
-            get_as_fast_llm(),
+            get_fast_llm(),
             [("system", get_memory_curator_prompt()), ("user", user_msg)],
             CurationResult,
         )

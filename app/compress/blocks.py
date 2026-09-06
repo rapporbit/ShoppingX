@@ -19,17 +19,79 @@ cache_control 标记**不在这一层打**：AgentScope 的 content block 是 py
 :mod:`app.harness.formatter`——那一层的 dict 序列才是真正发出去的 payload。
 """
 
+import json
 from collections.abc import Sequence
 
 from agentscope.message import Msg, TextBlock, ToolResultBlock
 
-from app.compress.breakpoint import DEFAULT_KEEP_RECENT
-from app.compress.compressor import (
-    _TRUNCATE_HINT,
-    DEFAULT_MAX_TOOL_TOKENS,
-    _smart_compress_json,
-)
 from app.utils.tokens import count_tokens, truncate_to_token_budget
+
+# 最近多少次工具结果留全文（= 工作集大小）。3 是实测口径：模型真正会回头引用的就是最后几次
+# Observe，再往前的细节它已经转写进自己的推理里了。
+DEFAULT_KEEP_RECENT = 3
+
+# 每条工具结果在「较旧区」的 token 上限。比 fork 边界的硬截断
+# （middleware.MAX_TOOL_RESULT_TOKENS=4000）更紧——旧历史细节已不重要，压更狠以省 token。
+# token 数走 app.utils.tokens（Qwen 本地分词器为主、CJK 启发式兜底），不再用 char/4 粗估
+# （后者对中文低估约 3 倍，见 tokens.py）。
+DEFAULT_MAX_TOOL_TOKENS = 1500
+_TRUNCATE_HINT = "\n\n[…较旧工具结果已精简；如需细节可用更窄查询重取]"
+
+# ---- JSON 字段抽取（较旧区工具结果智能压缩）----
+# 工具返回的候选列表字段名（item_search/price_compare/shipping_calc/item_picker）。
+_CANDIDATE_LIST_KEYS = frozenset({"candidates", "ranked", "items", "picks"})
+# 较旧区只保留决策相关字段：身份+标题+价格+评分+到手价+入选理由。
+_KEEP_FIELDS = frozenset(
+    {
+        "item_id",
+        "platform",
+        "title",
+        "price_usd",
+        "rating",
+        "landed_usd",
+        "pick_reason",
+    }
+)
+
+
+def _extract_candidate_fields(candidate: dict) -> dict:
+    """从单个候选 dict 抽取决策字段，丢弃冗余（brand/score/weight_kg/…）。"""
+    return {k: v for k, v in candidate.items() if k in _KEEP_FIELDS and v}
+
+
+def _smart_compress_json(text: str, max_tokens: int) -> str | None:
+    """尝试 JSON 字段抽取压缩：解析工具返回的 JSON，对候选列表做字段精简。
+
+    成功返回压缩后的 JSON 字符串（保证合法 JSON + 在 token 预算内）；
+    解析失败 / 无候选列表 / 压缩后仍超限则返回 None，调用方回退到尾部截断。
+    """
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    compressed_any = False
+    for key in _CANDIDATE_LIST_KEYS:
+        if key in data and isinstance(data[key], list) and data[key]:
+            data[key] = [_extract_candidate_fields(c) for c in data[key] if isinstance(c, dict)]
+            compressed_any = True
+
+    if not compressed_any:
+        return None
+
+    result = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    if count_tokens(result) <= max_tokens:
+        return result
+    return None
+
+# Anthropic cache_control 硬约束（refdocs/05 §4.4）。
+MAX_CACHE_MARKERS = 4
+# Sonnet 写入缓存的最小前缀 token 阈值；不足则写了也不会被缓存，白占一个标记额度。
+MIN_CACHE_PREFIX_TOKENS = 1024
+
 
 # 断点坐标：(消息下标, 消息内 block 下标)。字典序比较即「谁在前」。
 BlockPos = tuple[int, int]
@@ -133,7 +195,7 @@ def compress_blocks_before(
     return out
 
 
-def as_post_step_compress(
+def post_step_compress(
     messages: list[Msg],
     *,
     keep_recent: int = DEFAULT_KEEP_RECENT,

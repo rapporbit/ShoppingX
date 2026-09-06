@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.api.context import get_retrieval_mode, reset_retrieval_mode, set_retrieval_mode
-from app.harness.agent_middleware import _count_candidates
+from app.harness._tool_signals import _count_candidates
 from app.harness.hooks.phase_transition import check_refine_backfill, try_phase_transition
 from app.harness.phase_machine import Phase, PhaseStateMachine, set_phase_machine
 from app.harness.signals import candidate_count
@@ -433,7 +433,7 @@ async def _run_planner(monkeypatch: pytest.MonkeyPatch, retrieval: str) -> None:
     import app.tools.planner as mod
 
     plan = PlanOutput(category="沙发", tasks=["recommend"], retrieval=retrieval)  # type: ignore[arg-type]
-    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakePlannerLLM(plan))
+    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakePlannerLLM(plan))
     await mod.planner.ainvoke({"intent": "换个方向，想看真皮沙发"})
 
 

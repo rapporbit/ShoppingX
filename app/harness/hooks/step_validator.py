@@ -203,11 +203,11 @@ async def check_semantic_alignment(context: dict[str, Any]) -> dict[str, Any] | 
         # fast 档而非 judge 强模型：refdocs 17-3 §2 把 Semantic Assertion 的延迟预算定在 ~50ms，
         # 它只需回一个「相关 / 不相关」的标签，用强模型是把在线延迟花在不需要的地方。
         from app.agent.invoke import call_text
-        from app.agent.llm import get_as_fast_llm
+        from app.agent.llm import get_fast_llm
 
         verdict = (
             await call_text(
-                get_as_fast_llm(), _SEMANTIC_PROMPT.format(query=query, preview=preview)
+                get_fast_llm(), _SEMANTIC_PROMPT.format(query=query, preview=preview)
             )
         ).strip()
     except Exception:

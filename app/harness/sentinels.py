@@ -88,18 +88,10 @@ SUMMARY_NUDGE = (
 )
 
 # 硬挡哨兵：跨平台并行 fork 跑过一轮后再发起 fork 一律回这条——逼主 loop 用现有候选收尾。
-FORK_EXHAUSTED_PARALLEL = (
-    "[禁止再 fork] 你已并行 fork 过一轮跨平台检索。本任务不允许为「再找找更好的」对同品类"
-    "重复 fork 拓宽。立即用已汇集的候选完成用户要求的剩余步骤（按需 price_compare / "
-    "shipping_calc）→ item_picker 精挑，并**以调用 shopping_summary 结束**。"
-)
-
-# 硬挡哨兵：纯串行 dispatch_tool（未跑过并行轮）超过 max_serial 次——跟跨平台 fork 无关，
-# 文案不能沿用 FORK_EXHAUSTED_PARALLEL（那句话对这个场景是假的历史陈述）。
-FORK_EXHAUSTED_SERIAL = (
-    "[禁止再 fork] 你已连续派发多个独立子任务（dispatch_tool），已达本次上限。"
-    "请立即基于已收到的各子任务结果完成剩余步骤（按需合流 price_compare / shipping_calc → "
-    "item_picker 精挑），并**以调用 shopping_summary 结束**，不要再派发新的子任务。"
+FORK_EXHAUSTED = (
+    "[禁止再派发] 你已派发过本次任务允许的全部子任务，不允许为「再找找更好的」重复拓宽。"
+    "立即基于已收到的各子任务结果完成剩余步骤（按需 price_compare / shipping_calc → "
+    "item_picker 精挑），并**以调用 shopping_summary 结束**。"
 )
 
 # 深度闸哨兵：子 Agent（depth≥1）调聚合/终结工具时回这条——它没有跨平台/跨商品全局视图。
@@ -200,7 +192,7 @@ INTERNAL_MARKERS: tuple[str, ...] = (
     "[相关性问题]",
     "[阶段推进]",
     "[阶段回退]",
-    "[禁止再 fork]",
+    "[禁止再派发]",
     "[子任务无权收尾]",
     "[子任务无需此工具]",
     "[web_search 未执行]",

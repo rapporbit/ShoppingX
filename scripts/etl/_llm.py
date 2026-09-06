@@ -32,6 +32,6 @@ def get_etl_llm() -> Any:
 
     走 ``role="etl"`` 独立标记，网关的并发闸门与线上主链路共用——离线跑批时压不垮线上。
     """
-    from app.agent.llm import build_as_model
+    from app.agent.llm import build_model
 
-    return build_as_model(etl_llm_model(), temperature=0.3, role="etl", thinking=False)
+    return build_model(etl_llm_model(), temperature=0.3, role="etl", thinking=False)

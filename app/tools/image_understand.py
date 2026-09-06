@@ -21,13 +21,13 @@ import re
 from pathlib import Path
 
 from agentscope.message import Base64Source, DataBlock, Msg, TextBlock
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from app.agent.invoke import call_text
-from app.agent.llm import get_as_vision_llm, vision_enabled
+from app.agent.llm import get_vision_llm, vision_enabled
 from app.api import monitor
 from app.api.context import get_session_dir, get_thread_id
+from app.tools._shell import tool
 from app.utils.env import env_int
 from app.utils.path_utils import UPLOAD_ROOT, safe_join
 
@@ -223,7 +223,7 @@ async def image_understand(filename: str) -> ImageUnderstanding:
                 TextBlock(type="text", text=_PROMPT),
             ],
         )
-        text = await call_text(get_as_vision_llm(), [message])
+        text = await call_text(get_vision_llm(), [message])
         data = _extract_json(text)
     except Exception as e:  # 外部依赖失败不该崩主 loop，转成可读 note + 标降级
         out = _degraded(

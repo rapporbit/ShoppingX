@@ -180,7 +180,7 @@ async def test_reads_all_supported_formats(
 
             return _stream()
 
-    monkeypatch.setattr(mod, "get_as_vision_llm", lambda: _FakeLLM())
+    monkeypatch.setattr(mod, "get_vision_llm", lambda: _FakeLLM())
 
     with thread_scope("t-img", tmp_path / "session" / "t-img"):
         out = await image_understand.ainvoke({"filename": "ref.png"})

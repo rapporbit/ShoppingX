@@ -148,7 +148,7 @@ async def check_search_authority(context: dict[str, Any]) -> dict[str, Any] | No
         raise HookRejectSignal(SUB_SEARCH_EXHAUSTED, raw=True)
     if depth == 0:
         budget = get_fork_budget()
-        if budget is not None and budget.parallel_calls >= 1:
+        if budget is not None and budget.dispatched:
             # 结果感知的解锁（棘轮闸的三个出口）——否则「fork 跑过」就永久锁死直搜：
             # 1) 候选池是空的：整轮 fork 失败/超时/全空召回时，「候选已汇集」的哨兵是假话，
             #    直调 item_search 是仅剩的补救通路。放行（检索总量预算在 45 照常兜底）。

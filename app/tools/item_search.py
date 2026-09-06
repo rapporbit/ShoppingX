@@ -32,7 +32,6 @@ import re
 from typing import Literal
 
 import numpy as np
-from langchain_core.tools import tool
 from pydantic import BaseModel
 
 from app.agent.platform_scope import resolve_search_platforms
@@ -47,6 +46,7 @@ from app.recall.towers import TowerClient
 from app.tools._args import StrListArg
 from app.tools._bundle import current_slot, note_slot_searched, register_slot
 from app.tools._candidates import compact_candidates, enrich, register
+from app.tools._shell import tool
 from app.tools.schemas import ItemCandidate
 from app.utils.env import env_float, env_int
 from app.utils.terms import normalize_terms, term_hits

@@ -75,7 +75,7 @@ async def _teacher(row: dict) -> dict | None:
     批量跑会互相污染）——与 M21「训练与线上共用 embed_text、不共用会话层」同一条纪律。
     """
     from app.agent.invoke import call_structured
-    from app.agent.llm import get_as_fast_llm
+    from app.agent.llm import get_fast_llm
     from app.tools.planner import PlanOutput, get_planner_prompt
 
     prior = "".join(f"用户上一轮：{t}\n" for t in row.get("prior_turns") or [])
@@ -85,7 +85,7 @@ async def _teacher(row: dict) -> dict | None:
         try:
             out = await asyncio.wait_for(
                 call_structured(
-                    get_as_fast_llm(),
+                    get_fast_llm(),
                     [("system", get_planner_prompt()), ("user", prior + row["text"])],
                     PlanOutput,
                 ),

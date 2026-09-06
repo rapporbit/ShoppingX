@@ -24,13 +24,12 @@ from collections.abc import Mapping
 from typing import Annotated
 
 from agentscope.tool import ToolChoice
-from langchain_core.tools import InjectedToolArg, tool
 from pydantic import BaseModel, Field, model_validator
 
 from app.agent.invoke import call_structured, to_msgs
-from app.agent.llm import get_as_fast_llm
+from app.agent.llm import get_fast_llm
 from app.agent.prompts import get_shopping_summary_prompt
-from app.agent.token_budget import charge_as_usage
+from app.agent.token_budget import charge_usage
 from app.api import monitor
 from app.api.context import get_dest_country, is_dest_country_assumed
 from app.tools._args import drop_none_values
@@ -49,6 +48,7 @@ from app.tools._candidates import (
     register_updates,
     registry_snapshot,
 )
+from app.tools._shell import InjectedToolArg, tool
 from app.tools.schemas import ItemCandidate
 from app.tools.shipping_calc import cost_item
 
@@ -288,7 +288,7 @@ async def _stream_draft(
     增量推给前端前也过一遍 :func:`strip_item_ids`：否则模型写出的 ID 会先逐字渲染到用户眼前，
     等收尾的最终文案再把它换掉——闪一下的主键，用户照样看见了。
     """
-    model = get_as_fast_llm()
+    model = get_fast_llm()
     buf = ""
     emitted = 0
     last: object = None
@@ -306,7 +306,7 @@ async def _stream_draft(
                 emitted = len(text)
                 await monitor.report_summary_delta(strip_item_ids(text, id_map))
     finally:
-        charge_as_usage(getattr(model, "model", ""), getattr(last, "usage", None))
+        charge_usage(getattr(model, "model", ""), getattr(last, "usage", None))
     return _SummaryDraft.model_validate(json.loads(buf))
 
 
@@ -321,7 +321,7 @@ async def _generate_draft(
         # 入过账）——记 warning 让它可见，若某供应商长期走不了流式，该在配置层关掉而不是
         # 每轮白烧一遍。
         logger.warning("收尾文案流式生成失败，降级为阻塞结构化调用", exc_info=True)
-        return await call_structured(get_as_fast_llm(), messages, _SummaryDraft)
+        return await call_structured(get_fast_llm(), messages, _SummaryDraft)
 
 
 def _landed_note(picks: list[ItemCandidate]) -> str:

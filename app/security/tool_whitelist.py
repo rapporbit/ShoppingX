@@ -1,7 +1,7 @@
 """L1 工具白名单：模型只能调用已注册的工具，别的名字一律拒。
 
-**这层在当前依赖下是纵深防御，不是唯一防线——诚实标注。** LangChain 的 tool node 本来就只会
-按 ``tools=`` 里注册的那些去查找并执行，模型幻觉出一个 ``rm_database`` 通常在框架层就落不了地。
+**这层在当前依赖下是纵深防御，不是唯一防线——诚实标注。** AgentScope 的 ``Toolkit`` 本来就只
+按注册进去的那些工具查找并执行，模型幻觉出一个 ``rm_database`` 通常在框架层就落不了地。
 那为什么还要写？三个理由：
 
 1. **不把安全性寄托在上游框架的实现细节上。** 「框架恰好会拦」和「我们明确拒绝」是两回事，
@@ -25,15 +25,14 @@ logger = logging.getLogger("shoppingx.security.whitelist")
 
 @lru_cache(maxsize=1)
 def allowed_tools() -> frozenset[str]:
-    """当前进程允许调用的全部工具名（= ``FULL_TOOL_SET`` 的工具名集合）。
+    """当前进程允许调用的全部工具名（= 工具注册表里的全集，与角色发放无关）。
 
-    主 Agent 与所有 fork 子 Agent 共用同一份 ``FULL_TOOL_SET``（同质 fork 的硬约束），所以白名单
-    对主 / 子是同一个——**授权的差异由深度闸表达**（见 ``harness/hooks/tool_gates.py``），不在这里
-    分叉。这层只回答「这个名字是不是本系统的工具」。
+    白名单对主 Agent 与各类 worker 是同一个——**授权的差异由发放范围表达**（``build_toolkit(role)``
+    发给谁哪些工具，见 ``tool_registry``），不在这里分叉。这层只回答「这个名字是不是本系统的工具」。
     """
-    from app.agent.tool_registry import FULL_TOOL_SET
+    from app.agent.tool_registry import TOOLS
 
-    return frozenset(t.name for t in FULL_TOOL_SET)
+    return frozenset(t.name for t in TOOLS)
 
 
 def validate_tool_call(tool_name: str) -> bool:

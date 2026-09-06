@@ -18,11 +18,9 @@ token 是乘法累积的。只盯单次调用拦不住「子任务们合起来�
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
-
-from langchain_core.messages import AIMessage, BaseMessage
 
 from app.api.context import get_session_dir
 from app.utils.env import env_float
@@ -137,40 +135,10 @@ def _msg_cost(meta: dict, model: str) -> tuple[int, int, int, float]:
     return inp, out, cache_read, cost
 
 
-def charge_tree_usage(messages: Sequence[BaseMessage]) -> float | None:
-    """把本次模型调用返回的 AIMessage 用量计进全树，返回累计成本（美元）；无作用域返回 None。
-
-    幂等：按 AIMessage id 去重——middleware 每次 ``awrap_model_call`` 只把**本次**新返回的消息
-    传进来，但即便重复传同一条也不会重复计费。
-    """
-    st = _state()
-    if st is None:
-        return None
-    for msg in messages:
-        if not isinstance(msg, AIMessage):
-            continue
-        meta = getattr(msg, "usage_metadata", None)
-        if not meta:
-            continue
-        mid = msg.id or ""
-        if mid and mid in st._seen:
-            continue
-        if mid:
-            st._seen.add(mid)
-        model = (getattr(msg, "response_metadata", None) or {}).get("model_name", "") or ""
-        inp, out, cache_read, cost = _msg_cost(meta, model)
-        st.input_tokens += inp
-        st.output_tokens += out
-        st.cache_read_tokens += cache_read
-        st.cost_usd += cost
-        st.model_calls += 1
-    return st.cost_usd
-
-
 def charge_tool_llm_usage(usage_by_model: Mapping[str, Any]) -> None:
     """把**工具内部** LLM 调用的用量计进全树（planner / shopping_summary / chat_fallback）。
 
-    这些调用不经过 agent middleware 的 ``awrap_model_call``——那里的 :func:`charge_tree_usage`
+    这些调用不经过主 loop 的模型钩子——那里的 :func:`charge_usage`
     只见主 loop 的模型调用，工具内的这几笔曾完全漏账（perf-audit-r5 实测：总账恰好只等于主 loop
     各次之和，成本与预算闸少算约 25% 时长对应的用量）。结构化输出（``with_structured_output``）
     会把 AIMessage 吞成 Pydantic 对象，callback 是拿到 usage 且不改工具语义的唯一口子——工具侧
@@ -195,7 +163,7 @@ def charge_tool_llm_usage(usage_by_model: Mapping[str, Any]) -> None:
         logger.debug("工具内部 LLM 记账失败，跳过（不反噬工具执行）", exc_info=True)
 
 
-def charge_as_usage(model: str, usage: Any) -> None:
+def charge_usage(model: str, usage: Any) -> None:
     """AgentScope 侧的同一件事：把一次 ``ChatUsage`` 计进全树（批 0 / L7）。
 
     LangChain 靠回调收 usage（``UsageMetadataCallbackHandler``），AgentScope 把它直接挂在
@@ -207,11 +175,23 @@ def charge_as_usage(model: str, usage: Any) -> None:
     """
     if usage is None:
         return
-    meta = {
-        "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
-        "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
-        "input_token_details": {"cache_read": int(getattr(usage, "cache_input_tokens", 0) or 0)},
-    }
+    try:
+        meta = {
+            "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
+            "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
+            "input_token_details": {
+                "cache_read": int(getattr(usage, "cache_input_tokens", 0) or 0)
+            },
+        }
+    except (TypeError, ValueError):
+        # 字段形状不对（供应商回了奇怪的东西）→ 记日志跳过。计费出错绝不能把异常甩回 loop：
+        # 一次记不上账的代价远小于因为记账把整轮对话打断。
+        logger.warning("usage 形状异常，本次不计费：%r", usage)
+        return
+    # 三项全 0 = 拿到的是个空壳（供应商没回用量），不是「一次零成本的调用」。记下来只会让
+    # model_calls 虚高，而 token 与成本仍是 0——诊断时反而看不出「这次的账丢了」。
+    if not any((meta["input_tokens"], meta["output_tokens"])):
+        return
     charge_tool_llm_usage({model or "": meta})
 
 

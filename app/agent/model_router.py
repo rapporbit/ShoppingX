@@ -40,14 +40,9 @@
 from __future__ import annotations
 
 import logging
-import os
 from enum import IntEnum
-from functools import lru_cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from langchain_core.language_models import BaseChatModel
-
-from app.agent.llm import get_fast_llm
 from app.agent.token_budget import remaining_ratio
 from app.utils.env import env_float
 
@@ -92,7 +87,7 @@ def current_tier() -> Tier:
     return Tier.MAIN
 
 
-def tier_model(tier: Tier) -> BaseChatModel | None:
+def tier_model(tier: Tier) -> Any | None:
     """该档位该用哪个模型。``FALLBACK`` 返回 ``None``——那一档根本不调 LLM。
 
     ``MAIN`` 也返回 ``None``：表示「不覆盖，用 request 里原本那个」。这让适配器的逻辑退化成
@@ -103,24 +98,11 @@ def tier_model(tier: Tier) -> BaseChatModel | None:
     return _lite_llm()
 
 
-def _lite_llm() -> BaseChatModel:
-    """便宜档模型。默认复用 ``get_fast_llm()``（同模型关 reasoning）；``LLM_LITE`` 可显式覆盖。"""
-    name = os.environ.get("LLM_LITE")
-    return _named_lite_llm(name) if name else get_fast_llm()
+def _lite_llm() -> Any:
+    """便宜档模型：配了 ``LLM_LITE`` 就用它，否则复用快档（同模型关 reasoning）。"""
+    from app.agent.llm import get_lite_llm
 
-
-@lru_cache(maxsize=1)
-def _named_lite_llm(model: str) -> BaseChatModel:
-    """配了 ``LLM_LITE`` 时按名建模型（同 endpoint / 同温度）。缓存一份，复用连接池。"""
-    from langchain.chat_models import init_chat_model
-
-    return init_chat_model(
-        model,
-        model_provider="openai",
-        api_key=os.environ["OPENAI_API_KEY"],
-        base_url=os.environ["OPENAI_BASE_URL"],
-        temperature=env_float("LLM_TEMPERATURE", 0.3),
-    )
+    return get_lite_llm()
 
 
 # minimal 档注入的简洁 hint。用 ``[预算提醒]`` 前缀复用 ``session_hooks`` 已有的内部文案标记——

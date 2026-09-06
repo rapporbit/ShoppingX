@@ -57,7 +57,7 @@ class _FakeLLM:
 def _patch_llm_and_store(
     monkeypatch: Any, payload: Any, store: PreferenceStore, calls: list[Any] | None = None
 ) -> None:
-    monkeypatch.setattr(curator, "get_as_fast_llm", lambda: _FakeLLM(payload, calls))
+    monkeypatch.setattr(curator, "get_fast_llm", lambda: _FakeLLM(payload, calls))
     # curator 读长期偏好 + persist 落库都走 get_store()——两处 import 各自 patch 到同一个测试 store。
     monkeypatch.setattr(curator, "get_store", lambda: store)
     monkeypatch.setattr(injector, "get_store", lambda: store)

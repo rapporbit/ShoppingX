@@ -25,11 +25,12 @@ from typing import Any
 
 from app.agent import model_router
 from app.agent.model_router import Tier
-from app.compress.as_blocks import as_post_step_compress
-from app.compress.breakpoint import DEFAULT_KEEP_RECENT
-from app.compress.compressor import DEFAULT_MAX_TOOL_TOKENS, mark_system_cache
-from app.compress.pipeline import post_step_compress
-from app.harness._msgcompat import RUNTIME_AGENTSCOPE, runtime_of, system_message
+from app.compress.blocks import (
+    DEFAULT_KEEP_RECENT,
+    DEFAULT_MAX_TOOL_TOKENS,
+    post_step_compress,
+)
+from app.harness._msgcompat import system_message
 from app.harness.middleware import harness_hook
 from app.harness.state import GuardState
 from app.observability import metrics
@@ -106,36 +107,18 @@ async def route_by_budget(context: dict[str, Any]) -> dict[str, Any] | None:
 
 @harness_hook("pre_think", name="context_compress", priority=90)
 async def compress_context(context: dict[str, Any]) -> dict[str, Any] | None:
-    """压缩历史视图 + 给 system 段单独打缓存标记。"""
+    """压缩历史视图（只改这一次送给模型的那份，不动 state 里的原文）。"""
     messages = context.get("messages")
     if not isinstance(messages, list) or not messages:
         return None
 
-    keep_recent, max_tool_tokens, enable_cache_control = _compress_opts()
-
-    if runtime_of(context) == RUNTIME_AGENTSCOPE:
-        # AgentScope：一整轮 = 一条 assistant 消息，断点必须下沉到 block 级（见 as_blocks）。
-        # cache_control 也不在这里打——system 就在 messages 里、标记落在 formatter，
-        # 所以这条分支不碰 ``system_message``（LangChain 那边它是独立字段，才需要 mark）。
-        context["messages"] = as_post_step_compress(
-            messages,
-            keep_recent=keep_recent,
-            max_tool_tokens=max_tool_tokens,
-        )
-        return context
-
+    keep_recent, max_tool_tokens, _ = _compress_opts()
+    # 一整轮 = 一条 assistant 消息，断点下沉到 block 级（见 compress/blocks.py）。
+    # cache_control **不在这里打**：system 就在 messages 里，标记落在 formatter 那一层
+    # （content block 是强类型的，塞不进未知字段）。
     context["messages"] = post_step_compress(
         messages,
         keep_recent=keep_recent,
         max_tool_tokens=max_tool_tokens,
-        enable_cache_control=enable_cache_control,
     )
-
-    # LangChain 把 system prompt 放在 request.system_message（不在 messages 里），
-    # apply_cache_control 够不到它。system prompt 纯静态、是全天不变的最长缓存层，单独打一个
-    # cache_control 标记（对齐 refdocs/05 §4.4「system+tools 独立缓存层」）。
-    if enable_cache_control:
-        marked = mark_system_cache(context.get("system_message"))
-        if marked is not None:
-            context["system_message"] = marked
     return context

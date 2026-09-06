@@ -40,7 +40,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.agent.invoke import call_text  # noqa: E402
-from app.agent.llm import get_as_llm  # noqa: E402
+from app.agent.llm import get_llm  # noqa: E402
 
 CARDS_PATH = PROJECT_ROOT / "data" / "rag" / "category_cards.jsonl"
 OUT_DIR = PROJECT_ROOT / "data" / "train"
@@ -231,7 +231,7 @@ def _parse(text: str, expect: int) -> list[dict] | None:
 
 
 async def generate(plans: list[tuple[str, str, int]], cards: dict[str, dict], sink) -> int:
-    llm, sem = get_as_llm(), asyncio.Semaphore(CONCURRENCY)
+    llm, sem = get_llm(), asyncio.Semaphore(CONCURRENCY)
     done = [0]
 
     async def one(family: str, category: str, n: int) -> None:

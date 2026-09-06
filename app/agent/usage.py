@@ -11,17 +11,15 @@
 
 这些数发给 Langfuse（score）+ 日志，作为「是否 / 何时上 L3 摘要」的**判据闸门**，而不是预先建 L3。
 
-``usage_metadata`` 由 langchain 从 API 响应填充；DeepSeek 经 DashScope OpenAI 兼容层若回
-``prompt_tokens_details.cached_tokens``，langchain 会映射进 ``input_token_details['cache_read']``，
-否则该项缺省为 0——命中率如实反映「DashScope 到底报没报缓存」，不夸大。
+用量来自 ``Msg.usage``：AgentScope 在 ``OpenAIChatModel`` 里已把响应的
+``prompt_tokens_details.cached_tokens`` 映射进 ``cache_input_tokens``，不用自己解析。供应商不报
+缓存时该项为 0——命中率如实反映「网关到底报没报缓存」，不夸大。
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
-
-from langchain_core.messages import AIMessage, AnyMessage
 
 
 @dataclass(frozen=True)
@@ -39,51 +37,11 @@ class UsageSummary:
         return asdict(self)
 
 
-def summarize_usage(messages: Sequence[AnyMessage]) -> UsageSummary:
-    """从一轮 messages 聚合 token 用量。
+def summarize_usage(messages: Sequence[object]) -> UsageSummary:
+    """从一轮 ``list[Msg]`` 聚合 token 用量。
 
-    只统计带 ``usage_metadata`` 的 ``AIMessage``（一次模型调用一条）。任一字段缺失按 0 处理，
-    保证不抛——观测是附属品，绝不能反噬主链路。
-    """
-    calls = 0
-    carried = 0
-    peak = 0
-    output = 0
-    cache_read = 0
-    for msg in messages:
-        if not isinstance(msg, AIMessage):
-            continue
-        meta = getattr(msg, "usage_metadata", None)
-        if not meta:
-            continue
-        inp = int(meta.get("input_tokens") or 0)
-        calls += 1
-        carried += inp
-        peak = max(peak, inp)
-        output += int(meta.get("output_tokens") or 0)
-        details = meta.get("input_token_details") or {}
-        cache_read += int(details.get("cache_read") or 0)
-    rate = round(cache_read / carried, 4) if carried else 0.0
-    return UsageSummary(
-        model_calls=calls,
-        carried_input_tokens=carried,
-        peak_input_tokens=peak,
-        output_tokens=output,
-        cache_read_tokens=cache_read,
-        cache_hit_rate=rate,
-    )
-
-
-def summarize_usage_msgs(messages: Sequence[object]) -> UsageSummary:
-    """AgentScope 侧的同一件事：从 ``list[Msg]`` 聚合 token 用量。
-
-    与上面的 :func:`summarize_usage` 并存（批 0 迁移期，L8 摘 LangChain 时合并成一个）。
-    字段口径**刻意保持一致**，这样迁移前后的用量表可以直接对照——否则「迁移后 token 涨了」
-    这种结论根本没法判是真涨了还是换了口径。
-
-    数据来自 ``Msg.usage``（``agentscope.message._base.Usage``），AgentScope 在
-    ``OpenAIChatModel`` 里已经把 ``prompt_tokens_details.cached_tokens`` 映射进
-    ``cache_input_tokens``（L0 的 S1 spike 实测确认），不用自己解析响应。
+    字段口径与迁移前（LangChain 版读 ``usage_metadata``）**逐字一致**，这样两条链路的用量表
+    能直接对照——否则「迁移后 token 涨了」这种结论根本没法判是真涨了还是换了口径。
 
     只认带 ``usage`` 的 assistant 消息（一次模型调用一条）。任一字段缺失按 0，绝不抛——
     观测是附属品，不能反噬主链路。

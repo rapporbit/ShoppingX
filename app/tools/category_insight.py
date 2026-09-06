@@ -27,7 +27,6 @@ import re
 from typing import Literal
 
 import numpy as np
-from langchain_core.tools import tool
 from pydantic import BaseModel
 
 from app.api import monitor
@@ -37,6 +36,7 @@ from app.recall.kb_client import get_kb_client
 from app.recall.reranker import get_reranker
 from app.recall.semantic_cache import SemanticCache
 from app.recall.towers import get_tower_client
+from app.tools._shell import tool
 from app.utils.env import env_float, env_int
 
 # 品类定位歧义线：top2 置信度 / top1 置信度高于此，视为「两个品类都像」，交给

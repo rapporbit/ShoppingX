@@ -4,61 +4,21 @@
 - 递归 demands 深度超限被拦（① 深度上限）
 - 超长结果被截断（③ 结果截断）
 - 同工具刷屏触发循环检测（④ 循环检测）
-- 子任务异常转字符串、不抛崩溃（dispatch_tool 容错）
+- 子任务异常转字符串、不抛崩溃（task_dispatch 容错）
 """
 
 import pytest
 
-from app.agent.dispatch_tool import _ensure_platform_coverage, _run_sub_agent
+from app.agent.dispatch_tool import _run_worker
 from app.agent.fork_guard import (
     MAX_FORK_DEPTH,
     ForkLimitExceeded,
     current_fork_depth,
     enter_fork,
 )
-from app.agent.platform_scope import platform_scope
 from app.harness.loop_detector import LoopDetector
 from app.harness.truncation import MAX_TOOL_RESULT_TOKENS, truncate_tool_result
-from app.utils.clean import PLATFORMS
 from app.utils.tokens import count_tokens
-
-
-# ---------- 平台覆盖（机制兜：parallel_dispatch 按「启用平台」补齐 + 丢弃未启用的）----------
-def test_platform_coverage_fills_missing() -> None:
-    # 模型只列了启用集合里的 1 个 → 机制补齐到全部启用平台（补齐的用模板克隆）。
-    demands = ["在 amazon 上检索：品类=露营厨具，预算≈$70，关键词=cookware"]
-    with platform_scope(["amazon", "shein", "walmart"]):
-        out = _ensure_platform_coverage(demands)
-    covered = {p for p in PLATFORMS if any(p in d.lower() for d in out)}
-    assert covered == {"amazon", "shein", "walmart"}
-    assert out[0] == demands[0]  # 模型原本写的那条原样保留在前
-
-
-def test_platform_coverage_drops_disabled_platforms() -> None:
-    """未启用的平台**丢弃**：用户没勾它，派出去必然空军（这就是「不 fork 注定空军的平台」）。"""
-    demands = [f"在 {p} 上检索：品类=鞋，预算≈$50" for p in PLATFORMS]
-    with platform_scope(["amazon"]):
-        out = _ensure_platform_coverage(demands)
-    assert out == ["在 amazon 上检索：品类=鞋，预算≈$50"]
-
-
-def test_platform_coverage_falls_back_when_all_dropped() -> None:
-    """模型列的平台全没启用 → 不把整批派空：克隆一条「只搜启用平台」的 demand 兜底。"""
-    with platform_scope(["amazon"]):
-        out = _ensure_platform_coverage(["在 shopee 上检索：品类=鞋，预算≈$50"])
-    assert len(out) == 1 and "amazon" in out[0].lower()
-
-
-def test_platform_coverage_noop_when_already_full() -> None:
-    demands = [f"在 {p} 上检索：品类=鞋，预算≈$50" for p in PLATFORMS]
-    with platform_scope(list(PLATFORMS)):
-        assert _ensure_platform_coverage(demands) == demands
-
-
-def test_platform_coverage_skips_non_platform_dispatch() -> None:
-    # 不是平台检索（没有任何平台名）→ 原样放行，不强塞 5 平台。
-    demands = ["爬取这 3 个商品的详情页做对比", "汇总用户评论情感"]
-    assert _ensure_platform_coverage(demands) == demands
 
 
 # ---------- ① 深度上限 ----------
@@ -79,15 +39,17 @@ def test_enter_fork_raises_beyond_limit() -> None:
                 pass
 
 
-async def test_dispatch_rejected_at_max_depth() -> None:
-    """处于最大深度时再 dispatch，应返回「拒绝」字符串而非抛异常或调用 LLM。"""
-    with enter_fork():  # 深度已达上限（MAX_FORK_DEPTH=1）
-        # tools_provider 故意会爆炸：若深度拦截生效，根本不会触达它。
-        def boom() -> list:
-            raise AssertionError("不应构建子 Agent —— 深度拦截未生效")
+async def test_dispatch_rejected_at_max_depth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """处于最大深度时再派发，应返回「拒绝」字符串而非抛异常或调用 LLM。"""
+    import app.agent.agents as agents_mod
 
-        result = await _run_sub_agent("随便什么递归需求", boom)
-    assert "[dispatch_tool 拒绝]" in result
+    async def boom(_kind: str):  # type: ignore[no-untyped-def]
+        raise AssertionError("不应构建 worker —— 深度拦截未生效")
+
+    monkeypatch.setattr(agents_mod, "build_worker_agent", boom)
+    with enter_fork():  # 深度已达上限（MAX_FORK_DEPTH=1）
+        result = await _run_worker("随便什么递归需求", "search")
+    assert "[task_dispatch 拒绝]" in result
     assert current_fork_depth() == 0
 
 
@@ -135,12 +97,14 @@ def test_loop_detector_progressed_calls_dont_count() -> None:
 
 
 # ---------- dispatch_tool 容错 ----------
-async def test_dispatch_sub_agent_error_becomes_string() -> None:
-    """子 Agent 构建/执行抛异常时，应被兜底转成字符串，不向主 loop 抛。"""
+async def test_dispatch_sub_agent_error_becomes_string(monkeypatch: pytest.MonkeyPatch) -> None:
+    """worker 构建/执行抛异常时，应被兜底转成字符串，不向主 loop 抛。"""
+    import app.agent.agents as agents_mod
 
-    def boom() -> list:
-        raise RuntimeError("模拟子 Agent 故障")
+    async def boom(_kind: str):  # type: ignore[no-untyped-def]
+        raise RuntimeError("模拟 worker 故障")
 
-    result = await _run_sub_agent("demands", boom)
-    assert "[dispatch_tool 错误]" in result
+    monkeypatch.setattr(agents_mod, "build_worker_agent", boom)
+    result = await _run_worker("demands", "search")
+    assert "[task_dispatch 错误]" in result
     assert "RuntimeError" in result

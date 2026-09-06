@@ -5,8 +5,6 @@
 - load_prior_turns 转成 (role, content) 元组 + 按 HISTORY_MAX_TURNS 截尾 + 设 0 关闭续聊。
 - 惰性迁移：库上线前的 turns.json 第一次被读 / 写时整段迁进库，且不重复迁、续号不撞。
 - 容错：旧 turns.json 损坏 / 单条结构异常一律降级（空 / 跳过坏条），不抛。
-- save_full_trace 对 ToolMessage.artifact（自定义 Pydantic）能落盘不崩。
-- run_agent 续聊接缝：同一 thread_id 第二次跑会把上一轮回喂进开局 messages。
 - GET /api/history/{tid} 读出逐轮对话。
 
 thread_id 各用例互不相同（库是共享的，靠 conftest 的 _clean_memory_tables 兜底清表）。
@@ -21,17 +19,10 @@ from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 import app.api.server as server
 import app.memory.history as history
-from app.memory.history import (
-    append_turn,
-    load_prior_turns,
-    read_turns,
-    save_full_trace,
-)
-from app.tools.shopping_summary import ShoppingSummaryOutput, SummaryItem
+from app.memory.history import append_turn, load_prior_turns, read_turns
 
 
 def _write_legacy(session_dir: Path, raw: Any) -> None:
@@ -207,65 +198,9 @@ async def test_elapsed_ms_bool_rejected_on_migration(tmp_path: Path) -> None:
     assert "elapsed_ms" not in (await read_turns("t-bad-elapsed", tmp_path))[1]
 
 
-# ---------- save_full_trace：仍是文件（排障产物，刻意不进库）----------
-def test_save_full_trace_handles_custom_artifact(tmp_path: Path) -> None:
-    out = ShoppingSummaryOutput(
-        summary="为你精选 1 件。",
-        items=[SummaryItem(item_id="A1", platform="amazon", title="canvas bag")],
-    )
-    messages = [
-        HumanMessage(content="买个旅行包"),
-        ToolMessage(content=out.summary, name="shopping_summary", tool_call_id="c1", artifact=out),
-        AIMessage(content="已为你整理好清单。"),
-    ]
-    save_full_trace(tmp_path, messages)
-    data = json.loads((tmp_path / "history.json").read_text(encoding="utf-8"))
-    # 标准 messages_to_dict 结构：列表、逐条带 type；artifact 经 _json_default 降级成 dict，不抛。
-    assert isinstance(data, list) and len(data) == 3
-    assert data[0]["type"] == "human"
-
-
-# ---------- run_agent 续聊接缝（假 agent，无真实 LLM）----------
-async def test_run_agent_continues_thread_with_prior_turns(
-    tmp_path: Path, monkeypatch: Any
-) -> None:
-    import app.agent.main_agent as main_agent
-
-    # 会话目录仍要重定向到 tmp（完整轨迹 history.json 还落文件），避免污染真实 output/。
-    session_dir = tmp_path / "conv"
-    session_dir.mkdir()
-    monkeypatch.setattr(main_agent, "ensure_session_dir", lambda _tid: session_dir)
-    monkeypatch.setattr(main_agent.monitor, "report_task_result", _noop)
-    monkeypatch.setattr(main_agent.monitor, "report_session_created", _noop)
-
-    captured: dict[str, Any] = {}
-
-    def _fake_build(system_prompt: str, **_kw: Any) -> Any:
-        class _FakeAgent:
-            async def ainvoke(self, payload: Any, config: Any) -> dict[str, Any]:
-                captured["messages"] = payload["messages"]
-                # 末条是「运行时上下文（启用平台等）+ 本轮 query」，取回原始问题原样回一句。
-                raw = payload["messages"][-1][1].split("用户本轮消息：\n")[-1]
-                return {"messages": [AIMessage(content="answer-" + raw)]}
-
-        return _FakeAgent()
-
-    monkeypatch.setattr(main_agent, "_build_main_agent", _fake_build)
-
-    # 第一轮：无历史，开局只有当前 query（外加当轮注入的运行时上下文）。
-    await main_agent.run_agent("第一个问题", thread_id="t-conv", user_id=None)
-    first = captured["messages"]
-    assert len(first) == 1 and first[0][0] == "user"
-    assert "<enabled_platforms>" in first[0][1] and first[0][1].endswith("第一个问题")
-
-    # 第二轮（同 thread_id）：开局回喂上一轮 user→assistant，再接当前 query。
-    # 回喂的历史是**干净原始** (q,a) 对——不含运行时注入，故跨轮前缀逐字稳定、能命中 prompt cache。
-    await main_agent.run_agent("第二个问题", thread_id="t-conv", user_id=None)
-    msgs = captured["messages"]
-    assert msgs[:2] == [("user", "第一个问题"), ("assistant", "answer-第一个问题")]
-    assert msgs[2][0] == "user" and msgs[2][1].endswith("第二个问题")
-    # 库里已累加两轮。
-    assert len(await read_turns("t-conv")) == 4
+# 说明：完整轨迹 history.json 的落盘现在归 ``orchestrator._save_trace``（吃 AgentScope 的
+# ``Msg``），续聊接缝（回放干净 (q,a) + 当轮 query 拼在最后）由 tests/test_orchestrator.py 的
+# 两条恢复腿用例覆盖，这里不再重复。
 
 
 # ---------- GET /api/history/{tid} ----------

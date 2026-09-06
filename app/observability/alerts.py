@@ -71,7 +71,7 @@ class AlertRule:
 #
 # **告警阈值是观测的结论，不是观测的输入。** refdocs 给的 item_search=3000ms 是本地 mock 数据的
 # 水位；实测本项目的 item_search P95 只有 470ms（Qdrant 本地 + reranker 命中缓存），照抄那个数字
-# 等于「要慢 6 倍才报警」——规则形同虚设。反过来 planner / parallel_dispatch_tool 动辄几十秒，
+# 等于「要慢 6 倍才报警」——规则形同虚设。反过来 planner / 派发元工具动辄几十秒，
 # 用 refdocs 的秒级阈值会天天响，响到没人再看。**两个方向都错。**
 #
 # 下面每条注释里的实测值来自 17 条真实 query（数据落 data/eval/tool_rt_baseline.json）。
@@ -94,12 +94,11 @@ DEFAULT_RULES: tuple[AlertRule, ...] = (
     AlertRule("planner", p95_threshold_ms=45_000, hard_ms=90_000),  # 实测 P95 23_539
     AlertRule("shopping_summary", p95_threshold_ms=25_000, hard_ms=60_000),  # 实测 P95 11_900
     AlertRule("chat_fallback", p95_threshold_ms=12_000, hard_ms=30_000),  # 实测 P95 5_953
-    # 元工具：一次 dispatch = 一整棵子 AgentLoop 跑完，阈值按整轮墙钟给。
-    # parallel_dispatch_tool 才是跨平台检索实际走的那个（实测 P95 39_930，14 次调用）；
-    # dispatch_tool（串行单发）在这 17 条 query 里**一次都没被调用**，阈值按并行版的一半估，
-    # 真跑起来再校准。别只给 dispatch_tool 配规则——最花时间的那条路径反而没人盯着。
-    AlertRule("parallel_dispatch_tool", p95_threshold_ms=75_000, hard_ms=180_000),
-    AlertRule("dispatch_tool", p95_threshold_ms=40_000, hard_ms=120_000),
+    # 元工具：一次派发 = 一整棵子 AgentLoop 跑完，阈值按整轮墙钟给。基线是在被取代的
+    # parallel_dispatch_tool（一次调用派一批平台）上量的：P95 39_930ms / 14 次调用。
+    # task_dispatch 是**一条一次**、由框架并发跑，单次墙钟只含它自己那棵子树，所以按并行版的
+    # 一半估（40s），跑够样本再校准。宁可先松：这条路径最花时间，没人盯着比阈值不准糟得多。
+    AlertRule("task_dispatch", p95_threshold_ms=40_000, hard_ms=120_000),
 )
 
 _RULES_BY_TOOL: dict[str, AlertRule] = {r.tool: r for r in DEFAULT_RULES}

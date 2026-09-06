@@ -19,7 +19,7 @@ import logging
 from pydantic import BaseModel, Field, model_validator
 
 from app.agent.invoke import call_structured
-from app.agent.llm import get_as_fast_llm
+from app.agent.llm import get_fast_llm
 from app.agent.prompts import get_preference_parse_prompt
 from app.memory.domains import DOMAIN_OTHER, PrefDomain, domain_menu
 from app.memory.store import Polarity, PrefCategory
@@ -83,7 +83,7 @@ async def parse_user_preference(text: str) -> list[UserPrefDraft]:
         return []
     try:
         result = await call_structured(
-            get_as_fast_llm(),
+            get_fast_llm(),
             [("system", get_preference_parse_prompt()), ("user", text.strip())],
             _ParseResult,
         )

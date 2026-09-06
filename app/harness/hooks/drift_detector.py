@@ -330,11 +330,11 @@ async def detect_drift(context: dict[str, Any]) -> dict[str, Any] | None:
         # 近 10s，而这里只要一个三选一的标签。judge 档留给 Rubric 离线评测（要的是评分稳定性，
         # 不在线上关键路径）。
         from app.agent.invoke import call_text
-        from app.agent.llm import get_as_fast_llm
+        from app.agent.llm import get_fast_llm
 
         verdict = (
             await call_text(
-                get_as_fast_llm(),
+                get_fast_llm(),
                 _DRIFT_CHECK_PROMPT.format(
                     original_query=original_query,
                     recent_actions=recent_actions,

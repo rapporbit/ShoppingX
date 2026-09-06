@@ -48,27 +48,26 @@ def _keys(found: list[alerts.Alert]) -> dict[str, str]:
 
 # ---------- 规则与工具集的一致性 ----------
 def test_every_rule_targets_a_real_tool() -> None:
-    """规则里的 tool 名必须真的在 FULL_TOOL_SET 里。
+    """规则里的 tool 名必须真的在工具注册表里。
 
     名字对不上的规则是**死规则**：``record_tool_sample`` 按名字过滤，采不到任何样本，于是永远不会
     告警——而且毫无征兆，看起来一切正常。工具改名 / 拆分时这个测试会红，比线上某天「怎么从来没报过」
     要便宜得多。
     """
-    from app.agent.tool_registry import FULL_TOOL_SET
+    from app.agent.tool_registry import TOOLS
 
-    real = {t.name for t in FULL_TOOL_SET}
+    real = {t.name for t in TOOLS}
     unknown = {r.tool for r in alerts.DEFAULT_RULES} - real
     assert not unknown, f"这些规则指向不存在的工具，永远不会告警：{sorted(unknown)}"
 
 
-def test_fork_meta_tools_are_covered() -> None:
-    """两个 fork 元工具都要有规则。
+def test_dispatch_meta_tool_is_covered() -> None:
+    """派发元工具必须有规则：一次派发 = 一整棵子 AgentLoop，是全链路最花时间的那段。
 
-    跨平台检索实际走的是 ``parallel_dispatch_tool``——只给 ``dispatch_tool`` 配规则，最花时间的
-    那条路径（一次 fork = 一整棵子 AgentLoop）反而没人盯着。
+    它没有规则也不会报错，只会安静地永远不告警——最贵的路径反而没人盯着。
     """
     ruled = {r.tool for r in alerts.DEFAULT_RULES}
-    assert {"dispatch_tool", "parallel_dispatch_tool"} <= ruled
+    assert "task_dispatch" in ruled
 
 
 # ---------- 分位数 ----------

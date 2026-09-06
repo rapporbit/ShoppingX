@@ -5,9 +5,6 @@ description = "ShoppingX — 全球电商对话式购物 Agent（AgentLoop + 同
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "langchain>=1.0",
-    "langchain-openai>=0.2.0",
-    "langgraph>=1.0",
     "pydantic>=2.7",
     "python-dotenv>=1.0",
     "fastapi>=0.111",

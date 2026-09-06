@@ -1,18 +1,17 @@
-"""主 / 子 Agent 共用的唯一工具集（同质 fork 的硬约束）。
+"""工具注册表：一份工具全集 + 按角色发放。
 
-``FULL_TOOL_SET`` 是主 loop 与所有 fork 出的子 loop 共享的同一份列表对象。
-dispatch 元工具通过闭包延迟读取这份 live 列表，因此子 Agent 拿到的工具集始终和主
-Agent 完全一致（含 dispatch 自身 → 支持递归 fork）。
+每个业务工具一个文件（模块名 = 工具名），在这里汇总成 ``TOOLS``，再由 :func:`build_toolkit`
+按角色发给主 Agent / 各类 worker——**切的是发放范围，不是实现**：三种角色拿到的是同一批实现
+函数包出来的工具，只是集合不同。这是读写边界的结构性保证之一（另两个是 ``is_read_only`` 标记
+与 ``PermissionEngine`` 精准放行），不靠提示词劝退。
 
-M4 起集齐九大业务工具 + dispatch 元工具。主 / 子 Agent 必须用这同一份集合（同质 fork）。
-``TERMINAL_TOOLS`` 中的工具一旦被调用即终结循环（堵「不收尾死循环」）。
+``TERMINAL_TOOLS`` 里的工具一旦被调用即终结循环（堵「不收尾死循环」这个最常见的 Agent 失败）。
 """
 
 from agentscope.tool import FunctionTool, Toolkit, ToolMiddlewareBase
-from langchain_core.tools import BaseTool
 
-from app.agent.dispatch_tool import make_dispatch_tools, task_dispatch
-from app.tools._as_tools import as_function_tool
+from app.agent.dispatch_tool import task_dispatch
+from app.tools._shell import ToolShell, to_function_tool
 from app.tools.ask_user import ask_user
 from app.tools.category_insight import category_insight
 from app.tools.chat_fallback import chat_fallback
@@ -33,7 +32,7 @@ TERMINAL_TOOLS = {"shopping_summary", "chat_fallback"}
 # 注意:**没有** remember_preference——偏好的识别 / 沉淀已剥离给会话结束后独立运行的记忆管家
 # （app/memory/curator.py），购物工作流里不再有「随手记长期偏好」的工具。forget_preference 保留:
 # 用户明确要撤回某条长期偏好时即时生效，这与记忆判定正交。
-_BUSINESS_TOOLS: list[BaseTool] = [
+_BUSINESS_TOOLS: list[ToolShell] = [
     planner,
     image_understand,
     item_search,
@@ -48,22 +47,10 @@ _BUSINESS_TOOLS: list[BaseTool] = [
     forget_preference,
 ]
 
-# 主 / 子共用的同一份列表对象；先放业务工具，再 append dispatch 元工具。
-FULL_TOOL_SET: list[BaseTool] = list(_BUSINESS_TOOLS)
 
-# dispatch 元工具的工具集 provider：返回 live 的 FULL_TOOL_SET，保证同质 + 可递归。
-dispatch_tool, parallel_dispatch_tool = make_dispatch_tools(lambda: FULL_TOOL_SET)
-
-FULL_TOOL_SET.extend([dispatch_tool, parallel_dispatch_tool])
-
-
-# ============================================================================
-# AgentScope 侧的工具发放（批 0 / L2，与上面的 FULL_TOOL_SET 并存）
-# ----------------------------------------------------------------------------
-# 与旧壳指向同一批实现函数（见 app/tools/_as_tools.py 的双包装说明）。批 0 三个 role 都
-# 发全集——读写切分是批 1 的事，这里先把「按角色发放」这个入口摆好，免得 L3 装配时又要动
-# 一次结构。**只读标记现在就要标准**：批 1 的 SearchAgent 靠它做结构性权限边界。
-# ============================================================================
+# 三个 role 目前都发全集——读写切分（SearchAgent 只拿只读子集、TradeAgent 只拿交易写工具）
+# 是批 1 的事，这里先把「按角色发放」这个入口摆好。**只读标记现在就要标准**：切分那天
+# SearchAgent 靠它做结构性权限边界。
 
 # 只读 = 不写任何持久状态、不与用户交互、可安全并发重放。
 # 反例说明（别凭感觉标）：ask_user 会挂起等用户回复，forget_preference 删长期偏好，
@@ -82,7 +69,7 @@ _READ_ONLY_TOOLS = frozenset(
 )
 
 
-def _make_as_tools(middlewares: list[ToolMiddlewareBase] | None = None) -> list[FunctionTool]:
+def _make_tools(middlewares: list[ToolMiddlewareBase] | None = None) -> list[FunctionTool]:
     """造一批新壳（可带工具中间件）。
 
     **为什么每次 loop 都要重造**：``ToolMiddlewareBase`` 是挂在**工具实例**上的
@@ -92,14 +79,14 @@ def _make_as_tools(middlewares: list[ToolMiddlewareBase] | None = None) -> list[
     同一份，不重复解析业务逻辑），比起状态串味那种查半天的 bug，这点开销买得值。
     """
     tools = [
-        as_function_tool(t, is_read_only=t.name in _READ_ONLY_TOOLS, middlewares=middlewares)
+        to_function_tool(t, is_read_only=t.name in _READ_ONLY_TOOLS, middlewares=middlewares)
         for t in _BUSINESS_TOOLS
     ]
     tools.append(
         FunctionTool(
             task_dispatch,
-            # 同轮多个独立子任务靠它并发（框架看到多个 tool_call 就并行执行），这也是删掉
-            # parallel_dispatch_tool 的底气所在。
+            # 同轮多个独立子任务靠它并发（框架看到多个 tool_call 就并行执行），这也是不再
+            # 需要一个「入参是列表」的并行派发元工具的底气所在。
             is_concurrency_safe=True,
             is_read_only=False,
             middlewares=middlewares,
@@ -108,14 +95,14 @@ def _make_as_tools(middlewares: list[ToolMiddlewareBase] | None = None) -> list[
     return tools
 
 
-# 无中间件的一份（元数据查询 / 测试 / 不需要控制面的场景用）。真正跑 loop 的工具由
-# build_toolkit 现造，见 _make_as_tools 的说明。
-AS_TOOLS: list[FunctionTool] = _make_as_tools()
+# 无中间件的一份（元数据查询 / 白名单 / 测试等不需要控制面的场景用）。真正跑 loop 的工具由
+# build_toolkit 现造，见 _make_tools 的说明。
+TOOLS: list[FunctionTool] = _make_tools()
 
-AS_TOOLS_BY_NAME: dict[str, FunctionTool] = {t.name: t for t in AS_TOOLS}
+TOOLS_BY_NAME: dict[str, FunctionTool] = {t.name: t for t in TOOLS}
 
-# 角色 → 该角色能拿到的工具名。批 0 全是全集（worker = 主 Agent 的克隆）；批 1 改这张表即完成
-# 读写切分（SearchAgent 只拿只读子集、TradeAgent 只拿交易写工具），**切的是发放范围，不是实现**。
+# 角色 → 该角色能拿到的工具名。现在全是全集；批 1 改这张表即完成读写切分
+# （SearchAgent 只拿只读子集、TradeAgent 只拿交易写工具），**切的是发放范围，不是实现**。
 # 注意 ``task_dispatch`` 到那时要从 worker 的集合里拿掉——「worker 派不了 worker」是深度上限
 # 的结构性保证，比 fork_guard 的计数守卫更硬。
 _ROLE_TOOLS: dict[str, frozenset[str] | None] = {
@@ -132,13 +119,13 @@ async def build_toolkit(
     """按角色发一份 Toolkit（AgentScope 侧）。
 
     每次调用新建 Toolkit **与工具实例**：Toolkit 带角色态（激活的 tool group 等）不能跨 Agent
-    共享，工具实例则因为要挂 per-loop 的中间件而必须一 loop 一份（见 :func:`_make_as_tools`）。
+    共享，工具实例则因为要挂 per-loop 的中间件而必须一 loop 一份（见 :func:`_make_tools`）。
     """
     if role not in _ROLE_TOOLS:
         raise ValueError(f"未知角色 {role!r}，可选：{sorted(_ROLE_TOOLS)}")
     allowed = _ROLE_TOOLS[role]
     toolkit = Toolkit()
-    for tool_obj in _make_as_tools(tool_middlewares) if tool_middlewares else AS_TOOLS:
+    for tool_obj in _make_tools(tool_middlewares) if tool_middlewares else TOOLS:
         if allowed is None or tool_obj.name in allowed:
             await toolkit.add_tool(tool_obj)
     return toolkit

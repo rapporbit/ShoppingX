@@ -1,23 +1,17 @@
-"""主链路执行入口（批 0 / L3）：一条 query 从入口跑到收尾。
+"""主链路执行入口：一条 query 从入口跑到收尾（``run_agent`` 的唯一实现）。
 
-与 ``app/agent/main_agent.py``（LangChain 版）**并存**，签名逐字相同——``app/api/server.py``
-按 ``AGENT_RUNTIME`` 选一个调，两边对同一条 query 应当给出同构的返回值与同一串 AGUI 事件。
-L8 摘掉 LangChain 时，本模块占回 ``run_agent`` 的唯一实现。
+编排顺序是建会话目录 → 读历史 / P_t → 跑 loop → 收尾落产物 → 记忆判定。三处值得单独记住的
+接线（都是 AgentScope 运行时的特性，迁移时逐条验过）：
 
-编排本身**一步没变**（建会话目录 → 读历史 / P_t → 跑 loop → 收尾落产物 → 记忆判定），
-变的只有三处，都是运行时差异：
+1. **loop 怎么跑**：``Agent.reply_stream`` + 事件泵（见 ``app/agent/events.py``），
+   而不是「跑完拿返回值」——AGUI 事件要在过程中实时推给前端。
+2. **on_session_end 不在这里调**：由 ``HarnessAgentAdapter.on_reply`` 在框架内部改写最终
+   ``Msg``，所以这里拿到的 ``final_text`` **已经是审核后的**。别再补一次——重复审核会把哨兵
+   文案二次剥离，且 ``output_audit`` 的计数会翻倍。
+3. **会话恢复两条腿**：``agent_state.json``（``AgentState`` 全量落盘）优先，缺失时退回精简的
+   (q,a) 回放。任一条失效另一条还能把会话续上，见 :func:`_load_state`。
 
-1. **loop 怎么跑**：``create_agent(...).ainvoke`` → ``Agent.reply_stream`` + 事件泵
-   （见 ``app/agent/events.py``）。
-2. **on_session_end 谁调**：LangChain 版在本模块收尾时手动 ``harness.run("on_session_end")``；
-   AgentScope 版由 ``HarnessAgentAdapter.on_reply`` 在框架内部改写最终 ``Msg``（L4 已落地），
-   所以这里拿到的 ``final_text`` **已经是审核后的**。别再补一次——重复审核会把哨兵文案二次
-   剥离，且 ``output_audit`` 的计数会翻倍。
-3. **会话恢复**：多了一份 ``agent_state.json``（``AgentState`` 全量落盘），下一轮优先从它恢复；
-   缺失时退回原来的「精简 (q,a) 回放」。两条腿都留着，见 :func:`_load_state`。
-
-复用 ``main_agent`` 里那几个**与运行时无关**的纯函数（运行时上下文拼装、产物落盘、配额记账），
-不复制一份：两份实现漂移是迁移期最难查的 bug。L8 删 main_agent 时把它们搬进本模块即可。
+与运行时无关的那几件事（当轮上下文拼装、产物落盘、配额记账）住在 ``app/agent/session_io.py``。
 """
 
 import asyncio
@@ -33,18 +27,18 @@ from agentscope.state import AgentState
 
 from app.agent.agents import build_main_agent
 from app.agent.events import pump_events
-from app.agent.main_agent import (
-    MAIN_AGENT_TIMEOUT_SEC,
-    _charge_quota,
-    _inject_runtime_context,
-    _write_session_artifacts,
-)
 from app.agent.platform_scope import platform_scope
 from app.agent.retrieval_budget import reset_tree as reset_retrieval_tree
+from app.agent.session_io import (
+    MAIN_AGENT_TIMEOUT_SEC,
+    charge_quota,
+    inject_runtime_context,
+    write_session_artifacts,
+)
 from app.agent.token_budget import budget_status, set_task_cap, tree_snapshot
 from app.agent.token_budget import reset_tree as reset_token_tree
 from app.agent.tracing import current_trace_id, turn_span
-from app.agent.usage import summarize_usage_msgs
+from app.agent.usage import summarize_usage
 from app.api import monitor
 from app.api.context import (
     begin_learned_prefs,
@@ -237,19 +231,23 @@ async def run_agent(
         begin_learned_prefs()
 
         # 入口只读近期行为历史；长期偏好等 planner 判出品类域之后由 preference_inject 注入
-        # （在这里读等于跨域全量注入，见 main_agent._inject_runtime_context 的说明）。
+        # （在这里读等于跨域全量注入，见 session_io.inject_runtime_context 的说明）。
         history_block = await build_history_block(user_id or "")
         pt = load_pt(session_dir)
         set_session_pt(pt)
 
         # 续聊恢复两条腿：优先 AgentState（模型视野的完整上下文），缺失退回精简 (q,a) 回放。
         prior_state = _load_state(session_dir)
-        agent, _session = await build_main_agent(original_query=query, state=prior_state)
+        agent, _session = await build_main_agent(
+            original_query=query,
+            image_paths=tuple(image_paths or ()),
+            state=prior_state,
+        )
         replay: list[Msg] = []
         if prior_state is None:
             replay = _replay_msgs(await load_prior_turns(thread_id, session_dir))
 
-        turn_query = _inject_runtime_context(
+        turn_query = inject_runtime_context(
             query,
             history_block,
             pt,
@@ -311,7 +309,7 @@ async def run_agent(
             reset_original_query()
             reset_session_pt()
             if snap is not None:
-                await _charge_quota(user_id, snap)
+                await charge_quota(user_id, snap)
 
         messages: list[Msg] = list(agent.state.context)
         # **final_text 取事件泵拿到的那条 Msg，不从 context 尾部取**：on_session_end 的输出审核
@@ -321,7 +319,7 @@ async def run_agent(
         # 本轮结束态落盘，供下一轮 / 换进程恢复（与 append_turn 双做，见 _save_state）。
         _save_state(session_dir, agent.state)
 
-        usage = summarize_usage_msgs(messages)
+        usage = summarize_usage(messages)
         logger.info(
             "usage thread=%s calls=%d carried=%d peak=%d out=%d cache_read=%d hit=%.1f%%",
             thread_id,
@@ -341,7 +339,7 @@ async def run_agent(
         if summary is not None and not items:
             final_text = summary.summary
 
-        _write_session_artifacts(session_dir, final_text, summary)
+        write_session_artifacts(session_dir, final_text, summary)
 
         elapsed_ms = int((time.monotonic() - started_at) * 1000)
         tokens: dict[str, Any] | None = None
