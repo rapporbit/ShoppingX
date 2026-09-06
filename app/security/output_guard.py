@@ -50,6 +50,23 @@ _SENSITIVE_PATTERNS: tuple[tuple[str, str], ...] = (
 _COMPILED = tuple((name, re.compile(pattern)) for name, pattern in _SENSITIVE_PATTERNS)
 
 
+# 订单号白名单。脱敏是「宁可漏放也不误杀」的取向，而订单号是**误杀代价最高**的那一类：用户拿
+# 着 GBX-000123 才能查单 / 取消，脱成 [已脱敏] 等于把他刚下的单弄丢了。策划基线里没有模式会命中
+# 它，但飞轮学到的字面规则是动态的（从 bad case 沉淀），可能哪天学出一条把它连坐进去——这道
+# 白名单是给那种情况兜底的。
+_ORDER_ID = re.compile(r"\bGBX-\d{4,}\b")
+
+
+def _restore_order_ids(original: str, cleaned: str) -> str:
+    """把被误脱敏的订单号放回去（原文里有、脱敏后没了的那些）。"""
+    if REDACTED not in cleaned:
+        return cleaned
+    for oid in dict.fromkeys(_ORDER_ID.findall(original)):
+        if oid not in cleaned:
+            cleaned = cleaned.replace(REDACTED, oid, 1)
+    return cleaned
+
+
 def audit_output(text: str) -> tuple[bool, str, list[str]]:
     """审核最终回答，返回 ``(是否干净, 脱敏后文本, 命中的模式名)``。
 
@@ -69,6 +86,7 @@ def audit_output(text: str) -> tuple[bool, str, list[str]]:
             cleaned, n = pattern.subn(REDACTED, cleaned)
             if n:
                 hits.append(name)
+        cleaned = _restore_order_ids(text, cleaned)
         if hits:
             logger.warning("输出审核命中敏感模式并已脱敏：%s", ", ".join(hits))
         return not hits, cleaned, hits

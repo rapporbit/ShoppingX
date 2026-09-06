@@ -15,6 +15,7 @@ import type {
   AguiEvent,
   HistoryTurn,
   LearnedPref,
+  OrderCardPayload,
   ProductItem,
   SessionMeta,
   SessionSnapshot,
@@ -35,6 +36,9 @@ export type Turn = {
   images: string[];
   events: AguiEvent[];
   items: ProductItem[];
+  // 本轮的订单卡（交易域）。与 items 并列而不是塞进 items：一件商品和一张订单是两种东西，
+  // 混在一起渲染层就得靠字段有无去猜「这张卡该画成什么」。
+  orderCard: OrderCardPayload | null;
   finalAnswer: string | null;
   // 收尾文案的流式预览（summary_delta 事件的累计全文）：任务还在跑时逐字渲染，让用户在
   // task_result 之前 ~10s 就开始读清单。定稿到达（task_result）即清空，finalAnswer 接管。
@@ -123,6 +127,7 @@ function rebuildTurns(history: HistoryTurn[]): Turn[] {
         images: h.images ?? [],
         events: [],
         items: [],
+        orderCard: null,
         finalAnswer: null,
         streamingText: null,
         status: "done",
@@ -244,7 +249,13 @@ export function useShoppingXTask() {
           const replayed = inflight.events ?? [];
           // 回放里的 items_preview 与实时路径同样待遇：不进 events（不是思考行），而是还原成商品卡——
           // 刷新 / 切回时已推过的卡片跟着回来，不必干等收尾重发一遍。取最后一条（picker 可能跑多次）。
-          const events = replayed.filter((e) => e.event !== "items_preview");
+          const events = replayed.filter(
+            (e) => e.event !== "items_preview" && e.event !== "order_card",
+          );
+          // 回放里的订单卡同样还原（取最后一条）：刷新页面后确认卡要还在——它是用户下一句
+          // 「确认」的唯一依据，消失了就等于逼他从头再说一遍买什么。
+          const lastOrder = [...replayed].reverse().find((e) => e.event === "order_card");
+          const orderCard = (lastOrder?.data as unknown as OrderCardPayload) ?? null;
           const lastPreview = [...replayed].reverse().find((e) => e.event === "items_preview");
           const previewItems = (lastPreview?.data.items as ProductItem[]) ?? [];
           // 澄清等待中刷新/切回：回放里最后一条 clarification_request 之后若还没出现 ask_user 的
@@ -286,6 +297,7 @@ export function useShoppingXTask() {
               images: inflight.images ?? [],
               events: [...events],
               items: previewItems,
+              orderCard,
               finalAnswer: null,
               streamingText: null,
               status: pendingQuestion !== null ? ("waiting" as TaskStatus) : "running",
@@ -413,6 +425,14 @@ export function useShoppingXTask() {
       if (evt.event === "items_preview") {
         const preview = (evt.data.items as ProductItem[]) ?? [];
         if (preview.length) patchLastTurn(() => ({ items: preview }));
+        return;
+      }
+
+      // 订单卡：确认卡 / 下单成功 / 已取消。同样不进 events（是结果本身，不是思考行）。
+      // 后到的覆盖先到的——一轮里最多一次交易动作，而「确认卡 → 下单成功」正是要覆盖的。
+      if (evt.event === "order_card") {
+        const payload = evt.data as unknown as OrderCardPayload;
+        patchLastTurn(() => ({ orderCard: payload }));
         return;
       }
 
@@ -545,7 +565,7 @@ export function useShoppingXTask() {
       // 追加一条活动轮（其余轮已冻结为历史）。不复位别的轮，多轮对话流逐条累加。
       setTurns((prevTurns) => [
         ...prevTurns,
-        { id: newId(), query, images: [], events: [], items: [], finalAnswer: null, streamingText: null, status: "connecting", errorMsg: null, elapsedMs: null, tokens: null, clarificationQuestion: null, learnedPrefs: [] },
+        { id: newId(), query, images: [], events: [], items: [], orderCard: null, finalAnswer: null, streamingText: null, status: "connecting", errorMsg: null, elapsedMs: null, tokens: null, clarificationQuestion: null, learnedPrefs: [] },
       ]);
       setStatusSafe("connecting");
 

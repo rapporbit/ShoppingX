@@ -15,6 +15,7 @@ import { FavoritesDrawer } from "./components/FavoritesDrawer";
 import { FinalAnswer } from "./components/FinalAnswer";
 import { LearnedPrefsBar } from "./components/LearnedPrefsBar";
 import { PreferenceDrawer } from "./components/PreferenceDrawer";
+import { OrderCard } from "./components/OrderCard";
 import { ProductCards } from "./components/ProductCards";
 import { QueryImages } from "./components/QueryImages";
 import { SimilarDrawer } from "./components/SimilarDrawer";
@@ -364,6 +365,10 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
                               onSimilar={setSimilarOf}
                             />
                           )}
+
+                          {/* 订单卡（交易域）：确认卡 / 下单成功 / 已取消。放在商品卡之后——
+                              先看到买的是什么，再看到这单的状态。 */}
+                          {turn.orderCard && <OrderCard payload={turn.orderCard} />}
 
                           {/* 本轮结束后在右下角用小字标注用时 + token 消耗（后端权威口径，实时与回看一致）。
                               token 总量主显，hover 看输入/输出/成本拆分（全树记账，含 fork 子 Agent）。 */}

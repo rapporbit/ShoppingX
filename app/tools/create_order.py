@@ -99,6 +99,14 @@ async def create_order(
         total = sum((c.price or 0.0) * qty_of.get(c.item_id, 1) for c in cands)
         currency = cands[0].currency
         mark_preview_shown(ids)
+        await monitor.report_order_card(
+            "preview",
+            {
+                "preview": preview,
+                "total_display": f"{total:.2f} {currency}",
+                "address": addr.masked(),
+            },
+        )
         await monitor.report_tool_end("create_order", confirmed=False, items=len(preview))
         return CreateOrderOutput(
             confirmed=False,
@@ -127,6 +135,7 @@ async def create_order(
         return CreateOrderOutput(note=f"[error] 下单失败：{e}")
 
     snap = order.snapshot()
+    await monitor.report_order_card("placed", {"order": snap})
     await monitor.report_tool_end("create_order", order_id=order.order_id)
     return CreateOrderOutput(
         confirmed=True,
