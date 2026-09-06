@@ -21,6 +21,24 @@ from pydantic import BaseModel
 from app.recall.schemas import RecallCandidate
 
 
+class FilteredOutItem(BaseModel):
+    """被过滤条件挡在候选池外的一件商品（``item_search`` 的探测召回产出）。
+
+    存在的理由是**可观测**：dense 召回带 price / rating filter 时，「库里根本没这个品类」和
+    「库里有但都超预算」在返回体里长得一模一样（都是 ``total_recall`` 很小），模型只能猜，
+    于是常常把后者说成前者——用户明明只要放宽 20 美元就能买到，却被告知「没找到」。
+    带上这几条被挡的样本，模型才有据可依地说「有货但都在预算外，最低 $X」。
+
+    **只报不推荐**：这些候选没进登记表（``_candidates.register``），不能出现在清单/商品卡里
+    ——它们恰恰是违反用户硬约束的那批。字段也刻意只留识别与解释所需的四个。
+    """
+
+    item_id: str
+    title: str
+    price_usd: float | None = None
+    reason: str  # 被挡原因（人话，直接给模型看，如「超预算（$45.90 > $30）」）
+
+
 class ItemCandidate(BaseModel):
     """一件商品候选，贯穿召回→比价→到手价→精挑全流程（字段渐进填充）。"""
 

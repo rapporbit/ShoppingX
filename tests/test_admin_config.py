@@ -33,6 +33,7 @@ CONST_MAP: dict[str, tuple[object, str]] = {
     "CATEGORY_MATCH_FLOOR": (item_search, "CATEGORY_MATCH_FLOOR"),
     "ITEM_SEARCH_RETRY_MIN_HITS": (item_search, "RETRY_MIN_HITS"),
     "ITEM_SEARCH_EXCLUDE_BUFFER": (item_search, "EXCLUDE_FETCH_BUFFER"),
+    "ITEM_SEARCH_PROBE_LIMIT": (item_search, "PROBE_LIMIT"),
     "PICK_DISPLAY_CAP": (item_picker, "PICK_DISPLAY_CAP"),
     "PICK_REL_SHOW_RATIO": (item_picker, "PICK_REL_SHOW_RATIO"),
     "PICK_W_MATCH_HARD": (item_picker, "_W_MATCH_HARD"),
