@@ -360,6 +360,23 @@ def get_as_judge_llm() -> ThrottledChatModel:
     )
 
 
+def build_as_judge_llm(temperature: float) -> ThrottledChatModel:
+    """判官档、**温度由调用方指定**（离线标注 / 多票投票用），AgentScope 侧。
+
+    与 :func:`get_as_judge_llm` 的区别只在温度来源：那个钉在 env 上（0.0，线上评测的尺子
+    不许自己抖），而 S0-2 的 golden 标注**要的恰恰是三档不同温度**——温度是三票投票的扰动源，
+    三票同温等于把同一次调用重复三遍，一致率虚高、分歧根本暴露不出来。
+
+    刻意不加 ``lru_cache``：温度是入参，缓存键会随之膨胀，而这类离线脚本一轮只建三个模型。
+    """
+    return _build_as_model(
+        os.environ.get("LLM_JUDGE") or os.environ["LLM_MAIN"],
+        temperature=temperature,
+        role="judge",
+        thinking=True,
+    )
+
+
 @lru_cache(maxsize=1)
 def get_as_fallback_llm() -> ThrottledChatModel | None:
     """备用模型：主模型重试用尽后由 ``ModelConfig.fallback_model`` 接手。

@@ -24,11 +24,11 @@ import logging
 from pathlib import Path
 from typing import Any, Literal
 
-from langchain_core.messages import AIMessage, AnyMessage
 from pydantic import BaseModel, Field, model_validator
 
 # 顶层 import 安全：tracing 只在 TYPE_CHECKING 下反向引用本模块，运行时无循环依赖。
 from app.agent.tracing import record_rubric_scores
+from app.eval.trace import extract_tool_calls
 
 logger = logging.getLogger(__name__)
 
@@ -123,18 +123,8 @@ class RubricResult(BaseModel):
 
 
 # ────────────────────────────── 轨迹抽取 ──────────────────────────────
-def extract_tool_calls(messages: list[AnyMessage]) -> list[dict[str, Any]]:
-    """从 run_agent 返回的 messages 里抽出（父 loop 的）工具调用序列。
-
-    自洽地从 messages 取，不依赖 monitor/WS（离线评测脚本没有连接）。fork 子 Agent 的内部调用在
-    各自 thread 的 messages 里、不进父序列，这里看到的是主 loop 的编排轨迹——正是 P1 要评的对象。
-    """
-    calls: list[dict[str, Any]] = []
-    for msg in messages:
-        if isinstance(msg, AIMessage):
-            for tc in msg.tool_calls or []:
-                calls.append({"name": tc.get("name", "?"), "args": tc.get("args", {})})
-    return calls
+# ``extract_tool_calls`` 从本模块搬去了 :mod:`app.eval.trace`（运行时中立，两套消息形态都吃），
+# 上面那行 import 同时充当 re-export，保住既有导入路径（测试与蒸馏脚本都从 rubric 取）。
 
 
 def render_trajectory(calls: list[dict[str, Any]]) -> str:

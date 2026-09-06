@@ -26,7 +26,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 import re
 import sys
 from collections import Counter
@@ -35,6 +34,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from app.agent.invoke import call_text  # noqa: E402
 from app.memory.domains import ALL_DOMAINS, DOMAIN_LABELS, infer_domains_from_text  # noqa: E402
 from app.tools.planner import budget_amount_grounded, resolve_budget_currency  # noqa: E402
 
@@ -290,19 +290,11 @@ def _parse(text: str, n: int) -> list[dict] | None:
 
 
 def _llm(temperature: float):
-    """judge 模型 + 指定温度。不复用 ``get_judge_llm()``：它的温度钉在 env 上（0.0），
+    """judge 模型 + 指定温度。不复用 ``get_as_judge_llm()``：它的温度钉在 env 上（0.0），
     而这里要的恰恰是**三档不同温度**——投票的扰动源之一。其余参数与线上判官一致。"""
-    from langchain.chat_models import init_chat_model
+    from app.agent.llm import build_as_judge_llm
 
-    return init_chat_model(
-        os.environ.get("LLM_JUDGE") or os.environ["LLM_MAIN"],
-        model_provider="openai",
-        api_key=os.environ["OPENAI_API_KEY"],
-        base_url=os.environ["OPENAI_BASE_URL"],
-        temperature=temperature,
-        timeout=REQ_TIMEOUT,
-        max_retries=2,
-    )
+    return build_as_judge_llm(temperature)
 
 
 async def _one_vote(llm, session: dict, cfg: dict) -> list[dict] | None:
@@ -314,10 +306,10 @@ async def _one_vote(llm, session: dict, cfg: dict) -> list[dict] | None:
     )
     for _ in range(2):  # 只重试一次：连着两次解析失败多半是这条会话本身怪，重试第三次也白搭
         try:
-            resp = await asyncio.wait_for(llm.ainvoke(prompt), timeout=REQ_TIMEOUT)
+            text = await asyncio.wait_for(call_text(llm, prompt), timeout=REQ_TIMEOUT)
         except Exception:
             continue
-        if parsed := _parse(str(resp.content), len(turns)):
+        if parsed := _parse(text, len(turns)):
             return parsed
     return None
 
