@@ -1,0 +1,111 @@
+# API —— 收请求、鉴权、配额、幂等、入队，然后立刻回 thread_id。它**不跑 AgentLoop**
+# （QUEUE_ENABLED=1 时），所以 CPU 曲线平、可以按 QPS 扩，跟 worker 各扩各的。这正是把两者
+# 拆开的收益：以前一个进程既收请求又烧 token，扩容只能整体扩。
+apiVersion: v1
+kind: Service
+metadata:
+  name: globex-api
+  namespace: globex
+spec:
+  selector:
+    app: globex-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+  # **粘性会话是当前架构的硬要求，不是优化**：`POST /api/task/{thread_id}/cancel` 与
+  # `/inflight` 读的是本进程的 active_tasks（影子协程的账本）。请求落到另一个副本，表现是
+  # 「点取消返回 404，任务照跑」。批2-4 已经把取消指令做成跨进程的了，缺的只是「没有本地
+  # handle 时也照发广播」这一小步——那属于代码改动，不该用 yaml 去糊。
+  # ClientIP 亲和的局限也要说清楚：它按**源 IP** 分，如果前面还有一层 Ingress/NAT，所有请求
+  # 的源 IP 会是同一个，亲和就退化成「全打到一个副本」。真要多副本，得在 Ingress 上按
+  # thread_id 的 cookie/header 做一致性哈希。
+  sessionAffinity: ClientIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: globex-api
+  namespace: globex
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: globex-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0 # 先起新的再摘旧的，滚动期间容量不掉
+  template:
+    metadata:
+      labels:
+        app: globex-api
+    spec:
+      # API 侧的优雅退出比 worker 简单得多：它手上只有「影子协程」（入队 + 等结果），任务本体在
+      # worker 里。30s 足够把在途的 HTTP 响应写完；剩下的由前端重连 WS + GET /api/task/{id} 接上。
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: api
+          # 同一个镜像，api 与 worker 只差一个 command —— 这是「两种进程、一份代码」的落地方式。
+          # 换成两个镜像的代价不是麻烦，是**版本可能不一致**：api 已经在发新版事件、worker 还在
+          # 跑旧代码，前端收到看不懂的字段，而两边都不报错。
+          image: globex-backend:latest
+          imagePullPolicy: IfNotPresent
+          command: ["uvicorn", "app.api.server:app", "--host", "0.0.0.0", "--port", "8000"]
+          # 单 uvicorn worker 是硬约束（同 docker/Dockerfile.backend）：active_tasks / 准入池 /
+          # 幂等窗口都是进程内状态，--workers 2 会让取消与去重在同一个 Pod 内部就静默失效。
+          # 要更多并发就加 replicas，不是加 --workers。
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: globex-config
+            - secretRef:
+                name: globex-secrets
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              memory: "2Gi"
+          # readiness 与 liveness 都指向 /api/health，但**语义不同、参数也不同**：
+          # readiness 决定「要不要给它流量」，失败就摘出 Endpoints；liveness 决定「要不要重启它」，
+          # 失败会杀 Pod。liveness 给的阈值宽得多——一次慢响应就重启进程，等于把抖动升级成故障。
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 6
+          lifecycle:
+            preStop:
+              exec:
+                # 摘 Endpoints 与发 SIGTERM 是**并行**发生的，kube-proxy / Ingress 的规则更新要几百
+                # 毫秒到几秒才传播到位。不 sleep 的话，进程已经开始关闭、流量还在往这里打 → 滚动
+                # 更新期间零星 502。这 5s 计入上面的 30s grace（preStop 用掉的时间是从 grace 里扣的，
+                # 这是最容易记反的一条）。
+                command: ["sh", "-c", "sleep 5"]
+          volumeMounts:
+            - name: artifacts
+              mountPath: /app/output
+              subPath: output
+            - name: artifacts
+              mountPath: /app/uploaded
+              subPath: uploaded
+            - name: artifacts
+              mountPath: /app/var
+              subPath: var
+      volumes:
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: globex-artifacts

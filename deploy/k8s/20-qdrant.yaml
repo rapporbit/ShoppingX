@@ -1,0 +1,89 @@
+# Qdrant —— 商品向量库（138 万点，全落盘）。
+#
+# **版本钉死不用 latest**：Qdrant 的 snapshot 内嵌 RocksDB 备份，跨大版本恢复会直接报
+# "failed to restore RocksDB backup"。用 latest 的话，某次 Pod 重建就悄悄升了级，等到要从
+# 快照恢复的那天才发现回不去——那通常正是最不想出意外的一天（见记忆 deployed-on-gcjp-vps）。
+apiVersion: v1
+kind: Service
+metadata:
+  name: qdrant
+  namespace: globex
+spec:
+  clusterIP: None
+  selector:
+    app: qdrant
+  ports:
+    - name: http
+      port: 6333
+      targetPort: 6333
+    - name: grpc
+      port: 6334
+      targetPort: 6334
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: qdrant
+  namespace: globex
+spec:
+  serviceName: qdrant
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qdrant
+  template:
+    metadata:
+      labels:
+        app: qdrant
+    spec:
+      # 索引重建一次要几十分钟，滚动更新时宁可多停一会儿也别把卷抢坏。
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: qdrant
+          image: qdrant/qdrant:v1.18.2
+          ports:
+            - name: http
+              containerPort: 6333
+            - name: grpc
+              containerPort: 6334
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+            limits:
+              memory: "6Gi"
+          # 探活用 /readyz 而不是 /：集合还在从磁盘加载时根进程已经能应答，过早放流量的表现是
+          # 「搜出来 0 条但不报错」——比直接 5xx 难查得多。
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 6333
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 6333
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          volumeMounts:
+            - name: storage
+              mountPath: /qdrant/storage
+            - name: snapshots
+              mountPath: /qdrant/snapshots
+  volumeClaimTemplates:
+    - metadata:
+        name: storage
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi
+    - metadata:
+        name: snapshots
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi
