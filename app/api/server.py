@@ -58,7 +58,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.agent.orchestrator import run_agent
-from app.api import accounts, admin, dedup, event_log, monitor
+from app.api import accounts, admin, backplane, dedup, event_log, monitor
 from app.api.auth import (
     auth_enabled,
     create_access_token,
@@ -187,6 +187,11 @@ async def lifespan(_app: FastAPI):
     # 队列开着、但工厂回落到了进程内实现（Redis 客户端建不起来）→ **API 自己兼任 worker**。
     # 不做这件事的后果不是「退回现状」而是全线静默卡死：入的队是本进程的 deque，独立 worker 进程
     # 消费的是它自己那份，两边永远碰不上，用户提交的每一条任务都停在排队中。
+    # 事件背板：订阅 Redis Pub/Sub，把**别的进程**（独立 worker）发的 AGUI 事件转发给挂在本进程
+    # 的 WebSocket。不订阅的话，队列模式下前端一条实时事件都收不到——任务在 worker 里跑，事件
+    # 也发在那边。默认跟随 QUEUE_ENABLED，单进程部署下是空操作。
+    event_backplane = await backplane.start_forwarding(monitor.get_connection_manager())
+
     queue_stop = asyncio.Event()
     queue_task: asyncio.Task[None] | None = None
     if queue_enabled() and isinstance(get_task_queue(), InProcessQueue):
@@ -204,6 +209,8 @@ async def lifespan(_app: FastAPI):
             queue_task.cancel()  # 关服就是关服，不在这里等在飞任务——那是独立 worker 的职责
             with suppress(asyncio.CancelledError):
                 await queue_task
+        if event_backplane is not None:
+            await event_backplane.stop()
         if alert_task is not None:
             alert_task.cancel()
             with suppress(asyncio.CancelledError):
