@@ -30,7 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from app.api import event_log
+from app.api import backplane, event_log
 from app.api.connection import ConnectionManager
 from app.api.context import get_session_dir, get_thread_id
 from app.observability import metrics
@@ -196,10 +196,18 @@ async def _emit(
 
     if thread_id is None:
         return
+    delivered = False
     try:
-        await _manager.send_to_thread(thread_id, payload)
+        delivered = await _manager.send_to_thread(thread_id, payload)
     except Exception:  # 兜底：上报链路任何异常都不许冒泡进 AgentLoop
         logger.exception("monitor emit failed: event=%s thread_id=%s", event, thread_id)
+
+    # 本进程投不出去时才上事件背板广播（跨进程转发，见 app/api/backplane.py）。
+    # **只在投不到时发**：worker 进程一条 WS 都没有，所以它的每条事件都会广播出去；而 API 进程
+    # 自己那条 WS 就在手边，直投成功了再广播一遍纯属白烧 Redis 带宽——接收端也只会发现「这个
+    # thread 我没有连接」然后丢掉。背板没开（单进程部署，默认）时这里是空操作。
+    if not delivered:
+        backplane.publish_event(payload)
 
 
 # --- 七类标准事件 + fork 的上报入口 -------------------------------------------
