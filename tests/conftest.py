@@ -94,7 +94,10 @@ def _clean_memory_tables() -> Iterator[None]:
     ``usage_ledger`` 也在此列且尤其要清：它按 ``(user_id, 当天)`` 累加，不清的话「上一个用例烧了
     多少 credit」会直接算进下一个用例的额度里——配额相关的断言会随**用例执行顺序**忽红忽绿。
 
-    只清这五张，不动 ``users`` / ``threads``（账户测试自己靠不同用户名隔离，且它们之间没有
+    ``strategies`` 是第六张，也是唯一**全局**的一张（无 user_id）——上面几张还能靠「用例各用各的
+    user_id」兜底，它连这条退路都没有，一个用例写进去的策略会被下一个用例的注入位读到。
+
+    只清这六张，不动 ``users`` / ``threads``（账户测试自己靠不同用户名隔离，且它们之间没有
     「同名 user 反复写」的问题）。
     """
     yield
@@ -110,6 +113,9 @@ def _clean_memory_tables() -> Iterator[None]:
                 "favorites",
                 "messages",
                 "usage_ledger",
+                # 策略是**全局**的（没有 user_id 这一列），所以它比上面几张更容易串台：
+                # 用例之间连「换个 user_id 隔离」这条退路都没有，必须清。
+                "strategies",
             ):
                 await db.execute(text(f"DELETE FROM {table}"))  # noqa: S608 —— 表名是字面量常量
             await db.commit()

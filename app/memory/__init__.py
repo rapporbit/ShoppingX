@@ -6,6 +6,8 @@
 - :mod:`app.memory.session_state`：会话级短期状态 P_t（本轮约束，落 pt.json，不进长期库）。
 - :mod:`app.memory.injector`：偏好读出格式化注入 + 唯一落库口 ``persist_new_preferences``。
 - :mod:`app.memory.curator`：会话结束后独立跑的记忆管家——长期库的**唯一**判定 / 写入路径。
+- :mod:`app.memory.strategies`：成功策略库（18-4）——学的是 **Agent 的打法**而非用户的取向，
+  全局无 user_id，与 curator 那条路并列、零共享状态（两张表、两个 Store）。
 """
 
 from app.memory.domains import PrefDomain
@@ -21,6 +23,13 @@ from app.memory.store import (
     PreferenceStore,
     get_store,
 )
+from app.memory.strategies import (
+    Strategy,
+    StrategyStore,
+    get_strategy_store,
+    match_strategies,
+    render_strategy_block,
+)
 
 __all__ = [
     "FavoriteItem",
@@ -28,8 +37,13 @@ __all__ = [
     "PrefDomain",
     "PreferenceEntry",
     "PreferenceStore",
+    "Strategy",
+    "StrategyStore",
     "build_preference_block",
     "format_preferences",
     "get_store",
+    "get_strategy_store",
+    "match_strategies",
     "persist_new_preferences",
+    "render_strategy_block",
 ]

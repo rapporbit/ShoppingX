@@ -31,6 +31,7 @@ def setup_harness() -> None:
     import app.harness.hooks.security  # noqa: F401  安全护栏 L1 白名单 / L3 过滤 / L4 脱敏
     import app.harness.hooks.session_hooks  # noqa: F401  阶段复位 + 输出审核
     import app.harness.hooks.step_validator  # noqa: F401  Schema/Sequencing/Semantic
+    import app.harness.hooks.strategy_inject  # noqa: F401  成功策略：system prompt 注入 + 结账
     import app.harness.hooks.terminal_enforce  # noqa: F401  终结纪律（当场重发模型）
     import app.harness.hooks.tool_breaker  # noqa: F401  工具级熔断（闸 + 计数）
     import app.harness.hooks.tool_gates  # noqa: F401  终结硬停/深度/检索/fork/预算 各硬闸

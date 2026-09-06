@@ -126,9 +126,11 @@ class TestHarnessMiddleware:
             h.register("invalid_point", "x", noop)
 
     def test_hook_points_complete(self) -> None:
-        assert len(HOOK_POINTS) == 6
+        assert len(HOOK_POINTS) == 7
         assert "on_session_start" in HOOK_POINTS
         assert "on_session_end" in HOOK_POINTS
+        # 批 4-2 加的装配期钩子：不属于任何一次模型 / 工具调用，跑在 agents._assemble 里。
+        assert "on_system_prompt" in HOOK_POINTS
 
 
 # ============================================================

@@ -1,8 +1,14 @@
 """Harness Hook Pipeline：Agent 全生命周期的统一治理入口。
 
-6 个 Hook 点覆盖 Agent 完整生命周期：
+7 个 Hook 点覆盖 Agent 完整生命周期：
 
-    on_session_start → pre_think → pre_tool_call → post_tool_call → post_reflect → on_session_end
+    on_session_start → on_system_prompt → pre_think → pre_tool_call → post_tool_call
+    → post_reflect → on_session_end
+
+``on_system_prompt`` 与其余六个不同：它是**装配期**的（``agents._assemble`` 拼 system prompt 时
+跑一次），不属于任何一次模型 / 工具调用。放在这里而不是「注入一条 system 消息」，是因为策略这类
+内容要在**每一轮**都对模型有效，而消息注入只影响它被塞进去的那一轮；而且 system 段是缓存前缀
+所在，把内容拼进它的末尾比每轮多发一条消息更省 token。
 
 每个 Hook 接收 context dict、返回（可能修改过的）context dict 或 None（不修改）。
 Hook 按 priority 升序执行（低 priority 先执行），单个 Hook 异常不中断整个 Pipeline。
@@ -28,6 +34,7 @@ HookFn = Callable[[dict[str, Any]], Awaitable[dict[str, Any] | None]]
 
 HOOK_POINTS: list[str] = [
     "on_session_start",
+    "on_system_prompt",
     "pre_think",
     "pre_tool_call",
     "post_tool_call",
