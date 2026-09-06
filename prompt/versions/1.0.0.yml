@@ -1,0 +1,18 @@
+# ShoppingX 提示词版本 1.0.0 —— **基线版**（= 现行 prompt/prompts.yml 原样，零覆盖）。
+#
+# 版本文件是「叠加层」，不是提示词副本：正文只住在 prompt/prompts.yml 一处（单一事实源），
+# 每个版本文件只写它相对基线**改动的那几个键**。1.0.0 是基线本身，故 overrides 为空。
+#
+# 为什么不做成「每个版本一份完整 yml」：那等于把 471 行正文复制 N 份，改一处主文件就要手工同步
+# N 次——漂了也不报错，只是某个桶的用户悄悄跑在半旧的提示词上。叠加层让「没写的键」在结构上
+# 不可能漂（它压根不在这个文件里）。同一思路见批 0 L2 的「新旧壳共用 _impl」。
+#
+# 字段：
+#   base      —— 继承谁。"prompts.yml" 表示直接继承主文件；也可写另一个版本号形成链。
+#   overrides —— 相对 base 的覆盖，键必须在 base 里已存在（拼错会被 prompts.py 拒掉，不静默忽略）。
+#                顶层值为 dict 的键（如 sub_agents）做**一层递归合并**：只写要改的子键即可。
+#   notes     —— 这版改了什么、为什么（同一句话进 prompt/CHANGELOG.md）。
+
+base: prompts.yml
+notes: 基线版：与 prompt/prompts.yml 逐字相同，A/B 的对照组。
+overrides: {}

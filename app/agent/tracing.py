@@ -227,13 +227,23 @@ def tracing_middlewares() -> list[Any]:
 
 
 @contextmanager
-def turn_span(session_id: str | None = None, user_id: str | None = None) -> Iterator[Any]:
+def turn_span(
+    session_id: str | None = None,
+    user_id: str | None = None,
+    prompt_version: str | None = None,
+    ab_bucket: int | None = None,
+) -> Iterator[Any]:
     """把一轮 ``run_agent`` 包成一条 trace 的根 span（无 client 时是个空壳，不改变行为）。
 
     根 span 必须由 Langfuse 自己的 tracer 起：它没有 ``gen_ai.*`` 属性，若用 AgentScope 的
     tracer 起会被 Langfuse 的 span 过滤器丢掉——子 span 照样上报，但 trace 少了根，UI 里
     看到的是一堆没有归属的观测。``propagate_attributes`` 负责把 session / user 顺着上下文
     抹到本轮所有子 span 上（Langfuse 的聚合查询按这两个维度做，只设在根上是不够的）。
+
+    ``prompt_version`` / ``ab_bucket`` 走同一条 propagate 通道（批 4 / 18-3）：前者用 Langfuse
+    原生的 ``version`` 维度（UI 里能直接按版本切分对比），后者进 metadata。**两个都要**——只有
+    版本时看不出「这个人是被分进来的还是手工钉的」，桶号是把线上 trace 与离线 A/B 报告对上账的
+    唯一钥匙。
     """
     client = _get_client()
     if client is None:
@@ -245,8 +255,12 @@ def turn_span(session_id: str | None = None, user_id: str | None = None) -> Iter
         from langfuse import propagate_attributes
 
         with client.start_as_current_observation(name="shoppingx.turn", as_type="agent") as span:
+            metadata = {"ab_bucket": ab_bucket} if ab_bucket is not None else None
             with propagate_attributes(
-                session_id=session_id or None, user_id=user_id or None
+                session_id=session_id or None,
+                user_id=user_id or None,
+                version=prompt_version or None,
+                metadata=metadata,
             ):
                 _current_trace_id.set(client.get_current_trace_id())
                 yielded = True

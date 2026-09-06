@@ -213,6 +213,13 @@ class UsageLedger(Base):
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     task_count: Mapped[int] = mapped_column(Integer, default=0)
 
+    # 该用户当时所处的提示词 A/B 版本（批 4 / 18-3）。**不进唯一键**：唯一键一旦变成
+    # (user, period, version)，同一个人跨版本就会各拿一份日额度——改一次放量比例等于给一批人
+    # 免费续杯，配额闸当场漏。这里只是「最近一次记账时他在哪一版」的标签，后写覆盖先写；版本按
+    # user_id 稳定，同一天内改变只可能发生在「运维刚好调了放量比例」的那一刻，对成本归因的影响
+    # 是一天里的一行，可接受。要逐轮精确归因看 Langfuse trace（那里每轮都带 version + ab_bucket）。
+    prompt_version: Mapped[str] = mapped_column(String(16), default="")
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=func.now()
     )

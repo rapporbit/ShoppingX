@@ -144,3 +144,51 @@ def test_flush_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(T, "_get_client", lambda: _Client())
     T.flush_traces()  # 不抛即通过
+
+
+def test_turn_span_propagates_prompt_version_and_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A/B 归属要**顺着 propagate 通道抹到本轮所有子 span**，不能只设在根上（批 4 / 18-3）。
+
+    只设在根 span 上时，Langfuse 里按 version 聚合会漏掉所有模型 / 工具 span——版本对比表
+    看起来「有数据」，但成本与延迟那两列是空的。
+    """
+    import contextlib
+
+    import langfuse
+
+    captured: dict[str, Any] = {}
+
+    @contextlib.contextmanager
+    def _fake_propagate(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        yield None
+
+    monkeypatch.setattr(langfuse, "propagate_attributes", _fake_propagate, raising=False)
+    monkeypatch.setattr(T, "_get_client", lambda: _FakeSpanClient())
+    with T.turn_span(session_id="t1", user_id="u1", prompt_version="1.1.0", ab_bucket=7):
+        pass
+
+    assert captured["version"] == "1.1.0"  # Langfuse 原生维度，UI 里可直接切分
+    assert captured["metadata"] == {"ab_bucket": 7}
+    assert captured["session_id"] == "t1" and captured["user_id"] == "u1"
+
+
+def test_turn_span_without_ab_info_sends_no_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    """没有 A/B 信息时不塞空 metadata：trace 上多一个恒为 None 的维度只会污染聚合。"""
+    import contextlib
+
+    import langfuse
+
+    captured: dict[str, Any] = {}
+
+    @contextlib.contextmanager
+    def _fake_propagate(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        yield None
+
+    monkeypatch.setattr(langfuse, "propagate_attributes", _fake_propagate, raising=False)
+    monkeypatch.setattr(T, "_get_client", lambda: _FakeSpanClient())
+    with T.turn_span(session_id="t1"):
+        pass
+
+    assert captured["metadata"] is None and captured["version"] is None

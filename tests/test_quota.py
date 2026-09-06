@@ -13,9 +13,12 @@ from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
 import app.api.server as server
 from app.db import quota
+from app.db.models import UsageLedger
+from app.db.session import session_factory
 
 pytestmark = pytest.mark.anyio
 
@@ -131,3 +134,31 @@ async def test_remaining_usd_caps_task_budget(monkeypatch: Any, tmp_path: Any) -
         token_budget.set_task_cap(10.0)
         assert abs(token_budget.budget_cap_usd() - 0.50) < 1e-6
         token_budget.reset_tree()
+
+
+async def test_prompt_version_recorded_and_not_erased(client: AsyncClient) -> None:
+    """账本记下用户当时所在的提示词 A/B 版本；**空串不覆盖**已记的版本。
+
+    这一列是「哪一版烧了多少钱」的唯一库内证据（逐轮精确归因看 trace）。若空串也照写，一次
+    没带版本的记账就把归属抹成「未知」——账本里一行不知道归谁比一行旧版本更难查。
+    """
+    uid, _ = await _signup(client, "q-promptver")
+    await quota.add_usage(uid, 0.1, prompt_version="1.1.0")
+
+    async with session_factory()() as db:
+        row = (
+            await db.execute(
+                select(UsageLedger).where(UsageLedger.user_id == uid)
+            )
+        ).scalar_one()
+        assert row.prompt_version == "1.1.0"
+
+    await quota.add_usage(uid, 0.1)  # 没带版本的一次记账
+    async with session_factory()() as db:
+        row = (
+            await db.execute(
+                select(UsageLedger).where(UsageLedger.user_id == uid)
+            )
+        ).scalar_one()
+        assert row.prompt_version == "1.1.0"  # 仍是原来那一版，没被抹掉
+        assert row.task_count == 2
