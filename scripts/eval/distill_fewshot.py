@@ -25,10 +25,9 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from langchain_core.messages import AIMessage, messages_from_dict  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
-from app.eval.rubric import extract_tool_calls  # noqa: E402
+from app.eval.trace import extract_tool_calls, last_assistant_text, load_history  # noqa: E402
 
 REPORT_PATH = Path("data/eval/rubric_report.json")
 DISTILLED_PATH = Path("prompt/few_shot_distilled.yml")
@@ -70,15 +69,11 @@ def _load_high_score_traces(report_path: Path) -> list[dict]:
         if not r.get("ok") or not r["result"].get("is_high_score"):
             continue
         qid = r["id"]
-        hist = Path(f"output/eval_{qid}/history.json")
-        tools: list[str] = []
-        final = ""
-        if hist.exists():
-            msgs = messages_from_dict(json.loads(hist.read_text(encoding="utf-8")))
-            tools = [c["name"] for c in extract_tool_calls(msgs)]
-            final = next(
-                (m.text for m in reversed(msgs) if isinstance(m, AIMessage) and m.text), ""
-            )
+        # ``load_history`` 两套运行时的落盘格式都吃（见 app/eval/trace.py）：LangChain 那条是
+        # ``messages_to_dict`` 的 ``{"type","data"}``，AgentScope 那条是 ``Msg.model_dump()``。
+        msgs = load_history(Path(f"output/eval_{qid}/history.json"))
+        tools = [c["name"] for c in extract_tool_calls(msgs)]
+        final = last_assistant_text(msgs)
         traces.append(
             {
                 "id": qid,

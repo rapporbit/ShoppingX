@@ -35,9 +35,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from app.agent.main_agent import run_agent  # noqa: E402
+from app.agent.runtime import resolve_run_agent  # noqa: E402
 from app.agent.tracing import flush_traces  # noqa: E402
 from app.observability import alerts  # noqa: E402
+
+run_agent = resolve_run_agent()  # 运行时由 .env 的 AGENT_RUNTIME 定（批 0 迁移期）
 
 QUERIES_PATH = Path("data/eval/queries.jsonl")
 OUT_PATH = Path("data/eval/tool_rt_baseline.json")

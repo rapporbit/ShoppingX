@@ -106,6 +106,30 @@ def test_extract_tool_calls_in_order() -> None:
     assert "2. item_search(" in rendered
 
 
+def test_extract_tool_calls_from_agentscope_msgs() -> None:
+    """新运行时的形态也要走通同一个入口——``rubric.evaluate`` 拿到的 messages 由 AGENT_RUNTIME 决定。
+
+    双运行时的完整契约在 ``tests/test_eval_trace.py``，这里只钉「rubric 这个入口没漏接」。
+    """
+    from agentscope.message import Msg, TextBlock, ToolCallBlock
+
+    messages = [
+        Msg(name="user", role="user", content=[TextBlock(type="text", text="买个旅行包")]),
+        Msg(
+            name="assistant",
+            role="assistant",
+            content=[
+                ToolCallBlock(id="1", name="planner", input='{"intent": "买包"}'),
+                ToolCallBlock(id="2", name="item_search", input='{"query": "旅行包"}'),
+                TextBlock(type="text", text="给你清单"),
+            ],
+        ),
+    ]
+    calls = extract_tool_calls(messages)
+    assert [c["name"] for c in calls] == ["planner", "item_search"]
+    assert "query=旅行包" in render_trajectory(calls)
+
+
 def test_render_empty_trajectory() -> None:
     assert "未调用任何工具" in render_trajectory([])
 
