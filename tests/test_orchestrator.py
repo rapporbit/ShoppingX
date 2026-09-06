@@ -362,7 +362,7 @@ async def test_task_dispatch_rejects_platform_user_did_not_enable(
     from app.agent.platform_scope import platform_scope
 
     with platform_scope(["amazon"]):
-        chunk = await task_dispatch("在 shopee 上找一个帆布旅行包，预算 300")
+        chunk = await task_dispatch("在 shopee 上找一个帆布旅行包，预算 300", "search")
     assert chunk.state == ToolResultState.ERROR
     assert "未启用 shopee" in _chunk_text(chunk)
 
@@ -379,7 +379,7 @@ async def test_task_dispatch_turns_worker_failure_into_tool_result(
 
     monkeypatch.setattr("app.agent.agents.build_worker_agent", _boom)
     with platform_scope(["amazon"]):
-        chunk = await dt.task_dispatch("在 amazon 上找帆布旅行包")
+        chunk = await dt.task_dispatch("在 amazon 上找帆布旅行包", "search")
     assert chunk.state == ToolResultState.ERROR
     text = _chunk_text(chunk)
     assert "[task_dispatch 错误] RuntimeError" in text and "worker 起不来" in text
@@ -391,7 +391,7 @@ async def test_task_dispatch_depth_limited(monkeypatch: pytest.MonkeyPatch) -> N
     from app.agent.fork_guard import enter_fork
 
     with enter_fork():
-        chunk = await task_dispatch("再派一层")
+        chunk = await task_dispatch("再派一层", "search")
     assert chunk.state == ToolResultState.ERROR
     assert "深度已达上限" in _chunk_text(chunk)
 
@@ -415,6 +415,52 @@ async def test_task_dispatch_returns_worker_text(monkeypatch: pytest.MonkeyPatch
     assert chunk.state == ToolResultState.SUCCESS
     assert _chunk_text(chunk) == "找到 3 件"
     assert chunk.metadata["subagent_type"] == "search"
+
+
+async def test_task_dispatch_rejects_trade_before_trade_domain_ready() -> None:
+    """交易域（7.2）落地前，``trade`` 在入口就拒——派过去是零工具 Agent 空转到超时。"""
+    from app.agent.dispatch_tool import task_dispatch
+    from app.agent.tool_registry import trade_tools_ready
+
+    if trade_tools_ready():
+        pytest.skip("交易域已就绪，本条只覆盖未就绪期")
+    chunk = await task_dispatch("取消订单 GBX-1", "trade")
+    assert chunk.state == ToolResultState.ERROR
+    assert "交易能力尚未启用" in _chunk_text(chunk)
+
+
+async def test_buyer_preferences_injected_for_search_not_trade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """偏好由**服务端**注入，且只给 SearchAgent。
+
+    TradeAgent 不注入：偏好影响不了「下哪一单」（那由主 Agent 给定的 item_id 决定），给了只是
+    一份可能被转述进订单参数的噪声。
+    """
+    from app.agent import dispatch_tool as dt
+    from app.agent.platform_scope import platform_scope
+
+    seen: list[str] = []
+
+    class _Worker:
+        async def reply(self, msg: Any) -> Msg:
+            seen.append(msg.get_text_content() or "")
+            return Msg(name="w", role="assistant", content=[TextBlock(type="text", text="ok")])
+
+    async def _build(_kind: str = "search") -> Any:
+        return _Worker()
+
+    monkeypatch.setattr("app.agent.agents.build_worker_agent", _build)
+    monkeypatch.setattr(dt, "get_user_id", lambda: "u1")
+    monkeypatch.setattr(dt, "build_preference_block", _fake_pref_block)
+    with platform_scope(["amazon"]):
+        await dt.task_dispatch("在 amazon 上找帆布旅行包", "search")
+    assert "<buyer-preferences>" in seen[0] and "不要塑料" in seen[0]
+    assert seen[0].endswith("在 amazon 上找帆布旅行包")  # 偏好在前、子任务在后
+
+
+async def _fake_pref_block(_user_id: str, *_a: Any, **_kw: Any) -> str:
+    return "- [material.no_plastic] 不要塑料（材质，排斥）"
 
 
 # ---------- 装配：一 loop 一份控制面 ----------
