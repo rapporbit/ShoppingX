@@ -16,6 +16,7 @@ import { FinalAnswer } from "./components/FinalAnswer";
 import { LearnedPrefsBar } from "./components/LearnedPrefsBar";
 import { PreferenceDrawer } from "./components/PreferenceDrawer";
 import { OrderCard } from "./components/OrderCard";
+import { OrdersDrawer } from "./components/OrdersDrawer";
 import { ProductCards } from "./components/ProductCards";
 import { QueryImages } from "./components/QueryImages";
 import { SimilarDrawer } from "./components/SimilarDrawer";
@@ -149,6 +150,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
   // 手机上抽屉盖着大半个屏幕，点完不关，用户就看不到自己刚打开的那段对话。
   const [navOpen, setNavOpen] = useState(false);
   const [favsOpen, setFavsOpen] = useState(false);
+  const [ordersOpen, setOrdersOpen] = useState(false);
   // 「搜同款」抽屉：存的是**源商品**（点了哪张卡），非 null 即打开——相似结果由抽屉自己现拉。
   const [similarOf, setSimilarOf] = useState<ProductItem | null>(null);
 
@@ -249,6 +251,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
           onOpenSettings={() => setSettingsOpen(true)}
           onOpenAdmin={isAdmin ? () => setAdminOpen(true) : null}
           onOpenFavorites={() => setFavsOpen(true)}
+          onOpenOrders={() => setOrdersOpen(true)}
           onLogout={onLogout}
           onOpenNav={() => setNavOpen(true)}
         />
@@ -438,6 +441,8 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
         onClose={() => setFavsOpen(false)}
         onChanged={setFavorites}
       />
+
+      <OrdersDrawer open={ordersOpen} onClose={() => setOrdersOpen(false)} />
 
       <SimilarDrawer source={similarOf} onClose={() => setSimilarOf(null)} />
 
