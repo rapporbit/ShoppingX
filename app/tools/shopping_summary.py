@@ -34,8 +34,10 @@ from app.api import monitor
 from app.api.context import get_dest_country, is_dest_country_assumed
 from app.tools._args import drop_none_values
 from app.tools._bundle import (
+    SLOT_MODE_PARALLEL,
     drop_pick_from_report,
     get_bundle_report,
+    get_session_mode,
     refresh_report_prices,
     render_allocation,
     slot_display,
@@ -67,9 +69,13 @@ class SummaryItem(BaseModel):
     landed_usd: float | None = None
     price_usd: float | None = None
     reason: str = ""
-    # 套装槽位名（「一套齐」轮才非空）：前端据此把卡片按槽分组渲染（组头 = 槽名 + 该槽花费）。
+    # 套装槽位名（「一套齐」/「多类并列」轮才非空）：前端据此把卡片按槽分组渲染。
     # 走结构化字段而不是理由文案里的【槽名】前缀——前缀会被收尾 LLM 重写叙事句时丢掉（实测）。
     slot: str = ""
+    # 槽位形态（``parallel`` 才非空）：前端分组视图据此决定要不要显示「这一套合计 $X」——
+    # 并列的几类东西加总没有意义。每件都带一份是冗余的，但换来事件协议零改动（items 是
+    # task_result 里唯一的结构化载荷），比为一个布尔加一层 payload 划算。
+    slot_mode: str = ""
     # 商品图 URL / 商品页 URL：均不喂给 LLM、不由它生成（防 URL 幻觉），收尾按 item_id 从原候选
     # 回填真实值。image_url 供卡片显图，url 供点击跳转到该平台商品页。
     image_url: str = ""
@@ -355,6 +361,18 @@ def _bundle_note(picks: list[ItemCandidate]) -> str:
     if not report:
         return ""
     report = refresh_report_prices(report, picks)
+    if report.get("mode") == SLOT_MODE_PARALLEL:
+        # 并列轮：**不是一套**，把 bundle 那段「总价 vs 总预算 / 砍了哪个槽」的口径塞给模型，
+        # 它就会老老实实把跑鞋和耳机的价格加起来讲成「这一套合计」——那个数字没有意义。
+        return (
+            "本轮是**多类并列**推荐（用户一次要看几类互不相干的东西），分组如下"
+            "（确定性计算结果，照实转述、不得改数）：\n"
+            f"{render_allocation(report)}\n"
+            "文案必须**按类分段**讲：每类各推荐了什么、这一类里为什么是这几件；"
+            "**绝不要把几类的价格加总**、也不要写成「这一套」——它们不配套。"
+            "预算是**每件**的上限，不是几类的总额。搜了但没找到货的类如实说；"
+            "「本轮未检索的类」不是缺货，不要写成没找到。\n\n"
+        )
     return (
         "这是一次「一套齐」套装推荐，预算分配如下（确定性计算结果，照实转述、不得改数）：\n"
         f"{render_allocation(report)}\n"
@@ -473,6 +491,9 @@ async def shopping_summary(
         # hydrate 的全量候选，url/image 不穿过模型）。reason 两档：前 N 件用模型写的叙事句，其余
         # （以及模型漏写 / 写崩的那几件）用 item_picker 算好的确定性理由。顺序 = picks 顺序。
         items: list[SummaryItem] = []
+        # 形态只查一次（会话级常量），逐件重复的是同一个值。
+        mode = get_session_mode()
+        slot_mode = SLOT_MODE_PARALLEL if mode == SLOT_MODE_PARALLEL else ""
         for c in picks:
             # url/image 优先从登记表按 item_id 取真实值（无 session / 单测直传 picks 时退回 c）。
             src = enrich(c.item_id) or c
@@ -493,6 +514,7 @@ async def shopping_summary(
                     url=src.url,
                     # 内部盖章是槽 id；出卡片映射成展示名（旧会话按名字盖的章原样透传）。
                     slot=slot_display(src.slot or c.slot),
+                    slot_mode=slot_mode,
                 )
             )
         out = ShoppingSummaryOutput(summary=draft.summary, items=items)

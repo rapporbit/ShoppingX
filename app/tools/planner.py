@@ -69,6 +69,8 @@ from app.recall.geo import (
 from app.tools._args import drop_none_values
 from app.tools._bundle import (
     MAX_SLOTS,
+    SLOT_MODE_BUNDLE,
+    SLOT_MODE_PARALLEL,
     BundleSlot,
     reset_session_bundle,
     set_session_bundle,
@@ -383,11 +385,26 @@ class PlanOutput(BaseModel):
     bundle_slots: list[BundleSlot] = Field(
         default_factory=list,
         description=(
-            "「一套齐」跨品类套装需求专用（「新生入学一套」「露营装备一套」「旅行三件套」）：把这"
-            "一套拆成 2~6 个子品类槽位（name 中文槽名 / keywords 英文检索词 / prefer 槽级偏好词 / "
-            "essential 少了它这套是否就不成立）。**单品类需求一律留空**（哪怕买多件同类）。"
+            "**本轮要买的东西跨了 2~6 个不同品类**时把它拆成槽位（name 中文槽名 / keywords "
+            "英文检索词 / prefer 槽级偏好词 / essential 少了它这套是否就不成立）。两种情形都要拆"
+            "（哪一种由 slot_mode 说明）：①「一套齐」配套需求（「新生入学一套」「旅行三件套」）；"
+            "② 一次点名几类**互不相干**的东西（「想买双跑鞋，再配个降噪耳机」）。"
+            "**单品类需求一律留空**（哪怕买多件同类）。"
             "**每槽附 evidence**：用户原话点名了这件就照抄那个片段；是你按常识推断补的就留空——"
-            "系统据此判断「套装组成要不要先跟用户确认」。"
+            "系统据此判断「组成要不要先跟用户确认」。"
+        ),
+    )
+    slot_mode: str = Field(
+        default="bundle",
+        description=(
+            "bundle_slots 非空时才有意义，二选一：\n"
+            "- bundle：用户要的是**配套的一整套**，各件互相搭配、共享一个总预算、锦上添花的那件"
+            "预算紧时可以砍（「新生入学一套 1500」「露营装备一套」）。\n"
+            "- parallel：用户一次要看**几类互不相干**的东西，各类各自推荐、不配套、也不许砍掉"
+            "任何一类（「想买双跑鞋，再配个降噪耳机」「帮我看看猫粮和一个加湿器」）。\n"
+            "判据是「少了其中一件，剩下的还成立吗」：一套床品缺了被子就不成套 → bundle；"
+            "跑鞋和耳机各买各的、缺一个另一个照样有用 → parallel。拿不准填 parallel"
+            "（并列形态不会替用户砍掉任何一类，判错的代价更小）。"
         ),
     )
     keywords: list[str] = Field(default_factory=list, description="检索关键词，供 item_search")
@@ -479,11 +496,15 @@ class PlanOutput(BaseModel):
 
     @model_validator(mode="after")
     def _clean_bundle_slots(self) -> PlanOutput:
-        """套装槽位的机制收口：去空名、按名去重、封顶 MAX_SLOTS；**不足 2 槽直接清空**。
+        """槽位的机制收口：去空名、按名去重、封顶 MAX_SLOTS；**不足 2 槽直接清空**。
 
-        「是不是套装」由 ``len(bundle_slots) >= 2`` 这一个机制判据决定（下游 item_picker 据
-        会话里有没有 ≥2 槽切组合模式），不设 is_bundle 布尔让模型另判一遍——单槽的「套装」
+        「本轮是不是槽位轮」由 ``len(bundle_slots) >= 2`` 这一个机制判据决定（下游 item_picker
+        据会话里有没有 ≥2 槽切分组模式），不设 is_bundle 布尔让模型另判一遍——单槽的「套装」
         就是普通单品类需求，留着只会让下游多一个半激活的歧义态。
+
+        形态（``slot_mode``）另收两道口：① 非法值一律落 bundle（保持既有行为）；② parallel 下
+        ``essential`` 强制 True——并列需求里「可选」这个概念不存在，用户点名的每一类都得给交代，
+        留着 False 只会让报告把某一类讲成「已放弃的可选项」。
         """
         seen: set[str] = set()
         cleaned: list[BundleSlot] = []
@@ -498,6 +519,11 @@ class PlanOutput(BaseModel):
             s.id = ""
             cleaned.append(s)
         self.bundle_slots = cleaned[:MAX_SLOTS] if len(cleaned) >= 2 else []
+        if self.slot_mode not in (SLOT_MODE_BUNDLE, SLOT_MODE_PARALLEL):
+            self.slot_mode = SLOT_MODE_BUNDLE
+        if self.slot_mode == SLOT_MODE_PARALLEL:
+            for s in self.bundle_slots:
+                s.essential = True
         return self
 
 
@@ -717,7 +743,7 @@ async def planner(intent: str) -> PlanOutput:
     # 套装登记：validator 已收口成「≥2 槽或空」。只主 loop 写（同上 reset 的深度闸——子 Agent
     # 本就不该调 planner，真调了也不能让它覆盖主 loop 的套装定义）。
     if plan.bundle_slots and current_fork_depth() == 0:
-        set_session_bundle(plan.bundle_slots)
+        set_session_bundle(plan.bundle_slots, mode=plan.slot_mode)
     # 货币确定性：无视模型对 currency / budget_usd 的自由猜测，用规则解析币种 + fx 静态表折算回填。
     # 这是修「预算 500 每轮被猜成不同币种 → 预算内空召回退化」的关键一步（确定性，可复现）。
     code, explicit = resolve_budget_currency(intent)
@@ -795,13 +821,23 @@ async def planner(intent: str) -> PlanOutput:
         # 检索前先 web_search 翻译成品类词——此阶段 item_search 未跑，web_search 门控本就放行。
         plan_lines.append("意图接地：含新说法/时效词，建议检索前先 web_search 翻译成品类词")
     if plan.bundle_slots:
-        slot_bits = [f"{s.name}({'必备' if s.essential else '可选'})" for s in plan.bundle_slots]
-        bundle_line = "套装槽位：" + "、".join(slot_bits)
-        # 有槽位是推断补的（用户没逐一点名）→ 明示出来：主 loop 据此决定要不要先 ask_user
-        # 让用户对组成增删确认（「一套」的说法本就不唯一，别替用户拍板）。
-        if any(not s.evidence.strip() for s in plan.bundle_slots):
-            bundle_line += "（组成含推断项，用户未逐一点名——建议先与用户确认增删）"
-        plan_lines.append(bundle_line)
+        if plan.slot_mode == SLOT_MODE_PARALLEL:
+            # 并列形态不问组成：用户已经自己点名了要看哪几类，再拿一轮 ask_user 去确认
+            # 「你是不是要这几类」纯属浪费一次往返。「一套齐」才有「这套包含什么」的歧义。
+            plan_lines.append(
+                "并列子需求（各类独立、分头检索、不砍类）："
+                + "、".join(s.name for s in plan.bundle_slots)
+            )
+        else:
+            slot_bits = [
+                f"{s.name}({'必备' if s.essential else '可选'})" for s in plan.bundle_slots
+            ]
+            bundle_line = "套装槽位：" + "、".join(slot_bits)
+            # 有槽位是推断补的（用户没逐一点名）→ 明示出来：主 loop 据此决定要不要先 ask_user
+            # 让用户对组成增删确认（「一套」的说法本就不唯一，别替用户拍板）。
+            if any(not s.evidence.strip() for s in plan.bundle_slots):
+                bundle_line += "（组成含推断项，用户未逐一点名——建议先与用户确认增删）"
+            plan_lines.append(bundle_line)
     # 品类域摆进思考过程：它决定「哪些长期偏好本轮生效」，判错了用户得看得见——记忆最怕的就是
     # 静默失效（域判错 → 偏好没生效 → 用户只觉得「搜出来的东西不对」，却归因不到记忆头上）。
     plan_lines.append(
