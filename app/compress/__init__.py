@@ -5,6 +5,11 @@
 的是 ``app/harness/hooks/context_compress.py`` 的 pre_think Hook——控制面统一走 Hook Pipeline。
 """
 
+from app.compress.as_blocks import (
+    as_post_step_compress,
+    compress_blocks_before,
+    compute_block_breakpoint,
+)
 from app.compress.breakpoint import DEFAULT_KEEP_RECENT, compute_breakpoint
 from app.compress.compressor import (
     DEFAULT_MAX_TOOL_TOKENS,
@@ -22,7 +27,10 @@ __all__ = [
     "MAX_CACHE_MARKERS",
     "MIN_CACHE_PREFIX_TOKENS",
     "apply_cache_control",
+    "as_post_step_compress",
     "compress_after_breakpoint",
+    "compress_blocks_before",
+    "compute_block_breakpoint",
     "compute_breakpoint",
     "mark_system_cache",
     "post_step_compress",

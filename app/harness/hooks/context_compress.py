@@ -25,10 +25,11 @@ from typing import Any
 
 from app.agent import model_router
 from app.agent.model_router import Tier
+from app.compress.as_blocks import as_post_step_compress
 from app.compress.breakpoint import DEFAULT_KEEP_RECENT
 from app.compress.compressor import DEFAULT_MAX_TOOL_TOKENS, mark_system_cache
 from app.compress.pipeline import post_step_compress
-from app.harness._msgcompat import system_message
+from app.harness._msgcompat import RUNTIME_AGENTSCOPE, runtime_of, system_message
 from app.harness.middleware import harness_hook
 from app.harness.state import GuardState
 from app.observability import metrics
@@ -111,6 +112,18 @@ async def compress_context(context: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     keep_recent, max_tool_tokens, enable_cache_control = _compress_opts()
+
+    if runtime_of(context) == RUNTIME_AGENTSCOPE:
+        # AgentScope：一整轮 = 一条 assistant 消息，断点必须下沉到 block 级（见 as_blocks）。
+        # cache_control 也不在这里打——system 就在 messages 里、标记落在 formatter，
+        # 所以这条分支不碰 ``system_message``（LangChain 那边它是独立字段，才需要 mark）。
+        context["messages"] = as_post_step_compress(
+            messages,
+            keep_recent=keep_recent,
+            max_tool_tokens=max_tool_tokens,
+        )
+        return context
+
     context["messages"] = post_step_compress(
         messages,
         keep_recent=keep_recent,

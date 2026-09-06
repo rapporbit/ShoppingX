@@ -384,3 +384,71 @@ async def test_tool_error_is_not_counted_as_progress(isolated_harness: HarnessMi
     assert session.called_tools == set()
     assert post_seen == [], "ERROR 的调用不该跑 post_tool_call"
     assert session.guard.last_progress_at == before, "失败的调用不该给看门狗续命"
+
+
+@pytest.mark.asyncio
+async def test_injection_persists_into_state_context(
+    isolated_harness: HarnessMiddleware,
+) -> None:
+    """注入必须落进 state.context，否则下一轮从历史里蒸发——前缀缓存在注入点断掉。
+
+    形态钉成 ``HintBlock``：它跟着当前 assistant 消息走（不新建同 id 的消息），formatter 会
+    渲染成 role="user"，语义上「外部对模型说的话」也对得上。
+    """
+
+    async def injector(ctx: dict) -> dict:
+        ctx["persist_messages"] = [
+            Msg(
+                name="system",
+                role="system",
+                content=[TextBlock(type="text", text="[纠正] 回到需求")],
+            ),
+        ]
+        return ctx
+
+    isolated_harness.register("pre_think", "injector", injector, priority=10)
+
+    session = HarnessSession()
+    agent = await _build(session, [_text("好")])
+    await agent.reply(_user("你好"))
+
+    hints = [
+        b for m in agent.state.context for b in m.content if getattr(b, "type", None) == "hint"
+    ]
+    assert any("[纠正] 回到需求" in str(h.hint) for h in hints), "注入没落进 state.context"
+
+
+@pytest.mark.asyncio
+async def test_payload_prefix_stable_across_rounds_with_injection(
+    isolated_harness: HarnessMiddleware,
+) -> None:
+    """带注入的两轮，第 n 轮发出去的 payload 必须是第 n+1 轮的**逐字前缀**。
+
+    这是前缀缓存收益的根因，也是 L5 真正能确定性验收的那条（命中率受链长与网关隐式缓存影响，
+    单次不可比）。注入若只活在一次请求里，下一轮它从历史蒸发，前缀就在注入点起全部失配。
+    """
+
+    async def nudger(ctx: dict) -> dict:
+        ctx["inject_messages"] = [{"content": "[纠正] 回到用户原始需求"}]
+        return ctx
+
+    isolated_harness.register("post_reflect", "nudger", nudger, priority=10)
+
+    session = HarnessSession()
+    agent = await _build(session, [_tool_call("item_search", q="x"), _text("好")])
+    payloads: list[list[dict]] = []
+    original = agent.model._call_api
+
+    async def spy(*args: object, **kwargs: object) -> ChatResponse:
+        formatted = await agent.model.formatter.format(list(kwargs.get("messages") or []))
+        payloads.append(json.loads(json.dumps(formatted, default=str)))
+        return await original(*args, **kwargs)
+
+    agent.model._call_api = spy  # type: ignore[method-assign]
+    await agent.reply(_user("搜个背包"))
+
+    assert len(payloads) >= 2, "需要至少两轮模型调用才能比前缀"
+    # 两半缺一不可：注入既要真进本轮 payload（否则纠正等于没发），又要在下一轮原样还在。
+    assert any("[纠正] 回到用户原始需求" in json.dumps(e, ensure_ascii=False) for e in payloads[-1])
+    for prev, cur in zip(payloads, payloads[1:], strict=False):
+        assert cur[: len(prev)] == prev, "payload 前缀跨轮失配——注入没落进 state.context"

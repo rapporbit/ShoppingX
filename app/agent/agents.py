@@ -13,7 +13,7 @@
 
 import os
 
-from agentscope.agent import Agent, ReActConfig
+from agentscope.agent import Agent, ContextConfig, ReActConfig
 from agentscope.middleware import MiddlewareBase
 from agentscope.state import AgentState
 
@@ -74,6 +74,10 @@ async def _assemble(
         state=agent_state,
         model_config=get_model_config(),
         react_config=ReActConfig(max_iters=max_iters),
+        # 上下文治理由本仓自己做（Cache Breakpoint + block 级压缩，挂在 pre_think）。这里把框架
+        # 自带的摘要压缩触发线顶到允许的最高值（0.9 × 128k ≈ 115k），让它成为纯兜底；真撞上了
+        # 也不会跑框架的 LLM 摘要——``HarnessAgentAdapter.on_compress_context`` 已接管，理由见那里。
+        context_config=ContextConfig(trigger_ratio=0.9),
     )
     return agent, session
 

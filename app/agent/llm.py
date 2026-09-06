@@ -18,6 +18,7 @@ from functools import lru_cache
 
 from agentscope.agent import ModelConfig
 from agentscope.credential import OpenAICredential
+from agentscope.formatter import OpenAIChatFormatter
 from agentscope.model import OpenAIChatModel
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
@@ -249,6 +250,20 @@ def _as_credential(vision: bool = False) -> OpenAICredential:
     )
 
 
+def _as_formatter() -> OpenAIChatFormatter:
+    """格式化层：开了 ``COMPRESS_CACHE_CONTROL`` 就换成会打断点标记的那版。
+
+    每档模型各持一个实例（formatter 无状态，共享与否都行；各持一份省得将来有人往里加状态时
+    踩到跨档串扰）。``keep_recent`` 与压缩 Hook 同源，两处用同一把尺子量断点，否则标记会打在
+    压缩边界之外——缓存前缀里混进易变内容，命中率白丢。
+    """
+    if not _env_bool("COMPRESS_CACHE_CONTROL", False):
+        return OpenAIChatFormatter()
+    from app.harness.formatter import CacheAwareOpenAIFormatter
+
+    return CacheAwareOpenAIFormatter(keep_recent=_env_int("COMPRESS_KEEP_RECENT", 3))
+
+
 def _build_as_model(
     model: str,
     *,
@@ -267,6 +282,7 @@ def _build_as_model(
         model=model,
         parameters=OpenAIChatModel.Parameters(temperature=temperature),
         stream=True,
+        formatter=_as_formatter(),
         max_retries=LLM_MAX_RETRIES,
         client_kwargs={"timeout": LLM_REQUEST_TIMEOUT},
         # hybrid 模型（DashScope / Qwen / DeepSeek）经 OpenAI 兼容层读 extra_body 里的
