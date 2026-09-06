@@ -40,7 +40,8 @@
 
 ## 工具（摘要）
 
-主 Agent 与子 Agent 共用同一工具集。核心能力：
+主 Agent（Supervisor）持全部业务工具、**单干优先**；worker 按读写属性切分，拿到的是同一批工具
+的**子集**——SearchAgent 只有只读检索工具，TradeAgent 只有交易工具且没有检索能力。核心能力：
 
 | 工具 | 作用 |
 | --- | --- |
@@ -52,10 +53,13 @@
 | `web_search` / `ask_user` | 外部事实 / 澄清 |
 | `forget_preference` | 用户主动撤回长期偏好 |
 | `shopping_summary` / `chat_fallback` | 终结：清单收尾 / 非购物闲聊 |
-| `dispatch_tool` / `parallel_dispatch_tool` | 派生子 Agent |
+| `create_order` / `query_order` / `cancel_order` | 模拟交易：两段式下单（先确认卡）/ 查单 / 取消 |
+| `task_dispatch(demands, subagent_type)` | 派 worker（`search` 只读 / `trade` 写） |
 
-跨平台场景会并行 fork：子 Agent 可独立检索，结果截断后合流；深度与迭代有上限（默认子 Agent
-不可再 fork，超时与步数硬限制）。
+跨平台场景同轮发多个 `task_dispatch`（工具标了 `is_concurrency_safe`，由框架并发执行，实测子任务
+段耗时是串行的 27~28%）。边界靠三样**结构性**保证，不靠提示词劝退：Toolkit 的发放范围（worker
+的工具集里根本没有那个工具对象）、`is_read_only` 标记、`PermissionEngine` 逐工具放行。派发安全
+四层：深度（worker 手上没有 `task_dispatch`）、超时 + 迭代上限、结果截断、循环检测。
 
 ## 快速开始
 
@@ -105,6 +109,7 @@ uv run ruff check . && uv run mypy app && uv run pytest   # 927 tests
 | `POST /api/task/{thread_id}/cancel` | 取消任务 |
 | `GET /api/history/{thread_id}` | 会话历史 |
 | `GET /api/preferences/{user_id}` | 长期偏好 |
+| `GET /api/orders` · `GET /api/orders/{id}` · `POST /api/orders/{id}/cancel` | 订单（一律要求登录，只能看自己的；别人的单与不存在的单同回 404） |
 | `POST /api/upload` · `GET /api/files/...` | 会话文件（路径穿越防护） |
 | `GET /api/health` · `GET /metrics` | 健康检查 / Prometheus |
 
@@ -247,7 +252,9 @@ tests/            927 tests
 
 ## 已知限制
 
-- 不接真实平台下单链路：无 OAuth、支付、物流；商品为离线快照。
+- **交易域是模拟的**：有订单状态机（DRAFT→CONFIRMED→CANCELLED）、幂等键、归属校验与落库，但
+  **没有支付、物流、库存**，也不接真实平台下单链路（无 OAuth）；商品为离线快照。下单走两段式
+  确认卡（先出卡、用户确认后才落库），确认与「取消前必须先查单」都由机制把关而非提示词。
 - 汇率 / 关税 / 运费为查表估算，演示 landed cost，非财务级对账。
 - 评测以离线回归为主；种子集规模有限，不是大规模公开榜。
 

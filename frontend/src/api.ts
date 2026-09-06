@@ -8,6 +8,7 @@ import type {
   AdminConfig,
   AguiEvent,
   HistoryTurn,
+  OrderSnapshot,
   Preference,
   PrefDraft,
   ProductItem,
@@ -407,4 +408,24 @@ export async function resetAdminConfig(keys?: string[]): Promise<AdminConfig> {
     throw new Error(detail?.detail ?? `恢复默认失败：HTTP ${resp.status}`);
   }
   return (await resp.json()) as AdminConfig;
+}
+
+// --- 订单（批 1 交易域）------------------------------------------------------
+// user_id 不出现在任何一条 URL 里：订单的归属由后端从 token 解，前端传什么都不作数。
+// 这与偏好接口（路径带 user_id + 后端校验相等）的口径不同——那边前端要能展示「谁的偏好」，
+// 订单没有这个需求，那就别把一个可篡改的参数摆在那里让人试。
+export async function fetchOrders(): Promise<OrderSnapshot[]> {
+  const resp = await authFetch("/api/orders");
+  if (!resp.ok) return [];
+  return (await resp.json()).orders ?? [];
+}
+
+export async function cancelOrder(orderId: string): Promise<{ ok: boolean; message: string }> {
+  const resp = await authFetch(`/api/orders/${encodeURIComponent(orderId)}/cancel`, {
+    method: "POST",
+  });
+  if (resp.ok) return { ok: true, message: "已取消" };
+  // 409 = 状态机不允许（多半是已经取消过了）。把后端那句话原样带给用户——它比「操作失败」有用。
+  const detail = await resp.json().catch(() => ({}));
+  return { ok: false, message: detail?.detail ?? "取消失败" };
 }

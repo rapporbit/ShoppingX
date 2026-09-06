@@ -33,6 +33,7 @@ type TopBarProps = {
   // 有这么个东西存在（真正的门在后端，这里只是不摆一个必然 403 的按钮）。
   onOpenAdmin: (() => void) | null;
   onOpenFavorites: () => void;
+  onOpenOrders: () => void;
   onLogout: () => void;
   // 窄屏专用：会话栏在手机上收成了抽屉，得有个入口把它唤回来。宽屏侧栏常驻，此按钮 CSS 隐藏。
   onOpenNav: () => void;
@@ -77,6 +78,7 @@ export function TopBar({
   onOpenSettings,
   onOpenAdmin,
   onOpenFavorites,
+  onOpenOrders,
   onLogout,
   onOpenNav,
 }: TopBarProps) {
@@ -113,6 +115,10 @@ export function TopBar({
         >
           <span className="fav-glyph">♥</span>
           <span>收藏{favoriteCount > 0 ? ` ${favoriteCount}` : ""}</span>
+        </button>
+        {/* 我的订单：与收藏并列。交易是 mock（无支付/物流/库存），入口文案不吹成真实电商。 */}
+        <button className="ghost-btn" onClick={onOpenOrders} title="我的订单（模拟交易，无支付与物流）">
+          <span>订单</span>
         </button>
         {onOpenAdmin && (
           <button className="ghost-btn" onClick={onOpenAdmin} title="后台管理：模型与检索参数">

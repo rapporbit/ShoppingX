@@ -3471,3 +3471,16 @@ button:disabled {
 .order-hint {
   color: #9a6a12;
 }
+
+/* 订单抽屉里的一行（复用订单卡的内部类，外层给个卡片壳）。 */
+.order-row {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.order-row .ghost-btn {
+  align-self: flex-start;
+}
