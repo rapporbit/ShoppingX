@@ -37,7 +37,7 @@ from agentscope.tool import ToolMiddlewareBase
 from agentscope.tool._response import ToolChunk, ToolResultState
 
 from app.agent.fork_guard import current_fork_depth
-from app.agent.token_budget import tree_snapshot
+from app.agent.token_budget import charge_as_usage, tree_snapshot
 from app.api import monitor
 from app.compress.as_blocks import as_post_step_compress
 from app.harness._msgcompat import RUNTIME_AGENTSCOPE, RUNTIME_KEY
@@ -315,9 +315,32 @@ class HarnessAgentAdapter(MiddlewareBase):
         if model is not None:
             input_kwargs["current_model"] = model
 
+        model_name = getattr(input_kwargs.get("current_model") or agent.model, "model", "")
         res = await next_handler(**input_kwargs)
+        if hasattr(res, "__aiter__"):
+            return self._charge_stream(res, str(model_name))
+        charge_as_usage(str(model_name), getattr(res, "usage", None))
         s.track_token_delta()
         return res
+
+    async def _charge_stream(
+        self, stream: AsyncGenerator[ChatResponse, None], model_name: str
+    ) -> AsyncGenerator[ChatResponse, None]:
+        """转发流式响应，并在流结束时把这次调用的用量计进全树。
+
+        **只认最后一个 chunk 的 usage**：chunk 是累积快照（基类把增量攒好再吐），逐个入账
+        会把同一次调用重复计上十几遍。放 finally 是因为半路取消时 token 也已真实花掉——
+        少算的账会让预算闸和用户 credit 配额一起失真（LangChain 侧由 ``charge_tree_usage``
+        在中间件里做同一件事，AgentScope 侧没有对应的钩子，只能在这里接）。
+        """
+        last: ChatResponse | None = None
+        try:
+            async for chunk in stream:
+                last = chunk
+                yield chunk
+        finally:
+            charge_as_usage(model_name, getattr(last, "usage", None))
+            self._s.track_token_delta()
 
     # ── 框架自带的摘要压缩：接管，不放行 ──
 

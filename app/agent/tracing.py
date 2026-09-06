@@ -40,6 +40,8 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
@@ -333,3 +335,58 @@ def apply_tracing(
     if extra.get("metadata"):
         config.setdefault("metadata", {}).update(extra["metadata"])
     return config
+
+
+# ────────────────────── AgentScope 侧（批 0 / L7） ──────────────────────
+#
+# 换运行时后这条链路**不再需要 LangChain 的 CallbackHandler**：AgentScope 原生的
+# ``TracingMiddleware`` 打的是 OpenTelemetry 的标准 GenAI 语义属性（``gen_ai.*``），而
+# Langfuse v4 本身就是个 OTEL SDK 包装——它在 client 初始化时把自己的 ``TracerProvider``
+# 设成**全局**，并在 span processor 里按 ``is_genai_span``（带任一 ``gen_ai.*`` 属性）放行。
+# 两头一对，AgentScope 的 agent / llm / tool span 自动流进 Langfuse，中间不需要任何胶水。
+#
+# 于是 LangChain 侧那两个坑也一并消失：① 「一次 ainvoke 一条 root trace」——OTEL 的上下文是
+# ContextVar，子 Agent 的 span 天然挂在父 span 下，不必再手工传 trace_id；② 「fork 双记」——
+# handler 不再存在，也就无从重复挂载。ContextVar ``_current_trace_id`` 仍然保留，因为
+# ``run_agent`` 的返回值与 Rubric 分数回注要按 id 找这条 trace。
+
+
+def as_tracing_middlewares() -> list[Any]:
+    """Agent 装配时要挂的观测中间件（未启用 / 未装包 → 空表，装配处无需判断）。"""
+    if _get_client() is None:
+        return []
+    try:
+        from agentscope.middleware import TracingMiddleware
+
+        return [TracingMiddleware()]
+    except Exception:
+        logger.warning("TracingMiddleware 构造失败，本次降级无观测", exc_info=True)
+        return []
+
+
+@contextmanager
+def turn_span(session_id: str | None = None, user_id: str | None = None) -> Iterator[Any]:
+    """把一轮 ``run_agent`` 包成一条 trace 的根 span（无 client 时是个空壳，不改变行为）。
+
+    根 span 必须由 Langfuse 自己的 tracer 起：它没有 ``gen_ai.*`` 属性，若用 AgentScope 的
+    tracer 起会被 Langfuse 的 span 过滤器丢掉——子 span 照样上报，但 trace 少了根，UI 里
+    看到的是一堆没有归属的观测。``propagate_attributes`` 负责把 session / user 顺着上下文
+    抹到本轮所有子 span 上（Langfuse 的聚合查询按这两个维度做，只设在根上是不够的）。
+    """
+    client = _get_client()
+    if client is None:
+        yield None
+        return
+    try:
+        from langfuse import propagate_attributes
+
+        with client.start_as_current_observation(name="shoppingx.turn", as_type="agent") as span:
+            with propagate_attributes(
+                session_id=session_id or None, user_id=user_id or None
+            ):
+                _current_trace_id.set(client.get_current_trace_id())
+                yield span
+    except Exception:
+        # 观测绝不反噬主链路：起 span 失败就当没有观测，本轮照跑。
+        logger.warning("Langfuse 根 span 创建失败，本轮降级无观测", exc_info=True)
+        yield None
