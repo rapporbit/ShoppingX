@@ -29,10 +29,26 @@ def allowed_tools() -> frozenset[str]:
 
     白名单对主 Agent 与各类 worker 是同一个——**授权的差异由发放范围表达**（``build_toolkit(role)``
     发给谁哪些工具，见 ``tool_registry``），不在这里分叉。这层只回答「这个名字是不是本系统的工具」。
+
+    批 4-3 起还包含两类**非本仓实现**、但由本仓主动挂进 Toolkit 的工具：框架内置的 skill
+    阅读器（``Skill``）与 MCP 工具（``mcp__{server}__{tool}``）。它们今天走不到这道闸——
+    harness 的工具中间件挂在本仓自己的 ``FunctionTool`` 实例上，框架内部造的对象够不着（见
+    ``app/agent/mcp_registry.py`` 的诚实标注）。写进来是为了这道闸的**判据保持正确**：它回答
+    的是「这个名字是不是本系统的工具」，而它们确实是。等哪天控制面能接上，第一道闸不该反过来
+    把自家挂的工具当幻觉拒掉——那种失效方向的 bug 只会在切换的那一刻才现形。
+
+    MCP 名单**不查 server**（走本地配置推导）：白名单不能依赖一次网络往返，对端一挂第一道
+    安全闸自己先不可用。
     """
+    from app.agent.mcp_registry import MCP_ROLES, mcp_tool_names
+    from app.agent.skills import SKILL_VIEWER_TOOL_NAME
     from app.agent.tool_registry import TOOLS
 
-    return frozenset(t.name for t in TOOLS)
+    names = {t.name for t in TOOLS}
+    names.add(SKILL_VIEWER_TOOL_NAME)
+    for role in sorted(MCP_ROLES):
+        names.update(mcp_tool_names(role))
+    return frozenset(names)
 
 
 def validate_tool_call(tool_name: str) -> bool:
