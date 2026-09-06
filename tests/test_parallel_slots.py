@@ -258,3 +258,35 @@ def test_drop_pick_keeps_slot_when_other_items_remain() -> None:
         assert "跑鞋" not in out.report["missing_essential"]
         drop_pick_from_report("R2")  # 这一类最后一件也没了 → 如实报缺
         assert "跑鞋" in out.report["missing_essential"]
+
+
+# --------------------------------------------------------------------------
+# 派发侧兜底：planner 没拆槽时，按 demand 标记把槽登记回来
+# --------------------------------------------------------------------------
+def test_dispatch_marker_registers_slot_when_planner_missed_it() -> None:
+    """并列形态最脆的一环是 planner 判不判得出拆槽（实测会漏）。漏了就一个章都盖不上，
+    精挑退化成全池单一 query 排序、某一类屠版。模型在派发时已明写「子需求：X」——那是确定
+    的事实，机制据此把槽登记回来，不必回头指望 planner 那一跳。"""
+    from app.tools._bundle import ensure_dispatch_slot, get_session_bundle
+
+    sd = Path(tempfile.mkdtemp())
+    with thread_scope("t-par-11", sd):
+        assert get_session_bundle() == []  # planner 没拆槽
+        s1 = ensure_dispatch_slot("跑鞋")
+        s2 = ensure_dispatch_slot("降噪耳机")
+        assert s1 and s2 and s1 != s2
+        assert [s.name for s in get_session_bundle()] == ["跑鞋", "降噪耳机"]
+        assert get_session_mode() == SLOT_MODE_PARALLEL
+        # 已有槽表时原样走 register_slot：同名解析回既有 id，不重复建。
+        assert ensure_dispatch_slot("跑鞋") == s1
+        reset_session_bundle(clear_file=True)
+
+
+def test_dispatch_fallback_ignores_hallucinated_id_refs() -> None:
+    """模型幻觉出的 s9 不代表用户要买一个叫「s9」的东西——纯 id 形状一律不建槽。"""
+    from app.tools._bundle import ensure_dispatch_slot, get_session_bundle
+
+    with thread_scope("t-par-12", Path(tempfile.mkdtemp())):
+        assert ensure_dispatch_slot("s9") == ""
+        assert get_session_bundle() == []
+        reset_session_bundle(clear_file=True)
