@@ -13,20 +13,24 @@ from agentscope.tool import FunctionTool, Toolkit, ToolMiddlewareBase
 from app.agent.dispatch_tool import task_dispatch
 from app.tools._shell import ToolShell, to_function_tool
 from app.tools.ask_user import ask_user
+from app.tools.cancel_order import cancel_order
 from app.tools.category_insight import category_insight
 from app.tools.chat_fallback import chat_fallback
+from app.tools.create_order import create_order
 from app.tools.forget_preference import forget_preference
 from app.tools.image_understand import image_understand
 from app.tools.item_picker import item_picker
 from app.tools.item_search import item_search
 from app.tools.planner import planner
 from app.tools.price_compare import price_compare
+from app.tools.query_order import query_order
 from app.tools.shipping_calc import shipping_calc
 from app.tools.shopping_summary import shopping_summary
 from app.tools.web_search import web_search
 
-# 调用即终结主 loop 的工具。
-TERMINAL_TOOLS = {"shopping_summary", "chat_fallback"}
+# 调用即终结主 loop 的工具。``query_order`` **不在**其中：用户问完订单往往接着要取消或再买
+# 一件，查完就结束等于逼他再说一遍。
+TERMINAL_TOOLS = {"shopping_summary", "chat_fallback", "create_order", "cancel_order"}
 
 # 业务工具（每文件一个，模块名 = 工具名）：九大主工具 + ask_user 澄清 + forget_preference。
 # 注意:**没有** remember_preference——偏好的识别 / 沉淀已剥离给会话结束后独立运行的记忆管家
@@ -45,6 +49,9 @@ _BUSINESS_TOOLS: list[ToolShell] = [
     shopping_summary,
     ask_user,
     forget_preference,
+    create_order,
+    query_order,
+    cancel_order,
 ]
 
 
@@ -61,6 +68,7 @@ _READ_ONLY_TOOLS = frozenset(
         "category_insight",
         "item_picker",
         "web_search",
+        "query_order",
     }
 )
 
@@ -118,8 +126,9 @@ TOOLS_BY_NAME: dict[str, FunctionTool] = {t.name: t for t in TOOLS}
 # 取交集后 SearchAgent 就是「搜货 + 查库外事实」这两件事——这也正是它现在实际在做的全部。
 _SEARCH_TOOLS = frozenset({"item_search", "web_search"})
 
-# 交易写工具，批 1 的 7.2 落地后填进来（那之前 task_dispatch 对 trade 直接拒派）。
-_TRADE_TOOLS: frozenset[str] = frozenset()
+# 交易工具。``query_order`` 是只读的（也标了 is_read_only），但它跟着写工具一起发给 TradeAgent：
+# 「取消前必须先查」这条顺序约束，得让同一个 Agent 两件事都做得了才成立。
+_TRADE_TOOLS = frozenset({"create_order", "query_order", "cancel_order"})
 
 _ROLE_TOOLS: dict[str, frozenset[str] | None] = {
     "main": None,  # None = 全集

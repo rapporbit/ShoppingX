@@ -21,8 +21,14 @@ from agentscope.permission import (
 )
 from agentscope.state import AgentState
 
-# 批 0 放行清单：全是「Agent 工作流自身的零件」，不含任何对外部世界有副作用的动作。
-# 批 1 的交易域（create_order / cancel_order）**不进这张表**——它们要走原生确认通路。
+# 放行清单。每一项都要能回答「为什么它不需要弹确认」。
+#
+# **交易域为什么也在这里**（L3 时曾计划让它走原生 ``RequireUserConfirmEvent``）：批 1 落地时
+# 改成了**两段式确认卡**——`create_order(confirmed=False)` 先出一张卡，用户在对话里说确认，
+# 模型才再调一次 `confirmed=True`，而「这组商品出过卡没有」由 `tools/_order_guard.py` 会话级
+# 记录把关（没出过就自动退回去出卡）。确认这件事已经有机制兜底，再叠一层原生弹窗等于让用户
+# 点两次确认，且那套事件协议前端还没实现，挂起就是死等。两条路都能防误下单，选了与现有交互
+# 一致的那条；需要换回原生通路时，把这两项从表里删掉即可（L0 spike 验过它可跨实例恢复）。
 DEFAULT_ALLOWED_TOOLS: frozenset[str] = frozenset(
     {
         "ask_user",  # 向用户提问，回复通路是自建 Future 桥（见 app/api/clarification.py）
@@ -30,6 +36,8 @@ DEFAULT_ALLOWED_TOOLS: frozenset[str] = frozenset(
         "shopping_summary",  # 终结工具：产清单 + 落会话产物
         "chat_fallback",  # 终结工具：非购物意图兜底
         "task_dispatch",  # 派 worker，副作用只在本次会话内
+        "create_order",  # 确认门在 _order_guard（两段式），见上
+        "cancel_order",  # 取消前必须先 query_order（sequencing 断言），且只有 CONFIRMED 可取消
     }
 )
 

@@ -1442,10 +1442,10 @@ class TestSequencingAnyOf:
 
     @pytest.mark.asyncio
     async def test_fork_retrieval_satisfies_item_picker_prereq(self) -> None:
-        """候选由 parallel_dispatch_tool 的子 Agent 检索而来 → 不该报顺序错误。"""
+        """候选由 task_dispatch 的子 Agent 检索而来 → 不该报顺序错误。"""
         from app.harness.hooks.step_validator import check_sequencing
 
-        ctx = {"tool_name": "item_picker", "called_tools": {"parallel_dispatch_tool"}}
+        ctx = {"tool_name": "item_picker", "called_tools": {"task_dispatch"}}
         result = await check_sequencing(ctx)
         assert result is None or not result.get("assertions_failed")
 

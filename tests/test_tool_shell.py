@@ -121,9 +121,10 @@ def test_tools_cover_all_business_tools_with_same_metadata() -> None:
     """运行时壳与声明壳一一对应，元数据取自同一处——描述就是 docstring，漂了就是两套行为。"""
     from app.agent.tool_registry import _BUSINESS_TOOLS, TOOLS, TOOLS_BY_NAME
 
-    # 12 个业务工具 + 派发入口 task_dispatch（它是原生 FunctionTool，不经 @tool 声明壳）
-    assert len(_BUSINESS_TOOLS) == 12
-    assert len(TOOLS) == 13
+    # 15 个业务工具（12 + 交易域三件）+ 派发入口 task_dispatch
+    # （后者是原生 FunctionTool，不经 @tool 声明壳）
+    assert len(_BUSINESS_TOOLS) == 15
+    assert len(TOOLS) == 16
     assert "task_dispatch" in TOOLS_BY_NAME
     for shell in _BUSINESS_TOOLS:
         ft = TOOLS_BY_NAME[shell.name]
@@ -144,9 +145,18 @@ def test_read_only_flags_are_exactly_the_read_side() -> None:
         "category_insight",
         "item_picker",
         "web_search",
+        # 交易域里唯一的只读工具：查单不改任何状态，且它是「取消前必须先查」那条顺序约束的前提
+        "query_order",
     }
-    # 会挂起等用户、删长期偏好、决定 loop 收尾的四个，一个都不许标只读
-    write_side = {"ask_user", "forget_preference", "shopping_summary", "chat_fallback"}
+    # 会挂起等用户、删长期偏好、改订单状态、决定 loop 收尾的，一个都不许标只读
+    write_side = {
+        "ask_user",
+        "forget_preference",
+        "shopping_summary",
+        "chat_fallback",
+        "create_order",
+        "cancel_order",
+    }
     assert write_side & read_only == set()
 
 
@@ -156,8 +166,8 @@ async def test_build_toolkit_roles_produce_schemas() -> None:
 
     main = await build_toolkit("main")
     schemas = await main.get_tool_schemas()
-    # 主 Agent 拿全集：12 业务工具 + task_dispatch（单干优先的前提是它自己什么都能干）
-    assert len(schemas) == 13
+    # 主 Agent 拿全集：15 业务工具 + task_dispatch（单干优先的前提是它自己什么都能干）
+    assert len(schemas) == 16
     assert all(s["function"]["description"] for s in schemas)
 
     with pytest.raises(ValueError):
