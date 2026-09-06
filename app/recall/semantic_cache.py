@@ -21,12 +21,17 @@ Qdrant collection（多一跳 + 一套 collection 生命周期管理）。Qdrant
 
 from __future__ import annotations
 
+import hashlib
+import os
 import time
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 import numpy as np
 from cachetools import TTLCache
+
+from app.utils.env import env_bool, env_float, env_int
 
 T = TypeVar("T")
 
@@ -99,3 +104,157 @@ class SemanticCache(Generic[T]):
         """清空（测试 / 灌库后失效用）。"""
         self._exact.clear()
         self._vecs.clear()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 整轮结果缓存（批2-5）——上面那套是「一次工具调用」的缓存，这里缓存的是**一整轮 Agent**。
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# **它是压测 / 演示用的开关，不是常开特性，所以默认关。** 削峰队列压测时同一条 query 会被重复打
+# 几百遍，每遍都真跑一次 AgentLoop 的话，测出来的是模型供应商的限流曲线而不是本系统的吞吐；
+# 演示同理（讲解时反复问同一句，不该每次等 40 秒）。
+#
+# **为什么必须默认关、且评测脚本要主动拒跑。** 缓存一开，Rubric 评测就可能拿到上一次跑的答案——
+# 分数变成「上次那份的复读」，改了 prompt 也看不出差别，而且**全程零报错**。这类「测出来的数
+# 是假的」比崩溃危险得多，所以除了默认关，``scripts/eval/run_rubric.py`` 开跑前还要显式查一次
+# （见那边的 ``_assert_turn_cache_off``）。
+#
+# **key 的四个成分**（缺一个就会串味）：
+# - **buyer**：偏好注入、行为亲和、订单归属都按人不同，跨用户复用等于把别人的结果给你看。
+# - **偏好指纹**：同一个人改了偏好（加一条「不要皮革」），旧答案立刻不成立。
+# - **prompt 指纹**：用户这句话 **+ prompts.yml 的内容指纹**。后者是为了让「改了提示词」自动
+#   失效整片缓存——不然调完 prompt 重跑，看到的还是旧行为，会把人引到完全错误的结论上。
+# - **模型**：换模型就是换系统，不能复用。
+#
+# **两类轮次一律不入缓存**（判据在 :func:`turn_is_cacheable`）：**有历史轮**的（答案依赖上文，
+# 而上文不在 key 里）与**写意图 / 交互轮**的（下单、取消、澄清、遗忘偏好——重放一份「已下单」
+# 是真实伤害，不是少省一点钱）。
+
+#: 这些工具一旦在本轮出现过，本轮就**不许**进缓存：三个写工具会改真实状态，``ask_user`` 的答案
+#: 取决于当时用户怎么回的、``forget_preference`` 改的是长期记忆。重放它们等于伪造一次交互。
+UNCACHEABLE_TOOLS = frozenset(
+    {"create_order", "cancel_order", "query_order", "ask_user", "forget_preference"}
+)
+
+
+def turn_cache_enabled() -> bool:
+    """整轮缓存是否开着。**默认关**，见本节开头。"""
+    return env_bool("TURN_CACHE_ENABLED", False)
+
+
+@dataclass(frozen=True)
+class TurnCacheEntry:
+    """一轮的可复用产物。只存「给用户看的那两样」——文案与商品卡。
+
+    刻意**不存** ``AgentState`` / 候选池 / 产物文件：那些是给「下一轮续聊」用的，而带历史的轮次
+    本就不入缓存，存了也没人读，却要为每条缓存背上几十 KB。
+    """
+
+    final_text: str
+    items: list[dict[str, Any]]
+
+
+class TurnCache:
+    """进程内的整轮结果缓存（TTL + 容量上限）。
+
+    **进程内而非 Redis**：命中的价值是「省掉一整轮 LLM」，跨副本共享省的只是「另一个副本也各自
+    跑一次」——收益二阶，却要给每轮加一次网络往返 + 一份序列化。真要跨副本共享时再说。
+    """
+
+    def __init__(self, *, max_entries: int = 128, ttl: float = 900.0) -> None:
+        self._c: TTLCache[str, TurnCacheEntry] = TTLCache(maxsize=max_entries, ttl=ttl)
+
+    def get(self, key: str) -> TurnCacheEntry | None:
+        try:
+            return self._c[key]
+        except KeyError:
+            return None
+
+    def put(self, key: str, entry: TurnCacheEntry) -> None:
+        self._c[key] = entry
+
+    def clear(self) -> None:
+        self._c.clear()
+
+    def __len__(self) -> int:
+        return len(self._c)
+
+
+_turn_cache: TurnCache | None = None
+
+
+def get_turn_cache() -> TurnCache:
+    """进程级单例（懒建，容量与 TTL 从环境变量读一次）。"""
+    global _turn_cache
+    if _turn_cache is None:
+        _turn_cache = TurnCache(
+            max_entries=env_int("TURN_CACHE_MAX_ENTRIES", 128),
+            ttl=env_float("TURN_CACHE_TTL", 900.0),
+        )
+    return _turn_cache
+
+
+def reset_turn_cache() -> None:
+    """丢掉单例（测试 / 改完配置想重建时用）。"""
+    global _turn_cache
+    _turn_cache = None
+
+
+def _prompts_fingerprint() -> str:
+    """``prompt/prompts.yml`` 的内容指纹——改了提示词，整片缓存自动失效。
+
+    读不到就返回空串（缓存照常工作，只是少了这层失效）：为一个缓存指纹让主链路起不来不值当。
+    """
+    try:
+        from app.utils.path_utils import PROJECT_ROOT
+
+        return hashlib.sha256((PROJECT_ROOT / "prompt" / "prompts.yml").read_bytes()).hexdigest()[
+            :16
+        ]
+    except Exception:
+        return ""
+
+
+def preference_fingerprint(entries: Sequence[Any]) -> str:
+    """把一组偏好压成一个指纹。
+
+    取 ``dedup_key`` + 正文 + 是否硬淘汰，**排序后**再哈希：库里的返回顺序不保证稳定，不排序的话
+    同一组偏好会算出不同指纹，缓存永远不命中（症状是「开了没用」而不是报错，最难查）。
+    """
+    parts = sorted(
+        "{}|{}|{:d}".format(
+            getattr(e, "dedup_key", ""),
+            getattr(e, "content", ""),
+            bool(getattr(e, "is_blocking", False)),
+        )
+        for e in entries
+    )
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def turn_cache_key(*, buyer: str, prefs_fp: str, query: str, model: str = "") -> str:
+    """buyer + 偏好指纹 + prompt 指纹 + 模型 → 一个键。四个成分的理由见本节开头。"""
+    prompt_fp = hashlib.sha256(query.strip().encode("utf-8")).hexdigest()[:24]
+    model_name = model or os.environ.get("LLM_MAIN", "")
+    return f"{buyer or 'anon'}|{prefs_fp}|{prompt_fp}|{_prompts_fingerprint()}|{model_name}"
+
+
+def turn_is_cacheable(tool_names: Iterable[str], final_text: str) -> bool:
+    """本轮能不能进缓存：非空回复 + 没碰过写 / 交互类工具（:data:`UNCACHEABLE_TOOLS`）。
+
+    「有历史轮不入」不在这里判——那要在**开跑之前**就知道（否则白跑一轮才发现不能存），由调用方
+    在查缓存那一步一并决定：不查缓存的轮次也不写缓存。
+    """
+    if not final_text.strip():
+        return False
+    return not (set(tool_names) & UNCACHEABLE_TOOLS)
+
+
+def turn_cache_status() -> dict[str, Any]:
+    """给 ``/api/health`` 用的一行状态（评测脚本据此拒跑）。**只在开着时才建单例**，
+    免得一次探活就把缓存对象建出来。"""
+    enabled = turn_cache_enabled()
+    return {
+        "enabled": enabled,
+        "entries": len(get_turn_cache()) if enabled else 0,
+    }

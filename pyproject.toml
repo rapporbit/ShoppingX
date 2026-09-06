@@ -36,6 +36,15 @@ dependencies = [
     "agentscope>=2.0.7,<3",
 ]
 
+[project.optional-dependencies]
+# 换库驱动（批 2）。**刻意不进主依赖**：默认部署是 SQLite（``var/globex.db``），多装两个数据库
+# 驱动只是让镜像变大、且 asyncpg 要编译。真把 DATABASE_URL 指向 MySQL / PostgreSQL 时才装：
+# ``uv sync --extra db``。app/db/session.py 已按驱动分支好池参数，装上即用，代码零改动。
+db = [
+    "aiomysql>=0.3.2",
+    "asyncpg>=0.31.0",
+]
+
 [dependency-groups]
 dev = [
     "ruff>=0.6",

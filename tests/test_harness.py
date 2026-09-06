@@ -607,8 +607,6 @@ class TestPhaseHooks:
         names = [b.name for b in agent.state.context[-1].content]
         assert names == ["image_understand", "image_understand", "planner", "planner"]
 
-
-
     @pytest.mark.asyncio
     async def test_phase_transition_on_planner(self) -> None:
         from app.agent.fork_guard import _fork_depth
@@ -881,9 +879,7 @@ async def _run_tool(
     chunks = []
     async for chunk in adapter.on_tool_call(SimpleNamespace(name=name), args or {}, handler):
         chunks.append(chunk)
-    text = "".join(
-        b.text for c in chunks for b in c.content if getattr(b, "type", None) == "text"
-    )
+    text = "".join(b.text for c in chunks for b in c.content if getattr(b, "type", None) == "text")
     last = chunks[-1] if chunks else None
     return SimpleNamespace(
         content=text,
@@ -943,9 +939,7 @@ async def _drive_tool(mw, name: str, handler, args: dict | None = None):
         SimpleNamespace(name=name), args or {}, handler
     ):
         chunks.append(chunk)
-    text = "".join(
-        b.text for c in chunks for b in c.content if getattr(b, "type", None) == "text"
-    )
+    text = "".join(b.text for c in chunks for b in c.content if getattr(b, "type", None) == "text")
     last = chunks[-1] if chunks else None
     return SimpleNamespace(content=text, state=last.state if last is not None else None)
 
@@ -1597,13 +1591,16 @@ class TestOutputGuardOrdering:
 
         # ① 适配器内的顺序：_finalize 在 yield 之前
         ad_src = open(adapter_mod.__file__, encoding="utf-8").read()
-        on_reply = ad_src[ad_src.index("    async def on_reply("):]
+        on_reply = ad_src[ad_src.index("    async def on_reply(") :]
         assert on_reply.index("await self._finalize(event)") < on_reply.index("yield event"), (
             "审核晚于把消息 yield 出去 → 事件泵与前端拿到的是未审核原文"
         )
 
-        # ② 编排层的顺序：final_text 先于三条消费通路
+        # ② 编排层的顺序：final_text 先于三条消费通路。
+        # **只在 run_agent 的函数体里找**：模块里别的函数（如整轮缓存的命中回放）同样会调
+        # append_turn / report_task_result，按全文首次出现来比就会比到它们头上（批2-5 撞过）。
         text = open(orch.__file__, encoding="utf-8").read()
+        text = text[text.index("async def run_agent(") :]
         final_text = text.index("final_text = (final_msg.get_text_content()")
         artifacts = text.index("write_session_artifacts(session_dir, final_text, summary)")
         append = text.index("await append_turn(")
@@ -1862,6 +1859,41 @@ class TestBreakerParamErrorExemption:
             assert get_tool_breaker("web_search")._fail_count == 1
         finally:
             reset_tool_breakers()
+
+    async def test_exemption_holds_for_the_shared_breaker_too(self, clean_phase) -> None:
+        """批2-5：共享熔断开着时，豁免必须一起生效——否则一个会话的畸形参数会把这个工具对
+        **全部副本**熔断，比进程内那次严重得多。判据仍只有 adapter 里那一条 if。"""
+        from pydantic import BaseModel, ValidationError
+
+        from app.harness.hooks.tool_breaker import reset_tool_breakers
+        from app.utils import shared_breaker
+        from tests.test_shared_breaker import FakeRedis
+
+        class _Args(BaseModel):
+            x: int
+
+        async def bad_args_handler(**_kwargs):
+            _Args.model_validate({"x": "oops"})
+            yield  # pragma: no cover - 让它成为 async generator
+
+        async def broken_infra_handler(**_kwargs):
+            raise RuntimeError("infra down")
+            yield  # pragma: no cover - 让它成为 async generator
+
+        fake = FakeRedis()
+        shared_breaker.set_shared_store(shared_breaker.SharedBreakerStore(fake))
+        reset_tool_breakers()
+        try:
+            mw = _mw()
+            with pytest.raises(ValidationError):
+                await _drive_tool(mw, "web_search", bad_args_handler, {"query": "q"})
+            assert fake.data == {}  # 参数错：一个字节都没写进共享状态
+            with pytest.raises(RuntimeError):
+                await _drive_tool(mw, "web_search", broken_infra_handler, {"query": "q2"})
+            assert fake.data["globex:breaker:tool:web_search"]["fails"] == "1"
+        finally:
+            reset_tool_breakers()
+            shared_breaker.reset_shared_store()
 
 
 class TestInternalMarkersCoverage:

@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -35,6 +36,7 @@ from app.agent.tracing import flush_traces  # noqa: E402
 from app.db.models import Message  # noqa: E402
 from app.db.session import session_factory  # noqa: E402
 from app.eval.rubric import RubricResult, evaluate  # noqa: E402
+from app.recall.semantic_cache import turn_cache_enabled  # noqa: E402
 
 # 单条 query 的墙钟上限（含所有铺垫轮 + 打分）。取 15 分钟：实测最慢的全链路 case 也在 4 分钟内，
 # 这个值只兜「永远回不来」的死挂，正常慢 case 碰不到。
@@ -61,6 +63,36 @@ async def _reset_thread(thread_id: str) -> None:
 
 QUERIES_PATH = Path("data/eval/queries.jsonl")
 REPORT_PATH = Path("data/eval/rubric_report.json")
+
+#: 查后端整轮缓存状态的地址。评测**在本进程内直接调 run_agent**，所以本进程的开关才是决定性的；
+#: 这一项是给「后端另起一个进程、评测只是它的客户端」那种用法留的补充探测，配了才查。
+HEALTH_URL_ENV = "EVAL_HEALTH_URL"
+
+
+def _assert_turn_cache_off() -> None:
+    """整轮缓存开着就**拒跑**，而不是打条警告了事。
+
+    开着跑出来的分数是「上一次那份的复读」：改了 prompt 也看不出差别，bad case 修没修全靠猜，
+    而且**全程零报错**——评测数据被污染却看起来一切正常，是这类基建里最贵的一种失败。宁可让人
+    多敲一次 ``TURN_CACHE_ENABLED=0``。
+    """
+    if turn_cache_enabled():
+        raise SystemExit(
+            "拒跑：TURN_CACHE_ENABLED 开着，整轮结果缓存会让评测复读上一次的答案。"
+            "请先关掉（TURN_CACHE_ENABLED=0）再跑。"
+        )
+    url = os.environ.get(HEALTH_URL_ENV, "").strip()
+    if not url:
+        return
+    try:
+        import httpx
+
+        data = httpx.get(url, timeout=5.0).json()
+    except Exception as exc:  # noqa: BLE001 —— 探不到就别拦，本进程那道判据已经把住了主路
+        print(f"[warn] 查 {url} 失败（{type(exc).__name__}: {exc}），跳过后端缓存探测")
+        return
+    if (data.get("turn_cache") or {}).get("enabled"):
+        raise SystemExit(f"拒跑：{url} 显示后端整轮缓存开着，评测会拿到缓存结果。")
 
 
 def _load_queries(only: set[str] | None, limit: int | None) -> list[dict]:
@@ -182,6 +214,7 @@ async def main(
     gate: bool,
     use_cache: bool,
 ) -> int:
+    _assert_turn_cache_off()
     queries = _load_queries(only, limit)
     cache_note = "复用缓存细则" if use_cache else "刷新细则缓存"
     print(f"开跑 Rubric 评测：{len(queries)} 条 query，并发 {concurrency}，{cache_note}\n")
