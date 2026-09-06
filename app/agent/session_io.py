@@ -34,9 +34,13 @@ MAIN_AGENT_TIMEOUT_SEC = env_int("MAIN_AGENT_TIMEOUT_SEC", 300)
 def render_platform_block(enabled: tuple[str, ...]) -> str:
     """渲染 ``<enabled_platforms>``——本轮允许检索的平台（用户在前端设置里勾的，默认只 amazon）。
 
-    单平台时**显式告诉主 Agent 别派 worker**：派发的三件事判断里「能并行」是跨平台检索的唯一
-    理由，只有一个平台时派发只剩开销（一个子 Agent 的完整上下文 + 一轮往返）而无并行收益，
-    主 Agent 自己一次 item_search 就够——这正是「单干优先」那条规则要挡住的场景。
+    单平台时告诉主 Agent **跨平台泛搜那条路别派 worker**：一个平台派不出并行，只剩开销
+    （一个子 Agent 的完整上下文 + 一轮往返）——这正是「单干优先」要挡住的场景。
+
+    **但禁令只针对「按平台切分」这一种派发**。原先这里写的是「不要派 task_dispatch 检索」，
+    一句话把并行来源钉死在平台维度上：线上默认单平台（语料 99.75% 在 amazon），于是这条注入
+    每轮都在关掉 worker 的总闸——多品类并列（跑鞋 + 耳机分头查，与平台数无关）也被它拦下，
+    实测模型老老实实串行搜了三次（评测 pl02）。这是「零派发」的直接成因之一。
 
     这只是给模型的**动机**；真正的硬保证在机制层（``task_dispatch`` 丢弃未启用平台的 demand、
     item_search 的 Qdrant filter 收口到启用集合）——prompt 打动机、机制打保证。
@@ -45,8 +49,10 @@ def render_platform_block(enabled: tuple[str, ...]) -> str:
     if len(enabled) == 1:
         return (
             f"<enabled_platforms>\n本次只启用 **{names}** 一个平台（用户未开启多平台比价）。\n"
-            f"- **不要**派 task_dispatch 检索：只有一个平台，没有并行收益。"
+            f"- 跨平台泛搜**不要**派 task_dispatch：只有一个平台，按平台切分没有并行收益，"
             f'直接在主流程 item_search(platform="{names}") 检索、精挑、收尾。\n'
+            f"- **但多类并列照常并行派**（plan 的 slot_mode=parallel）：那是按**品类**切分，"
+            f"与平台数无关——一类一条 task_dispatch、同一轮里一起发。\n"
             f"- 比价 / 到手价照常算，但只在该平台内部的候选之间比。\n"
             f"- 收尾时如实说明「本次只搜了 {names}」，不要暗示比过其它平台。\n"
             "</enabled_platforms>"
