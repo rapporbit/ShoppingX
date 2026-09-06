@@ -18,6 +18,7 @@ import logging
 from typing import Any
 
 from app.agent.fork_guard import current_fork_depth
+from app.agent.retrieval_budget import budget_relax_due
 from app.api.context import get_retrieval_mode, get_session_tasks, set_retrieval_mode
 from app.harness.budgets import REUSE_RETRIEVAL_BUDGET
 from app.harness.middleware import harness_hook
@@ -134,8 +135,33 @@ def _hard_cull_backfill_due(
     诊断缺席（None）不触发——失效方向中性，与侧信道的降级语义一致。
     """
     culled = (excluded or 0) + (over_budget or 0)
+    if budget_relax_due():
+        # 补搜已被证伪：item_search 的探测召回显示「不带预算过滤也只捞得到超预算的货」，
+        # 再带 price_usd_max 搜一次必然还是空——那一轮解码纯属白烧，还会把模型往「再换个词
+        # 试试」的死循环上推。此时正确的动作是**如实告知 + 问用户要不要放宽**，由
+        # transition_notice 的放宽分支指路（判据同源，见 _budget_relax_notice_due）。
+        return False
     return (
         mode != "augment"
+        and (excluded is not None or over_budget is not None)
+        and picks < _REFINE_MIN_PICKS
+        and culled > picks
+    )
+
+
+def _budget_relax_notice_due(
+    mode: str, picks: int, excluded: int | None, over_budget: int | None
+) -> bool:
+    """该给「建议用户放宽预算」的指路了吗？＝硬淘汰杀池的形态 + 探测证明预算内确实没货。
+
+    条件与 :func:`_hard_cull_backfill_due` 的形态判据同源（故意重复那三条，而不是靠调用它——
+    它已经被 ``budget_relax_due`` 提前否掉了），只是结论相反：一个说「换条件补搜」，
+    一个说「补搜没用，去问用户」。
+    """
+    culled = (excluded or 0) + (over_budget or 0)
+    return (
+        budget_relax_due()
+        and mode != "augment"
         and (excluded is not None or over_budget is not None)
         and picks < _REFINE_MIN_PICKS
         and culled > picks
@@ -364,6 +390,22 @@ async def append_transition_notice(context: dict[str, Any]) -> dict[str, Any] | 
                 "（formal / business / men 这类）会把其他正装品类一并召回。请改用**聚焦的"
                 "品类核心词**（如 men's wristwatch）item_search 重搜一次（机制已放行），"
                 "场景词改放 item_picker 的 prefer_keywords；新老候选合流后再精挑。"
+            )
+        elif _budget_relax_notice_due(
+            get_retrieval_mode(),
+            picks,
+            context.get("call_excluded"),
+            context.get("call_over_budget"),
+        ):
+            # 补搜无解（探测已证明预算内没货）：指路「问用户」而不是「再搜一次」。**必须排在
+            # 硬淘汰分支之前**——两者形态判据相同，顺序反了这条永远轮不到。
+            over_n = context.get("call_over_budget") or 0
+            notice = (
+                f"\n\n[阶段回退] 预算把候选池筛得只剩 {picks} 件（超预算 {over_n} 件），"
+                "而系统的探测召回显示：**不带预算过滤也只捞得到超预算的货**——库里这个品类"
+                "在用户预算内确实没有，再补搜一次拿回的还是同一批。请直接如实告诉用户"
+                "「符合的商品都在预算之外，最低约 $X」，并用 ask_user 问是否放宽预算或换方向；"
+                "不要自作主张放宽预算，也不要再重复检索。"
             )
         elif _hard_cull_backfill_due(
             get_retrieval_mode(),
