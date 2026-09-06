@@ -1,0 +1,83 @@
+# Redis —— 这套编排里最关键的一个依赖：削峰队列（Stream）、事件背板与控制面（Pub/Sub）、
+# 事件回放、共享熔断，四样都住在它上面。它挂了不是「某个功能降级」，是 api 与 worker 之间
+# 那条线断了。
+#
+# **为什么是 StatefulSet 而不是 Deployment**：队列里躺着的是用户已经提交、还没跑的任务。
+# Deployment 滚动更新时会先起新 Pod 再删旧的，两个 Pod 抢同一个 RWO 卷会卡住；而 StatefulSet
+# 是「先停旧的、再起同名新的」，配 `volumeClaimTemplates` 每个副本一份稳定的卷。单实例 Redis
+# 本来就没有「同时两份」的余地。
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: globex
+spec:
+  # headless：StatefulSet 的标准搭配，Pod 拿到稳定 DNS（redis-0.redis.globex.svc）。
+  # 但配置里用的是 `redis:6379` 这个服务名——单实例下两者都解析得到，用短的更好读。
+  clusterIP: None
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: globex
+spec:
+  serviceName: redis
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.2-alpine
+          # AOF：重启不丢队列里排着的任务。**这条是队列语义的一部分，不是可选优化**——
+          # 批2-2 承诺的「API 重启时在跑的任务不丢」，前提是消息还在 Redis 的 PEL 里；
+          # 若 Redis 自己是纯内存的，它一重启，那份承诺就变成空话。
+          # appendfsync everysec：崩溃最多丢 1s 内的写，换来不必每条命令都 fsync。
+          args:
+            - "redis-server"
+            - "--appendonly"
+            - "yes"
+            - "--appendfsync"
+            - "everysec"
+          ports:
+            - name: redis
+              containerPort: 6379
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              memory: "1Gi"
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi

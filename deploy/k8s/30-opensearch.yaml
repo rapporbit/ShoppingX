@@ -1,0 +1,95 @@
+# OpenSearch —— 品类知识库的 Hybrid 检索（KNN + BM25）。
+#
+# 它是这套编排里最重、最挑剔的一个：JVM 堆要显式给、系统参数 vm.max_map_count 要够、
+# 起来慢（30~60s）。所以它的 readinessProbe 给了很宽的 failureThreshold —— 探活太严的下场是
+# Pod 起到一半被判死、重启、再起到一半，无限循环，日志里看不出任何「错误」。
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensearch
+  namespace: globex
+spec:
+  clusterIP: None
+  selector:
+    app: opensearch
+  ports:
+    - name: http
+      port: 9200
+      targetPort: 9200
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: opensearch
+  namespace: globex
+spec:
+  serviceName: opensearch
+  replicas: 1
+  selector:
+    matchLabels:
+      app: opensearch
+  template:
+    metadata:
+      labels:
+        app: opensearch
+    spec:
+      terminationGracePeriodSeconds: 120
+      initContainers:
+        # vm.max_map_count 是**节点级**内核参数，容器改不了自己的。不够时 OpenSearch 启动即退，
+        # 报的是 "max virtual memory areas vm.max_max_count [65530] is too low"。
+        # 这个 initContainer 要 privileged —— 若集群不允许（多数托管集群不允许），就改成由节点
+        # 初始化脚本 / DaemonSet 设好，然后把这一段删掉。写在这里是为了不让人在第一次部署时卡住。
+        - name: sysctl
+          image: busybox:1.36
+          command: ["sh", "-c", "sysctl -w vm.max_map_count=262144"]
+          securityContext:
+            privileged: true
+      containers:
+        - name: opensearch
+          image: opensearchproject/opensearch:2.13.0
+          env:
+            - name: discovery.type
+              value: "single-node"
+            # 无鉴权可接受的**前提是它不出集群内部网络**：没有 Service 暴露到外面、没有 Ingress。
+            # 一旦有人给它加了 NodePort，这行就变成「公网无密码全文库」。
+            - name: DISABLE_SECURITY_PLUGIN
+              value: "true"
+            # 堆固定 512m（Xms == Xmx 是官方要求，不等会在 GC 上抖）。容器 limit 要明显大于堆：
+            # JVM 还有堆外内存（线程栈、直接缓冲、Lucene 的 mmap），按堆开就会被 OOMKilled，
+            # 而 OOMKill 在日志里只留一个 137 退出码，看不出是谁的问题。
+            - name: OPENSEARCH_JAVA_OPTS
+              value: "-Xms512m -Xmx512m"
+          ports:
+            - name: http
+              containerPort: 9200
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              memory: "2Gi"
+          readinessProbe:
+            httpGet:
+              path: /_cluster/health
+              port: 9200
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 30 # 最长容忍 ~5 分钟冷启动
+          livenessProbe:
+            httpGet:
+              path: /_cluster/health
+              port: 9200
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            failureThreshold: 6
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/opensearch/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi
