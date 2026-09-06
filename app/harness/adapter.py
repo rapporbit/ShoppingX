@@ -30,7 +30,7 @@ import time
 from collections.abc import AsyncGenerator, Callable
 from typing import TYPE_CHECKING, Any
 
-from agentscope.message import Msg, TextBlock
+from agentscope.message import HintBlock, Msg, TextBlock
 from agentscope.middleware import MiddlewareBase
 from agentscope.model import ChatResponse
 from agentscope.tool import ToolMiddlewareBase
@@ -39,6 +39,7 @@ from agentscope.tool._response import ToolChunk, ToolResultState
 from app.agent.fork_guard import current_fork_depth
 from app.agent.token_budget import tree_snapshot
 from app.api import monitor
+from app.compress.as_blocks import as_post_step_compress
 from app.harness._msgcompat import RUNTIME_AGENTSCOPE, RUNTIME_KEY
 from app.harness._tool_signals import (
     _SEARCH_TOOLS,
@@ -48,11 +49,13 @@ from app.harness._tool_signals import (
     _observe_tool,
     _summarize_call,
 )
+from app.harness.hooks.context_compress import _compress_opts
 from app.harness.hooks.drift_detector import DriftState
 from app.harness.middleware import harness
 from app.harness.phase_machine import get_phase_machine
 from app.harness.state import GuardState
 from app.tools._diagnostics import consume_diagnostics
+from app.utils.tokens import count_tokens
 
 if TYPE_CHECKING:  # pragma: no cover
     from agentscope.agent import Agent
@@ -180,6 +183,65 @@ def _has_tool_calls(msg: Msg | None) -> bool:
     return any(getattr(b, "type", None) == "tool_call" for b in msg.content)
 
 
+def _persist_injections(agent: Agent, injected: list[Msg] | None) -> None:
+    """把本轮新增的注入（漂移纠正 / 断言纠正 / 预算 hint）落进 ``state.context``。
+
+    **不落 state 的代价是缓存塌方**（L5 实测抓到）：``_prepare_model_input`` 每轮都从
+    ``state.context`` 重建 messages，注入若只加在这一次的 ``input_kwargs`` 里，下一轮就从历史
+    里蒸发了——上一轮 payload 的第 n 条是「[漂移纠正]…」，这一轮第 n 条变成模型的回复，前缀从
+    注入点起全部失配。实测一条 9 次模型调用的链，注入那一对的前缀稳定率掉到 0.9，且注入越多掉越狠。
+
+    落地形态选 ``HintBlock`` 而不是独立的 system ``Msg``，两个理由：
+
+    1. 它是框架给「循环中塞外部提示」准备的原生块（框架自己的 runtime-state 注入就用它），
+       formatter 会渲染成一条 ``role="user"`` 消息——语义上这确实是外部对模型说的话，不是模型
+       自己说的，塞进 assistant 的 content 会让模型把纠正读成自己的发言。
+    2. 它跟着 ``append_context`` 进当前 assistant 消息的 blocks，不新建消息，因而不会出现两条
+       ``id`` 都等于 ``reply_id`` 的消息（``append_context`` 遇到非 assistant 结尾会新建一条，
+       那会给 ``get_awaiting_tool_calls`` / 落盘恢复埋下同 id 的坑）。
+
+    调用点在**构造本轮视图之前**（见 ``on_model_call``），所以本轮与下一轮看到的是同一份字节，
+    连「注入当轮断一次」都不会发生——比 LangChain 侧 M6.1 的口径（注入只断一轮）再进一步。
+    唯一的例外是 pre_think 的 hook 自己往 ``messages`` 里 append 的那种（预算 MINIMAL hint），
+    它这一轮是 system 消息、下一轮是 hint，会断一次；档位只降不升，一个 loop 至多一次。
+    """
+    if not injected:
+        return
+    blocks: list[Any] = [
+        HintBlock(source="harness", hint=[TextBlock(type="text", text=text)])
+        for text in (_text_of(m) for m in injected)
+        if text
+    ]
+    if blocks:
+        agent.state.append_context(agent.name, blocks)
+
+
+def _context_tokens(messages: list[Msg]) -> int:
+    """粗估整段历史的 token（只为「该不该兜底压缩」这一个是非题服务）。
+
+    刻意不用框架的 ``model.count_tokens``——它要先跑 ``_prepare_model_input``（私有、还要拉一遍
+    工具 schema），而这里只需要判个数量级。本仓的 ``count_tokens`` 对中文更准（框架默认实现是
+    bytes/4，中文低估约 3 倍），偏保守正合适：宁可早压一轮，不可撑爆上下文。
+    """
+    total = 0
+    for msg in messages:
+        content = msg.content
+        if isinstance(content, str):
+            total += count_tokens(content)
+            continue
+        for block in content:
+            for field in ("text", "thinking"):
+                value = getattr(block, field, None)
+                if isinstance(value, str):
+                    total += count_tokens(value)
+            output = getattr(block, "output", None)
+            if isinstance(output, str):
+                total += count_tokens(output)
+            elif isinstance(output, list):
+                total += sum(count_tokens(getattr(x, "text", "") or "") for x in output)
+    return total
+
+
 def _last_assistant(agent: Agent) -> Msg | None:
     for msg in reversed(agent.state.context):
         if msg.role == "assistant":
@@ -221,12 +283,17 @@ class HarnessAgentAdapter(MiddlewareBase):
         s.guard.terminal_nudge_retries = 0
         await monitor.report_assistant_call(step=str(s.guard.think_step))
 
-        inject = s.consume_inject()
+        # 注入**先落 state 再构造视图**：``messages`` 里的 Msg 与 ``state.context`` 是同一批
+        # 对象，``append_context`` 原地把 hint 挂进末尾那条 assistant 消息，本轮视图因此自动
+        # 含它、且与下一轮从 state 重建出来的形态逐字一致——注入连一次前缀断裂都不会造成。
+        # （末尾不是 assistant 时 append_context 会新建一条 Msg，它不在 messages 快照里，
+        #   所以下面把新增部分补进视图。）
+        before = len(agent.state.context)
+        _persist_injections(agent, s.consume_inject())
         ctx = s.base_context()
-        ctx["messages"] = [*messages, *inject]
-        # 注入随本轮请求进入模型视野，并留在 state 里（AgentScope 的 context 就是下一轮的前缀，
-        # 不像 LangChain 版要显式 persist）——纠正不该下一轮就从历史里蒸发，前缀缓存也才接得上。
-        ctx["persist_messages"] = list(inject)
+        ctx["messages"] = [*messages, *agent.state.context[before:]]
+        # 留给 pre_think 的 hook 追加自己的注入（如预算 MINIMAL hint），hook 跑完后一并落 state。
+        ctx["persist_messages"] = []
         ctx["system_message"] = next((m for m in messages if m.role == "system"), None)
         ctx["recent_actions_summary"] = s.recent_actions_summary()
         ctx = await harness.run("pre_think", ctx)
@@ -240,6 +307,7 @@ class HarnessAgentAdapter(MiddlewareBase):
             return ChatResponse(content=[TextBlock(type="text", text=fallback)], is_last=True)
 
         input_kwargs["messages"] = ctx["messages"]
+        _persist_injections(agent, ctx.get("persist_messages"))
         # 换档（第一轮开 reasoning / 预算降 lite）：Hook 只给**档位名**，模型对象在这里解析。
         # 刻意不读 ``model_override``——那个键装的是 LangChain 模型对象，塞进 current_model
         # 会在调用时炸「'ChatOpenAI' object is not callable」（L3 的冒烟测试抓到过）。
@@ -250,6 +318,50 @@ class HarnessAgentAdapter(MiddlewareBase):
         res = await next_handler(**input_kwargs)
         s.track_token_delta()
         return res
+
+    # ── 框架自带的摘要压缩：接管，不放行 ──
+
+    async def on_compress_context(
+        self,
+        agent: Agent,
+        input_kwargs: dict,
+        next_handler: Callable[..., Any],
+    ) -> None:
+        """把框架的「LLM 摘要 + 替换 context」换成本仓的 block 级压缩。**刻意不调 next_handler。**
+
+        框架的实现会让模型写一份 continuation summary，然后用它**替换掉** ``state.context`` 里
+        被压的那几条。两处与本仓冲突：
+
+        1. 本仓的第一性原则是「压缩只改这一次送给模型的视图，不改历史原文」（见 as_blocks）。
+           原文一旦被摘要替换，``agent_state.json`` 落盘的就是摘要，跨进程续聊读回来的历史
+           从此是二手的——L3 验收过的那条「模型接住了上文」的链路会悄悄降级。
+        2. 它要额外烧一次 LLM 调用，而触发它的场景（上下文逼近 102k）恰恰是预算最紧的时候。
+
+        所以这里就地对 ``state.context`` 跑一次同一套 block 级压缩：把较旧的工具结果截到上限，
+        一条消息不删、一个 block 不丢。这是**兜底**——正常路径上 pre_think 的视图压缩早已把体积
+        压住，能走到这里说明历史真的异常长，此时保结构比保细节重要。
+
+        压缩后仍不达标不会死循环：本函数幂等（已截断的不再压），框架下一轮照常调模型，真超上限
+        由网关报错——比静默把历史换成摘要更诚实。
+
+        **阈值判断必须自己做**（实测踩到的坑）：本钩子是 ``_reply_impl`` 在**每次** Reasoning
+        前无条件调的，「超没超阈值」判在 ``_compress_context_impl`` 里、也就是 next_handler
+        那一侧。不判就直接压 = 每轮都把 ``state.context`` 的历史原文截一遍，比框架的摘要还狠。
+        """
+        threshold = agent.context_config.trigger_ratio * agent.model.context_size
+        if _context_tokens(agent.state.context) < threshold:
+            return
+
+        keep_recent, max_tool_tokens, _ = _compress_opts()
+        before = len(agent.state.context)
+        agent.state.context = as_post_step_compress(
+            list(agent.state.context),
+            keep_recent=keep_recent,
+            max_tool_tokens=max_tool_tokens,
+        )
+        logger.warning(
+            "上下文逼近上限，已就地做 block 级压缩兜底（%d 条消息，未启用框架摘要）", before
+        )
 
     # ── post_reflect ──
 
