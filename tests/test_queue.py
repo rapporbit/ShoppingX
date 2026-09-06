@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from app import worker
 from app.queue import InProcessQueue, RedisStreamQueue, get_task_queue, set_task_queue
 from app.queue.ports import IntentTask, TaskQueue, TaskStatus
 from app.queue.redis_stream import GROUP, STREAM_DEAD, STREAM_LARGE, STREAM_NORMAL
@@ -367,3 +368,140 @@ def test_factory_falls_back_when_redis_client_fails(monkeypatch: pytest.MonkeyPa
 def test_both_implementations_satisfy_the_port(fake: FakeRedis) -> None:
     assert isinstance(InProcessQueue(), TaskQueue)
     assert isinstance(RedisStreamQueue(fake), TaskQueue)
+
+
+# ── worker 进程（app/worker.py）─────────────────────────────────────────────
+#
+# 这一组钉的是**优雅退出**：SIGTERM 之后停领新任务、等在飞跑完、超时把它们交还队列重投。三步任一
+# 步错了都不会报错，只会在滚动更新时静默丢任务或双跑，所以每一步都要有一条能变红的用例。
+
+
+async def test_worker_writes_running_then_done(monkeypatch: pytest.MonkeyPatch) -> None:
+    """状态由 worker 写：跑之前 running（轮询方看得见它已经开工），跑完 done + 结论文本。"""
+    queue = InProcessQueue()
+    seen: list[str] = []
+
+    async def _fake_run(query: str, thread_id: str, **_kw: Any) -> dict[str, Any]:
+        status = await queue.get_status("t1")
+        seen.append(status.state if status else "missing")
+        return {"final_text": "这三件更耐操"}
+
+    monkeypatch.setattr(worker, "run_agent", _fake_run)
+    await worker.handle_task(_task(), queue)
+
+    assert seen == ["running"]
+    done = await queue.get_status("t1")
+    assert done is not None and done.state == "done"
+    assert done.final_text == "这三件更耐操"
+
+
+async def test_worker_failure_writes_failed_and_reraises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """失败必须往外抛：队列侧靠这个异常决定「留 PEL 重投」还是「进死信」，吞掉就没人管了。"""
+    queue = InProcessQueue()
+
+    async def _boom(*_a: Any, **_kw: Any) -> dict[str, Any]:
+        raise RuntimeError("模型挂了")
+
+    monkeypatch.setattr(worker, "run_agent", _boom)
+    with pytest.raises(RuntimeError):
+        await worker.handle_task(_task(), queue)
+
+    status = await queue.get_status("t1")
+    assert status is not None and status.state == "failed" and "模型挂了" in status.error
+
+
+async def test_worker_cancel_leaves_status_non_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """被取消不写终态：这条消息没 ack，会被下一个 worker 领回重跑，写 failed 是在骗轮询方。"""
+    queue = InProcessQueue()
+
+    async def _hang(*_a: Any, **_kw: Any) -> dict[str, Any]:
+        await asyncio.sleep(10)
+        return {}
+
+    monkeypatch.setattr(worker, "run_agent", _hang)
+    running = asyncio.create_task(worker.handle_task(_task(), queue))
+    await asyncio.sleep(0.05)
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    status = await queue.get_status("t1")
+    assert status is not None and status.state == "running"
+
+
+async def test_worker_stop_finishes_inflight_and_leaves_rest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """停止信号之后：在飞的那条跑完，还没领的那条原封不动留在队列里。"""
+    queue = InProcessQueue()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _slow(query: str, thread_id: str, **_kw: Any) -> dict[str, Any]:
+        started.set()
+        await release.wait()
+        return {"final_text": "ok"}
+
+    monkeypatch.setattr(worker, "run_agent", _slow)
+    await queue.enqueue(_task(tid="t1"))
+    stop = asyncio.Event()
+    runner = asyncio.create_task(
+        worker.run_worker(queue, concurrency=2, grace_seconds=5, stop=stop, install_signals=False)
+    )
+    await asyncio.wait_for(started.wait(), 2.0)
+
+    stop.set()
+    await asyncio.sleep(0.05)  # 让消费循环先走出 while，确认它之后不再领新的
+    await queue.enqueue(_task(tid="t2"))
+    release.set()
+    await asyncio.wait_for(runner, 3.0)
+
+    finished = await queue.get_status("t1")
+    assert finished is not None and finished.state == "done"
+    assert await queue.get_status("t2") is None  # 停止之后入的队没被领走
+    assert await queue.depth() == 1  # 它还躺在队列里
+
+
+async def test_worker_grace_timeout_returns_message_to_pending(
+    fake: FakeRedis, rq: RedisStreamQueue, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """宽限期内跑不完 → 掐掉在飞任务 → 消息**不 ack**、留在 PEL 里等下一个 worker 领回重跑。
+
+    这条是「超时转回 pending」的回归。把 ports.cancel_in_flight 那一手去掉即红：消费循环被取消时
+    在途 task 会变成孤儿协程（进程都在退出还在跑 LLM），而这里断言的 PEL 反倒照样是满的——所以
+    额外断言在飞协程真的被取消了。
+    """
+    cancelled = asyncio.Event()
+
+    async def _hang(*_a: Any, **_kw: Any) -> dict[str, Any]:
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return {}
+
+    monkeypatch.setattr(worker, "run_agent", _hang)
+    await rq.ensure_group()
+    await rq.enqueue(_task())
+    stop = asyncio.Event()
+    runner = asyncio.create_task(
+        worker.run_worker(rq, concurrency=1, grace_seconds=0, stop=stop, install_signals=False)
+    )
+    for _ in range(100):  # 等它把消息领进 PEL
+        await asyncio.sleep(0.02)
+        if fake.pending_ids(STREAM_NORMAL):
+            break
+    assert fake.pending_ids(STREAM_NORMAL)
+
+    stop.set()
+    await asyncio.wait_for(runner, 3.0)
+    await asyncio.wait_for(cancelled.wait(), 1.0)
+    assert fake.pending_ids(STREAM_NORMAL)  # 仍未 ack，可被 XAUTOCLAIM 领回
+
+
+def test_worker_main_refuses_when_queue_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """QUEUE_ENABLED=0 起 worker 是纯误配：它消费的进程内 deque 没有生产方，宁可起不来。"""
+    monkeypatch.delenv("QUEUE_ENABLED", raising=False)
+    with pytest.raises(SystemExit):
+        worker.main()

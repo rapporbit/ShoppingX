@@ -27,7 +27,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
-from app.queue.ports import IntentTask, TaskHandler, TaskStatus
+from app.queue.ports import IntentTask, TaskHandler, TaskStatus, cancel_in_flight
 from app.utils.env import env_int
 
 logger = logging.getLogger("shoppingx.queue")
@@ -156,29 +156,39 @@ class RedisStreamQueue:
         ——饿死长任务不是背压，是拒绝服务。
 
         **空转时才去捡 pending**：有活干的时候不该分神，闲下来正好扫一遍上一个 worker 留下的烂摊子。
+
+        **被取消时必须显式掐掉在途任务**：它们是 ``create_task`` 出来的独立 task，取消本协程并不会
+        连带取消它们（只有 ``gather`` 的取消才会往下传）。不补这一手，worker 优雅退出超时那条路上
+        会留下一批孤儿协程——进程都在退出了，它们还在跑 LLM，而消息既没 ack 也没人管。
         """
         await self.ensure_group()
         limit = max(1, concurrency)
         sem = asyncio.Semaphore(limit)
         in_flight: set[asyncio.Task[None]] = set()
-        while not should_stop():
-            in_flight = {t for t in in_flight if not t.done()}
-            free = limit - len(in_flight)
-            if free <= 0:
-                await asyncio.wait(in_flight, return_when=asyncio.FIRST_COMPLETED)
-                continue
-            entries = await self._read(consumer, free, block_ms)
-            if not entries:
-                entries = await self._reclaim(consumer, claim_idle_ms, free)
-            for stream, message_id, fields in entries:
-                in_flight.add(
-                    asyncio.create_task(
-                        self._handle_one(stream, message_id, fields, handler, max_deliveries, sem)
+        try:
+            while not should_stop():
+                in_flight = {t for t in in_flight if not t.done()}
+                free = limit - len(in_flight)
+                if free <= 0:
+                    await asyncio.wait(in_flight, return_when=asyncio.FIRST_COMPLETED)
+                    continue
+                entries = await self._read(consumer, free, block_ms)
+                if not entries:
+                    entries = await self._reclaim(consumer, claim_idle_ms, free)
+                for stream, message_id, fields in entries:
+                    in_flight.add(
+                        asyncio.create_task(
+                            self._handle_one(
+                                stream, message_id, fields, handler, max_deliveries, sem
+                            )
+                        )
                     )
-                )
-        if in_flight:
-            logger.info("停止领新任务，等 %d 个在途任务跑完", len(in_flight))
-            await asyncio.gather(*in_flight, return_exceptions=True)
+            if in_flight:
+                logger.info("停止领新任务，等 %d 个在途任务跑完", len(in_flight))
+                await asyncio.gather(*in_flight, return_exceptions=True)
+        except asyncio.CancelledError:
+            await cancel_in_flight(in_flight)
+            raise
 
     async def _read(
         self, consumer: str, count: int, block_ms: int

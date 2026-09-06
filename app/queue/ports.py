@@ -20,6 +20,7 @@ AgentLoop，并发上限由 :mod:`app.api.concurrency` 的双池准入守着。�
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -151,6 +152,22 @@ class TaskStatus:
 
 
 TaskHandler = Callable[[IntentTask], Awaitable[None]]
+
+
+async def cancel_in_flight(tasks: set[asyncio.Task[None]]) -> None:
+    """消费循环被取消时，连带掐掉它 ``create_task`` 出来的在途任务。两份实现共用。
+
+    **不能指望取消会自动往下传**：``create_task`` 出来的是独立 task，取消父协程只会打断父协程当前
+    那个 ``await``（``gather`` 是例外，它会把取消转给子任务）。少这一手，worker 优雅退出超时那条路
+    上会留一批孤儿协程——进程都在退出了它们还在跑 LLM，消息既没 ack 也没人管。
+
+    掐掉之后消息**留在 PEL 里没被 ack**，正是「超时转回 pending」要的效果。
+    """
+    if not tasks:
+        return
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @runtime_checkable
