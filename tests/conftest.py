@@ -43,6 +43,11 @@ os.environ.setdefault("LANGFUSE_ENABLED", "false")
 # 限流本身的行为由 tests/test_ratelimit.py 显式打开开关来验。
 os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
 
+# 批 4-3：消费侧 MCP 默认关。开发者 .env 里指着一台真 MCP server 时，SearchAgent 的工具集会
+# 随「那台机器起没起」在两种形态间飘——同一个用例两次跑出不同的工具表。要验 MCP 通路的用例
+# 自己起进程 + monkeypatch 这个变量（见 tests/test_mcp.py），别靠环境碰巧配着。
+os.environ.setdefault("MCP_SEARCH_URL", "")
+
 # M16：账户库钉到临时文件，且**强制覆盖**（不是 setdefault）——单测会真的写库（注册用户、认领
 # 会话），若落到开发者的 var/globex.db 上，跑一遍 pytest 就往真实账户表里塞一堆测试用户。每次
 # pytest 启动先删掉旧的临时库，保证从空表开始（用例间的隔离则靠各自用不同用户名）。
