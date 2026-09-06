@@ -60,6 +60,12 @@ def _candidate(price_usd: float, item_id: str = "i1") -> ItemCandidate:
         ("shoes in 300 budget", DEFAULT_DEST_COUNTRY, False),  # "in" ≠ 印度
         ("美元预算200的耳机", DEFAULT_DEST_COUNTRY, False),  # 「美元」≠ 美国
         ("便宜的行李箱", DEFAULT_DEST_COUNTRY, False),  # 没提 → 默认国
+        # 国名的**子串**不算命中（geo._bounded）：城市名里嵌着国名是常态，此前会静默错判。
+        ("ship to Indianapolis", DEFAULT_DEST_COUNTRY, False),  # Indianapolis ⊃ India
+        ("寄到 Ukraine", DEFAULT_DEST_COUNTRY, False),  # Ukraine ⊃ UK
+        ("ship to Indonesia", "ID", True),  # 边界不能误伤真国名
+        ("ship to USA", "US", True),  # 补进表的高频写法
+        ("寄到 UK", "GB", True),
     ],
 )
 def test_resolve_dest_country(text: str, expected: str, explicit: bool) -> None:
