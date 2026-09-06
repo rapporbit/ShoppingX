@@ -9,7 +9,10 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
+
+from pydantic import BaseModel
 
 import app.memory.curator as curator
 import app.memory.injector as injector
@@ -26,33 +29,35 @@ def _store() -> PreferenceStore:
     return get_store()
 
 
-class _FakeStructured:
+class _FakeLLM:
+    """AgentScope 侧假模型：只需 ``generate_structured_output``（见 invoke.call_structured）。
+
+    payload 可以是 Pydantic 对象、dict 或 Exception（模拟 judge/供应商报错）。
+    """
+
+    model = "fake-fast"
+
     def __init__(self, payload: Any, calls: list[Any] | None = None) -> None:
         self._payload = payload
         self._calls = calls
 
-    async def ainvoke(self, messages: Any) -> Any:
+    async def generate_structured_output(self, messages: Any, _schema: Any, **_kw: Any) -> Any:
         if self._calls is not None:
             self._calls.append(messages)
         if isinstance(self._payload, Exception):
             raise self._payload
-        return self._payload
-
-
-class _FakeLLM:
-    def __init__(self, payload: Any, calls: list[Any] | None = None) -> None:
-        self._payload = payload
-        self._calls = calls
-
-    def with_structured_output(self, _schema: Any, **kwargs: Any) -> _FakeStructured:
-        self.structured_kwargs = kwargs
-        return _FakeStructured(self._payload, self._calls)
+        content = (
+            self._payload.model_dump()
+            if isinstance(self._payload, BaseModel)
+            else dict(self._payload)
+        )
+        return SimpleNamespace(content=content, usage=None)
 
 
 def _patch_llm_and_store(
     monkeypatch: Any, payload: Any, store: PreferenceStore, calls: list[Any] | None = None
 ) -> None:
-    monkeypatch.setattr(curator, "get_fast_llm", lambda: _FakeLLM(payload, calls))
+    monkeypatch.setattr(curator, "get_as_fast_llm", lambda: _FakeLLM(payload, calls))
     # curator 读长期偏好 + persist 落库都走 get_store()——两处 import 各自 patch 到同一个测试 store。
     monkeypatch.setattr(curator, "get_store", lambda: store)
     monkeypatch.setattr(injector, "get_store", lambda: store)

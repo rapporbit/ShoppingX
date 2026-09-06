@@ -11,12 +11,11 @@
 
 from __future__ import annotations
 
-from langchain_core.callbacks import UsageMetadataCallbackHandler
 from langchain_core.tools import tool
 from pydantic import BaseModel
 
-from app.agent.llm import get_llm
-from app.agent.token_budget import charge_tool_llm_usage
+from app.agent.invoke import call_text
+from app.agent.llm import get_as_llm
 from app.api import monitor
 
 _SYSTEM = (
@@ -40,20 +39,14 @@ async def chat_fallback(message: str) -> ChatFallbackOutput:
       - message：用户的原话。
     """
     await monitor.report_tool_start("chat_fallback", message=message)
-    # usage 经 callback 收集入账（与 planner / shopping_summary 同口径：工具内部 LLM 调用
-    # 不经过 agent middleware，不挂就是漏账，见 token_budget.charge_tool_llm_usage）。
-    usage_cb = UsageMetadataCallbackHandler()
+    # 用量由 call_text 入账（与 planner / shopping_summary 同口径：工具内部 LLM 调用不经过
+    # agent middleware，不入账就是漏账，见 token_budget.charge_tool_llm_usage）。
     try:
-        resp = await get_llm().ainvoke(
-            [("system", _SYSTEM), ("user", message)], config={"callbacks": [usage_cb]}
-        )
+        reply = await call_text(get_as_llm(), [("system", _SYSTEM), ("user", message)])
     except Exception:
         # 模型调用失败也要补一条 end 事件，否则前端（M8）会看到工具「永远在跑」。
         await monitor.report_tool_end("chat_fallback", error=True)
         raise
-    finally:
-        charge_tool_llm_usage(usage_cb.usage_metadata)
-    reply = resp.content if isinstance(resp.content, str) else str(resp.content)
     out = ChatFallbackOutput(reply=reply)
     await monitor.report_tool_end("chat_fallback")
     return out

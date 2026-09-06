@@ -31,7 +31,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.agent.llm import get_llm  # noqa: E402
+from app.agent.invoke import call_text  # noqa: E402
+from app.agent.llm import get_as_llm  # noqa: E402
 
 DATA_DIR = PROJECT_ROOT / "data" / "train"
 BATCH = 8
@@ -77,7 +78,7 @@ def _parse(text: str, expect: int) -> list[dict] | None:
 async def synth(items: list[dict], sink) -> int:
     """生成并**逐批落盘**。
 
-    第一版栽了个跟头，两个缺陷叠在一起代价极大：``llm.ainvoke`` 没有超时，而结果要等
+    第一版栽了个跟头，两个缺陷叠在一起代价极大：模型调用没有超时，而结果要等
     ``asyncio.gather`` 全部返回才写文件。跑到 6400/10000 时 16 个并发槽全被挂起的请求占死
     （实测 16 条 TCP 连接全在等、进程 CPU 时间只有 11 秒），**gather 永远不会返回，2.6 小时
     的 API 调用一条都落不了盘**。
@@ -85,7 +86,7 @@ async def synth(items: list[dict], sink) -> int:
     所以现在：① 每个请求套 ``wait_for`` 超时；② 每批一完成立刻写文件，进程随时可杀可续。
     长跑任务只要没有增量落盘，任何一个挂起点都会让全部产出归零。
     """
-    llm, sem = get_llm(), asyncio.Semaphore(CONCURRENCY)
+    llm, sem = get_as_llm(), asyncio.Semaphore(CONCURRENCY)
     batches = [items[i : i + BATCH] for i in range(0, len(items), BATCH)]
     done_n = [0]
 
@@ -94,12 +95,12 @@ async def synth(items: list[dict], sink) -> int:
         async with sem:
             for _ in range(2):
                 try:
-                    resp = await asyncio.wait_for(
-                        llm.ainvoke(PROMPT.format(items=listing)), timeout=REQ_TIMEOUT
+                    text = await asyncio.wait_for(
+                        call_text(llm, PROMPT.format(items=listing)), timeout=REQ_TIMEOUT
                     )
                 except (TimeoutError, Exception):
                     continue
-                arr = _parse(str(resp.content), len(batch))
+                arr = _parse(text, len(batch))
                 if arr:
                     sink([{"item": it, "q": a} for it, a in zip(batch, arr, strict=True)])
                     done_n[0] += len(batch)

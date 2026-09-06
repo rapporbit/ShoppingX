@@ -9,6 +9,7 @@ item_id hydrate 得到上一轮的候选。
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -415,24 +416,24 @@ def test_diagnostics_channel_roundtrip_and_isolation(tmp_path) -> None:
 
 
 class _FakePlannerLLM:
-    """假模型：with_structured_output(...).ainvoke(...) 回一个固定的 PlanOutput。"""
+    """假模型：``generate_structured_output`` 回固定 PlanOutput（见 invoke.call_structured）。"""
+
+    model = "fake-fast"
 
     def __init__(self, plan: PlanOutput) -> None:
         self._plan = plan
 
-    def with_structured_output(self, _schema: object, **kwargs: object) -> "_FakePlannerLLM":
-        self.structured_kwargs = kwargs
-        return self
-
-    async def ainvoke(self, _messages: object, config: object = None) -> PlanOutput:
-        return self._plan
+    async def generate_structured_output(
+        self, _messages: object, _schema: object, **_kw: object
+    ) -> object:
+        return SimpleNamespace(content=self._plan.model_dump(), usage=None)
 
 
 async def _run_planner(monkeypatch: pytest.MonkeyPatch, retrieval: str) -> None:
     import app.tools.planner as mod
 
     plan = PlanOutput(category="沙发", tasks=["recommend"], retrieval=retrieval)  # type: ignore[arg-type]
-    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakePlannerLLM(plan))
+    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakePlannerLLM(plan))
     await mod.planner.ainvoke({"intent": "换个方向，想看真皮沙发"})
 
 

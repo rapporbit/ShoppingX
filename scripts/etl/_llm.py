@@ -2,6 +2,10 @@
 
 建库走便宜快模型（``LLM_FAST``，缺省回落 ``LLM_MAIN``）；信号量全 ETL 共享，
 避免多个生成阶段叠加把 API rate limit 打爆。
+
+模型对象是 AgentScope 的（批 0 / L7）：调用一律经 :mod:`app.agent.invoke` 的
+``call_text`` / ``call_structured``，别自己 ``await model(...)`` ——流式模型直接 await
+拿到的是异步生成器，要迭代到最后一个 chunk 才是完整回答。
 """
 
 from __future__ import annotations
@@ -11,7 +15,6 @@ import os
 from typing import Any
 
 from dotenv import load_dotenv
-from langchain.chat_models import init_chat_model
 
 load_dotenv()
 
@@ -25,12 +28,10 @@ def etl_llm_model() -> str:
 
 
 def get_etl_llm() -> Any:
-    return init_chat_model(
-        etl_llm_model(),
-        model_provider="openai",
-        api_key=os.environ["OPENAI_API_KEY"],
-        base_url=os.environ["OPENAI_BASE_URL"],
-        temperature=0.3,
-        timeout=60.0,
-        max_retries=2,
-    )
+    """建库档模型：不关思考、temperature 0.3（属性抽取要一点多样性但不能发散）。
+
+    走 ``role="etl"`` 独立标记，网关的并发闸门与线上主链路共用——离线跑批时压不垮线上。
+    """
+    from app.agent.llm import build_as_model
+
+    return build_as_model(etl_llm_model(), temperature=0.3, role="etl", thinking=False)

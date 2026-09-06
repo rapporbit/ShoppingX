@@ -18,7 +18,8 @@ import logging
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.agent.llm import get_fast_llm
+from app.agent.invoke import call_structured
+from app.agent.llm import get_as_fast_llm
 from app.agent.prompts import get_preference_parse_prompt
 from app.memory.domains import DOMAIN_OTHER, PrefDomain, domain_menu
 from app.memory.store import Polarity, PrefCategory
@@ -81,15 +82,13 @@ async def parse_user_preference(text: str) -> list[UserPrefDraft]:
     if not text.strip():
         return []
     try:
-        # method 钉死的理由见 planner.py（默认值随模型能力画像浮动，qwen 系会 400）。
-        structured = get_fast_llm().with_structured_output(_ParseResult, method="function_calling")
-        result = await structured.ainvoke(
-            [("system", get_preference_parse_prompt()), ("user", text.strip())]
+        result = await call_structured(
+            get_as_fast_llm(),
+            [("system", get_preference_parse_prompt()), ("user", text.strip())],
+            _ParseResult,
         )
     except Exception as exc:  # noqa: BLE001 —— 解析失败降级为空，由 API 层告诉用户「没听懂」
         logger.warning("偏好解析失败（text=%r）：%s", text[:60], exc)
-        return []
-    if not isinstance(result, _ParseResult):
         return []
     # slug 是去重身份，空 slug 的条目会让 dedup_key 退化成同一个键、互相覆盖——直接丢弃。
     drafts = [p for p in result.preferences if p.slug.strip() and p.content.strip()]

@@ -195,6 +195,26 @@ def charge_tool_llm_usage(usage_by_model: Mapping[str, Any]) -> None:
         logger.debug("工具内部 LLM 记账失败，跳过（不反噬工具执行）", exc_info=True)
 
 
+def charge_as_usage(model: str, usage: Any) -> None:
+    """AgentScope 侧的同一件事：把一次 ``ChatUsage`` 计进全树（批 0 / L7）。
+
+    LangChain 靠回调收 usage（``UsageMetadataCallbackHandler``），AgentScope 把它直接挂在
+    ``ChatResponse.usage`` / ``StructuredResponse.usage`` 上——拿得到就不必再挂回调。字段名
+    对不上（``cache_input_tokens`` vs ``input_token_details['cache_read']``），在这里翻译成
+    :func:`charge_tool_llm_usage` 的入参口径，**计费公式与去重语义只有一份**。
+
+    与 LangChain 版一样绝不反噬调用方：无 usage / 无作用域静默跳过，异常吞掉记日志。
+    """
+    if usage is None:
+        return
+    meta = {
+        "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
+        "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
+        "input_token_details": {"cache_read": int(getattr(usage, "cache_input_tokens", 0) or 0)},
+    }
+    charge_tool_llm_usage({model or "": meta})
+
+
 def peek_tree_cost() -> float | None:
     """只读当前全树累计成本（不计费），供「越线即夺权」在请求模型前判断。无作用域返回 None。"""
     st = _state(create=False)

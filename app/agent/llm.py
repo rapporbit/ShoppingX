@@ -264,7 +264,7 @@ def _as_formatter() -> OpenAIChatFormatter:
     return CacheAwareOpenAIFormatter(keep_recent=_env_int("COMPRESS_KEEP_RECENT", 3))
 
 
-def _build_as_model(
+def build_as_model(
     model: str,
     *,
     temperature: float,
@@ -296,7 +296,7 @@ def _build_as_model(
 @lru_cache(maxsize=1)
 def get_as_llm() -> ThrottledChatModel:
     """主 AgentLoop 的模型（AgentScope 侧），对应 :func:`get_llm`。"""
-    return _build_as_model(
+    return build_as_model(
         os.environ["LLM_MAIN"],
         temperature=_env_float("LLM_TEMPERATURE", 0.3),
         role="main",
@@ -311,7 +311,7 @@ def get_as_fast_llm() -> ThrottledChatModel:
     L0 的 S2 spike 实测：同一条 planner 请求，主档 12.7~17.2s，关思考后 4.5~5.1s，
     结构化结果质量无差。这一档的收益是实打实的解码时间，不是玄学。
     """
-    return _build_as_model(
+    return build_as_model(
         os.environ.get("LLM_FAST") or os.environ["LLM_MAIN"],
         temperature=_env_float("LLM_FAST_TEMPERATURE", _env_float("LLM_TEMPERATURE", 0.3)),
         role="fast",
@@ -329,7 +329,7 @@ def get_as_lite_llm() -> ThrottledChatModel:
     name = os.environ.get("LLM_LITE", "").strip()
     if not name:
         return get_as_fast_llm()
-    return _build_as_model(
+    return build_as_model(
         name,
         temperature=_env_float("LLM_FAST_TEMPERATURE", _env_float("LLM_TEMPERATURE", 0.3)),
         role="lite",
@@ -340,7 +340,7 @@ def get_as_lite_llm() -> ThrottledChatModel:
 @lru_cache(maxsize=1)
 def get_as_vision_llm() -> ThrottledChatModel:
     """看图档（AgentScope 侧），对应 :func:`get_vision_llm`。"""
-    return _build_as_model(
+    return build_as_model(
         os.environ["LLM_VISION"],
         temperature=_env_float("LLM_VISION_TEMPERATURE", 0.1),
         role="vision",
@@ -352,7 +352,7 @@ def get_as_vision_llm() -> ThrottledChatModel:
 @lru_cache(maxsize=1)
 def get_as_judge_llm() -> ThrottledChatModel:
     """判官档（AgentScope 侧），对应 :func:`get_judge_llm`——temperature=0，尺子不能自己抖。"""
-    return _build_as_model(
+    return build_as_model(
         os.environ.get("LLM_JUDGE") or os.environ["LLM_MAIN"],
         temperature=_env_float("LLM_JUDGE_TEMPERATURE", 0.0),
         role="judge",
@@ -369,7 +369,7 @@ def build_as_judge_llm(temperature: float) -> ThrottledChatModel:
 
     刻意不加 ``lru_cache``：温度是入参，缓存键会随之膨胀，而这类离线脚本一轮只建三个模型。
     """
-    return _build_as_model(
+    return build_as_model(
         os.environ.get("LLM_JUDGE") or os.environ["LLM_MAIN"],
         temperature=temperature,
         role="judge",
@@ -388,7 +388,7 @@ def get_as_fallback_llm() -> ThrottledChatModel | None:
     name = os.environ.get("LLM_FALLBACK_MODEL", "").strip()
     if not name or name == os.environ.get("LLM_MAIN"):
         return None
-    return _build_as_model(
+    return build_as_model(
         name,
         temperature=_env_float("LLM_TEMPERATURE", 0.3),
         role="fallback",

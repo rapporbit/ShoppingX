@@ -29,6 +29,7 @@ from pathlib import Path
 import numpy as np
 from pydantic import BaseModel, Field
 
+from app.agent.invoke import call_structured
 from app.recall.towers import TowerClient
 from scripts.etl._llm import LLM_SEM, etl_llm_model, get_etl_llm
 from scripts.etl.aggregate import _slug
@@ -175,17 +176,13 @@ def _load_adj_cache() -> dict[str, int]:
 
 async def _adjudicate_one(llm, category: str, cand_lines: list[str]) -> int:
     """让 LLM 在候选里选一个（返回 0-based 下标）或全拒（返回 -1）；调用失败也算全拒。"""
-    structured = llm.with_structured_output(_Pick)
     prompt = f"OUR category: {category}\n\nCandidates:\n" + "\n".join(
         f"{i}. {line}" for i, line in enumerate(cand_lines)
     )
     async with LLM_SEM:
         try:
-            result: _Pick = await structured.ainvoke(
-                [
-                    {"role": "system", "content": _ADJ_SYSTEM},
-                    {"role": "user", "content": prompt},
-                ]
+            result: _Pick = await call_structured(
+                llm, [("system", _ADJ_SYSTEM), ("user", prompt)], _Pick
             )
         except Exception as e:
             print(f"  ⚠ {category}: Shopify 裁决失败，按拒绝处理 ({type(e).__name__})")

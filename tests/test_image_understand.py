@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -164,15 +165,22 @@ async def test_reads_all_supported_formats(
     (upload_dir / "ref.png").write_bytes(payload)
     monkeypatch.setattr(mod, "UPLOAD_ROOT", tmp_path / "uploads")
 
-    class _FakeResp:
-        content = '{"subject": "杯子", "category": "mug", "search_query": "white ceramic mug"}'
+    text = '{"subject": "杯子", "category": "mug", "search_query": "white ceramic mug"}'
 
     class _FakeLLM:
-        # 签名要收下 config：真实调用会挂 usage callback 记 token 账（漏账则成本闸/配额少算）。
-        async def ainvoke(self, _messages: Any, config: Any = None) -> Any:
-            return _FakeResp()
+        """AgentScope 侧假 VL 模型：流式吐一个 text block（见 invoke.call_text）。"""
 
-    monkeypatch.setattr(mod, "get_vision_llm", lambda: _FakeLLM())
+        model = "fake-vl"
+
+        async def __call__(self, _messages: Any, **_kw: Any) -> Any:
+            async def _stream() -> Any:
+                yield SimpleNamespace(
+                    content=[{"type": "text", "text": text}], usage=None, is_last=True
+                )
+
+            return _stream()
+
+    monkeypatch.setattr(mod, "get_as_vision_llm", lambda: _FakeLLM())
 
     with thread_scope("t-img", tmp_path / "session" / "t-img"):
         out = await image_understand.ainvoke({"filename": "ref.png"})

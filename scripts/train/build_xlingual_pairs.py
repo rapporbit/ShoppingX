@@ -26,7 +26,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.agent.llm import get_llm  # noqa: E402
+from app.agent.invoke import call_text  # noqa: E402
+from app.agent.llm import get_as_llm  # noqa: E402
 
 DATA_DIR = PROJECT_ROOT / "data" / "train"
 BATCH = 20
@@ -57,17 +58,17 @@ def _parse_array(text: str, expect: int) -> list[str] | None:
 
 
 async def translate(rows: list[dict]) -> list[dict]:
-    llm, sem = get_llm(), asyncio.Semaphore(CONCURRENCY)
+    llm, sem = get_as_llm(), asyncio.Semaphore(CONCURRENCY)
     batches = [rows[i : i + BATCH] for i in range(0, len(rows), BATCH)]
 
     async def one(batch: list[dict]) -> list[dict]:
         queries = [r["query"] for r in batch]
         async with sem:
             for _ in range(2):  # 失败重试一次，仍失败则丢弃该批
-                resp = await llm.ainvoke(
-                    PROMPT.format(items=json.dumps(queries, ensure_ascii=False))
+                text = await call_text(
+                    llm, PROMPT.format(items=json.dumps(queries, ensure_ascii=False))
                 )
-                zh = _parse_array(str(resp.content), len(queries))
+                zh = _parse_array(text, len(queries))
                 if zh:
                     return [{**r, "query_zh": z} for r, z in zip(batch, zh, strict=True)]
         print(f"  [warn] 一批 {len(batch)} 条翻译失败，已丢弃")

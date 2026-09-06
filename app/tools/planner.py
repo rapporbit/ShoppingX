@@ -28,14 +28,13 @@ import os
 import re
 from typing import Literal
 
-from langchain_core.callbacks import UsageMetadataCallbackHandler
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field, model_validator
 
 from app.agent.fork_guard import current_fork_depth
-from app.agent.llm import get_fast_llm
+from app.agent.invoke import call_structured
+from app.agent.llm import get_as_fast_llm
 from app.agent.prompts import get_planner_prompt
-from app.agent.token_budget import charge_tool_llm_usage
 from app.api import monitor
 from app.api.context import (
     get_original_query,
@@ -667,27 +666,21 @@ async def planner(intent: str) -> PlanOutput:
     """
     await monitor.report_tool_start("planner", intent=intent)
     prior = _render_prior_context()
-    # 结构化输出把 AIMessage 吞成 Pydantic 对象，usage 只能经 callback 拿到；不挂就是漏账
-    # （成本与预算闸都少算这一笔，见 token_budget.charge_tool_llm_usage）。
-    usage_cb = UsageMetadataCallbackHandler()
     try:
-        # method 必须显式钉死：默认值由 LangChain 的模型能力画像推断，qwen 系会被判成不支持
-        # tools → 回退 response_format=json_object，而 DashScope 要求该模式下 messages 里必须
-        # 出现 "json" 字样（本 prompt 没有）→ 400 直接打挂拆解。后台管理页能热更新 LLM_MAIN，
-        # 不钉死就等于「随手换个模型就炸」（实测 qwen3.5-flash 触发，deepseek-v4-flash 不触发）。
-        structured = get_fast_llm().with_structured_output(PlanOutput, method="function_calling")
-        result = await structured.ainvoke(
+        # 曾经这里要显式钉 ``method="function_calling"``：LangChain 按模型能力画像推断默认
+        # method，qwen 系被判成不支持 tools → 回退 response_format=json_object，而 DashScope
+        # 要求该模式下 messages 里必须出现 "json" 字样（本 prompt 没有）→ 400 直接打挂拆解。
+        # AgentScope 的 generate_structured_output 自带策略梯（forced→auto→no_think→none），
+        # 这个坑结构上不存在，也没有 method 可钉（L0/S2 实测）。用量由 call_structured 入账。
+        plan = await call_structured(
+            get_as_fast_llm(),
             [("system", get_planner_prompt()), ("user", prior + intent if prior else intent)],
-            config={"callbacks": [usage_cb]},
+            PlanOutput,
         )
-        plan = result if isinstance(result, PlanOutput) else PlanOutput.model_validate(result)
     except Exception:
         # 模型调用失败也要补一条 end 事件，否则前端（M8）会看到工具「永远在跑」。
         await monitor.report_tool_end("planner", error=True)
         raise
-    finally:
-        # 放 finally：模型调用成功但下游解析抛错时，token 也已真实花掉，照样入账。
-        charge_tool_llm_usage(usage_cb.usage_metadata)
     # 没有既有候选就没什么可复用/可合流的——无视模型的自由发挥，钉死 search。首轮判成 reuse 会让
     # 主 loop 直奔 item_picker 精挑一个空池子，产出空清单（和币种回填同一套「确定性兜底」思路）。
     if not registry_snapshot():

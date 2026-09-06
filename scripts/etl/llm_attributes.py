@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
 
+from app.agent.invoke import call_structured
 from scripts.etl._llm import LLM_SEM, get_etl_llm
 
 
@@ -73,14 +74,12 @@ def _sanitize(s: str) -> str:
 
 async def _generate_one(llm, category: str, now: str) -> list[dict]:
     """为一个品类生成属性分布卡片草稿列表。"""
-    structured = llm.with_structured_output(_CategoryAttributes)
     async with LLM_SEM:
         try:
-            result: _CategoryAttributes = await structured.ainvoke(
-                [
-                    {"role": "system", "content": _SYSTEM},
-                    {"role": "user", "content": f"Category: {category}"},
-                ]
+            result: _CategoryAttributes = await call_structured(
+                llm,
+                [("system", _SYSTEM), ("user", f"Category: {category}")],
+                _CategoryAttributes,
             )
         except Exception as e:
             print(f"  ⚠ {category}: LLM 调用失败 ({type(e).__name__}: {e})")

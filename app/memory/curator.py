@@ -26,7 +26,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.agent.llm import get_fast_llm
+from app.agent.invoke import call_structured
+from app.agent.llm import get_as_fast_llm
 from app.agent.prompts import get_memory_curator_prompt
 from app.api.context import get_session_domains
 from app.memory.domains import DOMAIN_OTHER, PrefDomain, domain_menu
@@ -151,15 +152,10 @@ async def curate_turn(
         f"【该用户已有长期偏好（判 keys_to_supersede 用）】\n{_format_long_term(long_term)}"
     )
     try:
-        # method 钉死的理由见 planner.py（默认值随模型能力画像浮动，qwen 系会 400）。
-        structured = get_fast_llm().with_structured_output(
-            CurationResult, method="function_calling"
-        )
-        result = await structured.ainvoke(
+        curation = await call_structured(
+            get_as_fast_llm(),
             [("system", get_memory_curator_prompt()), ("user", user_msg)],
-        )
-        curation = (
-            result if isinstance(result, CurationResult) else CurationResult.model_validate(result)
+            CurationResult,
         )
     except Exception:
         logger.warning("curator LLM 调用失败，本轮记忆判定降级跳过（user=%s）", user_id)
