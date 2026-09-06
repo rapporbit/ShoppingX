@@ -161,10 +161,17 @@ async def _eval_one(q: dict, user_id: str | None, sem: asyncio.Semaphore, use_ca
             print(f"  [done] {qid:32s} {verdict} {result.total:5.1f}")
             return {
                 "id": qid,
+                # 注意：这个 "bucket" 是**种子集的场景分桶**（预算陷阱 / 假货……），与提示词 A/B
+                # 的桶号无关，后者叫 "ab_bucket"。两个词撞在一起过，别再混。
                 "bucket": q.get("bucket", ""),
                 "ok": True,
                 # 落进报告，让 bad case 能回溯到那条 Langfuse trace（分数已作为 score 挂在上面）。
                 "trace_id": run.get("trace_id"),
+                # 提示词 A/B 的归属与代价面（scripts/eval/ab_report.py 按这三项聚合）。
+                "prompt_version": run.get("prompt_version", ""),
+                "ab_bucket": run.get("ab_bucket"),
+                "model_calls": run.get("model_calls"),
+                "tokens": run.get("tokens"),
                 "result": result.model_dump(),
             }
         except TimeoutError:

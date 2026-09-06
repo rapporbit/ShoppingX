@@ -25,6 +25,7 @@ from typing import Any, Literal
 from agentscope.message import Msg, TextBlock
 from agentscope.state import AgentState
 
+from app.agent.ab import assign as assign_prompt_version
 from app.agent.agents import build_main_agent
 from app.agent.events import pump_events
 from app.agent.platform_scope import platform_scope
@@ -280,13 +281,21 @@ async def run_agent(
     """
     started_at = time.monotonic()
     session_dir = ensure_session_dir(thread_id)
+    # 提示词 A/B：桶号与版本本轮**只算一次**，trace / 账本 / 返回值共用同一份结论。分开各算各的
+    # 会在「刚好跨过热更新」的那一轮记出互相矛盾的归属——A/B 报告最怕的就是这种错行。
+    ab_assign = assign_prompt_version(user_id)
     with (
         thread_scope(thread_id, session_dir, user_id=user_id),
         platform_scope(platforms) as enabled_platforms,
         # 一轮 = 一条 trace 的根 span。主 loop 与 worker 的 span 靠 OTEL 上下文自动挂进来
         # （不像 LangChain 侧要手工传 trace_id），多轮再靠 session_id=thread_id 聚成 Session。
         # 未启用观测时它是个空壳。
-        turn_span(session_id=thread_id, user_id=user_id),
+        turn_span(
+            session_id=thread_id,
+            user_id=user_id,
+            prompt_version=ab_assign.version,
+            ab_bucket=ab_assign.bucket,
+        ),
     ):
         activity_rec = monitor.begin_activity_capture()
         await monitor.report_session_created(session_dir)
@@ -411,7 +420,7 @@ async def run_agent(
             reset_original_query()
             reset_session_pt()
             if snap is not None:
-                await charge_quota(user_id, snap)
+                await charge_quota(user_id, snap, prompt_version=ab_assign.version)
 
         messages: list[Msg] = list(agent.state.context)
         # **final_text 取事件泵拿到的那条 Msg，不从 context 尾部取**：on_session_end 的输出审核
@@ -504,4 +513,10 @@ async def run_agent(
             "messages": messages,
             "items": items,
             "learned_preferences": get_learned_prefs(),
+            # 以下四项给离线 A/B 报告按桶聚合用（`scripts/eval/ab_report.py`）：光有版本号还
+            # 判不了优劣，「轮数 / token」是版本变化最先反映出来的两处代价。
+            "prompt_version": ab_assign.version,
+            "ab_bucket": ab_assign.bucket,
+            "tokens": tokens,
+            "model_calls": usage.model_calls,
         }
