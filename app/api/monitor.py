@@ -436,9 +436,18 @@ async def report_task_cancelled() -> None:
     await _emit(EVENT_TASK_CANCELLED, "任务已取消", {})
 
 
-async def report_error(error_type: str, message: str) -> None:
-    """执行异常时上报（前端显示错误，便于定位卡在哪一步）。"""
-    await _emit(EVENT_ERROR, "执行出错", {"error_type": error_type, "message": _clip(message)})
+async def report_error(error_type: str, message: str, thread_id: str | None = None) -> None:
+    """执行异常时上报（前端显示错误，便于定位卡在哪一步）。
+
+    ``thread_id`` 显式传入的场景同 :func:`report_queue_status`：入队失败发生在任务进
+    ``thread_scope`` **之前**，ContextVar 还是空的，不递进来这条错误就只剩日志、前端永远转圈。
+    """
+    await _emit(
+        EVENT_ERROR,
+        "执行出错",
+        {"error_type": error_type, "message": _clip(message)},
+        thread_id=thread_id,
+    )
 
 
 async def report_model_fallback(model: str) -> None:

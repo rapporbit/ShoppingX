@@ -22,7 +22,7 @@ from collections import OrderedDict, deque
 from collections.abc import Callable
 
 from app.api.concurrency import RequestClass
-from app.queue.ports import IntentTask, TaskHandler, TaskStatus
+from app.queue.ports import IntentTask, TaskHandler, TaskStatus, cancel_in_flight
 
 logger = logging.getLogger("shoppingx.queue")
 
@@ -85,23 +85,28 @@ class InProcessQueue:
         """消费循环，形状与 Redis 侧一致：跑到 ``should_stop()`` 为真且在途任务收干净才返回。"""
         limit = max(1, concurrency)
         in_flight: set[asyncio.Task[None]] = set()
-        while not should_stop():
-            in_flight = {t for t in in_flight if not t.done()}
-            if len(in_flight) >= limit:
-                await asyncio.wait(in_flight, return_when=asyncio.FIRST_COMPLETED)
-                continue
-            task = self._pop()
-            if task is None:
-                self._arrival.clear()
-                try:
-                    await asyncio.wait_for(self._arrival.wait(), timeout=poll_interval)
-                except TimeoutError:
-                    pass  # 超时是正常路径：借它回头看一眼 should_stop
-                continue
-            in_flight.add(asyncio.create_task(self._handle_one(task, handler)))
-        if in_flight:
-            logger.info("停止领新任务，等 %d 个在途任务跑完", len(in_flight))
-            await asyncio.gather(*in_flight, return_exceptions=True)
+        try:
+            while not should_stop():
+                in_flight = {t for t in in_flight if not t.done()}
+                if len(in_flight) >= limit:
+                    await asyncio.wait(in_flight, return_when=asyncio.FIRST_COMPLETED)
+                    continue
+                task = self._pop()
+                if task is None:
+                    self._arrival.clear()
+                    try:
+                        await asyncio.wait_for(self._arrival.wait(), timeout=poll_interval)
+                    except TimeoutError:
+                        pass  # 超时是正常路径：借它回头看一眼 should_stop
+                    continue
+                in_flight.add(asyncio.create_task(self._handle_one(task, handler)))
+            if in_flight:
+                logger.info("停止领新任务，等 %d 个在途任务跑完", len(in_flight))
+                await asyncio.gather(*in_flight, return_exceptions=True)
+        except asyncio.CancelledError:
+            # 与 Redis 侧同一手法：create_task 出来的在途任务不会随本协程一起被取消，得显式掐。
+            await cancel_in_flight(in_flight)
+            raise
 
     async def _handle_one(self, task: IntentTask, handler: TaskHandler) -> None:
         try:

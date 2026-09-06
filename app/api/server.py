@@ -7,6 +7,8 @@
 接口                            解决什么
 ==============================  ============================================
 ``POST /api/task``              启动一次主 AgentLoop（后台跑），立即返回 thread_id
+``POST /api/task/async``        异步提交（需 QUEUE_ENABLED）：入队即返回 task_id，无 WS 的调用方用
+``GET  /api/task/{task_id}``    查异步任务的状态 / 结果（轮询）
 ``WS   /ws/{thread_id}``        订阅该 thread 的 AGUI 事件流（长连接）
 ``POST /api/task/{tid}/cancel`` 用户主动取消长任务
 ``GET  /api/files/{tid}/{name}``下载本次会话产物（summary.md / result.json）
@@ -86,6 +88,13 @@ from app.memory.session_state import load_pt, save_pt
 from app.memory.store import FavoriteItem, PreferenceEntry, get_store
 from app.observability import alerts, metrics
 from app.observability.logging import configure_logging
+from app.queue import (
+    InProcessQueue,
+    IntentTask,
+    TaskStatus,
+    get_task_queue,
+    queue_enabled,
+)
 from app.recall import get_recall_client
 from app.recall.geo import SUPPORTED_COUNTRIES
 from app.tools.image_understand import sniff_image_mime
@@ -101,6 +110,8 @@ from app.utils.path_utils import (
 )
 from app.utils.terms import term_hits
 from app.utils.tokens import warm_tokenizer
+from app.worker import WORKER_CONCURRENCY
+from app.worker import handle_task as worker_handle_task
 
 logger = logging.getLogger("shoppingx.server")
 
@@ -111,6 +122,19 @@ logger = logging.getLogger("shoppingx.server")
 # **与 image_understand 读同一个 env**：两处各写一个数字的话，中间地带的图会「传得上去却看不了」——
 # 上传口放行 9MB，工具侧按 8MB 判超限降级，用户只看到「传成功了但 Agent 说没看到图」。
 MAX_UPLOAD_BYTES = env_int("UPLOAD_MAX_IMAGE_MB", 8) * 1024 * 1024
+
+# ── 队列模式（QUEUE_ENABLED=1）的三个常数 ──
+#
+# 准入池的 429 守的是「本进程同时跑几个 AgentLoop」。任务交给 worker 之后本进程一个 loop 都不跑，
+# 那道闸就失效了——**必须换一道**，否则「削峰」会悄悄退化成无界堆积：队列看着能收，用户却在等一个
+# 永远排不到的位置。所以队列模式下改用队列深度做背压，超了照样 429 + Retry-After。
+QUEUE_MAX_DEPTH = env_int("QUEUE_MAX_DEPTH", 200)
+# API 侧「等结果」协程的轮询间隔（秒）。它只是为了让 /inflight、取消口、幂等第 1 层的形状不变，
+# 真正的实时性走 WS 事件，不需要秒级轮询。
+QUEUE_POLL_SECONDS = env_int("QUEUE_POLL_MS", 1000) / 1000
+# 等结果的上限。worker 整批挂掉时，API 侧的 waiter 不能就这么挂着——active_tasks 里留一条永不退休的
+# 记录，会让同 thread 同 query 永远被幂等第 1 层判成 already_running。
+QUEUE_WAIT_TIMEOUT_SEC = env_int("QUEUE_WAIT_TIMEOUT_SEC", 1800)
 
 
 def _safe_session_dir(root: Path, thread_id: str) -> Path:
@@ -159,9 +183,27 @@ async def lifespan(_app: FastAPI):
     if alerts.alerts_enabled():
         alert_task = asyncio.create_task(alerts.alert_loop())
         logger.info("工具 RT 告警轮询已启动")
+
+    # 队列开着、但工厂回落到了进程内实现（Redis 客户端建不起来）→ **API 自己兼任 worker**。
+    # 不做这件事的后果不是「退回现状」而是全线静默卡死：入的队是本进程的 deque，独立 worker 进程
+    # 消费的是它自己那份，两边永远碰不上，用户提交的每一条任务都停在排队中。
+    queue_stop = asyncio.Event()
+    queue_task: asyncio.Task[None] | None = None
+    if queue_enabled() and isinstance(get_task_queue(), InProcessQueue):
+        logger.warning("队列已回落到进程内实现：API 进程兼任 worker（重启仍会丢在跑的任务）")
+        queue_task = asyncio.create_task(
+            get_task_queue().consume(
+                "api-inprocess", worker_handle_task, queue_stop.is_set, WORKER_CONCURRENCY
+            )
+        )
     try:
         yield
     finally:
+        if queue_task is not None:
+            queue_stop.set()
+            queue_task.cancel()  # 关服就是关服，不在这里等在飞任务——那是独立 worker 的职责
+            with suppress(asyncio.CancelledError):
+                await queue_task
         if alert_task is not None:
             alert_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -292,6 +334,41 @@ async def issue_token(req: TokenRequest) -> dict[str, str]:
 # --- 启动任务 ---------------------------------------------------------------
 
 
+async def _enforce_quota(user_id: str | None) -> None:
+    """credit 配额闸（M18）：今日额度用尽 → 402，连任务都不给起。
+
+    放在最前（早于归属登记 / 占槽 / 指纹 / 入队）：额度不够的人不该在系统里留下任何足迹——不该认领
+    thread、不该占并发槽、更不该在队列里排。402 Payment Required 是这里语义最准的码：不是没权限
+    （403，他登录了且这是他自己的会话），也不是限速（429，等一会儿并不会好转），而是「这个周期的
+    额度已经花完了」。detail 里带上限 / 已用 / 重置时刻，前端直接拿去展示。
+    """
+    if not (quota_enabled() and user_id):
+        return
+    async with session_factory()() as db:
+        quota = await get_quota(db, user_id)
+    if quota.exhausted:
+        metrics.record_task_rejected("quota_exhausted")
+        logger.info("配额耗尽，拒绝任务：user=%s period=%s", user_id, quota.period)
+        raise HTTPException(402, detail={"error": "quota_exhausted", **quota.as_dict()})
+
+
+async def _claim_thread_if_needed(thread_id: str, user_id: str | None, query: str) -> None:
+    """归属登记（M16）：首轮把 thread 记到本人名下，后续轮顶新 updated_at（侧栏据此排序）。
+
+    ``claim_thread`` 自带属主校验——拿别人的 thread_id 发消息会被它拒，否则「用他的 tid 说句话」
+    就成了把他的会话过户到自己名下。
+    """
+    if not (auth_enabled() and user_id):
+        return
+    async with session_factory()() as db:
+        try:
+            await claim_thread(db, thread_id, user_id, query)
+        except PermissionError as exc:
+            raise HTTPException(403, "无权访问该会话") from exc
+        except LookupError as exc:  # token 合法但用户已不存在 → 让他重新登录
+            raise HTTPException(401, "凭证已失效，请重新登录") from exc
+
+
 async def _history_turns(thread_id: str) -> int:
     """该 thread 已积累的历史轮数（分类器的输入）。读不到一律按 0 算 → normal 池。
 
@@ -303,6 +380,128 @@ async def _history_turns(thread_id: str) -> int:
         return len(await read_turns(thread_id, safe_join(OUTPUT_ROOT, thread_id)))
     except Exception:
         return 0
+
+
+async def _queue_depth_or_429(kind: str) -> int:
+    """队列模式的背压闸：读一次队列深度，超过 :data:`QUEUE_MAX_DEPTH` 就 429（理由见该常数）。"""
+    depth = await get_task_queue().depth()
+    if depth >= QUEUE_MAX_DEPTH:
+        metrics.record_task_rejected("queue_full")
+        raise HTTPException(
+            429,
+            f"服务繁忙：队列已积压 {depth} 条（上限 {QUEUE_MAX_DEPTH}），"
+            f"请 {TASK_RETRY_AFTER_SEC}s 后重试",
+            headers={"Retry-After": str(TASK_RETRY_AFTER_SEC)},
+        )
+    logger.debug("队列深度 %d（kind=%s）", depth, kind)
+    return depth
+
+
+async def _enqueue_intent(intent: IntentTask, depth: int) -> None:
+    """先落 ``queued`` 状态、再入队。
+
+    顺序反过来会**把状态倒退**：worker 可能已经领走并置成 running，我们随后写的 queued 会盖掉它，
+    轮询方看见任务从「跑着」变回「排队」。先写则 worker 只会把状态往前推。
+    """
+    queue = get_task_queue()
+    await queue.set_status(
+        TaskStatus(
+            task_id=intent.task_id,
+            state="queued",
+            thread_id=intent.thread_id,
+            queue_depth=depth,
+        )
+    )
+    await queue.enqueue(intent)
+
+
+async def _queued_runner(intent: IntentTask, position: int) -> None:
+    """队列模式下 API 侧的影子协程：入队 → 报排位 → 等 worker 跑完。
+
+    **它不跑 Agent，存在的理由只有一个**：``active_tasks`` 是 ``/inflight``、幂等第 1 层、取消口
+    三样共用的账本。队列模式下若不在 API 侧留一条记录，这三样会一起失效——而「前端零改动」的前提
+    正是它们的行为不变。所以这里用一个廉价的轮询协程占住那个位置，跑完就摘。
+
+    **取消的诚实边界**：cancel 掉的是这个 waiter，worker 那边还在跑。跨进程取消（取消标记 +
+    Pub/Sub）是批 2 后面一单的事，现在不假装它已经有了。
+    """
+    thread_id = intent.thread_id
+    queue = get_task_queue()
+    deadline = asyncio.get_running_loop().time() + QUEUE_WAIT_TIMEOUT_SEC
+    try:
+        try:
+            await _enqueue_intent(intent, position - 1)
+        except Exception as exc:
+            # 入队失败必须让用户看见。走 error 事件而不是 HTTP 5xx：响应早就返回了，而前端本就按
+            # error 事件收尾（run_agent 抛异常时也是这条路），故零改动即可显示。
+            logger.exception("入队失败：thread_id=%s", thread_id)
+            await monitor.report_error(
+                "enqueue_failed", f"任务入队失败：{exc}", thread_id=thread_id
+            )
+            return
+        if position > 1:
+            metrics.record_task_queued(intent.kind)
+            await monitor.report_queue_status(
+                thread_id,
+                position,
+                # 传「前面有几个人」而不是 position 本身——与准入池那边差一个身位是有原因的：在那边
+                # 「进了等待队列」本身就意味着槽全满、你必须等一轮；这边队列里有人不等于 worker 忙，
+                # 排第 1 位就是没人挡着你，说 30s 是凭空吓人。
+                estimated_wait_seconds(position - 1, WORKER_CONCURRENCY),
+                intent.kind,
+            )
+        while asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(QUEUE_POLL_SECONDS)
+            status = await queue.get_status(intent.task_id)
+            if status is not None and status.state in ("done", "failed"):
+                return
+        logger.warning(
+            "等结果超时（%ds）：task=%s thread=%s",
+            QUEUE_WAIT_TIMEOUT_SEC,
+            intent.task_id,
+            thread_id,
+        )
+        await monitor.report_error("queue_timeout", "任务等待超时，请稍后重试", thread_id=thread_id)
+    finally:
+        # 与 _runner 同一手法：按身份摘除，不按 key 盲删——覆盖重发时旧 waiter 的 finally 会晚几个
+        # tick 才跑，盲删会把已登记的新任务摘掉。
+        handle = active_tasks.get(thread_id)
+        if handle is not None and handle.task is asyncio.current_task():
+            active_tasks.pop(thread_id, None)
+
+
+def _start_queued(
+    req: TaskRequest, thread_id: str, user_id: str | None, turn_count: int, depth: int
+) -> dict[str, Any]:
+    """登记影子协程并返回响应体。
+
+    **全同步**：它处在 endpoint 的无 ``await`` 区间里（原子性理由见 create_task）。
+    """
+    intent = IntentTask.create(
+        task_id=uuid.uuid4().hex,
+        thread_id=thread_id,
+        query=req.query,
+        history_turns=turn_count,
+        user_id=user_id,
+        platforms=req.platforms,
+        image_paths=req.image_paths,
+    )
+    position = depth + 1
+    task = asyncio.create_task(_queued_runner(intent, position))
+    active_tasks[thread_id] = TaskHandle(
+        task=task,
+        query=req.query,
+        reservation=Reservation(kind=intent.kind),  # 队列模式不占准入槽，凭据只为形状对齐
+        images=list(req.image_paths or ()),
+    )
+    dedup.remember(user_id, req.query, thread_id)
+    queued = position > 1
+    return {
+        "status": "queued" if queued else "started",
+        "thread_id": thread_id,
+        "queue_position": position if queued else 0,
+        "task_id": intent.task_id,  # 契约是加法：老前端忽略这个键，脚本可拿它去 GET /api/task/{id}
+    }
 
 
 @app.post("/api/task")
@@ -329,42 +528,30 @@ async def create_task(
     槽，短任务的槽永远留着。池满则进该池的有界等待队列（用户在 WS 上收到 ``queue_status`` 看排位），
     队列也满才 ``429 + Retry-After``。**准入判定全同步无 await**，单线程下无竞态；真正的「等」发生
     在后台协程里，不阻塞本响应。
+
+    **``QUEUE_ENABLED=1`` 时（批 2）改走削峰队列：** 前面的配额 / 归属 / 幂等三层逐字不变，只把
+    「在本进程 ``create_task(run_agent)``」换成「入队 + 在本进程等结果」，对外的响应体、事件流、
+    取消口、``/inflight`` 全都不变——**前端零改动**。准入池在这条路上被跳过（本进程不跑 loop，占它
+    没有意义），背压改由队列深度承担，细节见 ``_start_queued`` / ``_queued_runner``。
+    ``QUEUE_ENABLED=0``（默认）时这条分支一个字节都不执行。
     """
     user_id = resolve_identity(auth_uid, req.user_id)
     thread_id = req.thread_id or uuid.uuid4().hex
 
-    # ── credit 配额闸（M18）：今日额度用尽 → 402，连任务都不给起 ──
-    #
-    # 放在最前（早于归属登记 / 占槽 / 指纹）：额度不够的人不该在系统里留下任何足迹——不该认领
-    # thread、不该占并发槽、更不该在队列里排。402 Payment Required 是这里语义最准的码：不是没
-    # 权限（403，他登录了且这是他自己的会话），也不是限速（429，等一会儿并不会好转），而是
-    # 「这个周期的额度已经花完了」。detail 里带上限 / 已用 / 重置时刻，前端直接拿去展示。
-    if quota_enabled() and user_id:
-        async with session_factory()() as db:
-            quota = await get_quota(db, user_id)
-        if quota.exhausted:
-            metrics.record_task_rejected("quota_exhausted")
-            logger.info("配额耗尽，拒绝任务：user=%s period=%s", user_id, quota.period)
-            raise HTTPException(402, detail={"error": "quota_exhausted", **quota.as_dict()})
-
-    # ── 归属登记（M16）：首轮把 thread 记到本人名下，后续轮顶新 updated_at（侧栏据此排序）──
-    #
-    # 放在最前、且是本 handler 里**唯一**的 await 点之前半段：下面「幂等判定 → 占槽 → 写
-    # active_tasks」那一整段仍然一个 await 都没有，原子性不受影响（单线程事件循环里，没有 await
-    # 就不会被别的请求插进来）。claim_thread 自带属主校验——拿别人的 thread_id 发消息会被它拒，
-    # 否则「用他的 tid 说句话」就成了把他的会话过户到自己名下。
-    if auth_enabled() and user_id:
-        async with session_factory()() as db:
-            try:
-                await claim_thread(db, thread_id, user_id, req.query)
-            except PermissionError as exc:
-                raise HTTPException(403, "无权访问该会话") from exc
-            except LookupError as exc:  # token 合法但用户已不存在 → 让他重新登录
-                raise HTTPException(401, "凭证已失效，请重新登录") from exc
+    # 配额闸与归属登记都在最前（各自 docstring 说明为什么），且都在本 handler「无 await 区间」的
+    # 前半段：下面「幂等判定 → 占槽 / 入队登记 → 写 active_tasks」那一整段仍然一个 await 都没有，
+    # 原子性不受影响（单线程事件循环里，没有 await 就不会被别的请求插进来）。
+    await _enforce_quota(user_id)
+    await _claim_thread_if_needed(thread_id, user_id, req.query)
 
     # 分池的输入（历史轮数）在这里就取好：它要查库（await），而下面从幂等判定到占槽那一整段
     # 必须一个 await 都没有——原子性全靠这个，见 _history_turns 的 docstring。
     turn_count = await _history_turns(thread_id)
+    kind = classify_request(turn_count)
+    # 队列模式的深度背压同理要先算好——depth() 是一次 Redis 往返，塞进下面那段就等于给准入判定
+    # 开了个竞态窗口。QUEUE_ENABLED=0（默认）时这里一个字节都不执行。
+    use_queue = queue_enabled()
+    queue_depth = await _queue_depth_or_429(kind) if use_queue else 0
 
     # ── 幂等第 1 层：同 thread 上一个任务还活着 ──
     old = active_tasks.get(thread_id)
@@ -394,12 +581,24 @@ async def create_task(
             logger.info("幂等命中（指纹去重）：原 thread_id=%s", dup_thread)
             return {"status": "duplicate", "thread_id": dup_thread}
 
+    # ── 队列模式：不占准入槽，把任务交给 worker ──
+    #
+    # **为什么跳过准入池而不是两道闸都过。** 准入池管的是「本进程同时跑几个 AgentLoop」；任务派给
+    # worker 之后本进程一个 loop 都不跑，再占它就是把削峰上限按回单进程那 8 个数，队列白开。背压
+    # 换成上面的队列深度闸 + worker 侧的 WORKER_CONCURRENCY——各管各真正约束得住的那件事。
+    if use_queue:
+        if old is not None and is_replace:
+            # 诚实边界：这里掐掉的是 API 侧的影子协程。旧任务若已被 worker 领走，它在那边还会跑完
+            # （覆盖重发在队列模式下暂时是「多跑一轮」而不是「换一轮」）。真正的跨进程取消是批 2
+            # 后面一单（取消标记 + Pub/Sub + UserInterruptEvent），不在这里假装它已经有了。
+            old.task.cancel()
+        return _start_queued(req, thread_id, user_id, turn_count, queue_depth)
+
     # ── 准入：分池 + 占槽 or 排队 or 429。以下到 create_task 之间不得出现 await ──
     #
     # 强占（force_reserve）只在**旧任务真的占着槽**时才成立——它马上会被 cancel 并把槽还回来，
     # 新任务顶上去，真实并发不变。旧任务若还在排队（没持槽），强占就是凭空多出一个并发，把并发
     # 上限悄悄绕过；那种情况新任务老老实实走一遍准入（多半是排到旧任务腾出的那个队列位上）。
-    kind = classify_request(turn_count)
     if is_replace and old is not None and old.reservation.admitted:
         reservation = task_queue.force_reserve(kind)
     else:
@@ -472,6 +671,79 @@ async def create_task(
     dedup.remember(user_id, req.query, thread_id)
     status = "queued" if not reservation.admitted else "started"
     return {"status": status, "thread_id": thread_id, "queue_position": reservation.position}
+
+
+@app.post("/api/task/async")
+async def create_task_async(
+    req: TaskRequest, auth_uid: str | None = Depends(get_current_user_id)
+) -> dict[str, Any]:
+    """异步提交：入队即返回 ``task_id``，API 侧不留任何等待协程。
+
+    **与 ``POST /api/task`` 的分工按「调用方有没有 WS」划**。前端是 connect-first、事件走 WS，所以
+    它用 ``/api/task``（那条路会在 API 侧留一个影子协程占住 ``active_tasks``，好让 ``/inflight``、
+    取消口、幂等第 1 层照旧工作）。脚本 / 批量灌入没有 WS 可订阅，留影子协程纯属浪费——它们用这个
+    口子拿 ``task_id``，再去 ``GET /api/task/{id}`` 轮询。
+
+    **``QUEUE_ENABLED=0`` 时 503 而不是退回本进程跑**：关着队列时入的是进程内 deque，没有消费方，
+    返回 200 + 一个永远停在 queued 的 task_id 是骗人。配额 / 归属两道闸与主路径完全一致。
+    """
+    if not queue_enabled():
+        raise HTTPException(503, "异步提交需开启 QUEUE_ENABLED（关着时入的队没有消费方）")
+    user_id = resolve_identity(auth_uid, req.user_id)
+    thread_id = req.thread_id or uuid.uuid4().hex
+    await _enforce_quota(user_id)
+    await _claim_thread_if_needed(thread_id, user_id, req.query)
+    turn_count = await _history_turns(thread_id)
+    depth = await _queue_depth_or_429(classify_request(turn_count))
+    intent = IntentTask.create(
+        task_id=uuid.uuid4().hex,
+        thread_id=thread_id,
+        query=req.query,
+        history_turns=turn_count,
+        user_id=user_id,
+        platforms=req.platforms,
+        image_paths=req.image_paths,
+    )
+    try:
+        await _enqueue_intent(intent, depth)
+    except Exception as exc:
+        # 队列的降级口径：入队失败必抛（见 app/queue/ports.py）。这里是「调用方决定」的那一半——
+        # 同步提交口有 WS 可以补一条 error 事件，这个口子只有 HTTP 响应，故 503 说清楚。
+        logger.exception("异步提交入队失败：thread_id=%s", thread_id)
+        raise HTTPException(503, "任务入队失败，请稍后重试") from exc
+    position = depth + 1
+    return {
+        "task_id": intent.task_id,
+        "thread_id": thread_id,
+        "status": "queued",
+        "queue_position": position,
+        # 同 _queued_runner：预估等待按「前面有几个人」算，排第 1 位就是 0（口径见那里的注释）。
+        "estimated_wait_seconds": estimated_wait_seconds(depth, WORKER_CONCURRENCY),
+    }
+
+
+@app.get("/api/task/{task_id}")
+async def get_task_state(
+    task_id: str, auth_uid: str | None = Depends(get_current_user_id)
+) -> dict[str, Any]:
+    """查一条异步任务的状态 / 结果。
+
+    **属主校验只能在读到状态之后做**——``task_id`` 本身不带身份，得先拿它换出 ``thread_id`` 才知道
+    该问谁。状态键有 TTL（``QUEUE_STATUS_TTL``），过期即 404：它是给一次提交轮询几分钟用的，不是
+    历史存储，真·历史在 ``GET /api/history/{thread_id}``。
+    """
+    status = await get_task_queue().get_status(task_id)
+    if status is None:
+        raise HTTPException(404, "任务不存在或状态已过期")
+    await _guard_thread(status.thread_id, auth_uid)
+    body = status.to_dict()
+    # queue_depth 是队列深度不是精确排位（Stream 没有「排第几」的查询），故预估等待也只给量级。
+    body["estimated_wait_seconds"] = (
+        estimated_wait_seconds(status.queue_depth, WORKER_CONCURRENCY)
+        if status.state == "queued"
+        else 0
+    )
+    return body
 
 
 # --- WebSocket 订阅 ---------------------------------------------------------
@@ -566,6 +838,10 @@ async def cancel_task(
     run_agent 任一 await 点被打断 → 上报 task_cancelled。
 
     属主校验（M16）：不然任何人拿到 thread_id 就能掐断别人正在跑的任务。
+
+    **``QUEUE_ENABLED=1`` 下的诚实边界**：任务在 worker 进程里跑，这里能取消的只有 API 侧那个等结果
+    的影子协程——前端会立刻停下，但 worker 那边会把这一轮跑完（「取消即免单」的账也照旧记）。跨进程
+    取消（取消标记 + Pub/Sub → worker 发 ``UserInterruptEvent``）是批 2 后面一单，别当它已经有了。
     """
     await _guard_thread(thread_id, auth_uid)
     handle = active_tasks.get(thread_id)
