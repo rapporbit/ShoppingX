@@ -16,8 +16,15 @@
     毫秒级），不需要近似算法。**不可行时如实报**：给最省组合 + 超支额，绝不静默超预算。
   - 组合报告：分配表（哪槽花了多少、砍了谁、缺了谁）登记给 shopping_summary 注入文案。
 
-「是不是套装轮」由机制判（会话里登记的槽 ≥2），不由模型自报——同 planner 的 retrieval
+「是不是槽位轮」由机制判（会话里登记的槽 ≥2），不由模型自报——同 planner 的 retrieval
 / 币种确定性回填一个思路。
+
+**槽位有两种形态**（``SLOT_MODE_*``，planner 判、随槽表一起登记落盘）：``bundle`` 是上面
+说的「一套齐」；``parallel`` 是「多品类并列」——用户一次要看几类互不相干的东西（「跑鞋 +
+降噪耳机」），各类分头检索、各自给推荐，**不配套、不砍类、预算是每件上限不是总和**。
+两者共用槽位登记 / 打标 / 分组精排 / 报告结构，差别只在最后那一步选择规则（组合优选 vs
+每类各取 top N）与文案措辞。并列这条路是「能并行」这条派发判据在本仓真正成立的来源：
+它与平台数无关，任何配置下都能触发。
 """
 
 from __future__ import annotations
@@ -46,6 +53,19 @@ MAX_SLOTS = env_int("BUNDLE_MAX_SLOTS", 6)
 # 每槽进组合枚举的候选上限：组合规模 = (每槽候选+1)^槽数，5×6 槽 ≈ 4.7 万组合，纯 Python
 # 毫秒级。再大收益也小——第 6 名靠分数进组合的概率已经很低。
 TOP_PER_SLOT = env_int("BUNDLE_TOP_PER_SLOT", 5)
+# 并列模式下每个子需求展示几件。「一套齐」每槽只能要一件（配套），并列需求则是**各给一份
+# 推荐**——3 件够用户在每类里做选择，再多会把三类的卡片堆成一屏刷不完。
+PARALLEL_PER_SLOT = env_int("PARALLEL_PER_SLOT", 3)
+
+# 槽位的两种形态。**是同一套槽位机制的两种消费方式**，共用登记 / 打标 / 分组 rerank / 报告：
+#   bundle   —— 「一套齐」：配套、共享**总预算**、essential 必选 optional 可砍，跨槽做组合
+#                优选（MCKP），每槽定稿一件。
+#   parallel —— 「多品类并列」：用户一次要调研几类互不相干的东西（「跑鞋 + 降噪耳机」），
+#                各类各自给推荐、不配套、不砍类、预算是**每件**上限而非总和。
+# 为什么必须分开：MCKP 会为了「凑一套不超总预算」擅自砍掉某一类（optional 槽整槽放弃），
+# 这在「一套齐」里是正确行为，在并列需求里就是把用户明确要的一类东西弄丢了。
+SLOT_MODE_BUNDLE = "bundle"
+SLOT_MODE_PARALLEL = "parallel"
 
 
 class BundleSlot(BaseModel):
@@ -87,6 +107,9 @@ _REPORT: dict[str, dict[str, Any]] = {}
 # 落盘——只放内存的话续聊轮清内存后拦不住复活）。register_slot 据此拒绝复活：demand 文本里
 # 再飘出这个词不代表用户改了主意。存 {"id","name"}：id 供记账，name 供创建时的漂移匹配。
 _DECLINED: dict[str, list[dict[str, str]]] = {}
+# session_dir -> 槽位形态（SLOT_MODE_*）。与槽表同生命周期、同落盘文件——形态判错的后果
+# （并列需求被 MCKP 砍掉一类）和槽表丢了一样严重，不能只放内存。
+_MODE: dict[str, str] = {}
 
 _BUNDLE_FILE = "bundle.json"
 
@@ -103,11 +126,15 @@ def _next_id(k: str, slots: list[BundleSlot]) -> int:
     return max(nums, default=0) + 1
 
 
-def set_session_bundle(slots: Iterable[BundleSlot]) -> None:
-    """登记本会话的套装槽位（planner 判出 bundle_slots ≥2 时调），并落盘供续聊轮读回。
+def set_session_bundle(slots: Iterable[BundleSlot], mode: str | None = None) -> None:
+    """登记本会话的槽位（planner 判出 ``bundle_slots`` ≥2 时调），并落盘供续聊轮读回。
 
     机制在此**发槽位 id**（s1、s2…，没带 id 的补发、带了的保留）——id 是身份，模型无权自造。
     落盘失败只记日志——槽位是工作记忆，丢了最多退化成普通单品类清单，不拖垮主链路。
+
+    ``mode`` 是槽位形态（见 SLOT_MODE_*）：``None`` = 沿用会话里已登记的那个。补槽通路
+    （``register_slot`` / ``reconcile_slots_from_reply``）都走这个默认值——它们改的是槽表，
+    不该顺手把形态重置回 bundle，那会让并列轮在用户确认组成后突然变成「一套齐」。
     """
     k = _key()
     if k is None:
@@ -127,6 +154,8 @@ def set_session_bundle(slots: Iterable[BundleSlot]) -> None:
             s.id = f"s{n}"
             n += 1
     _BUNDLE[k] = cleaned
+    if mode is not None:
+        _MODE[k] = mode if mode in (SLOT_MODE_BUNDLE, SLOT_MODE_PARALLEL) else SLOT_MODE_BUNDLE
     sd = get_session_dir()
     if sd is not None:
         try:
@@ -135,6 +164,7 @@ def set_session_bundle(slots: Iterable[BundleSlot]) -> None:
                     {
                         "slots": [s.model_dump() for s in cleaned],
                         "declined": _DECLINED.get(k, []),
+                        "mode": _MODE.get(k, SLOT_MODE_BUNDLE),
                     },
                     ensure_ascii=False,
                 ),
@@ -164,10 +194,13 @@ def get_session_bundle() -> list[BundleSlot]:
         rows = data if isinstance(data, list) else data.get("slots", [])
         slots = [BundleSlot.model_validate(r) for r in rows]
         declined = [] if isinstance(data, list) else list(data.get("declined", []))
+        # 旧文件没有 mode 字段 → bundle（写那些文件时只有这一种形态）。
+        mode = SLOT_MODE_BUNDLE if isinstance(data, list) else str(data.get("mode", ""))
     except (OSError, ValueError, ValidationError) as exc:
         logger.warning("套装槽位读回失败（本轮退化为普通清单）：%s", exc)
         return []
     _DECLINED[k] = declined
+    _MODE[k] = mode if mode in (SLOT_MODE_BUNDLE, SLOT_MODE_PARALLEL) else SLOT_MODE_BUNDLE
     n = _next_id(k, slots)
     for s in slots:
         if not re.fullmatch(r"s\d+", s.id or ""):
@@ -175,6 +208,18 @@ def get_session_bundle() -> list[BundleSlot]:
             n += 1
     _BUNDLE[k] = slots
     return list(slots)
+
+
+def get_session_mode() -> str:
+    """本会话的槽位形态（``SLOT_MODE_BUNDLE`` / ``SLOT_MODE_PARALLEL``）。
+
+    先触发一次 :func:`get_session_bundle`——形态和槽表存在同一个文件里，续聊轮内存被清后
+    要一起读回。没登记过（非套装 / 非并列轮）返回 bundle，但那种轮次槽 <2、下游根本不看
+    形态，默认值取哪个都不改变行为。
+    """
+    get_session_bundle()
+    k = _key()
+    return _MODE.get(k, SLOT_MODE_BUNDLE) if k is not None else SLOT_MODE_BUNDLE
 
 
 def _match_name(candidate: str, target: str) -> bool:
@@ -317,6 +362,7 @@ def reset_session_bundle(*, clear_file: bool = False) -> None:
     _SEARCHED.pop(k, None)
     _REPORT.pop(k, None)
     _DECLINED.pop(k, None)
+    _MODE.pop(k, None)
     if clear_file:
         sd = get_session_dir()
         if sd is not None:
@@ -329,8 +375,10 @@ def reset_session_bundle(*, clear_file: bool = False) -> None:
 # 不是工具间横向传递，所以这里用裸 ContextVar 是安全的（对比 context.py 里踩过三次的坑）。
 _current_slot: ContextVar[str] = ContextVar("shoppingx_search_slot", default="")
 
-# demand 里的确定性槽位标记（prompt 约定每条套装 demand 开头写「套装槽位：X」）。
-_SLOT_MARKER_RE = re.compile(r"套装槽位[:：]\s*([^\s，。;；,、）)]+)")
+# demand 里的确定性槽位标记（prompt 约定每条槽位 demand 开头写「套装槽位：X」；并列需求
+# 那条路写「子需求：X」——同一套打标机制，措辞跟着场景走，让模型写「套装槽位：跑鞋」这种
+# 别扭话，它照做的概率就低一截，标记漏写就等于这批候选没盖章）。
+_SLOT_MARKER_RE = re.compile(r"(?:套装槽位|子需求)[:：]\s*([^\s，。;；,、）)]+)")
 
 
 @contextmanager
@@ -447,6 +495,46 @@ def _assign(
     return groups
 
 
+def _slot_options(
+    stocked: list[BundleSlot],
+    groups: dict[str, list[ItemCandidate]],
+    base_scores: dict[str, float],
+    matched: dict[str, list[str]],
+    *,
+    top_n: int,
+    w_cheap: float,
+    w_slot_pref: float,
+    slot_relevance: dict[str, float] | None,
+    w_relevance: float,
+) -> dict[str, list[tuple[float, ItemCandidate, list[str]]]]:
+    """每槽的候选按**槽内**打分排序，取 top N。两种形态共用这一份打分。
+
+    便宜度必须在槽内归一：床垫（$200 档）在全局归一里永远垫底、台灯（$20 档）永远满分，
+    跨槽比就成了比价格档位而不是比商品优劣。并列形态同理——跑鞋和耳机的价格没有可比性。
+    """
+    options: dict[str, list[tuple[float, ItemCandidate, list[str]]]] = {}
+    for s in stocked:
+        cands = groups[s.id]
+        priced = [p for p in (_price(c) for c in cands) if p is not None]
+        lo, hi = (min(priced), max(priced)) if priced else (0.0, 0.0)
+        span = hi - lo
+        rows: list[tuple[float, ItemCandidate, list[str]]] = []
+        for c in cands:
+            p = _price(c)
+            cheap = 0.5 if (p is None or span == 0) else (hi - p) / span
+            slot_hits = [kw for kw in s.prefer if kw.strip() and term_hits(kw, _searchable(c))]
+            score = base_scores.get(c.item_id, 0.0) + w_cheap * cheap + w_slot_pref * len(slot_hits)
+            # 槽内品类相关性加分（cross-encoder）：真品在场时把蹭词垃圾压下去（实测真水杯
+            # 0.92 vs 贴纸 ≤0.60）。只做**排序信号**不做二值门——绝对分数因 query 措辞剧烈
+            # 漂移（真笔袋 vs "stationery pen" 才 0.055），阈值门已被真实数据标定证伪。
+            if slot_relevance is not None and c.item_id in slot_relevance:
+                score += w_relevance * slot_relevance[c.item_id]
+            rows.append((score, c, [*slot_hits, *matched.get(c.item_id, [])]))
+        rows.sort(key=lambda r: r[0], reverse=True)
+        options[s.id] = rows[:top_n]
+    return options
+
+
 def combine_bundle(
     survivors: list[ItemCandidate],
     base_scores: dict[str, float],
@@ -477,27 +565,17 @@ def combine_bundle(
     if len(stocked) < 2:
         return None  # 打标全失败 / 只有一个槽有货——组合无意义，退化普通精挑
 
-    # 槽内打分：base + 槽内便宜度 + 槽级 prefer 命中，取每槽 top N 进枚举。
-    options: dict[str, list[tuple[float, ItemCandidate, list[str]]]] = {}
-    for s in stocked:
-        cands = groups[s.id]
-        priced = [p for p in (_price(c) for c in cands) if p is not None]
-        lo, hi = (min(priced), max(priced)) if priced else (0.0, 0.0)
-        span = hi - lo
-        rows: list[tuple[float, ItemCandidate, list[str]]] = []
-        for c in cands:
-            p = _price(c)
-            cheap = 0.5 if (p is None or span == 0) else (hi - p) / span
-            slot_hits = [kw for kw in s.prefer if kw.strip() and term_hits(kw, _searchable(c))]
-            score = base_scores.get(c.item_id, 0.0) + w_cheap * cheap + w_slot_pref * len(slot_hits)
-            # 槽内品类相关性加分（cross-encoder）：真品在场时把蹭词垃圾压下去（实测真水杯
-            # 0.92 vs 贴纸 ≤0.60）。只做**排序信号**不做二值门——绝对分数因 query 措辞剧烈
-            # 漂移（真笔袋 vs "stationery pen" 才 0.055），阈值门已被真实数据标定证伪。
-            if slot_relevance is not None and c.item_id in slot_relevance:
-                score += w_relevance * slot_relevance[c.item_id]
-            rows.append((score, c, [*slot_hits, *matched.get(c.item_id, [])]))
-        rows.sort(key=lambda r: r[0], reverse=True)
-        options[s.id] = rows[:TOP_PER_SLOT]
+    options = _slot_options(
+        stocked,
+        groups,
+        base_scores,
+        matched,
+        top_n=TOP_PER_SLOT,
+        w_cheap=w_cheap,
+        w_slot_pref=w_slot_pref,
+        slot_relevance=slot_relevance,
+        w_relevance=w_relevance,
+    )
 
     # 穷举组合：optional 槽多一个「放弃」选项（None，0 分 0 价）。价格未知按 0 计入（组合层
     # 不惩罚它，报告里如实标注件数——比拍一个假价格诚实）。
@@ -528,6 +606,101 @@ def combine_bundle(
     )
     set_bundle_report(report)
     return BundleOutcome(chosen=chosen, report=report)
+
+
+def combine_parallel(
+    survivors: list[ItemCandidate],
+    base_scores: dict[str, float],
+    matched: dict[str, list[str]],
+    budget_usd: float | None,
+    *,
+    w_cheap: float,
+    w_slot_pref: float,
+    slot_relevance: dict[str, float] | None = None,
+    relevance_floor: float = 0.0,
+    w_relevance: float = 0.0,
+) -> BundleOutcome | None:
+    """并列形态的分配：**每个子需求各自取 top N**，不做跨槽组合优选。
+
+    与 :func:`combine_bundle` 的区别只有一件事，但它是这个形态存在的全部理由：**不砍类**。
+    MCKP 为了「一套不超总预算」可以整槽放弃 optional 槽，用在「跑鞋 + 降噪耳机」这种并列
+    需求上，就是把用户明说要看的一类东西悄悄弄丢。这里没有跨槽预算耦合——预算在 picker 上游
+    已按**单件**硬筛过（每类各自受同一个上限约束），到这一步只剩「每类挑几件最好的」。
+
+    分组、槽内打分、缺货如实报全部复用 bundle 那条路：形态不同的是**选择规则**，不是机制。
+    槽 <2 或分组后不足 2 组有货 → None，退化普通精挑（失效方向安全）。
+    """
+    slots = get_session_bundle()
+    if len(slots) < 2:
+        return None
+    groups = _assign(survivors, slots, slot_relevance, relevance_floor)
+    stocked = [s for s in slots if groups.get(s.id)]
+    if len(stocked) < 2:
+        return None  # 只有一类有货——分组展示无意义，退化普通精挑
+    options = _slot_options(
+        stocked,
+        groups,
+        base_scores,
+        matched,
+        top_n=PARALLEL_PER_SLOT,
+        w_cheap=w_cheap,
+        w_slot_pref=w_slot_pref,
+        slot_relevance=slot_relevance,
+        w_relevance=w_relevance,
+    )
+    chosen = [
+        SlotPick(slot=s, cand=row[1], matched=row[2]) for s in stocked for row in options[s.id]
+    ]
+    report = _build_parallel_report(slots, stocked, chosen, budget_usd, len(groups[""]))
+    set_bundle_report(report)
+    return BundleOutcome(chosen=chosen, report=report)
+
+
+def _build_parallel_report(
+    slots: list[BundleSlot],
+    stocked: list[BundleSlot],
+    chosen: list[SlotPick],
+    budget_usd: float | None,
+    unslotted: int,
+) -> dict[str, Any]:
+    """并列形态的报告。键与 bundle 报告**同名同义**（下游 render / 刷新 / 落盘共用一套读法），
+    差别只在语义标注：``budget_usd`` 是**每件**上限不是总预算，``total_usd`` 只是各件求和的
+    参考数（并列需求没有「一套的总价」这回事），因此 ``feasible`` 恒 True、不判超支。
+    """
+    searched = searched_slots()
+    stocked_ids = {s.id for s in stocked}
+    total = sum(p or 0.0 for p in (_price(c.cand) for c in chosen))
+    return {
+        "mode": SLOT_MODE_PARALLEL,
+        "budget_usd": budget_usd,
+        "total_usd": round(total, 2),
+        "feasible": True,
+        "over_usd": 0,
+        "rows": [
+            {
+                "slot": p.slot.name,
+                "essential": p.slot.essential,
+                "item_id": p.cand.item_id,
+                "title": p.cand.title[:60],
+                "price_usd": _price(p.cand),
+            }
+            for p in chosen
+        ],
+        "skipped_optional": [],  # 并列形态不砍类，这一栏永远空
+        # 搜了但一件都没有的类：并列需求里 essential 没有意义（用户要的每一类都得如实交代），
+        # 但键名沿用 bundle 那套，渲染层按 mode 换措辞即可。
+        "missing_essential": sorted(
+            s.name for s in slots if s.id not in stocked_ids and s.id in searched
+        ),
+        "missing_optional": [],
+        "not_included": sorted(
+            s.name for s in slots if s.id not in stocked_ids and s.id not in searched
+        ),
+        "unslotted": unslotted,
+        "price_unknown": sum(1 for p in chosen if _price(p.cand) is None),
+        # 并列形态每类已经展示了 top N，「升降级备选」没有额外信息量，留空键保结构一致。
+        "alternatives": {},
+    }
 
 
 def _build_report(
@@ -614,7 +787,10 @@ def drop_pick_from_report(item_id: str) -> None:
     report["rows"] = [r for r in report["rows"] if r.get("item_id") != item_id]
     key = "missing_essential" if row.get("essential", True) else "missing_optional"
     slot = str(row.get("slot", ""))
-    if slot and slot not in report.get(key, []):
+    # 并列形态一类有好几件，摘掉一件不等于这类没货了——该类还剩行就不报缺（bundle 每槽只有
+    # 一件，摘掉即空，行为与原来一致）。
+    still_there = any(r.get("slot") == slot for r in report["rows"])
+    if slot and not still_there and slot not in report.get(key, []):
         report[key] = sorted([*report.get(key, []), slot])
     report["total_usd"] = round(
         sum(r["price_usd"] for r in report["rows"] if r.get("price_usd") is not None), 2
@@ -644,14 +820,48 @@ def refresh_report_prices(report: dict[str, Any], picks: list[ItemCandidate]) ->
             bare += 1
     out = {**report, "rows": rows, "total_usd": round(total, 2), "bare_price": bare}
     budget = report.get("budget_usd")
+    # 并列形态的 budget 是**每件**上限（单件超预算在 picker 上游就淘汰了），各类价格求和超过它
+    # 完全正常——在这儿判超支会凭空报一条「超预算」的假警。
+    if report.get("mode") == SLOT_MODE_PARALLEL:
+        return out
     if budget is not None and total > budget:
         out["feasible"] = False
         out["over_usd"] = round(total - budget, 2)
     return out
 
 
+def _render_parallel(report: dict[str, Any]) -> str:
+    """并列形态的分配文本。**刻意不出现总价与「一套」字样**：用户要的是几类互不相干的东西，
+    把跑鞋和耳机的价格加起来给他看，这个数字没有任何含义，还会诱导收尾文案讲成「这一套」。
+    """
+    by_slot: dict[str, list[dict[str, Any]]] = {}
+    for r in report["rows"]:
+        by_slot.setdefault(str(r["slot"]), []).append(r)
+    lines = [f"分头调研：{len(by_slot)} 类各给推荐（各类独立、不配套，**禁止把各类价格相加**）"]
+    for slot, rows in by_slot.items():
+        priced = [r["price_usd"] for r in rows if r["price_usd"] is not None]
+        span = f"${min(priced):.2f}–${max(priced):.2f}" if priced else "价格未知"
+        lines.append(f"·【{slot}】{len(rows)} 件（{span}）")
+        lines += [f"  - {r['title']}" for r in rows]
+    budget = report.get("budget_usd")
+    if budget is not None:
+        lines.append(f"预算口径：每件 ≤ ${budget:.2f}（不是几类加起来的总额）")
+    if report.get("bare_price"):
+        lines.append(
+            f"⚠ 其中 {report['bare_price']} 件只有商品裸价（未含运费关税），文案不得声称"
+            "「全部含税到手价」"
+        )
+    if report["missing_essential"]:
+        lines.append("搜了但没找到货的类：" + "、".join(report["missing_essential"]))
+    if report["not_included"]:
+        lines.append("本轮未检索的类（不是缺货）：" + "、".join(report["not_included"]))
+    return "\n".join(lines)
+
+
 def render_allocation(report: dict[str, Any]) -> str:
     """把分配报告渲染成人读的多行文本（前端思考过程 + summary 注入共用，零 LLM）。"""
+    if report.get("mode") == SLOT_MODE_PARALLEL:
+        return _render_parallel(report)
     lines: list[str] = []
     budget = report.get("budget_usd")
     head = f"套装组合：总价 ${report['total_usd']:.2f}"

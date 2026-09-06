@@ -54,8 +54,12 @@ from app.recall.reranker import get_reranker
 from app.recall.towers import get_tower_client
 from app.tools._args import StrListArg
 from app.tools._bundle import (
+    SLOT_MODE_PARALLEL,
     combine_bundle,
+    combine_parallel,
+    drop_pick_from_report,
     get_session_bundle,
+    get_session_mode,
     prospective_slot,
     render_allocation,
     slot_display,
@@ -682,10 +686,15 @@ async def item_picker(
 
     scored.sort(key=lambda t: t[0], reverse=True)
 
-    # 套装轮（会话里登记了 ≥2 槽，见 app.tools._bundle）优先走跨槽组合优选：总预算内每槽
-    # 选一件（essential 必选、optional 可砍），代替「全池排序取前 N」。不构成套装（槽 <2 /
-    # 打标全失败只剩一组有货）返回 None，照常走普通精挑——失效方向安全：最差退化成现状行为。
-    outcome = combine_bundle(
+    # 槽位轮（会话里登记了 ≥2 槽，见 app.tools._bundle）按**形态**走两条分配路，代替「全池
+    # 排序取前 N」：bundle = 总预算内跨槽组合优选（每槽一件，essential 必选、optional 可砍）；
+    # parallel = 每类各取 top N、一类都不砍。不构成槽位轮（槽 <2 / 打标全失败只剩一组有货）
+    # 两者都返回 None，照常走普通精挑——失效方向安全：最差退化成现状行为。
+    #
+    # 分派放在 picker 里而不是 _bundle 内部：这一行是「本轮拿什么规则选货」的业务决策，
+    # 藏进机制层会让「为什么这轮没砍类」变得不可读。
+    combine = combine_parallel if get_session_mode() == SLOT_MODE_PARALLEL else combine_bundle
+    outcome = combine(
         survivors,
         base_scores,
         matched_map,
@@ -702,6 +711,11 @@ async def item_picker(
         # 命中偏好 / 评分价格；「哪槽花钱哪槽省」的相对叙事由组合报告承担（bundle + summary 注入）。
         empty_stats = _BatchStats(None, None, None)
         for p in outcome.chosen:
+            # 并列形态一类给好几件，同一款的颜色/包装变体会各占一张卡（bundle 每槽只有一件，
+            # 撞不上这个问题）。同槽内判重、**不补位**：这一类少一张卡，好过给用户两张一样的。
+            if any(q.slot == p.slot.id and _near_duplicate(p.cand, q) for q in picks):
+                drop_pick_from_report(p.cand.item_id)
+                continue
             item = p.cand.model_copy()
             # 归槽结果回写到 slot 字段（**槽 id**）——盖章缺失、靠 keywords 兜底归槽的候选
             # （主循环补搜没传 slot 的那批）全靠这行把槽位带到收尾卡片，否则前端落「其他」组

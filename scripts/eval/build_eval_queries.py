@@ -294,7 +294,7 @@ QUERIES: list[dict] = [
             "slots": ["行李箱", "旅行收纳袋", "洗漱包"],
             "soft": ["耐用"],
         },
-        "expected_path": ["planner", "parallel_dispatch_tool", "item_picker", "shopping_summary"],
+        "expected_path": ["planner", "task_dispatch", "item_picker", "shopping_summary"],
         "probe": (
             "P0 清单必须跨品类凑齐三个点名槽位各一件（不许只出单品类清单）、三件合计不超总预算、"
             "不含塑料材质、不编造；P1 组成已列明不该反问用户、讲清预算怎么分（哪槽花钱哪槽省）；"
@@ -315,7 +315,7 @@ QUERIES: list[dict] = [
         "expected_path": [
             "planner",
             "ask_user",
-            "parallel_dispatch_tool",
+            "task_dispatch",
             "item_picker",
             "shopping_summary",
         ],
@@ -323,6 +323,45 @@ QUERIES: list[dict] = [
             "P0 清单总价不超总预算、至少覆盖 2 个不同子品类、没检索/没找到的槽位如实交代"
             "（不许拿别的商品冒充）；P1 组成系推断应先 ask_user 让用户确认增删（用户未回复时"
             "按建议必备项继续并说明），不许既不问也不说明就自作主张；P2 讲清预算分配与剩余"
+        ),
+    },
+    {
+        # 「多类并列」两类：planner 拆槽 + slot_mode=parallel → 同轮两条 task_dispatch 并行
+        # → picker 每类各给几件（**一类都不许砍**）。与 q21/q22 的对照点：那两条是「一套齐」
+        # （配套、共享总预算、可砍可选槽），这条是并列（各买各的、预算是每件上限）。
+        "id": "pl01_parallel_two_categories",
+        "bucket": "多类并列",
+        "intent": "shopping",
+        "query": "想买双跑鞋，再配个降噪耳机，各 500 以内",
+        "constraints": {
+            "budget": "500 CNY（**每件**上限，不是两件合计）",
+            "slots": ["跑鞋", "降噪耳机"],
+            "mode": "parallel（两类互不相干，不配套）",
+        },
+        "expected_path": ["planner", "task_dispatch", "item_picker", "shopping_summary"],
+        "probe": (
+            "P0 清单必须**两类都有**（只出跑鞋或只出耳机即失败）、每件不超 500、不编造；"
+            "P1 不该把两类价格加总说成「这一套合计」、不该反问用户要不要凑成一套、"
+            "两类分开讲不混在一段；P2 每类各给选购理由与类内取舍"
+        ),
+    },
+    {
+        # 三类并列：真正压「同轮多派」这条路——三条 task_dispatch 该在同一轮里一起发出去，
+        # 而不是一轮派一条串着等（后者功能上也对，只是三倍延迟）。
+        "id": "pl02_parallel_three_categories",
+        "bucket": "多类并列",
+        "intent": "shopping",
+        "query": "最近想置办点东西：一个机械键盘、一副降噪耳机，还有一双跑鞋，每样 800 以内",
+        "constraints": {
+            "budget": "800 CNY（每件上限）",
+            "slots": ["机械键盘", "降噪耳机", "跑鞋"],
+            "mode": "parallel",
+        },
+        "expected_path": ["planner", "task_dispatch", "item_picker", "shopping_summary"],
+        "probe": (
+            "P0 三类都要有（少一类即失败）、每件不超 800、没找到货的那类如实说而不是拿别的顶；"
+            "P1 三类应在同一轮里并行检索（不该串行派三趟）、不加总价、不说成「一套」；"
+            "P2 按类分段、每类给理由"
         ),
     },
     {

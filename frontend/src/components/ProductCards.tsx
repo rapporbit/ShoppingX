@@ -167,8 +167,12 @@ function shownPrice(it: ProductItem): number | null {
   return null;
 }
 
-// 「一套齐」套装轮的分组视图：按槽位（床品 / 台灯 / …）分节渲染，组头带槽名与该槽花费，
-// 底部一行合计。平台胶囊在这里没有意义（一套里每槽一件、通常同平台），整个替换掉。
+// 槽位轮的分组视图：按槽位（床品 / 台灯 / …）分节渲染，组头带槽名与该槽花费。平台胶囊在
+// 这里没有意义（分组本身就是筛选维度），整个替换掉。
+//
+// 两种形态共用这个视图，差别只在底部那行合计：「一套齐」要给总价（用户关心这一套多少钱），
+// 「多类并列」（跑鞋 + 耳机）**不给**——把互不相干的几类加总，那个数字没有任何含义，还会
+// 让用户以为得一起买。
 function BundleGroups({
   items,
   favorited,
@@ -190,6 +194,14 @@ function BundleGroups({
   }
   const priced = items.map(shownPrice).filter((p): p is number => p != null);
   const total = priced.reduce((s, p) => s + p, 0);
+  const parallel = items.some((it) => it.slot_mode === "parallel");
+  const Total = () =>
+    parallel || priced.length === 0 ? null : (
+      <div className="bundle-total">
+        这一套合计约 <strong>${total.toFixed(2)}</strong>
+        {priced.length < items.length && "（个别商品缺价格，未计入）"}
+      </div>
+    );
 
   // 套装常态是组合优选每槽恰好一件——每组还配整宽组头就是 N 个「大标题配孤卡」，
   // 右边 3/4 全空白。此时退化成一个统一网格，槽名改做卡片顶上的小标签；
@@ -210,12 +222,7 @@ function BundleGroups({
             </div>
           ))}
         </div>
-        {priced.length > 0 && (
-          <div className="bundle-total">
-            这一套合计约 <strong>${total.toFixed(2)}</strong>
-            {priced.length < items.length && "（个别商品缺价格，未计入）"}
-          </div>
-        )}
+        <Total />
       </section>
     );
   }
@@ -249,13 +256,9 @@ function BundleGroups({
         );
       })}
       {/* 合计由卡片价格求和，与用户眼前的数字必然一致；预算与剩余在上方收尾文案里。
-          口径混标时（部分到手价 / 部分货价）用「约」弱化，卡片各自的标注才是权威。 */}
-      {priced.length > 0 && (
-        <div className="bundle-total">
-          这一套合计约 <strong>${total.toFixed(2)}</strong>
-          {priced.length < items.length && "（个别商品缺价格，未计入）"}
-        </div>
-      )}
+          口径混标时（部分到手价 / 部分货价）用「约」弱化，卡片各自的标注才是权威。
+          并列形态不显示（见 BundleGroups 头部注释）。 */}
+      <Total />
     </section>
   );
 }
