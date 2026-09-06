@@ -239,6 +239,8 @@ def turn_span(session_id: str | None = None, user_id: str | None = None) -> Iter
     if client is None:
         yield None
         return
+    yielded = False
+    body_exc: BaseException | None = None
     try:
         from langfuse import propagate_attributes
 
@@ -247,8 +249,21 @@ def turn_span(session_id: str | None = None, user_id: str | None = None) -> Iter
                 session_id=session_id or None, user_id=user_id or None
             ):
                 _current_trace_id.set(client.get_current_trace_id())
-                yield span
-    except Exception:
-        # 观测绝不反噬主链路：起 span 失败就当没有观测，本轮照跑。
+                yielded = True
+                try:
+                    yield span
+                except BaseException as exc:  # noqa: BLE001 —— 只做标记，紧接着原样抛回
+                    body_exc = exc
+                    raise
+    except Exception as exc:
+        # 业务异常（with 体里抛的，被 contextlib throw 回这个 yield 点）必须**原样穿透**：
+        # 早先这里连它一起吞掉又 yield 了第二次，Python 只好报 "generator didn't stop after
+        # throw()" 的 RuntimeError，把真实报错盖死——批 3 验收时 q03 撞上游内容审核，终端只见
+        # RuntimeError，真凶 ``openai.APIError: ...inappropriate content`` 要往上翻 50 行栈。
+        if exc is body_exc:
+            raise
+        # 剩下的才是观测自身的毛病（起 span 失败 / span 收尾报错），绝不反噬主链路。
         logger.warning("Langfuse 根 span 创建失败，本轮降级无观测", exc_info=True)
+        if yielded:
+            return  # span 早交出去了，主链路已跑完；再 yield 一次就是上面那个 RuntimeError
         yield None
