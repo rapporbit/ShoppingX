@@ -289,3 +289,65 @@ class ConfigOverride(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
     )
+
+
+class OrderRow(Base):
+    """订单（批 1 / 7.2 的交易域，见 :mod:`app.trade`）。
+
+    **金额存整数最小单位**（``total_minor``），不存 float：订单要逐分对得上「确认卡上写的数」，
+    而 float 的 0.1+0.2 在这里就是一张对不平的单。倍率随币种（日元没有小数位），见
+    :func:`app.trade.money.minor_factor`。
+
+    **``idempotency_key`` 唯一**是这张表最重要的约束。模型重试是常态（网络抖动、harness 的
+    retry_nudge、用户连点两次确认），而下单不是只读操作——没有这道唯一索引，一次重试就是两张单。
+    键由「用户 + 会话 + 商品行」派生（见 usecases），不是随机数：随机数每次重试都不一样，等于没设。
+
+    **地址整块存 JSON** 而不是拆成省市区列：本域不做地址校验，也不按地址查询，拆开只会得到一堆
+    永远为空的列。
+
+    与 ``threads`` 不设外键：评测 / 脚本跑出来的 thread 不入 threads 表，设了外键这些单就落不了库。
+    """
+
+    __tablename__ = "orders"
+
+    order_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    thread_id: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="DRAFT")
+
+    currency: Mapped[str] = mapped_column(String(8), default="USD")
+    total_minor: Mapped[int] = mapped_column(Integer, default=0)
+    address_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+    idempotency_key: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancel_reason: Mapped[str] = mapped_column(String(200), default="")
+
+    lines: Mapped[list[OrderLineRow]] = relationship(
+        back_populates="order", cascade="all, delete-orphan", lazy="selectin"
+    )
+
+
+class OrderLineRow(Base):
+    """订单行：下单那一刻的商品**快照**。
+
+    存标题 / 单价 / 到手价的值，而不是指向候选池的引用——候选池是会话级的（``output/<thread_id>/
+    candidates.json``），会话一过就没了，而订单要能在三个月后查出来还显示得出买了什么。
+    """
+
+    __tablename__ = "order_lines"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    order_id: Mapped[str] = mapped_column(ForeignKey("orders.order_id"), index=True)
+
+    platform: Mapped[str] = mapped_column(String(32), default="")
+    item_id: Mapped[str] = mapped_column(String(128))
+    title: Mapped[str] = mapped_column(String(500), default="")
+    unit_price_minor: Mapped[int] = mapped_column(Integer, default=0)
+    currency: Mapped[str] = mapped_column(String(8), default="USD")
+    quantity: Mapped[int] = mapped_column(Integer, default=1)
+    landed_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    order: Mapped[OrderRow] = relationship(back_populates="lines")

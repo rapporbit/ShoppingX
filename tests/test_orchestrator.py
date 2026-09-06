@@ -417,16 +417,20 @@ async def test_task_dispatch_returns_worker_text(monkeypatch: pytest.MonkeyPatch
     assert chunk.metadata["subagent_type"] == "search"
 
 
-async def test_task_dispatch_rejects_trade_before_trade_domain_ready() -> None:
-    """交易域（7.2）落地前，``trade`` 在入口就拒——派过去是零工具 Agent 空转到超时。"""
-    from app.agent.dispatch_tool import task_dispatch
-    from app.agent.tool_registry import trade_tools_ready
+async def test_trade_worker_has_only_trade_tools() -> None:
+    """TradeAgent 的另一半边界：它**没有检索工具**。
 
-    if trade_tools_ready():
-        pytest.skip("交易域已就绪，本条只覆盖未就绪期")
-    chunk = await task_dispatch("取消订单 GBX-1", "trade")
-    assert chunk.state == ToolResultState.ERROR
-    assert "交易能力尚未启用" in _chunk_text(chunk)
+    这不是洁癖——正因为它搜不了，「买清单里第 2 个」的候选定位才必须由主 Agent 在 demands 里翻成
+    具体 item_id。给它 item_search，它就会自己去搜一件「差不多的」，然后下单下错东西。
+    """
+    from app.agent.tool_registry import build_toolkit, trade_tools_ready
+
+    assert trade_tools_ready(), "交易域已落地，派发入口的未就绪拒派分支应当失效"
+    trade = await build_toolkit("trade")
+    names = {s["function"]["name"] for s in await trade.get_tool_schemas()}
+    assert names == {"create_order", "query_order", "cancel_order"}
+    for forbidden in ("item_search", "item_picker", "shopping_summary", "task_dispatch"):
+        assert await trade.get_tool(forbidden) is None, forbidden
 
 
 async def test_buyer_preferences_injected_for_search_not_trade(

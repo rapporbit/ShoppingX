@@ -128,9 +128,14 @@ async def check_schema(context: dict[str, Any]) -> dict[str, Any] | None:
 # 都没调过。只认 item_search 会让「fork 检索 → item_picker」这条正常链路每次都被误报顺序错误。
 PREREQUISITES: dict[str, list[str]] = {
     "shopping_summary": ["item_picker"],
-    "price_compare": ["item_search", "dispatch_tool", "parallel_dispatch_tool"],
+    # 派发工具名 L8 已统一成 task_dispatch。这里曾留着 dispatch_tool / parallel_dispatch_tool
+    # 两个死名字——工具名对不上等于那条路径永不满足，「派发过所以有候选」的前置白写。
+    "price_compare": ["item_search", "task_dispatch"],
     "shipping_calc": ["price_compare"],
-    "item_picker": ["item_search", "dispatch_tool", "parallel_dispatch_tool"],
+    "item_picker": ["item_search", "task_dispatch"],
+    # 取消前先查单。这里是**软**断言（注入一条警告），硬闸在 tool_gates.trade_sequence_gate：
+    # 写操作的代价不对称，光警告拦不住一个已经打算取消的模型。
+    "cancel_order": ["query_order"],
 }
 
 # 这些工具的真实前置是「登记表里有候选」，工具名只是达成它的若干条路径之一。

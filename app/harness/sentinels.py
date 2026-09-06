@@ -187,6 +187,7 @@ INTERNAL_MARKERS: tuple[str, ...] = (
     "[预算提醒]",
     "[token 预算已超限]",
     "[本轮已收尾]",
+    "[未执行取消]",
     "[格式问题]",
     "[顺序问题]",
     "[相关性问题]",
@@ -204,4 +205,12 @@ INTERNAL_MARKERS: tuple[str, ...] = (
     "[dispatch_tool 超时]",
     "[dispatch_tool 错误]",
     "[…工具结果过长已截断",
+)
+
+
+# 交易顺序闸哨兵：没查就取消时回这条。
+CANCEL_WITHOUT_QUERY = (
+    "[未执行取消] 取消订单前必须先 query_order 查到那张单，确认它确实存在、属于该用户、"
+    "且状态是 CONFIRMED。请先调 query_order，拿到真实订单号与状态后再取消——取消是写操作，"
+    "取消错了改的是库里的真实状态。"
 )

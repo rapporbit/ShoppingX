@@ -51,6 +51,7 @@ from app.harness.budgets import (
 from app.harness.middleware import HookRejectSignal, harness_hook
 from app.harness.sentinels import (
     BUDGET_HARD_DENIED,
+    CANCEL_WITHOUT_QUERY,
     MAIN_POSTFORK_SEARCH_DENIED,
     SUB_AGGREGATION_DENIED,
     SUB_CONTEXT_DENIED,
@@ -86,6 +87,25 @@ async def check_terminal_reached(context: dict[str, Any]) -> dict[str, Any] | No
     if guard.terminal_reached:
         raise HookRejectSignal(TERMINAL_REACHED_DENIED, raw=True)
     return None
+
+
+@harness_hook("pre_tool_call", name="trade_sequence_gate", priority=12)
+async def check_trade_sequence(context: dict[str, Any]) -> dict[str, Any] | None:
+    """取消订单前必须先查单——**硬拒**，不是警告。
+
+    与 `step_validator` 的 sequencing 软断言是一对：那条给的是「通常应该先…」的提醒，对读操作
+    够用；取消不是读操作。模型最典型的错法是从用户一句「把上次那单取消了」里直接编一个订单号
+    调 cancel_order——编出来的号大概率不存在（那还好，会失败），但也可能**恰好命中另一张真单**。
+
+    判据是本轮轨迹里有没有 query_order，不是「查到了什么」：查了发现不存在也算查过，那时模型
+    收到的是查询工具的如实结果，它该做的是告诉用户查不到，而不是继续取消。
+    """
+    if context.get("tool_name") != "cancel_order":
+        return None
+    called: set[str] = context.get("called_tools", set())
+    if "query_order" in called:
+        return None
+    raise HookRejectSignal(CANCEL_WITHOUT_QUERY, raw=True)
 
 
 @harness_hook("pre_tool_call", name="depth_gate", priority=10)
