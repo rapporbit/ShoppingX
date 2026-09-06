@@ -117,3 +117,31 @@ def test_msgs_without_usage_are_zero() -> None:
     u = summarize_usage(msgs)
     assert u.model_calls == 0
     assert u.cache_hit_rate == 0.0
+
+
+def test_tree_snapshot_wins_over_message_count() -> None:
+    """给了记账树就以它为准——一次 reply 只落一条 assistant 消息，光数消息会把次数数成 1。
+
+    这条是迁移踩出来的：``model_calls`` 恒为 1、``carried`` 只算最后一次调用，指标全废却零报错。
+    """
+    msgs = [_ai(3000, 150, cache_read=2400)]  # 消息侧只看得到最后一次调用
+    tree = {
+        "model_calls": 9,
+        "input_tokens": 80314,
+        "output_tokens": 2100,
+        "cache_read_tokens": 68352,
+    }
+    u = summarize_usage(msgs, tree=tree)
+    assert u.model_calls == 9
+    assert u.carried_input_tokens == 80314
+    assert u.output_tokens == 2100
+    assert u.cache_read_tokens == 68352
+    assert u.cache_hit_rate == round(68352 / 80314, 4)
+    # peak 仍来自消息：树只累加，不记单次极值
+    assert u.peak_input_tokens == 3000
+
+
+def test_empty_tree_falls_back_to_messages() -> None:
+    """没有树作用域（单测直调 / 无会话）时退回数消息，不因此报错。"""
+    u = summarize_usage([_ai(500, 50)], tree=None)
+    assert u.model_calls == 1 and u.carried_input_tokens == 500
