@@ -29,7 +29,7 @@ from app.api.context import get_session_dir, get_user_id
 from app.harness.budgets import get_fork_semaphore
 from app.harness.truncation import truncate_tool_result
 from app.memory.injector import PREF_EMPTY, build_preference_block
-from app.tools._bundle import detect_slot, slot_scope
+from app.tools._bundle import detect_slot, ensure_dispatch_slot, slot_scope
 from app.utils.clean import PLATFORMS
 from app.utils.thread_ctx import thread_scope
 
@@ -163,7 +163,10 @@ async def _run_worker(demands: str, kind: str) -> str:
             # 的批次判定等价，只是粒度从批降到条）：跨平台泛搜的兄弟之间该共享「已经找到货了
             # 就别再找」，定点调查 / 套装槽位则各查各的，不许一个搜到就让别人收手。
             isolated = _detect_platform(demands) is None
-            slot = detect_slot(demands)
+            # 槽位打标：解析出标记后**先把槽落实**（planner 没拆槽时兜底登记，见
+            # ensure_dispatch_slot），再把稳定 id 传进子作用域——传名字的话，兜底那条路上
+            # item_search 盖章时槽表还是空的，章照样盖不上。
+            slot = ensure_dispatch_slot(detect_slot(demands) or "") if kind == "search" else ""
             scope: Any = (
                 thread_scope(sub_thread_id, parent_session_dir)
                 if parent_session_dir is not None

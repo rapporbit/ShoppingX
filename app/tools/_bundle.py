@@ -281,6 +281,37 @@ def register_slot(ref: str) -> str:
     return new.id
 
 
+def ensure_dispatch_slot(ref: str) -> str:
+    """派发侧的槽位兜底：把 demand 里的「子需求：X」标记落成一个真槽，返回**槽 id**。
+
+    为什么需要这条通路：并列形态的槽表本该由 planner 拆出来，但**它判得不稳**——实测同一条
+    三品类 query 有几次压根没拆（``bundle_slots`` 空）。一旦没拆，:func:`register_slot` 会因
+    「套装未激活」拒绝创建，候选就一个章都盖不上，精挑退化成全池按单一 query 排序，某一类直接
+    屠版（评测 pl02 实测：三类只剩跑鞋）。
+
+    机制兜底的依据是**模型自己已经表达过的意图**：它在派发时明写了「子需求：跑鞋」，那这一批
+    候选属于哪一类就是确定的事实，不必再回头指望 planner 那一跳判对。这与本仓一贯的做法一致
+    ——档位、币种、收货国都是「问模型稳的那件事，其余交给机制」。
+
+    只兜「槽表为空」这一种情形：有槽表时原样走 register_slot（它带着 declined 拒复活、槽数上限
+    这些既有纪律，不能绕过）。纯 id 形状的野引用（模型幻觉出 s9）一律不建。
+    """
+    ref = (ref or "").strip()
+    if not ref or re.fullmatch(r"s\d+", ref):
+        return ""
+    if get_session_bundle():
+        return register_slot(ref)
+    k = _key()
+    if k is None:
+        return ""
+    new = BundleSlot(name=ref, essential=True, evidence="派发标记")
+    # 形态定 parallel：走到这里意味着 planner 没判出槽位，而「一套齐」轮 planner 必然已登记过
+    # 槽表（套装流程的第一步就是拆槽）。并列是这条兜底通路唯一可能的来源。
+    set_session_bundle([new], mode=SLOT_MODE_PARALLEL)
+    logger.info("派发标记兜底登记槽位「%s」（planner 本轮未拆槽），形态 parallel", ref)
+    return new.id
+
+
 def reconcile_slots_from_reply(reply: str, offered: Iterable[str] | None = None) -> list[str]:
     """按 ask_user 的用户回复核销套装组成：被问及但没被选中的槽**删除**（用户明确不要）。
 
