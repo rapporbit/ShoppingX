@@ -48,10 +48,6 @@ _BUSINESS_TOOLS: list[ToolShell] = [
 ]
 
 
-# 三个 role 目前都发全集——读写切分（SearchAgent 只拿只读子集、TradeAgent 只拿交易写工具）
-# 是批 1 的事，这里先把「按角色发放」这个入口摆好。**只读标记现在就要标准**：切分那天
-# SearchAgent 靠它做结构性权限边界。
-
 # 只读 = 不写任何持久状态、不与用户交互、可安全并发重放。
 # 反例说明（别凭感觉标）：ask_user 会挂起等用户回复，forget_preference 删长期偏好，
 # shopping_summary / chat_fallback 是终结工具（写会话产物 + 决定 loop 结束），都不是只读。
@@ -101,15 +97,49 @@ TOOLS: list[FunctionTool] = _make_tools()
 
 TOOLS_BY_NAME: dict[str, FunctionTool] = {t.name: t for t in TOOLS}
 
-# 角色 → 该角色能拿到的工具名。现在全是全集；批 1 改这张表即完成读写切分
-# （SearchAgent 只拿只读子集、TradeAgent 只拿交易写工具），**切的是发放范围，不是实现**。
-# 注意 ``task_dispatch`` 到那时要从 worker 的集合里拿掉——「worker 派不了 worker」是深度上限
-# 的结构性保证，比 fork_guard 的计数守卫更硬。
+# 角色 → 该角色能拿到的工具名（批 1 的读写切分，**切的是发放范围，不是实现**）。
+#
+# 为什么不用 ``ToolGroup``：它是**运行时可激活 / 停用**的分组——非 basic 组默认不激活，模型可
+# 以调 meta tool 把组激活回来，而且工具对象照样住在 Toolkit 里（``get_tool("create_order")``
+# 拿得到）。那是「按需露出」，不是权限边界。这里要的是结构性保证：worker 的 Toolkit 里**根本
+# 没有**那个工具对象，模型再怎么想调也调不出来。
+#
+# ``task_dispatch`` 只在 main 手上：「worker 派不了 worker」是派发安全第①层（深度上限）的
+# 结构性保证，比 fork_guard 的计数守卫更硬——计数守卫拦的是次数，这个拦的是可能性。
+#
+# **为什么只有两个**（对齐手册 §7.1 那张表的刻意偏离）：手册照 refdocs 给的是五个
+# （+ category_insight / price_compare / shipping_calc），但本仓早有一道 ``depth_gate``
+# 把这三个划为 depth==0 专属，理由至今成立：
+#   · price_compare 要的是**跨平台合流后的全局视图**——只搜了一个平台的 worker 拿不出别家数据，
+#     它在那里比价，比的是个寂寞；
+#   · category_insight 平台无关、主流程跑一次结果就写进 demands，N 个 worker 各跑一遍纯属重复解码；
+#   · shipping_calc 同理跟着合流后的候选集算，否则每个 worker 都为自己那批候选算一遍运费。
+# 发了工具又被闸硬拒 = 模型每次调都白烧一轮再吃一条拒绝文案。**发放范围与闸的口径必须一致**，
+# 取交集后 SearchAgent 就是「搜货 + 查库外事实」这两件事——这也正是它现在实际在做的全部。
+_SEARCH_TOOLS = frozenset({"item_search", "web_search"})
+
+# 交易写工具，批 1 的 7.2 落地后填进来（那之前 task_dispatch 对 trade 直接拒派）。
+_TRADE_TOOLS: frozenset[str] = frozenset()
+
 _ROLE_TOOLS: dict[str, frozenset[str] | None] = {
     "main": None,  # None = 全集
-    "search": None,
-    "trade": None,
+    "search": _SEARCH_TOOLS,
+    "trade": _TRADE_TOOLS,
 }
+
+# 自检：search 拿到的必须全是只读工具。读写边界的三根支柱（发放范围 / is_read_only 标记 /
+# PermissionEngine）里，前两根在这里对齐——漏标一个只读，或往 search 集合里塞进一个写工具，
+# 都在 import 期就炸，而不是等线上某轮 worker 偷偷写了状态。
+assert _SEARCH_TOOLS <= _READ_ONLY_TOOLS, sorted(_SEARCH_TOOLS - _READ_ONLY_TOOLS)
+
+
+def trade_tools_ready() -> bool:
+    """交易域是否已就绪（7.2 落地后为真）。派发入口据此决定 ``trade`` 能不能派。
+
+    判据是「TradeAgent 的工具集非空」而不是某个开关变量：工具还没建出来的时候，派过去就是一个
+    零工具的 Agent 空转一轮再超时——那种失败模式对用户表现为「卡了 90 秒然后说不知道」。
+    """
+    return bool(_TRADE_TOOLS)
 
 
 async def build_toolkit(

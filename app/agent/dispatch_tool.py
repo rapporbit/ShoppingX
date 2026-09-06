@@ -23,12 +23,12 @@ from agentscope.tool._response import ToolChunk, ToolResultState
 
 from app.agent.fork_guard import ForkLimitExceeded, enter_fork
 from app.agent.platform_scope import get_enabled_platforms
-from app.agent.prompts import get_sub_agent_brief
 from app.agent.retrieval_budget import isolated_retrieval_scope
 from app.api import monitor
-from app.api.context import get_session_dir
+from app.api.context import get_session_dir, get_user_id
 from app.harness.budgets import get_fork_semaphore
 from app.harness.truncation import truncate_tool_result
+from app.memory.injector import PREF_EMPTY, build_preference_block
 from app.tools._bundle import detect_slot, slot_scope
 from app.utils.clean import PLATFORMS
 from app.utils.thread_ctx import thread_scope
@@ -100,6 +100,35 @@ def _platform_guard(demands: str) -> str | None:
     )
 
 
+async def _buyer_preferences() -> str:
+    """在**父上下文**取本轮域内的长期偏好，渲染成 ``<buyer-preferences>`` 块。
+
+    **偏好由服务端注入，不由子 Agent 自己去读 Store**：worker 拿到的应该是一份已经按买家、按
+    本轮品类域裁好的事实，而不是一个「你自己去查」的授权——后者等于把偏好读取这件事的正确性
+    押在模型愿不愿意调、调得对不对上。
+
+    在父上下文取有两个原因：① 域（``session_domains``）按 session_dir 聚合，父子共享，但父这边
+    是 planner 判完域之后的确定态；② 取偏好是纯读，放在派发前做不占子任务的超时预算。
+
+    只给 SearchAgent。TradeAgent 不注入——偏好影响不了「下哪一单」，那由主 Agent 给定的 item_id
+    决定；给它看反而多一份可能被转述进订单参数的噪声。
+    """
+    user_id = get_user_id() or ""
+    if not user_id:
+        return ""
+    block = await build_preference_block(user_id)
+    if not block or block == PREF_EMPTY:
+        return ""
+    return (
+        "<buyer-preferences>\n"
+        f"{block}\n"
+        "</buyer-preferences>\n"
+        "以上是该买家与本轮品类相关的长期偏好，**系统已在检索与打分里自动并入**（见 "
+        "memory.assemble）。它在这里只为一件事：让你判断召回是否跑题时有依据。**不要**再把它们\n"
+        "转述进任何工具参数——重复一遍不会让它们更生效，只会替用户做他没授权的决定。\n\n"
+    )
+
+
 async def _run_worker(demands: str, kind: str) -> str:
     """派一个 worker 执行 demands，回传截断后的最终文本；任何失败都转字符串。
 
@@ -108,9 +137,18 @@ async def _run_worker(demands: str, kind: str) -> str:
     ``HarnessSession`` 里的 LoopDetector）。**任何异常都转成字符串回传**，让主 Agent 把「子任务
     失败」当普通工具结果处理，而不是整个 loop 崩。
     """
-    rejected = _platform_guard(demands)
+    if kind == "trade":
+        # 交易域（工具 + prompt 段）是批 1 的 7.2；在那之前 TradeAgent 的 Toolkit 是空的，
+        # 派出去只会空转一轮再超时。宁可在入口一句话说清，让主 Agent 转去自己处理。
+        from app.agent.tool_registry import trade_tools_ready
+
+        if not trade_tools_ready():
+            return "[task_dispatch 拒绝] 交易能力尚未启用，无法下单 / 查单 / 取消。请如实告知用户。"
+    # 平台闸只对检索有意义：trade 的 demands 里出现平台名是「在 X 平台买的那单」，不是检索目标。
+    rejected = _platform_guard(demands) if kind == "search" else None
     if rejected is not None:
         return rejected
+    prefs = await _buyer_preferences() if kind == "search" else ""
     try:
         # fork 前捕获父会话目录，worker 继承同一目录（产物归同一会话）。
         parent_session_dir = get_session_dir()
@@ -140,12 +178,13 @@ async def _run_worker(demands: str, kind: str) -> str:
                     # Agent 在子 scope **内**建：它自带的 HarnessSession / Toolkit 都是 per-loop
                     # 的，建在外面会让 worker 与主 loop 共用控制面状态（断言、循环检测全串味）。
                     agent = await build_worker_agent(kind)
+                    # 「执行方通则」批 1 起住在 worker 自己的 system prompt 里（``sub_agents.*``
+                    # 段），user 消息只剩「这一条子任务 + 服务端注入的买家偏好」——system 段因此
+                    # 跨调用逐字稳定，同类 worker 共用一条缓存前缀。
                     msg = Msg(
                         name="user",
                         role="user",
-                        content=[
-                            TextBlock(type="text", text=get_sub_agent_brief() + demands),
-                        ],
+                        content=[TextBlock(type="text", text=prefs + demands)],
                     )
                     # 用 reply 而非 reply_stream：worker 的 thread 没有前端连接，事件转发出去
                     # 也无人接收（上下文隔离本就是它的目的）。排队等 fork 槽的时间不计入超时。
@@ -170,7 +209,7 @@ async def _run_worker(demands: str, kind: str) -> str:
 
 async def task_dispatch(
     demands: str,
-    subagent_type: Literal["search", "trade"] = "search",
+    subagent_type: Literal["search", "trade"],
 ) -> ToolChunk:
     """把一个子任务派给专职的子 Agent 执行，返回它的最终回复。
 
@@ -186,8 +225,10 @@ async def task_dispatch(
     参数：
       - demands：交给子 Agent 的完整需求描述。它看不到你的上下文，所以预算 / 品类 / 硬约束 /
         软偏好 / 目标平台都要在这段文字里写全。跨平台检索时**一条只写一个平台**。
-      - subagent_type：派给哪种子 Agent。``search`` = 只读检索（商品检索 / 品类调研 / 比价 /
-        运费）；``trade`` = 交易操作（下单 / 查单 / 取消，需在 demands 里给定 item_id）。
+      - subagent_type：派给哪种子 Agent，**必填**，两种能力完全不重叠：
+        ``search`` = 只读检索（商品检索 / 品类调研 / 比价 / 运费）。它**没有**下单类工具。
+        ``trade`` = 交易操作（下单 / 查单 / 取消）。它**没有**检索工具，所以 demands 里必须给全
+        platform + item_id + 数量 + 收货地址这些确定信息——它自己查不出「清单里第 2 件是哪件」。
     """
     text = await _run_worker(demands, subagent_type)
     # 派发失败已在 _run_worker 里转成 "[task_dispatch …]" 文案。判 ERROR 状态而不是只回文本：

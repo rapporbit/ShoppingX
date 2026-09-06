@@ -97,7 +97,10 @@ async def check_depth_permission(context: dict[str, Any]) -> dict[str, Any] | No
     - 平台无关上下文（``MAIN_ONLY_CONTEXT_TOOLS``）：主流程已做、结果在 demands →
       ``SUB_CONTEXT_DENIED``。
 
-    能力同质（子握全部检索工具）但授权不同质（收回终结 + 上下文拆解权）。
+    **批 1 起本闸退居二线**：读写切分后 worker 的 Toolkit 里根本没有这些工具对象（见
+    ``tool_registry._SEARCH_TOOLS``，它与本闸的名单**取过交集**），模型连 schema 都看不到。
+    闸留着是二道保险，只在两种情况下还会真的触发：``WORKER_MODE=clone`` 的对照实验（那时
+    worker 拿的是全集），以及将来有人往 worker 的发放范围里加错工具。
     """
     if current_fork_depth() < 1:
         return None

@@ -37,15 +37,23 @@ def _inject_pref_rules(text: str) -> str:
     return text.replace(_PREF_RULES_PLACEHOLDER, rules)
 
 
-def get_sub_agent_brief() -> str:
-    """子 Agent 的「执行方通则」——fork 时拼进 demands 前缀，**不进 system prompt**。
+def get_worker_system_prompt(kind: str) -> str:
+    """worker 的**专职** system prompt（``sub_agents.search`` / ``sub_agents.trade``）。
 
-    这段只有执行方（子 Agent）用得上，写进 system prompt 的话主 loop 每一步都要为它付 token 却
-    永远用不上。挪到运行时的 human message 后：system prompt 对主 / 子仍逐字相同（同质 fork 硬
-    约束不破、cache 前缀不破），但只有真正 fork 出去的子 Agent 才会读到它。
+    批 1 起 worker 不再复用主 prompt：读写切分之后，主 prompt 里的收尾判据、bundle 槽位流程、
+    派发策略对 worker 全是噪声——更糟的是**指挥它去调根本没发给它的工具**（worker 手上没有
+    shopping_summary / task_dispatch），白烧一轮撞 tool-not-found。
+
+    对 prompt cache 的影响是**正的**：worker 不再蹭主 Agent 的前缀，但它自己那段短得多且逐字
+    稳定，同类 worker 之间（跨调用、跨会话）共用同一条前缀。
+
+    批 0 的 ``clone`` 模式不走这里——它的定义就是「与主 Agent 同工具集、同 system prompt」，
+    换 prompt 就不是对照组了（见 :func:`app.agent.agents.build_worker_agent`）。
     """
-    brief: str = _load_prompts().get("sub_agent_brief", "")
-    return brief
+    sub_agents = _load_prompts().get("sub_agents", {})
+    if kind not in sub_agents:
+        raise KeyError(f"prompts.yml 缺少 sub_agents.{kind} 段")
+    return str(sub_agents[kind])
 
 
 def get_system_prompt() -> str:

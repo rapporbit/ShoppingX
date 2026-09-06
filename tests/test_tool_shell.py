@@ -154,15 +154,54 @@ def test_read_only_flags_are_exactly_the_read_side() -> None:
 async def test_build_toolkit_roles_produce_schemas() -> None:
     from app.agent.tool_registry import build_toolkit
 
-    for role in ("main", "search", "trade"):
-        toolkit = await build_toolkit(role)
-        schemas = await toolkit.get_tool_schemas()
-        # 三个角色目前都发全集：12 业务工具 + task_dispatch（读写切分是批 1 的事）
-        assert len(schemas) == 13
-        assert all(s["function"]["description"] for s in schemas)
+    main = await build_toolkit("main")
+    schemas = await main.get_tool_schemas()
+    # 主 Agent 拿全集：12 业务工具 + task_dispatch（单干优先的前提是它自己什么都能干）
+    assert len(schemas) == 13
+    assert all(s["function"]["description"] for s in schemas)
 
     with pytest.raises(ValueError):
         await build_toolkit("nope")
+
+
+@pytest.mark.asyncio
+async def test_search_worker_toolkit_has_no_write_tools() -> None:
+    """批 1 验收①：读写边界是**结构性**的——SearchAgent 的 Toolkit 里根本没有写工具对象。
+
+    不测「模型不会去调」（那是劝退），测「调不出来」：拿不到工具对象 = 连 schema 都不会出现在
+    它的 tool_schemas 里，模型无从知道有这么个工具。
+    """
+    from app.agent.tool_registry import build_toolkit
+
+    search = await build_toolkit("search")
+    names = {s["function"]["name"] for s in await search.get_tool_schemas()}
+    assert names == {"item_search", "web_search"}
+    # 写工具 / 交互工具 / 终结工具 / 派发工具，一个都不在（后者是深度上限的结构性保证）
+    for forbidden in (
+        "create_order",
+        "cancel_order",
+        "forget_preference",
+        "ask_user",
+        "shopping_summary",
+        "chat_fallback",
+        "task_dispatch",
+    ):
+        # 注意 get_tool 与 add_tool 同族，都是 async——忘 await 只会拿到一个恒真的协程对象，
+        # 断言「不为 None」永远通过（假绿）。
+        assert await search.get_tool(forbidden) is None, forbidden
+
+
+def test_search_role_agrees_with_depth_gate() -> None:
+    """发放范围与 ``depth_gate`` 的口径必须一致——发了工具又被闸硬拒是纯浪费。
+
+    往 ``_SEARCH_TOOLS`` 里加一个 depth==0 专属的工具，模型每次调都要白烧一轮再吃条拒绝文案，
+    而测试全绿、线上也不崩（只是变慢变蠢）。这条断言就是拦这种改动的。
+    """
+    from app.agent.tool_registry import _SEARCH_TOOLS
+    from app.harness.budgets import DEPTH0_ONLY_TOOLS, FORK_TOOLS, MAIN_ONLY_CONTEXT_TOOLS
+
+    blocked = DEPTH0_ONLY_TOOLS | MAIN_ONLY_CONTEXT_TOOLS | FORK_TOOLS
+    assert _SEARCH_TOOLS & blocked == set(), sorted(_SEARCH_TOOLS & blocked)
 
 
 async def test_content_and_artifact_tool_yields_structured_json() -> None:
