@@ -50,10 +50,10 @@ def _load_cards() -> list[CategoryCard]:
 
 
 async def _paraphrase(category: str) -> str:
-    from app.agent.llm import get_judge_llm
+    from app.agent.invoke import call_text
+    from app.agent.llm import get_as_judge_llm
 
-    resp = await get_judge_llm().ainvoke(PARAPHRASE_PROMPT.format(category=category))
-    text = resp.content if isinstance(resp.content, str) else str(resp.content)
+    text = await call_text(get_as_judge_llm(), PARAPHRASE_PROMPT.format(category=category))
     return text.strip().splitlines()[0].strip() or category
 
 

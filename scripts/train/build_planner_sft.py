@@ -74,22 +74,24 @@ async def _teacher(row: dict) -> dict | None:
     复用**线上 prompt + schema**，不碰工具体（那里有 P_t 写入 / 计费 / AGUI 上报等会话副作用，
     批量跑会互相污染）——与 M21「训练与线上共用 embed_text、不共用会话层」同一条纪律。
     """
-    from app.agent.llm import get_fast_llm
+    from app.agent.invoke import call_structured
+    from app.agent.llm import get_as_fast_llm
     from app.tools.planner import PlanOutput, get_planner_prompt
 
     prior = "".join(f"用户上一轮：{t}\n" for t in row.get("prior_turns") or [])
-    structured = get_fast_llm().with_structured_output(PlanOutput, method="function_calling")
     # **必须重试**：首次全量跑（并发 16）教师失败 411/1621 = 25.4%，而 120 条 smoke 时是 0 ——
     # 典型的限流/超时，不是这些样本本身有问题。失败直接丢等于白扔四分之一训练集。
     for attempt in range(3):
         try:
             out = await asyncio.wait_for(
-                structured.ainvoke(
-                    [("system", get_planner_prompt()), ("user", prior + row["text"])]
+                call_structured(
+                    get_as_fast_llm(),
+                    [("system", get_planner_prompt()), ("user", prior + row["text"])],
+                    PlanOutput,
                 ),
                 timeout=REQ_TIMEOUT,
             )
-            return out.model_dump() if hasattr(out, "model_dump") else dict(out)
+            return out.model_dump()
         except Exception:
             if attempt < 2:
                 await asyncio.sleep(2 * (attempt + 1))  # 退避：限流下立刻重试只会继续撞墙

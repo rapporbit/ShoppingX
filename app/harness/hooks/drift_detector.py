@@ -329,23 +329,19 @@ async def detect_drift(context: dict[str, Any]) -> dict[str, Any] | None:
         # 「用 lite 模型、单次 < $0.0001」。实测 judge 档单次 3.8-5.4s——每 3 轮一次就给主链路白加
         # 近 10s，而这里只要一个三选一的标签。judge 档留给 Rubric 离线评测（要的是评分稳定性，
         # 不在线上关键路径）。
-        from app.agent.llm import get_fast_llm
+        from app.agent.invoke import call_text
+        from app.agent.llm import get_as_fast_llm
 
-        llm = get_fast_llm()
-        resp = await llm.ainvoke(
-            [
-                (
-                    "user",
-                    _DRIFT_CHECK_PROMPT.format(
-                        original_query=original_query,
-                        recent_actions=recent_actions,
-                        n=CHECK_INTERVAL,
-                    ),
+        verdict = (
+            await call_text(
+                get_as_fast_llm(),
+                _DRIFT_CHECK_PROMPT.format(
+                    original_query=original_query,
+                    recent_actions=recent_actions,
+                    n=CHECK_INTERVAL,
                 ),
-            ]
-        )
-        raw = resp.content
-        verdict = raw.strip() if isinstance(raw, str) else str(raw)
+            )
+        ).strip()
     except Exception:
         logger.debug("Drift LLM 判定失败，跳过", exc_info=True)
         return None

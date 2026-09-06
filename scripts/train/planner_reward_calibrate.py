@@ -60,16 +60,18 @@ async def _retrieve(keywords: list[str]) -> list[str]:
 async def _strong_plan(row: dict) -> dict | None:
     """线上 API 模型的真实产出。只复用 prompt + schema，**不碰工具体**——那里面有
     reset_candidates / P_t 写入 / 计费 / AGUI 上报一堆会话副作用，批量跑会互相污染。"""
-    from app.agent.llm import get_fast_llm
+    from app.agent.invoke import call_structured
+    from app.agent.llm import get_as_fast_llm
     from app.tools.planner import PlanOutput, get_planner_prompt
 
     prior = "".join(f"用户上一轮：{t}\n" for t in row.get("prior_turns") or [])
     try:
-        structured = get_fast_llm().with_structured_output(PlanOutput, method="function_calling")
-        out = await structured.ainvoke(
-            [("system", get_planner_prompt()), ("user", prior + row["text"])]
+        out = await call_structured(
+            get_as_fast_llm(),
+            [("system", get_planner_prompt()), ("user", prior + row["text"])],
+            PlanOutput,
         )
-        return out.model_dump() if hasattr(out, "model_dump") else dict(out)
+        return out.model_dump()
     except Exception as exc:  # 标定跑批，单条失败不该中断整跑
         print(f"  [warn] {row['id']} strong 产出失败：{type(exc).__name__}")
         return None

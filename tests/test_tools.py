@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
 import pytest
+from pydantic import BaseModel
 from qdrant_client import QdrantClient
 
 from app.agent.platform_scope import platform_scope
@@ -1590,36 +1592,34 @@ async def test_web_search_degrades_without_key(monkeypatch: Any) -> None:
 # --------------------------------------------------------------------------
 # LLM 工具：monkeypatch get_llm 成假模型，离线断言结构与数据流
 # --------------------------------------------------------------------------
-class _FakeStructured:
-    def __init__(self, payload: Any) -> None:
-        self._payload = payload
-
-    async def ainvoke(self, _messages: Any, config: Any = None) -> Any:
-        return self._payload
-
-
 class _FakeLLM:
-    """假模型：with_structured_output 回固定结构；ainvoke 回带 .content 的对象。
+    """AgentScope 侧假模型：结构化走 ``generate_structured_output``，纯文本走 ``__call__``。
 
-    ``config`` 参数不能省：真实工具会传 ``config={"callbacks": [usage_cb]}`` 收集 usage 入账
-    （token_budget.charge_tool_llm_usage），假模型签名跟不上会 TypeError。
+    两个接口对应 ``invoke.call_structured`` / ``invoke.call_text`` 的用法：前者要
+    ``.content``（dict）+ ``.usage``，后者要一个**异步生成器**（本仓模型一律 stream=True，
+    最后一个 chunk 才是完整回答）。
     """
+
+    model = "fake-fast"
 
     def __init__(self, structured_payload: Any = None, content: str = "") -> None:
         self._structured_payload = structured_payload
         self._content = content
 
-    def with_structured_output(self, _schema: Any, **kwargs: Any) -> _FakeStructured:
-        # 真实调用钉了 method="function_calling"（见 planner.py 的注释）；替身照单全收并记下来，
-        # 免得日后被人悄悄改回默认 method 而测试还是绿的。
-        self.structured_kwargs = kwargs
-        return _FakeStructured(self._structured_payload)
+    async def generate_structured_output(self, _messages: Any, _schema: Any, **_kw: Any) -> Any:
+        payload = self._structured_payload
+        content = payload.model_dump() if isinstance(payload, BaseModel) else dict(payload or {})
+        return SimpleNamespace(content=content, usage=None)
 
-    async def ainvoke(self, _messages: Any, config: Any = None) -> Any:
-        class _Resp:
-            content = self._content
+    async def __call__(self, _messages: Any, **_kw: Any) -> Any:
+        text = self._content
 
-        return _Resp()
+        async def _stream() -> Any:
+            yield SimpleNamespace(
+                content=[{"type": "text", "text": text}], usage=None, is_last=True
+            )
+
+        return _stream()
 
 
 def test_planner_demotes_weak_exclude_by_evidence() -> None:
@@ -1684,7 +1684,7 @@ async def test_planner_intent_grounding_passthrough(monkeypatch: Any) -> None:
     payload = PlanOutput(
         category="解压小物", tasks=["recommend"], intent_grounding="web", keywords=["fidget"]
     )
-    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakeLLM(structured_payload=payload))
     out = await mod.planner.ainvoke({"intent": "送女朋友一个今年最流行的那种解压小玩意"})
     assert out.intent_grounding == "web"
 
@@ -1703,7 +1703,7 @@ async def test_planner_returns_structured(monkeypatch: Any) -> None:
         prefer_keywords=["小众"],
         keywords=["travel", "pouch"],
     )
-    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakeLLM(structured_payload=payload))
     out = await mod.planner.ainvoke(
         {"intent": "想买便宜抗造的旅行三件套，预算300，不要塑料，喜欢小众"}
     )
@@ -1731,7 +1731,7 @@ async def test_planner_auto_adds_landed_cost(monkeypatch: Any) -> None:
 
     # 模型只判了 recommend（它的纪律仍是「只填用户明确表达的」，不许自作主张加 tasks）。
     payload = PlanOutput(category="旅行收纳", tasks=["recommend"], keywords=["packing", "cubes"])
-    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakeLLM(structured_payload=payload))
     out = await mod.planner.ainvoke({"intent": "推荐几个旅行收纳袋，寄到日本"})
 
     assert out.dest_country == "JP"
@@ -1745,7 +1745,7 @@ async def test_planner_skips_landed_cost_for_non_recommend(monkeypatch: Any) -> 
     from app.tools.planner import PlanOutput
 
     payload = PlanOutput(category="旅行收纳", tasks=["category_intel"])
-    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakeLLM(structured_payload=payload))
     out = await mod.planner.ainvoke({"intent": "旅行收纳袋现在什么价位，我在日本"})
 
     assert out.dest_country == "JP"
@@ -1785,7 +1785,7 @@ async def test_planner_writes_session_pt_same_turn(monkeypatch: Any) -> None:
         soft_dislikes=["花哨"],
         prefer_keywords=["帆布", "小众"],
     )
-    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakeLLM(structured_payload=payload))
 
     session_dir = Path(tempfile.mkdtemp())
     with thread_scope("t-pt", session_dir, user_id="u-pt"):
@@ -1827,7 +1827,7 @@ async def test_planner_pt_reaches_item_picker_same_turn(monkeypatch: Any) -> Non
 
     monkeypatch.setattr(
         pmod,
-        "get_fast_llm",
+        "get_as_fast_llm",
         lambda: _FakeLLM(
             structured_payload=PlanOutput(
                 exclude_terms=[ExcludeTerm(word="塑料", evidence="不要塑料")]
@@ -1860,7 +1860,7 @@ async def test_planner_soft_dislike_penalizes_not_excludes(monkeypatch: Any) -> 
     monkeypatch.setattr(imod, "_W_ATTEN_SEM", 0.0)
     monkeypatch.setattr(
         pmod,
-        "get_fast_llm",
+        "get_as_fast_llm",
         lambda: _FakeLLM(structured_payload=PlanOutput(soft_dislikes=["floral"])),
     )
     cands = [
@@ -1926,7 +1926,8 @@ def test_budget_amount_grounded(intent: str, amount: float, grounded: bool) -> N
 async def test_chat_fallback_replies(monkeypatch: Any) -> None:
     import app.tools.chat_fallback as mod
 
-    monkeypatch.setattr(mod, "get_llm", lambda: _FakeLLM(content="你好！我可以帮你跨平台找商品。"))
+    fake = _FakeLLM(content="你好！我可以帮你跨平台找商品。")
+    monkeypatch.setattr(mod, "get_as_llm", lambda: fake)
     out = await mod.chat_fallback.ainvoke({"message": "你好"})
     assert "你好" in out.reply
 
@@ -1938,7 +1939,7 @@ async def test_shopping_summary_returns_list(monkeypatch: Any) -> None:
     # LLM 只产一段 summary；title/platform/到手价/图/链接/每件 reason 全由收尾确定性组装。
     payload = _SummaryDraft(summary="为你精选了 1 件：帆布旅行包。")
     # shopping_summary 文案走非推理快模型（perf/model-tiering）→ monkeypatch get_fast_llm。
-    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakeLLM(structured_payload=payload))
     # 候选带真实商品图，但 LLM 的结构化输出 item 里 image_url 为空——验证收尾按 item_id 回填。
     picks = [
         ItemCandidate(
@@ -2006,7 +2007,7 @@ async def test_shopping_summary_drops_off_intent_items(monkeypatch: Any) -> None
     from app.tools.shopping_summary import _SummaryDraft
 
     payload = _SummaryDraft(summary="为你精选了两台相机。", off_intent=["ACC1", "FILM"])
-    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakeLLM(structured_payload=payload))
 
     msg = await mod.shopping_summary.ainvoke(
         {
@@ -2028,7 +2029,7 @@ async def test_shopping_summary_off_intent_guard_never_empties_list(monkeypatch:
     from app.tools.shopping_summary import _SummaryDraft
 
     payload = _SummaryDraft(summary="……", off_intent=["CAM1", "CAM2", "ACC1"])
-    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakeLLM(structured_payload=payload))
 
     msg = await mod.shopping_summary.ainvoke(
         {
@@ -2057,7 +2058,7 @@ async def test_shopping_summary_defaults_to_all_picker_picks(
 
     monkeypatch.setattr(
         mod,
-        "get_fast_llm",
+        "get_as_fast_llm",
         lambda: _FakeLLM(structured_payload=_SummaryDraft(summary="清单如下。")),
     )
     cands = [
@@ -2104,7 +2105,7 @@ async def test_shopping_summary_tripwire_on_empty_picks_with_candidates(
 
     monkeypatch.setattr(
         mod,
-        "get_fast_llm",
+        "get_as_fast_llm",
         lambda: _FakeLLM(structured_payload=_SummaryDraft(summary="没找到合适的。")),
     )
     with thread_scope("t-tripwire", tmp_path):
@@ -2135,7 +2136,7 @@ async def test_shopping_summary_never_passes_price_off_as_landed(monkeypatch: An
     from app.tools.shopping_summary import _SummaryDraft
 
     payload = _SummaryDraft(summary="为你精选了 1 件。")
-    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakeLLM(structured_payload=payload))
     # 只有货价、没有到手价（本轮没调 shipping_calc）——真实场景里这是最常见的一种候选。
     picks = [ItemCandidate(item_id="A1", platform="amazon", title="canvas bag", price_usd=36.99)]
     msg = await mod.shopping_summary.ainvoke(
@@ -2162,7 +2163,7 @@ async def test_shopping_summary_backfills_url_from_registry(
 
     # LLM 只产 summary；url/image/reason 由收尾按 item_id 从登记表回填，不经模型。
     payload = _SummaryDraft(summary="精选 1 件。")
-    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakeLLM(structured_payload=payload))
 
     with thread_scope("t-reg", tmp_path):
         # item_search 阶段：把全量候选（含真实 url）登记到会话。
@@ -2196,23 +2197,33 @@ async def test_shopping_summary_backfills_url_from_registry(
 # --------------------------------------------------------------------------
 # 收尾文案流式生成（杠杆3）：增量提取 / 流式路径 / 降级路径
 # --------------------------------------------------------------------------
-class _FakeStreamChunk:
-    def __init__(self, args: str) -> None:
-        self.tool_call_chunks = [{"args": args}]
-
-
 class _FakeStreamingLLM:
-    """假流式模型：bind_tools 后 astream 逐片吐 tool-call args 分片。"""
+    """假流式模型：``__call__`` 逐片吐工具调用的入参 JSON。
+
+    AgentScope 基类**已经把增量累积好**再交给调用方，所以这里 yield 的每个 chunk 带的是
+    当前**完整前缀**（不是新增那一段）。实现里若再自己 ``+=`` 一次就会拼出重复串、
+    ``json.loads`` 当场炸——这条测试连带钉住那个坑。
+    """
+
+    model = "fake-fast"
 
     def __init__(self, pieces: list[str]) -> None:
         self._pieces = pieces
 
-    def bind_tools(self, _tools: Any, tool_choice: Any = None) -> _FakeStreamingLLM:
-        return self
+    async def __call__(self, _messages: Any, **_kw: Any) -> Any:
+        pieces = self._pieces
 
-    async def astream(self, _messages: Any, config: Any = None, **_kw: Any) -> Any:
-        for p in self._pieces:
-            yield _FakeStreamChunk(p)
+        async def _stream() -> Any:
+            acc = ""
+            for i, p in enumerate(pieces):
+                acc += p
+                yield SimpleNamespace(
+                    content=[{"type": "tool_call", "input": acc}],
+                    usage=None,
+                    is_last=i == len(pieces) - 1,
+                )
+
+        return _stream()
 
 
 def test_strip_item_ids_replaces_with_names_not_holes() -> None:
@@ -2260,7 +2271,7 @@ async def test_stream_draft_emits_prefix_deltas(monkeypatch: Any) -> None:
         '{"summary": "这批候选主打耐用',
         '与低调，都在预算内，可放心选。"}',
     ]
-    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeStreamingLLM(pieces))
+    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakeStreamingLLM(pieces))
     sent: list[str] = []
 
     async def _fake_delta(text: str) -> None:
@@ -2275,12 +2286,12 @@ async def test_stream_draft_emits_prefix_deltas(monkeypatch: Any) -> None:
 
 
 async def test_generate_draft_falls_back_without_streaming(monkeypatch: Any) -> None:
-    """供应商 / 假模型不支持流式（无 bind_tools）→ 静默降级阻塞结构化，产物不变。"""
+    """供应商 / 假模型流式里吐不出 tool_call 分片 → 静默降级阻塞结构化，产物不变。"""
     import app.tools.shopping_summary as mod
     from app.tools.shopping_summary import _SummaryDraft
 
     payload = _SummaryDraft(summary="打底文案")
-    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakeLLM(structured_payload=payload))
     draft = await mod._generate_draft([("system", "s"), ("user", "u")], {})
     assert draft.summary == "打底文案"
 

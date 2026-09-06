@@ -133,7 +133,7 @@ async def test_llm_rewrites_only_top_n_reasons(monkeypatch: pytest.MonkeyPatch) 
             mod.SummaryReason(item_id="I2", reason="容量更大，适合长途。"),
         ],
     )
-    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakeLLM(structured_payload=payload))
     msg = await mod.shopping_summary.ainvoke(
         {
             "name": "shopping_summary",
@@ -163,7 +163,7 @@ async def test_truncated_llm_reason_falls_back(monkeypatch: pytest.MonkeyPatch) 
         summary="一件。",
         reasons=[mod.SummaryReason(item_id="I0", reason="评分4.1，标题")],  # 悬垂：半句被截
     )
-    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakeLLM(structured_payload=payload))
     msg = await mod.shopping_summary.ainvoke(
         {
             "name": "shopping_summary",

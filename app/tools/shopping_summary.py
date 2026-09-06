@@ -23,13 +23,14 @@ import re
 from collections.abc import Mapping
 from typing import Annotated
 
-from langchain_core.callbacks import UsageMetadataCallbackHandler
+from agentscope.tool import ToolChoice
 from langchain_core.tools import InjectedToolArg, tool
 from pydantic import BaseModel, Field, model_validator
 
-from app.agent.llm import get_fast_llm
+from app.agent.invoke import call_structured, to_msgs
+from app.agent.llm import get_as_fast_llm
 from app.agent.prompts import get_shopping_summary_prompt
-from app.agent.token_budget import charge_tool_llm_usage
+from app.agent.token_budget import charge_as_usage
 from app.api import monitor
 from app.api.context import get_dest_country, is_dest_country_assumed
 from app.tools._args import drop_none_values
@@ -243,29 +244,69 @@ def strip_item_ids(text: str, id_map: Mapping[str, str]) -> str:
     return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 
+def _draft_tool_schema() -> dict:
+    """把 ``_SummaryDraft`` 描述成一个 OpenAI 口径的工具 schema（强制单工具调用用）。"""
+    return {
+        "type": "function",
+        "function": {
+            "name": _SummaryDraft.__name__,
+            "description": (_SummaryDraft.__doc__ or "生成收尾清单草稿").strip().splitlines()[0],
+            "parameters": _SummaryDraft.model_json_schema(),
+        },
+    }
+
+
+def _tool_call_args(chunk: object) -> str:
+    """从一个流式 ``ChatResponse`` 里取工具调用的入参 JSON 串（可能只到一半）。
+
+    块类型叫 ``tool_call``（不是 Anthropic 的 ``tool_use``），且 ``input`` 是**字符串**——
+    流式解析里一段段拼出来的。AgentScope 基类已把增量累积好，所以每个 chunk 拿到的是
+    **当前完整前缀**，这里直接取、不要再自己 ``+=``（那会把前缀重复叠出乱码）。
+    """
+    for block in getattr(chunk, "content", None) or []:
+        btype = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+        if btype != "tool_call":
+            continue
+        raw = block.get("input") if isinstance(block, dict) else getattr(block, "input", None)
+        if isinstance(raw, str):
+            return raw
+        if isinstance(raw, dict):  # 非流式供应商直接给 dict
+            return json.dumps(raw, ensure_ascii=False)
+    return ""
+
+
 async def _stream_draft(
     messages: list[tuple[str, str]],
-    usage_cb: UsageMetadataCallbackHandler,
     id_map: Mapping[str, str],
 ) -> _SummaryDraft:
     """流式路径：强制单工具调用，边收 args 分片边推 summary 增量，收齐后整体校验。
 
-    ``stream_usage=True`` 让供应商在流尾带 usage（OpenAI 兼容口径的 stream_options），
-    usage_cb 才有账可记；不支持的供应商会在这里抛错 → 上层降级到阻塞路径。
+    不用 :func:`call_structured` 是因为它只在**调用返回后**给完整结果，拿不到中途的分片——
+    而这里的全部意义就是让用户先看到文案在长出来。用量因此也得自己入账（模型不支持流式
+    工具调用时会在这里抛错 → 上层降级到阻塞路径，已烧掉的 token 照样记在 finally 里）。
 
     增量推给前端前也过一遍 :func:`strip_item_ids`：否则模型写出的 ID 会先逐字渲染到用户眼前，
     等收尾的最终文案再把它换掉——闪一下的主键，用户照样看见了。
     """
-    bound = get_fast_llm().bind_tools([_SummaryDraft], tool_choice=_SummaryDraft.__name__)
+    model = get_as_fast_llm()
     buf = ""
     emitted = 0
-    async for chunk in bound.astream(messages, config={"callbacks": [usage_cb]}, stream_usage=True):
-        for tc in getattr(chunk, "tool_call_chunks", None) or []:
-            buf += tc.get("args") or ""
-        text = _partial_summary(buf)
-        if len(text) >= emitted + _DELTA_MIN_CHARS:
-            emitted = len(text)
-            await monitor.report_summary_delta(strip_item_ids(text, id_map))
+    last: object = None
+    try:
+        stream = await model(
+            to_msgs(messages),
+            tools=[_draft_tool_schema()],
+            tool_choice=ToolChoice(mode=_SummaryDraft.__name__),
+        )
+        async for chunk in stream:
+            last = chunk
+            buf = _tool_call_args(chunk) or buf
+            text = _partial_summary(buf)
+            if len(text) >= emitted + _DELTA_MIN_CHARS:
+                emitted = len(text)
+                await monitor.report_summary_delta(strip_item_ids(text, id_map))
+    finally:
+        charge_as_usage(getattr(model, "model", ""), getattr(last, "usage", None))
     return _SummaryDraft.model_validate(json.loads(buf))
 
 
@@ -273,27 +314,14 @@ async def _generate_draft(
     messages: list[tuple[str, str]], id_map: Mapping[str, str]
 ) -> _SummaryDraft:
     """先走流式（用户提前看到文案），失败降级为原阻塞结构化调用；usage 两条路都入账。"""
-    usage_cb = UsageMetadataCallbackHandler()
     try:
-        try:
-            return await _stream_draft(messages, usage_cb, id_map)
-        except Exception:
-            # 降级代价是重调一次（前一次流着的 token 白花）——记 warning 让它可见，
-            # 若某供应商长期走不了流式，该在配置层关掉而不是每轮白烧一遍。
-            logger.warning("收尾文案流式生成失败，降级为阻塞结构化调用", exc_info=True)
-            # method 钉死的理由见 planner.py（默认值随模型能力画像浮动，qwen 系会 400）。
-            structured = get_fast_llm().with_structured_output(
-                _SummaryDraft, method="function_calling"
-            )
-            result = await structured.ainvoke(messages, config={"callbacks": [usage_cb]})
-            return (
-                result
-                if isinstance(result, _SummaryDraft)
-                else _SummaryDraft.model_validate(result)
-            )
-    finally:
-        # 放 finally：无论哪条路、成功失败，已消耗的 token 都入账（helper 自身绝不抛）。
-        charge_tool_llm_usage(usage_cb.usage_metadata)
+        return await _stream_draft(messages, id_map)
+    except Exception:
+        # 降级代价是重调一次（前一次流着的 token 白花，但已在 _stream_draft 的 finally 里
+        # 入过账）——记 warning 让它可见，若某供应商长期走不了流式，该在配置层关掉而不是
+        # 每轮白烧一遍。
+        logger.warning("收尾文案流式生成失败，降级为阻塞结构化调用", exc_info=True)
+        return await call_structured(get_as_fast_llm(), messages, _SummaryDraft)
 
 
 def _landed_note(picks: list[ItemCandidate]) -> str:

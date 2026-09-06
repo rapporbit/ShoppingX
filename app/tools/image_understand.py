@@ -20,13 +20,12 @@ import json
 import re
 from pathlib import Path
 
-from langchain_core.callbacks import UsageMetadataCallbackHandler
-from langchain_core.messages import HumanMessage
+from agentscope.message import Base64Source, DataBlock, Msg, TextBlock
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from app.agent.llm import get_vision_llm, vision_enabled
-from app.agent.token_budget import charge_tool_llm_usage
+from app.agent.invoke import call_text
+from app.agent.llm import get_as_vision_llm, vision_enabled
 from app.api import monitor
 from app.api.context import get_session_dir, get_thread_id
 from app.utils.env import env_int
@@ -205,20 +204,26 @@ async def image_understand(filename: str) -> ImageUnderstanding:
         # base64 直传，而不是把商品图的公网 URL 交给 provider 去下载：实测 DashScope 拉
         # Amazon CDN 会被 403 挡下（Failed to download multimodal content）。何况用户上传的
         # 图本来就只在我们盘上，没有公网 URL 可给。
-        data_url = f"data:{mime};base64,{base64.b64encode(raw).decode()}"
-        message = HumanMessage(
+        #
+        # 用量由 call_text 记账：这次调用不经 agent middleware（工具内部自己调 LLM），不记
+        # 就是漏账——成本闸与用户每日 credit 配额都会少算这一笔。一张图动辄上千 prompt token，
+        # 漏掉的不是零头（同 planner / chat_fallback / shopping_summary 的先例）。
+        message = Msg(
+            name="user",
+            role="user",
             content=[
-                {"type": "image_url", "image_url": {"url": data_url}},
-                {"type": "text", "text": _PROMPT},
-            ]
+                DataBlock(
+                    type="data",
+                    source=Base64Source(
+                        type="base64",
+                        media_type=mime,
+                        data=base64.b64encode(raw).decode(),
+                    ),
+                ),
+                TextBlock(type="text", text=_PROMPT),
+            ],
         )
-        # 挂 usage callback 并记账：这次调用不经 agent middleware（工具内部自己调 LLM），
-        # 不挂就是漏账——成本闸与用户每日 credit 配额都会少算这一笔。一张图动辄上千 prompt
-        # token，漏掉的不是零头（同 planner / chat_fallback / shopping_summary 的先例）。
-        usage_cb = UsageMetadataCallbackHandler()
-        resp = await get_vision_llm().ainvoke([message], config={"callbacks": [usage_cb]})
-        charge_tool_llm_usage(usage_cb.usage_metadata)
-        text = resp.content if isinstance(resp.content, str) else str(resp.content)
+        text = await call_text(get_as_vision_llm(), [message])
         data = _extract_json(text)
     except Exception as e:  # 外部依赖失败不该崩主 loop，转成可读 note + 标降级
         out = _degraded(

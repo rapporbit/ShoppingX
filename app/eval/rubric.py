@@ -12,8 +12,8 @@
 **为什么 Rubric 要动态生成：** 换一条 query（「工业螺丝批量采购」vs「送闺蜜伴手礼」）红线与维度
 完全不同，通用模板打分会失真。所以每条 query 先让 judge 生成专属细则，再据此打分。
 
-judge 调用全走 :func:`app.agent.llm.get_judge_llm`（更强、temperature=0，评分稳定可复现）。
-生成与打分各一次结构化输出（``with_structured_output``），与 ``planner`` 等工具同款。
+judge 调用全走 :func:`app.agent.llm.get_as_judge_llm`（更强、temperature=0，评分稳定可复现）。
+生成与打分各一次结构化输出（``invoke.call_structured``），与 ``planner`` 等工具同款。
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 # 顶层 import 安全：tracing 只在 TYPE_CHECKING 下反向引用本模块，运行时无循环依赖。
+from app.agent.invoke import call_structured
 from app.agent.tracing import record_rubric_scores
 from app.eval.trace import extract_tool_calls
 
@@ -291,7 +292,7 @@ async def generate_rubric(
     ``use_cache=True``：命中缓存直接返回；未命中生成后写缓存。``use_cache=False``：跳过读、强制
     重新生成并覆盖写（``--refresh-rubric`` 走这条，用于刷新尺子）。
     """
-    from app.agent.llm import get_judge_llm
+    from app.agent.llm import get_as_judge_llm
 
     cache_file = cache_dir / f"{_rubric_cache_key(query, constraints, intent)}.json"
     if use_cache:
@@ -300,19 +301,16 @@ async def generate_rubric(
             return cached
 
     intent_rule = "" if intent == "shopping" else _INTENT_RULE_NON_SHOPPING
-    # json_mode（非 function_calling）：本仓库 judge 走 DashScope/Qwen 兼容端点，不支持
-    # tool_choice=required，故用 json_object 模式——prompt 里已自带 json 字样与结构说明。
-    structured = get_judge_llm().with_structured_output(Rubric, method="json_mode")
     prompt = _GEN_PROMPT.format(
         query=query, constraints=constraints or "（无）", intent_rule=intent_rule
     )
-    # 重试一次：`with_structured_output` 内部的 max_retries 只兜网络/限流，**吐回来的 JSON
-    # 结构不合格它不会重来**。judge 的字段遗漏是随机的，换一次采样多半就好了。
+    # 重试一次：模型层的 max_retries 只兜网络/限流，**吐回来的 JSON 结构不合格它不会重来**
+    # （AgentScope 的策略梯换的是 tool_choice，不是重新采样）。judge 的字段遗漏是随机的，
+    # 换一次采样多半就好了。
     rubric: Rubric | None = None
     for attempt in range(2):
         try:
-            result = await structured.ainvoke(prompt)
-            rubric = result if isinstance(result, Rubric) else Rubric.model_validate(result)
+            rubric = await call_structured(get_as_judge_llm(), prompt, Rubric)
             if rubric.criteria:
                 break
         except Exception as exc:  # noqa: BLE001 —— 结构不合格属预期内，换一次采样再试
@@ -332,14 +330,14 @@ async def score_against_rubric(
     query: str, rubric: Rubric, agent_output: str
 ) -> list[CriterionScore]:
     """调 judge 模型，按细则给 Agent 回答逐条打分，并把 dimension 回填到每条打分上。"""
-    from app.agent.llm import get_judge_llm
+    from app.agent.llm import get_as_judge_llm
 
     rubric_text, by_id = _enumerate_rubric(rubric)
-    structured = get_judge_llm().with_structured_output(_ScoreSheet, method="json_mode")
-    result = await structured.ainvoke(
-        _SCORE_PROMPT.format(query=query, rubric_text=rubric_text, agent_output=agent_output)
+    sheet = await call_structured(
+        get_as_judge_llm(),
+        _SCORE_PROMPT.format(query=query, rubric_text=rubric_text, agent_output=agent_output),
+        _ScoreSheet,
     )
-    sheet = result if isinstance(result, _ScoreSheet) else _ScoreSheet.model_validate(result)
     for s in sheet.scores:
         if s.id in by_id and not s.dimension:
             s.dimension = by_id[s.id].dimension

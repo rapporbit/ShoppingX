@@ -37,7 +37,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.agent.llm import get_llm  # noqa: E402
+from app.agent.invoke import call_text  # noqa: E402
+from app.agent.llm import get_as_llm  # noqa: E402
 
 CARDS_PATH = PROJECT_ROOT / "data" / "rag" / "category_cards.jsonl"
 ANCHORS_PATH = PROJECT_ROOT / "data" / "train" / "planner_anchors.jsonl"
@@ -353,7 +354,7 @@ async def generate(sessions: list[dict], cards: dict[str, dict], sink) -> int:
 
     逐批落盘是 M21 的血泪教训：没有增量落盘时，任何一个挂起点都会让整跑的产出归零。
     """
-    llm, sem = get_llm(), asyncio.Semaphore(CONCURRENCY)
+    llm, sem = get_as_llm(), asyncio.Semaphore(CONCURRENCY)
     by_cat: dict[str, list[dict]] = {}
     for s in sessions:
         by_cat.setdefault(s["category"], []).append(s)
@@ -374,10 +375,10 @@ async def generate(sessions: list[dict], cards: dict[str, dict], sink) -> int:
         async with sem:
             for _ in range(2):  # 只重试一次：解析失败多半是这批规格太拧巴，重试第二次也白搭
                 try:
-                    resp = await asyncio.wait_for(llm.ainvoke(prompt), timeout=REQ_TIMEOUT)
+                    text = await asyncio.wait_for(call_text(llm, prompt), timeout=REQ_TIMEOUT)
                 except (TimeoutError, Exception):
                     continue
-                arr = _parse(str(resp.content), len(batch))
+                arr = _parse(text, len(batch))
                 if arr:
                     sink([{**s, "turns": a["turns"]} for s, a in zip(batch, arr, strict=True)])
                     done[0] += len(batch)

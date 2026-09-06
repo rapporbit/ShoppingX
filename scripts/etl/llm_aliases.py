@@ -16,6 +16,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from app.agent.invoke import call_structured
 from scripts.etl._llm import LLM_SEM, etl_llm_model, get_etl_llm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -61,14 +62,10 @@ def _cache_key(category: str, model: str) -> str:
 
 
 async def _generate_one(llm, category: str) -> list[str]:
-    structured = llm.with_structured_output(_Aliases)
     async with LLM_SEM:
         try:
-            result: _Aliases = await structured.ainvoke(
-                [
-                    {"role": "system", "content": _SYSTEM},
-                    {"role": "user", "content": f"Category: {category}"},
-                ]
+            result: _Aliases = await call_structured(
+                llm, [("system", _SYSTEM), ("user", f"Category: {category}")], _Aliases
             )
         except Exception as e:
             print(f"  ⚠ {category}: 别名生成失败 ({type(e).__name__}: {e})")

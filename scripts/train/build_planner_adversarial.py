@@ -39,7 +39,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.agent.llm import get_llm  # noqa: E402
+from app.agent.invoke import call_text  # noqa: E402
+from app.agent.llm import get_as_llm  # noqa: E402
 
 CARDS_PATH = PROJECT_ROOT / "data" / "rag" / "category_cards.jsonl"
 OUT_DIR = PROJECT_ROOT / "data" / "train"
@@ -230,7 +231,7 @@ def _parse(text: str, expect: int) -> list[dict] | None:
 
 
 async def generate(plans: list[tuple[str, str, int]], cards: dict[str, dict], sink) -> int:
-    llm, sem = get_llm(), asyncio.Semaphore(CONCURRENCY)
+    llm, sem = get_as_llm(), asyncio.Semaphore(CONCURRENCY)
     done = [0]
 
     async def one(family: str, category: str, n: int) -> None:
@@ -250,10 +251,10 @@ async def generate(plans: list[tuple[str, str, int]], cards: dict[str, dict], si
         async with sem:
             for _ in range(2):
                 try:
-                    resp = await asyncio.wait_for(llm.ainvoke(prompt), timeout=REQ_TIMEOUT)
+                    text = await asyncio.wait_for(call_text(llm, prompt), timeout=REQ_TIMEOUT)
                 except (TimeoutError, Exception):
                     continue
-                if arr := _parse(str(resp.content), n):
+                if arr := _parse(text, n):
                     sink(family, category, arr)
                     done[0] += n
                     if done[0] % 60 < n:
