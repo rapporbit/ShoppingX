@@ -28,7 +28,9 @@ from typing import Any, Literal, Protocol, runtime_checkable
 
 from app.api.concurrency import RequestClass, classify_request
 
-TaskState = Literal["queued", "running", "done", "failed"]
+# ``cancelled`` 与 ``failed`` 分开（批2-4）：轮询方要能区分「跑挂了，可以重试」与「是我自己
+# 取消的，别再重试」。把用户取消塞进 failed 会让脚本类调用方一遍遍重投一条它自己刚掐掉的任务。
+TaskState = Literal["queued", "running", "done", "failed", "cancelled"]
 
 
 def _now_iso() -> str:
@@ -142,7 +144,9 @@ class TaskStatus:
         state = raw.get("state", "queued")
         return TaskStatus(
             task_id=raw["task_id"],
-            state=state if state in ("queued", "running", "done", "failed") else "failed",
+            state=state
+            if state in ("queued", "running", "done", "failed", "cancelled")
+            else "failed",
             thread_id=raw.get("thread_id", ""),
             final_text=raw.get("final_text", ""),
             error=raw.get("error", ""),

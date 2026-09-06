@@ -439,9 +439,14 @@ async def report_task_result(
     await _emit(EVENT_TASK_RESULT, "任务完成", data)
 
 
-async def report_task_cancelled() -> None:
-    """任务被用户取消时上报（AgentLoop 捕获 CancelledError 后发）。"""
-    await _emit(EVENT_TASK_CANCELLED, "任务已取消", {})
+async def report_task_cancelled(thread_id: str | None = None) -> None:
+    """任务被用户取消时上报（AgentLoop 捕获 CancelledError 后发）。
+
+    ``thread_id`` 显式传入的场景同 :func:`report_error`：队列模式下用户可能在任务**还没被 worker
+    领走**时就取消，那一刻它连 ``thread_scope`` 都没进过，ContextVar 是空的——不递进来这条事件就
+    发不出去，前端永远停在转圈。
+    """
+    await _emit(EVENT_TASK_CANCELLED, "任务已取消", {}, thread_id=thread_id)
 
 
 async def report_error(error_type: str, message: str, thread_id: str | None = None) -> None:
