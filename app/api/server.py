@@ -97,6 +97,7 @@ from app.queue import (
 )
 from app.recall import get_recall_client
 from app.recall.geo import SUPPORTED_COUNTRIES
+from app.recall.semantic_cache import turn_cache_status
 from app.tools.image_understand import sniff_image_mime
 from app.trade.order import OrderStateError
 from app.trade.repository_sql import order_repository
@@ -1473,7 +1474,11 @@ async def get_history(
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
-    """探活 + 当前活跃任务数 + 双池槽位/排队用量（人读的概览；机器看板走 /metrics）。"""
+    """探活 + 当前活跃任务数 + 双池槽位/排队用量（人读的概览；机器看板走 /metrics）。
+
+    ``turn_cache`` 挂在这里是给**评测脚本**看的：整轮缓存开着时跑 Rubric，分数会变成上一次那份
+    的复读且全程零报错，所以 ``run_rubric.py`` 开跑前要能查到它、查到开着就拒跑。
+    """
     return {
         "status": "ok",
         "active_tasks": len(active_tasks),
@@ -1483,6 +1488,7 @@ async def health() -> dict[str, Any]:
             "full": task_queue.full,
         },
         "pools": task_queue.stats(),
+        "turn_cache": turn_cache_status(),
     }
 
 

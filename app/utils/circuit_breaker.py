@@ -94,6 +94,15 @@ class CircuitBreaker:
         """当前状态（供 health / metrics / 测试观测）。读时不推进状态机。"""
         return self._state
 
+    @property
+    def open_seconds(self) -> float:
+        """OPEN 态已持续多久（秒）；非 OPEN 返回 0。读时不推进状态机。
+
+        给共享熔断（:mod:`app.utils.shared_breaker`）判「本地恢复窗口过没过」用——它要在
+        「窗口已过 + 远端已被别的副本探测成功清干净」时才就地复位本地，不能只凭远端干净。
+        """
+        return 0.0 if self._state != OPEN else max(0.0, time.monotonic() - self._opened_at)
+
     def allow(self) -> bool:
         """本次调用是否放行。OPEN 且恢复窗口已过 → 转 HALF_OPEN 并放行一次探测。
 
