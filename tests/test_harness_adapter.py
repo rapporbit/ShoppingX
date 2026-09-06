@@ -6,18 +6,21 @@
 """
 
 import json
+from pathlib import Path
 
 import pytest
 from agentscope.agent import Agent
 from agentscope.credential import OpenAICredential
 from agentscope.message import Msg, TextBlock, ToolCallBlock
-from agentscope.model import ChatResponse, OpenAIChatModel
+from agentscope.model import ChatResponse, ChatUsage, OpenAIChatModel
 from agentscope.tool import FunctionTool, Toolkit
 from agentscope.tool._response import ToolChunk, ToolResultState
 
+from app.agent.token_budget import reset_tree, tree_snapshot
 from app.harness import adapter as adapter_mod
 from app.harness.adapter import HarnessAgentAdapter, HarnessSession, HarnessToolAdapter
 from app.harness.middleware import HarnessMiddleware, HookRejectSignal
+from app.utils.thread_ctx import thread_scope
 
 EXEC_LOG: list[str] = []
 
@@ -452,3 +455,69 @@ async def test_payload_prefix_stable_across_rounds_with_injection(
     assert any("[纠正] 回到用户原始需求" in json.dumps(e, ensure_ascii=False) for e in payloads[-1])
     for prev, cur in zip(payloads, payloads[1:], strict=False):
         assert cur[: len(prev)] == prev, "payload 前缀跨轮失配——注入没落进 state.context"
+
+
+# ---------- 主 loop 的用量入账（L7） ----------
+def _usage(inp: int, out: int) -> ChatUsage:
+    return ChatUsage(input_tokens=inp, output_tokens=out, time=0.1)
+
+
+@pytest.mark.asyncio
+async def test_model_usage_charged_to_tree(
+    isolated_harness: HarnessMiddleware, tmp_path: Path
+) -> None:
+    """主 loop 的模型调用要计进全树——不计的话预算闸与用户 credit 配额一起失真。
+
+    LangChain 侧这件事由 ``agent_middleware`` 的 ``charge_tree_usage`` 做；AgentScope 侧没有
+    对应钩子，只能挂在 ``on_model_call`` 的返回上（见 ``HarnessAgentAdapter._charge_stream``）。
+    """
+    session = HarnessSession(original_query="q")
+    resp = _text("好的")
+    resp.usage = _usage(1000, 200)
+    agent = await _build(session, [resp])
+
+    with thread_scope("t-charge", tmp_path):
+        reset_tree()
+        await agent.reply(_user("你好"))
+        snap = tree_snapshot()
+        reset_tree()
+
+    assert snap is not None
+    assert snap["input_tokens"] == 1000
+    assert snap["output_tokens"] == 200
+    assert snap["model_calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_streaming_usage_charged_once_not_per_chunk(
+    isolated_harness: HarnessMiddleware, tmp_path: Path
+) -> None:
+    """流式下 chunk 是**累积快照**，逐个入账会把同一次调用重复计上十几遍——只认最后一个。"""
+    session = HarnessSession(original_query="q")
+    agent = await _build(session, [])
+
+    async def fake_stream(*_args: object, **_kwargs: object):
+        # ``_call_api`` 本身是普通协程，**返回**一个异步生成器（不是自己就是生成器函数）。
+        async def gen():
+            for i in range(1, 4):
+                chunk = ChatResponse(
+                    content=[TextBlock(type="text", text="好" * i)], is_last=i == 3
+                )
+                chunk.usage = _usage(1000, 100 * i)  # 累积语义：每个 chunk 带当前累计用量
+                yield chunk
+
+        return gen()
+
+    agent.model.stream = True
+    agent.model._call_api = fake_stream  # type: ignore[method-assign]
+
+    with thread_scope("t-charge-stream", tmp_path):
+        reset_tree()
+        await agent.reply(_user("你好"))
+        snap = tree_snapshot()
+        reset_tree()
+
+    assert snap is not None
+    assert snap["model_calls"] == 1  # 3 个 chunk，1 笔账
+    assert snap["input_tokens"] == 1000  # 不是 3000
+    assert snap["output_tokens"] == 300  # 最后一个 chunk 的累计值

@@ -43,7 +43,7 @@ from app.agent.platform_scope import platform_scope
 from app.agent.retrieval_budget import reset_tree as reset_retrieval_tree
 from app.agent.token_budget import budget_status, set_task_cap, tree_snapshot
 from app.agent.token_budget import reset_tree as reset_token_tree
-from app.agent.tracing import current_trace_id
+from app.agent.tracing import current_trace_id, turn_span
 from app.agent.usage import summarize_usage_msgs
 from app.api import monitor
 from app.api.context import (
@@ -203,6 +203,10 @@ async def run_agent(
     with (
         thread_scope(thread_id, session_dir, user_id=user_id),
         platform_scope(platforms) as enabled_platforms,
+        # 一轮 = 一条 trace 的根 span。主 loop 与 worker 的 span 靠 OTEL 上下文自动挂进来
+        # （不像 LangChain 侧要手工传 trace_id），多轮再靠 session_id=thread_id 聚成 Session。
+        # 未启用观测时它是个空壳。
+        turn_span(session_id=thread_id, user_id=user_id),
     ):
         activity_rec = monitor.begin_activity_capture()
         await monitor.report_session_created(session_dir)

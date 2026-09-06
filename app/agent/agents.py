@@ -21,6 +21,7 @@ from app.agent.llm import get_as_fast_llm, get_as_llm, get_model_config
 from app.agent.permissions import allow_tools
 from app.agent.prompts import get_system_prompt
 from app.agent.tool_registry import build_toolkit
+from app.agent.tracing import as_tracing_middlewares
 from app.harness.adapter import HarnessAgentAdapter, HarnessSession, HarnessToolAdapter
 from app.utils.env import env_int
 
@@ -57,10 +58,11 @@ async def _assemble(
     agent_state = state if state is not None else AgentState()
     # 写工具精准放行：不用 BYPASS，见 app/agent/permissions.py。
     allow_tools(agent_state)
-    # 观测（Langfuse）**不在这层挂**：LangChain 版靠 callback handler 走 config，AgentScope 侧
-    # 要换成 OTel 的 TracingMiddleware + OTLP 后端，那是 L7 的活。这里先只挂控制面，免得半截
-    # 接线让 trace 里出现「有的轮有、有的轮没有」的空洞。
-    middlewares: list[MiddlewareBase] = [HarnessAgentAdapter(session)]
+    # 观测：框架原生的 ``TracingMiddleware`` 打标准 GenAI 语义属性，Langfuse（本身是 OTEL SDK
+    # 包装）的 span 过滤器按 ``gen_ai.*`` 放行 —— 两头自动对上，不需要胶水（见 tracing.py 尾部）。
+    # 未启用观测时返回空表，主 + worker 一视同仁：trace 里不会出现「有的轮有、有的轮没有」的空洞。
+    # 顺序上放在控制面**后面**：适配器改写 messages / 换档发生在前，trace 记的是真正发出去的那份。
+    middlewares: list[MiddlewareBase] = [HarnessAgentAdapter(session), *as_tracing_middlewares()]
     agent = Agent(
         name=name,
         # system prompt 纯静态（无运行时注入）→ 跨轮 / 跨会话字节稳定、可命中 prompt cache；
