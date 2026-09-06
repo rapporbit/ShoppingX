@@ -10,9 +10,9 @@ filter 维度：platform + price_usd_max + min_rating（Qdrant Range）+ brand_e
 精排**——候选的二次质量把关交给下游 item_picker（按用户偏好精挑）。这样每次检索少一次 rerank
 网络往返，跨平台 fork 放大时收益明显。
 
-**单平台**：一次只搜一个平台。跨平台并行检索由主 loop 通过 ``parallel_dispatch_tool`` fork 多个
-同质子 Agent、每个子 Agent 搜一个平台来完成（fork 三件事之「能并行」），本工具不自己
-循环多平台——把「要不要并行」的决策权留给主 loop 的 fork 判断。
+**单平台**：一次只搜一个平台。跨平台并行检索由主 loop 同轮多派 ``task_dispatch``（每条 demands
+一个平台、由框架批并发）来完成（派发三件事之「能并行」），本工具不自己循环多平台——把
+「要不要并行」的决策权留给主 loop 的派发判断。
 
 **个性化改走「拼进检索词」，不再走 user 塔向量画像**（Mmem）：本工具把用户本轮域内的 like
 偏好原子词并进 query 文本再编码。原来那条路（把所有 like 加权平均成一个 user 向量、按 β 融进
@@ -442,8 +442,8 @@ async def item_search(
 ) -> ItemSearchOutput:
     """在【单个】平台检索商品（dense 召回；用户长期偏好词已由系统自动并入检索词）。
 
-    何时调用：需要在某平台搜商品时。跨多个平台请用 parallel_dispatch_tool 并行 fork、每个
-    子任务搜一个平台，不要自己串行多次调本工具。
+    何时调用：需要在某平台搜商品时。跨多个平台请同轮多派 task_dispatch（一个平台一条
+    demands）并行，不要自己串行多次调本工具。
     用户的硬排除偏好（「绝不推荐」黑名单 + 本轮明说的「不要 X」）已由系统在召回阶段自动过滤
     （返回的 memory_excluded 计数），不需要你转述进参数；total_recall 为 0 且 memory_excluded>0
     时，如实告诉用户「符合的商品都被你的排除偏好筛掉了」，而不是「库里没有」。
@@ -466,7 +466,7 @@ async def item_search(
       - target_name：**定点商品调查时传**被点名的商品名/型号原文（如 "Sony WH-1000XM5"）。
         传入后额外按型号过滤召回，语义相关但型号不符的候选不算命中（如搜索该型号时召回到
         同品牌其它便宜型号），避免"库里没这型号却拿相似品硬凑"。跨平台泛搜
-        （parallel_dispatch_tool 场景）不传。
+        （task_dispatch 逐平台派发的场景）不传。
       - expected_category：**定点商品调查时配合 target_name 一起传**目标商品所属品类
         （如 planner 拆出的 "降噪耳机"）。用于过滤"型号 token 对得上但其实是配件/耗材"的
         假阳性（如该型号的充电线、保护壳——标题必然带宿主型号，型号过滤拦不住，但配件在
