@@ -423,3 +423,70 @@ async def test_compress_hook_noop_on_empty_messages() -> None:
     from app.harness.hooks.context_compress import compress_context
 
     assert await compress_context({"messages": []}) is None
+
+
+# ---------- 批 3-2 复核：保留清单与批 1/3-1 新增工具的接缝 ----------
+def test_order_result_keeps_order_no() -> None:
+    """交易工具的结果**不走字段抽取**——订单号丢了，「取消前先 query_order」那条红线就断了。
+
+    `_CANDIDATE_LIST_KEYS` 与 `_KEEP_FIELDS` 是一对：把 `orders` 加进前者而不给后者加
+    order_no / status，抽取会把订单号整个丢光，且**全程零报错**（模型只是从此认不出那张单）。
+    这条测试就是拦那次「顺手加一个键」的改动。
+    """
+    raw = json.dumps(
+        {
+            "orders": [
+                {"order_no": "GBX-000001", "status": "CONFIRMED", "total_minor": 2799}
+            ]
+        },
+        ensure_ascii=False,
+    )
+    assert _smart_compress_json(raw, max_tokens=5000) is None  # 不抽取 → 回退截断，原文保留
+
+
+def test_filtered_out_survives_candidate_extraction() -> None:
+    """批 3-1 的 `filtered_out` 是证据不是候选池：candidates 被精简时，它必须原样还在。"""
+    raw = json.dumps(
+        {
+            "platform": "amazon",
+            "candidates": [
+                {"item_id": "a1", "title": "包", "price_usd": 20.0, "brand": "X", "score": 0.9}
+            ],
+            "filtered_out": [
+                {"item_id": "b1", "title": "贵包", "price_usd": 99.0, "reason": "超预算"}
+            ],
+            "recall_strategy": "dense+price_filter+probe",
+        },
+        ensure_ascii=False,
+    )
+    data = json.loads(_smart_compress_json(raw, max_tokens=5000) or "{}")
+    assert "brand" not in data["candidates"][0]  # 候选照常精简
+    assert data["filtered_out"][0] == {
+        "item_id": "b1",
+        "title": "贵包",
+        "price_usd": 99.0,
+        "reason": "超预算",
+    }
+    assert data["recall_strategy"] == "dense+price_filter+probe"
+
+
+async def test_worker_system_prompt_is_below_cache_threshold() -> None:
+    """worker 的专职 prompt（批 1）短于最小缓存写入阈值，所以**不该**被打标记。
+
+    不是缺陷：Anthropic 侧 1024 token 以下本来就写不进缓存，打了也只是白占一个额度；worker 的
+    token 收益来自「prompt 本身短 + 同类 worker 之间前缀逐字相同」。这条测试钉的是**别为了让
+    worker 也有标记而调低阈值**——那会换来一堆写不进去的缓存写入。
+    """
+    from app.agent.prompts import get_worker_system_prompt
+    from app.compress.blocks import MIN_CACHE_PREFIX_TOKENS
+
+    for kind in ("search", "trade"):
+        assert count_tokens(get_worker_system_prompt(kind)) < MIN_CACHE_PREFIX_TOKENS
+
+    prompt = get_worker_system_prompt("search")
+    msgs = [Msg(name="system", role="system", content=[TextBlock(type="text", text=prompt)])]
+    out = await CacheAwareOpenAIFormatter().format(msgs)
+    assert not any(
+        isinstance(b, dict) and "cache_control" in b
+        for b in (out[0]["content"] if isinstance(out[0]["content"], list) else [])
+    )
