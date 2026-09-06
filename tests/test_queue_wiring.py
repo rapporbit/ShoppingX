@@ -25,7 +25,7 @@ from httpx import ASGITransport, AsyncClient
 
 import app.api.server as server
 from app import worker
-from app.api import dedup, monitor
+from app.api import control, dedup, monitor
 from app.api.concurrency import PriorityRequestQueue
 from app.queue import InProcessQueue, set_task_queue
 
@@ -269,3 +269,176 @@ async def test_default_mode_does_not_touch_the_queue(
     assert "task_id" not in resp.json()  # 默认路径的响应体逐字节不变
     await asyncio.wait_for(started.wait(), 2.0)
     assert await q.depth() == 0
+
+
+# ---------- 跨进程取消 / 澄清（批2-4）----------
+#
+# 这里只钉**接线**：取消口有没有把指令送出去、覆盖重发有没有从「多跑一轮」变成「换一轮」、
+# handle_task 有没有把两种 CancelledError 分开。控制面自己的语义（令牌 / origin / 重连）在
+# tests/test_clarification.py。
+
+
+class _SpyBus:
+    """只记录调用的控制面替身：接线测试关心「谁调了谁、传了什么」，不关心 Redis 协议。"""
+
+    def __init__(self) -> None:
+        self.marked: list[str] = []
+        self.published: list[dict[str, Any]] = []
+
+    async def mark_cancel(self, task_id: str) -> bool:
+        self.marked.append(task_id)
+        return True
+
+    async def publish(self, kind: str, **fields: Any) -> bool:
+        self.published.append({"kind": kind, **fields})
+        return True
+
+    async def was_cancelled(self, task_id: str) -> bool:
+        return task_id in self.marked
+
+    async def clear_cancel(self, task_id: str) -> None:
+        while task_id in self.marked:
+            self.marked.remove(task_id)
+
+    async def load(self, _key: str) -> str | None:
+        return None  # 澄清令牌不在本文件的射程内（见 tests/test_clarification.py）
+
+    async def store(self, _key: str, _value: str, _ttl: int) -> bool:
+        return True
+
+    async def drop(self, _key: str) -> None:
+        return None
+
+
+@pytest.fixture
+def spy_bus() -> Any:
+    bus = _SpyBus()
+    control.set_control_bus(bus)
+    yield bus
+    control.reset_control_bus()
+
+
+async def test_cancel_endpoint_sends_the_cancel_across_processes(
+    client: AsyncClient, queue: InProcessQueue, monkeypatch: pytest.MonkeyPatch, spy_bus: Any
+) -> None:
+    """队列模式下取消口要把指令送到 worker：标记（管排队中的）+ 广播（管在跑的）各一份。"""
+    _stub_agent(monkeypatch)
+    posted = await client.post("/api/task", json={"query": "买帐篷", "thread_id": "c-a"})
+    task_id = posted.json()["task_id"]
+    resp = await client.post("/api/task/c-a/cancel")
+
+    assert resp.status_code == 200
+    assert spy_bus.marked == [task_id]  # 按 task_id 打标记，不是按 thread（覆盖重发会误伤）
+    assert spy_bus.published[-1] == {"kind": "cancel", "thread_id": "c-a", "task_id": task_id}
+
+
+async def test_replace_cancels_the_old_task_in_the_worker(
+    client: AsyncClient, queue: InProcessQueue, monkeypatch: pytest.MonkeyPatch, spy_bus: Any
+) -> None:
+    """覆盖重发 = 换一轮，不是多跑一轮：旧那条要在 worker 侧真的被掐掉。
+
+    批2-2 报告里标注的缺口就是这条。少了它，用户改主意重问一句，旧问题仍在后台烧 token，
+    两轮的事件还会同时往同一条 WS 上推。
+    """
+    _stub_agent(monkeypatch)
+    r1 = await client.post("/api/task", json={"query": "买帐篷", "thread_id": "c-b"})
+    r2 = await client.post("/api/task", json={"query": "改买睡袋", "thread_id": "c-b"})
+    first, second = r1.json()["task_id"], r2.json()["task_id"]
+
+    assert second != first
+    await _wait(lambda: bool(spy_bus.published))
+    assert spy_bus.published[-1]["task_id"] == first  # 掐的是**旧**那条
+    assert spy_bus.marked == [first]  # 新任务的 task_id 绝不能被打上取消标记
+
+
+def _slow_agent(monkeypatch: pytest.MonkeyPatch, started: asyncio.Event) -> None:
+    """一个跑得足够久、能被中途掐掉的 run_agent 替身。"""
+
+    async def _fake(query: str, thread_id: str, **_kw: Any) -> dict[str, Any]:
+        started.set()
+        await asyncio.sleep(30)
+        return {"final_text": "不该跑到这里"}
+
+    monkeypatch.setattr(worker, "run_agent", _fake)
+
+
+async def test_task_cancelled_while_queued_is_skipped_on_pickup(
+    queue: InProcessQueue, monkeypatch: pytest.MonkeyPatch, spy_bus: Any
+) -> None:
+    """在队列里排着时被取消：worker 领到手先查标记，一步都不跑。
+
+    广播只送得到「已经领走它的那个 worker」，还没被领走的任务只能靠这张标记——而那恰恰是最该
+    取消的一批（用户还没等到它开始就反悔了）。
+    """
+    ran = _stub_agent(monkeypatch)
+    task = server.IntentTask.create(task_id="ct-1", thread_id="ct-1", query="买帐篷")
+    await spy_bus.mark_cancel("ct-1")
+
+    await worker.handle_task(task, queue)
+
+    assert ran == []
+    status = await queue.get_status("ct-1")
+    assert status is not None and status.state == "cancelled"
+    assert spy_bus.marked == []  # 标记只兑现一次，别留成垃圾
+
+
+async def test_user_cancel_acks_the_message_instead_of_requeueing_it(
+    queue: InProcessQueue, monkeypatch: pytest.MonkeyPatch, spy_bus: Any
+) -> None:
+    """用户取消 → handle_task **不往外抛**（于是消息被 ack、不会重投），状态落 cancelled。
+
+    这条是本单最容易写错的地方：用户取消与优雅退出都表现为 CancelledError，可语义相反。往外抛
+    会让消息留在 PEL 里被下一个 worker 领回来**重跑一遍**——用户按了取消，任务却又活了过来。
+    """
+    started = asyncio.Event()
+    _slow_agent(monkeypatch, started)
+    intent = server.IntentTask.create(task_id="ct-2", thread_id="ct-2", query="买帐篷")
+    running = asyncio.create_task(worker.handle_task(intent, queue))
+    await asyncio.wait_for(started.wait(), 2.0)
+
+    assert control.cancel_local(task_id="ct-2") is True
+    await asyncio.wait_for(running, 2.0)  # 正常返回，没有 CancelledError 漏出去
+
+    status = await queue.get_status("ct-2")
+    assert status is not None and status.state == "cancelled"
+
+
+async def test_graceful_shutdown_cancel_still_returns_the_message_to_pending(
+    queue: InProcessQueue, monkeypatch: pytest.MonkeyPatch, spy_bus: Any
+) -> None:
+    """优雅退出的取消照旧往外抛：消息不 ack，留在 PEL 里等下一个 worker 领回重跑。
+
+    与上一条是同一枚硬币的两面。判据是控制面的进程内标记——没有它就只能二选一，两种取消里
+    必然有一种是错的。
+    """
+    started = asyncio.Event()
+    _slow_agent(monkeypatch, started)
+    intent = server.IntentTask.create(task_id="ct-3", thread_id="ct-3", query="买帐篷")
+    running = asyncio.create_task(worker.handle_task(intent, queue))
+    await asyncio.wait_for(started.wait(), 2.0)
+
+    running.cancel()  # 没打过取消标记 = 不是用户取消
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    status = await queue.get_status("ct-3")
+    assert status is not None and status.state == "running"  # 不写终态：它待会儿还会活过来
+
+
+# ---------- POST /api/clarify/{thread_id}：没有 WS 的调用方也能回答提问 ----------
+async def test_clarify_endpoint_delivers_to_a_local_waiter(client: AsyncClient) -> None:
+    """本进程就有人等 → 就地 resolve。前端不用这个口子（它走 WS），脚本 / 冒烟用它。"""
+    from app.api.clarification import create_pending
+
+    fut = create_pending("cl-a")
+    resp = await client.post("/api/clarify/cl-a", json={"text": "要女款"})
+
+    assert resp.status_code == 200
+    assert resp.json()["route"] == "local"
+    assert await asyncio.wait_for(fut, 1.0) == "要女款"
+
+
+async def test_clarify_endpoint_404_when_nobody_is_waiting(client: AsyncClient) -> None:
+    """没人在等（从没提问 / 已超时 / 令牌过期）→ 404，绝不把迟到的回复塞给下一个问题。"""
+    resp = await client.post("/api/clarify/cl-b", json={"text": "无人问津"})
+    assert resp.status_code == 404

@@ -32,8 +32,10 @@ import os
 import signal
 import socket
 from contextlib import suppress
+from typing import Any
 
 from app.agent.orchestrator import run_agent
+from app.api import clarification, control
 from app.config import store as config_store
 from app.db.session import init_db
 from app.observability.logging import configure_logging
@@ -70,8 +72,28 @@ async def handle_task(task: IntentTask, queue: TaskQueue | None = None) -> None:
 
     **被取消时不写终态**：优雅退出把在飞任务掐掉时，这条消息没有被 ack，它会被下一个 worker 领回来
     重跑。此刻写 failed 会让轮询方以为已经有定论，而几秒后它又活了过来。
+
+    **但「用户取消」是另一回事，两种取消必须分开**（批2-4）。它同样表现为 ``CancelledError``，
+    可语义相反：任务不该被重投——用户要的就是它别再跑了，重投一遍等于取消按钮没用。判据是控制面
+    的进程内标记（:func:`app.api.control.was_cancelled_locally`），只有它才知道这一刀是谁砍的。
+    命中就吞掉取消、把消息 ack 掉、状态落 ``cancelled``；没命中照旧往外抛（= 交还队列）。
     """
     q = queue or get_task_queue()
+    # 排队期间就被取消的：领到手先自查标记，一步都不用跑。这是「还在排队的任务也取消得掉」的落点
+    # ——广播只能送到已经领走它的那个 worker，还没被领走的只能靠这张标记。
+    if await control.consume_cancel_mark(task.task_id):
+        logger.info("任务在排队期间已被取消，跳过：%s（thread=%s）", task.task_id, task.thread_id)
+        await q.set_status(
+            TaskStatus(task_id=task.task_id, state="cancelled", thread_id=task.thread_id)
+        )
+        return
+    current = asyncio.current_task()
+    if current is not None:
+        control.register_inflight(task.task_id, task.thread_id, current)
+    # 澄清的两件前置：本轮 turn_id 绑上下文（等待令牌要带它），并清掉上一轮崩溃留下的残留令牌
+    # ——否则用户的回复会被转发给一个早已不存在的等待方，界面上表现为「答了没反应」。
+    clarification.set_turn_id(task.task_id)
+    await clarification.drop_stale_waiter(task.thread_id, turn_id=task.task_id)
     await q.set_status(TaskStatus(task_id=task.task_id, state="running", thread_id=task.thread_id))
     try:
         result = await run_agent(
@@ -84,7 +106,20 @@ async def handle_task(task: IntentTask, queue: TaskQueue | None = None) -> None:
             image_paths=list(task.image_paths) or None,
         )
     except asyncio.CancelledError:
-        raise
+        if not control.was_cancelled_locally(task.task_id):
+            raise  # 优雅退出：不 ack，留在 PEL 里等下一个 worker 领回重跑
+        # 用户取消：run_agent 的 finally 已经上报 task_cancelled 并把这一轮的账记完（「取消即
+        # 免单」的洞早堵住了，见 session_io.charge_quota）。这里只负责让消息被 ack 掉。
+        if current is not None:
+            current.uncancel()  # 取消已被消费，后面几个 await 才不会立刻再抛
+        logger.info("任务被用户取消：%s（thread=%s）", task.task_id, task.thread_id)
+        with suppress(Exception, asyncio.CancelledError):
+            await q.set_status(
+                TaskStatus(task_id=task.task_id, state="cancelled", thread_id=task.thread_id)
+            )
+            # 取消是这条消息的定论（它马上会被 ack），标记留着只是垃圾——取消常被连点好几次。
+            await control.clear_cancel_mark(task.task_id)
+        return
     except Exception as exc:
         logger.exception("任务失败：%s（thread=%s）", task.task_id, task.thread_id)
         await q.set_status(
@@ -96,6 +131,10 @@ async def handle_task(task: IntentTask, queue: TaskQueue | None = None) -> None:
             )
         )
         raise
+    finally:
+        # 摘登记放 finally：任何收尾路径（正常 / 用户取消 / 优雅退出 / 异常）都不能把句柄留在表里
+        # ——留着就是让下一次同 task_id 的取消去 cancel 一个早已结束的 task，静默无效。
+        control.unregister_inflight(task.task_id)
     await q.set_status(
         TaskStatus(
             task_id=task.task_id,
@@ -104,6 +143,36 @@ async def handle_task(task: IntentTask, queue: TaskQueue | None = None) -> None:
             final_text=str(result.get("final_text") or ""),
         )
     )
+
+
+async def _on_cancel(payload: dict[str, Any]) -> None:
+    """控制面收到「取消」指令：掐掉本进程正在跑的那条任务（不在本进程就什么也不做）。
+
+    **顺序与 API 单进程那条路逐字一致**：先 ``cancel_pending``（把 ``ask_user`` 从等待里放出来），
+    再 cancel 任务本体。反过来的话，正挂在 Future 上的那个 await 会先吃到任务级取消，
+    ``ask_user`` 里区分两种取消的那段判断（``cancelling() > 0``）就失去了它的前提。
+    """
+    thread_id = str(payload.get("thread_id") or "")
+    task_id = str(payload.get("task_id") or "")
+    if thread_id:
+        clarification.cancel_pending(thread_id)
+    if control.cancel_local(task_id=task_id or None, thread_id=thread_id or None):
+        logger.info("按控制面指令取消任务：%s（thread=%s）", task_id, thread_id)
+
+
+async def start_control_plane() -> control.ControlBus | None:
+    """订阅控制面：取消 + 澄清回复两类指令。未启用（单进程部署）时返回 ``None``。
+
+    两类指令共用一条订阅循环、一个 Redis 连接——它们的收件人都是「正在跑这一轮的那个进程」，
+    分开订阅只会多一条要各自重连的长连接。
+    """
+    bus = control.get_control_bus()
+    if bus is None:
+        return None
+    bus.on("cancel", _on_cancel)
+    clarification.register_control_handlers()
+    await bus.start()
+    return bus
 
 
 def install_signal_handlers(stop: asyncio.Event) -> None:
@@ -140,6 +209,7 @@ async def run_worker(
         install_signal_handlers(stop_event)
 
     limit = concurrency or WORKER_CONCURRENCY
+    bus = await start_control_plane()
     logger.info("worker 启动：consumer=%s concurrency=%d", consumer_name(), limit)
     consume = asyncio.create_task(
         q.consume(consumer_name(), lambda t: handle_task(t, q), stop_event.is_set, limit)
@@ -163,6 +233,8 @@ async def run_worker(
         stop_waiter.cancel()
         with suppress(asyncio.CancelledError):
             await stop_waiter
+        if bus is not None:
+            await bus.stop()
         await q.close()
         logger.info("worker 已退出")
 

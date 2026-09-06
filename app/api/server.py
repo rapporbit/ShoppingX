@@ -58,7 +58,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.agent.orchestrator import run_agent
-from app.api import accounts, admin, backplane, dedup, event_log, monitor
+from app.api import accounts, admin, backplane, clarification, control, dedup, event_log, monitor
 from app.api.auth import (
     auth_enabled,
     create_access_token,
@@ -211,6 +211,7 @@ async def lifespan(_app: FastAPI):
                 await queue_task
         if event_backplane is not None:
             await event_backplane.stop()
+        await control.close_control_bus()  # 只关已经建出来的那个（发布端是懒加载的）
         if alert_task is not None:
             alert_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -283,6 +284,9 @@ class TaskHandle:
     # 本轮参考图的文件名。和 query 一样是「正在跑那一轮」的提问内容，故一并随句柄活着：
     # 少了它，用户传图后一刷新，图会先消失、等任务收尾落库才又冒出来——一次没必要的闪烁。
     images: list[str] = field(default_factory=list)
+    # 队列模式下这一轮在队列里的 id（单进程模式恒为 None）。取消口要靠它把指令精确送到 worker：
+    # 按 thread 打取消标记会误伤覆盖重发时紧接着入队的**新**任务，见 app/api/control.py 的第 2 点。
+    task_id: str | None = None
 
 
 # thread_id → 正在跑的后台任务句柄。用于取消 / 防重 / 续看（同 thread 只留一个活跃任务）。
@@ -422,6 +426,18 @@ async def _enqueue_intent(intent: IntentTask, depth: int) -> None:
     await queue.enqueue(intent)
 
 
+async def _report_cancel_if_queued(task_id: str, thread_id: str) -> None:
+    """任务被取消时，若它**还没被 worker 领走**就由 API 侧补一条 ``task_cancelled``。
+
+    判据是状态表里仍写着 ``queued``。已经在跑的那些由 worker 进程的 ``run_agent`` 发（那条路还
+    连着记账与产物清理），两边都发就成了重复事件。极窄的竞态（worker 刚领走、``running`` 还没落
+    库）下会多发一条——前端按 thread 收尾，重复一条是可接受的，漏发一条是永远转圈。
+    """
+    status = await get_task_queue().get_status(task_id)
+    if status is None or status.state == "queued":
+        await monitor.report_task_cancelled(thread_id=thread_id)
+
+
 async def _queued_runner(intent: IntentTask, position: int) -> None:
     """队列模式下 API 侧的影子协程：入队 → 报排位 → 等 worker 跑完。
 
@@ -429,8 +445,9 @@ async def _queued_runner(intent: IntentTask, position: int) -> None:
     三样共用的账本。队列模式下若不在 API 侧留一条记录，这三样会一起失效——而「前端零改动」的前提
     正是它们的行为不变。所以这里用一个廉价的轮询协程占住那个位置，跑完就摘。
 
-    **取消的诚实边界**：cancel 掉的是这个 waiter，worker 那边还在跑。跨进程取消（取消标记 +
-    Pub/Sub）是批 2 后面一单的事，现在不假装它已经有了。
+    **取消**（批2-4 起）：cancel 这个 waiter 的同时，取消口会经控制面把指令送到 worker，那边照常
+    上报 ``task_cancelled``。但任务**还在队列里没人领**时没有任何 worker 会为它发事件，前端就停在
+    转圈上——所以这里补一条，且只在状态仍是 ``queued`` 时补（已经在跑的那些由 worker 发，避免两份）。
     """
     thread_id = intent.thread_id
     queue = get_task_queue()
@@ -460,7 +477,7 @@ async def _queued_runner(intent: IntentTask, position: int) -> None:
         while asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(QUEUE_POLL_SECONDS)
             status = await queue.get_status(intent.task_id)
-            if status is not None and status.state in ("done", "failed"):
+            if status is not None and status.state in ("done", "failed", "cancelled"):
                 return
         logger.warning(
             "等结果超时（%ds）：task=%s thread=%s",
@@ -469,6 +486,14 @@ async def _queued_runner(intent: IntentTask, position: int) -> None:
             thread_id,
         )
         await monitor.report_error("queue_timeout", "任务等待超时，请稍后重试", thread_id=thread_id)
+    except asyncio.CancelledError:
+        # shield：本协程正在被取消，直接 await 会在第一个挂起点再吃一次 CancelledError，事件就发
+        # 不出去了（同 session_io.charge_quota 的手法）。发完再把取消原样往上抛。
+        with suppress(asyncio.CancelledError, Exception):
+            await asyncio.shield(
+                asyncio.create_task(_report_cancel_if_queued(intent.task_id, thread_id))
+            )
+        raise
     finally:
         # 与 _runner 同一手法：按身份摘除，不按 key 盲删——覆盖重发时旧 waiter 的 finally 会晚几个
         # tick 才跑，盲删会把已登记的新任务摘掉。
@@ -500,6 +525,7 @@ def _start_queued(
         query=req.query,
         reservation=Reservation(kind=intent.kind),  # 队列模式不占准入槽，凭据只为形状对齐
         images=list(req.image_paths or ()),
+        task_id=intent.task_id,
     )
     dedup.remember(user_id, req.query, thread_id)
     queued = position > 1
@@ -595,9 +621,14 @@ async def create_task(
     # 换成上面的队列深度闸 + worker 侧的 WORKER_CONCURRENCY——各管各真正约束得住的那件事。
     if use_queue:
         if old is not None and is_replace:
-            # 诚实边界：这里掐掉的是 API 侧的影子协程。旧任务若已被 worker 领走，它在那边还会跑完
-            # （覆盖重发在队列模式下暂时是「多跑一轮」而不是「换一轮」）。真正的跨进程取消是批 2
-            # 后面一单（取消标记 + Pub/Sub + UserInterruptEvent），不在这里假装它已经有了。
+            # 覆盖重发 = **换一轮**，不是多跑一轮（批2-4 补齐）：除了掐掉 API 侧的影子协程，还要
+            # 把取消送到真正在跑它的 worker，否则用户改主意重问一句，旧问题仍在后台烧着 token，
+            # 两轮的事件还会同时往同一条 WS 上推。
+            #
+            # 用 nowait：这里处在 endpoint 的**无 await 区间**里（准入 / 幂等判定的原子性全靠它，
+            # 见 create_task 的 docstring）。本地那一半是同步的、当场生效；剩下的 Redis 往返丢进
+            # 后台任务，且它打的标记按**旧** task_id，不会误伤下面马上要入队的这条新任务。
+            control.request_cancel_nowait(thread_id, old.task_id)
             old.task.cancel()
         return _start_queued(req, thread_id, user_id, turn_count, queue_depth)
 
@@ -823,9 +854,13 @@ async def ws_endpoint(
             except (json.JSONDecodeError, ValueError):
                 continue
             if msg.get("type") == "clarification_response":
-                from app.api.clarification import resolve_pending
+                # 队列模式下等着这条回复的 Future 在 worker 进程里，故走 deliver_reply（本地
+                # 命中就地 resolve，落空再经控制面转发）。前端契约一字未动。
+                from app.api.clarification import deliver_reply
 
-                resolve_pending(thread_id, msg.get("text", ""))
+                route = await deliver_reply(thread_id, msg.get("text", ""))
+                if route not in ("local", "forwarded"):
+                    logger.info("澄清回复无人接收：thread_id=%s（%s）", thread_id, route)
     except WebSocketDisconnect:
         pass
     finally:
@@ -846,9 +881,11 @@ async def cancel_task(
 
     属主校验（M16）：不然任何人拿到 thread_id 就能掐断别人正在跑的任务。
 
-    **``QUEUE_ENABLED=1`` 下的诚实边界**：任务在 worker 进程里跑，这里能取消的只有 API 侧那个等结果
-    的影子协程——前端会立刻停下，但 worker 那边会把这一轮跑完（「取消即免单」的账也照旧记）。跨进程
-    取消（取消标记 + Pub/Sub → worker 发 ``UserInterruptEvent``）是批 2 后面一单，别当它已经有了。
+    **``QUEUE_ENABLED=1`` 下（批2-4 补齐）**：任务在 worker 进程里跑，所以除了掐掉 API 侧那个等
+    结果的影子协程，还要经控制面把取消送过去——落一个按 ``task_id`` 的标记（管住「还在队列里排队、
+    没人领」的那些）+ 发一条广播（管住「已经被某个 worker 领走、正在跑」的那些）。worker 侧收到后
+    先放开 ``ask_user`` 的等待再 cancel 任务本体，``run_agent`` 的 finally 照常上报
+    ``task_cancelled`` 并把这一轮的账记完——「取消即免单」的口径一个字没变。
     """
     await _guard_thread(thread_id, auth_uid)
     handle = active_tasks.get(thread_id)
@@ -857,8 +894,41 @@ async def cancel_task(
     from app.api.clarification import cancel_pending
 
     cancel_pending(thread_id)
+    # 先送远端再掐本地：影子协程一被 cancel，它的 finally 就把 active_tasks 摘了，那之后再想拿
+    # task_id 就没处拿。顺序反过来在真实链路上是「偶尔取消不掉」，且只在竞态窗口里复现。
+    if queue_enabled():
+        await control.request_cancel(thread_id, handle.task_id)
     handle.task.cancel()
     return {"status": "cancelling", "thread_id": thread_id}
+
+
+class ClarifyRequest(BaseModel):
+    """``POST /api/clarify/{thread_id}`` 的请求体（回复文本与 WS 那条通路逐字同义）。"""
+
+    text: str = ""
+
+
+@app.post("/api/clarify/{thread_id}")
+async def submit_clarification(
+    thread_id: str, req: ClarifyRequest, auth_uid: str | None = Depends(get_current_user_id)
+) -> dict[str, Any]:
+    """回答 Agent 通过 ``ask_user`` 提出的澄清问题（HTTP 版）。
+
+    **前端不用它**——浏览器那条路仍然是 WS 上的 ``clarification_response`` 帧，契约一字未动。这个
+    口子是给没有 WS 的调用方（脚本 / 压测 / 端到端冒烟）准备的：批2-4 之前它们根本无法回答提问，
+    只能干等到 120s 超时。两条路进的是同一个 :func:`app.api.clarification.deliver_reply`，所以
+    「本地就有人等 → 就地 resolve；否则查令牌 → 经控制面转发给 worker」的判断只有一份。
+
+    ``404`` 表示**没人在等这条 thread 的回复**（从没提问 / 已经超时 / 令牌过期）——令牌过期按取消
+    处理，迟到的回复一律不投递，绝不能塞给下一个问题。
+    """
+    await _guard_thread(thread_id, auth_uid)
+    route = await clarification.deliver_reply(thread_id, req.text)
+    if route == "publish_failed":
+        raise HTTPException(503, "澄清回复转发失败（控制面不可用），请稍后重试")
+    if route not in ("local", "forwarded"):
+        raise HTTPException(404, f"会话 {thread_id} 当前没有等待回答的问题")
+    return {"status": "delivered", "thread_id": thread_id, "route": route}
 
 
 @app.get("/api/task/{thread_id}/inflight")
