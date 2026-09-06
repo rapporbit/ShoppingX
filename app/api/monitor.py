@@ -68,6 +68,10 @@ EVENT_ITEMS_PREVIEW = "items_preview"
 # 否则「今天怎么变慢/变笨了」永远查不出根因。走 monitor_event 通道，前端已有兜底渲染，
 # 不动 AGUI 协议既有字段。**瞬态**：它是一次降级告警，不属于会话思考过程，不进活动流回看。
 EVENT_MODEL_FALLBACK = "model_fallback"
+# 订单卡（批 1 交易域）：确认卡与下单/取消结果都走它，前端用同一个 OrderCard 渲染，靠 kind 区分。
+# 与 items_preview 同一取向：**不瞬态**（进回放存档），否则跑到一半刷新页面，用户刚看到的确认卡
+# 就凭空消失了——而确认卡是他下一句「确认」的唯一依据。不进活动流（它是结果本身，不是思考行）。
+EVENT_ORDER_CARD = "order_card"
 
 # 事件里携带的自由文本（demands / preview / 最终答案）截断上限，避免单条事件灌爆前端。
 _MAX_TEXT = 2000
@@ -248,6 +252,23 @@ async def report_items_preview(items: list[dict[str, Any]]) -> None:
         EVENT_ITEMS_PREVIEW,
         f"精选 {len(items)} 件商品",
         {"items": items},
+        thread_id=root,
+    )
+
+
+async def report_order_card(kind: str, payload: dict[str, Any]) -> None:
+    """订单卡：``kind`` 为 ``preview``（确认卡，未下单）/ ``placed`` / ``cancelled``。
+
+    **显式路由到根 thread**，理由同 :func:`report_items_preview`：交易动作可能发生在 TradeAgent
+    的子 loop 里，而子 thread 没有前端连接——事件会静默丢掉，用户就永远等不到那张确认卡。
+    """
+    rec = _activity_recorder.get()
+    root = rec.root_thread_id if rec is not None and rec.root_thread_id else None
+    label = {"preview": "待确认订单", "placed": "下单成功", "cancelled": "订单已取消"}
+    await _emit(
+        EVENT_ORDER_CARD,
+        label.get(kind, "订单"),
+        {"kind": kind, **payload},
         thread_id=root,
     )
 

@@ -35,7 +35,11 @@ export type AguiEvent = {
     | "items_preview"
     // 会话级 P_t 约束快照（data: SessionSnapshot）：planner 每轮落 P_t 后推，偏好面板「本次
     // 会话」区据此实时刷新。瞬态：断线重连后面板走 GET /api/session/{tid}/constraints 主动拉。
-    | "session_constraints";
+    | "session_constraints"
+    // 订单卡（批 1 交易域，data: {kind, order?, preview?, total_display?, address?}）：
+    // kind=preview 是**尚未下单**的确认卡（用户回一句「确认」后模型才真下单），placed/cancelled
+    // 是结果。与 items_preview 同样不瞬态——刷新页面后确认卡要还在，它是用户下一句话的依据。
+    | "order_card";
   message: string;
   data: Record<string, unknown>;
   thread_id: string | null;
@@ -61,6 +65,45 @@ export type ProductItem = {
   // 套装槽位名（「一套齐」轮才非空）：任一卡带 slot 即按槽分组渲染（组头 = 槽名 + 该槽花费），
   // 代替平台胶囊筛选。走结构化字段而非理由文案的【槽名】前缀（前缀会被收尾 LLM 重写时丢掉）。
   slot?: string;
+};
+
+// 一张订单（后端 Order.snapshot()）。金额在后端按最小单位整数算，这里拿到的已是主单位小数。
+export type OrderSnapshot = {
+  order_id: string;
+  status: "DRAFT" | "CONFIRMED" | "CANCELLED";
+  currency: string;
+  total: number;
+  address: string;
+  created_at: string;
+  cancel_reason?: string;
+  lines: {
+    platform: string;
+    item_id: string;
+    title: string;
+    unit_price: number;
+    quantity: number;
+    landed_usd?: number | null;
+  }[];
+};
+
+// 确认卡（尚未下单）里的一行。字段与 OrderSnapshot.lines 刻意不同构：它还没有订单号、没有落库，
+// 混成一个类型只会让「这到底下没下单」在渲染层变成一个要靠 optional 字段猜的问题。
+export type OrderPreviewLine = {
+  item_id: string;
+  title: string;
+  platform: string;
+  unit_price: number | null;
+  currency: string;
+  quantity: number;
+};
+
+// order_card 事件的载荷。
+export type OrderCardPayload = {
+  kind: "preview" | "placed" | "cancelled";
+  order?: OrderSnapshot;
+  preview?: OrderPreviewLine[];
+  total_display?: string;
+  address?: string;
 };
 
 // 本轮全树（主 + 各 fork 子 Agent）token 用量。随 task_result 事件下发、随 turns.json 落盘回看。

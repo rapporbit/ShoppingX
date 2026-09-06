@@ -84,7 +84,19 @@ logger = logging.getLogger("shoppingx.planner")
 #   price_compare  —— 跨平台比价
 #   landed_cost    —— 算关税 + 运费（到手价）
 #   category_intel —— 只问品类行情（热卖 / 价位 / 该看哪些维度），不一定要具体商品
-ShoppingTask = Literal["recommend", "evaluate", "price_compare", "landed_cost", "category_intel"]
+#   place_order / query_order / cancel_order —— 交易意图（批 1 的交易域）。它们与前五个正交：
+#     检索类任务判的是「要给什么」，交易类判的是「要动哪张单」，一轮里可以只有后者（「我的订单
+#     呢」不需要任何检索）。
+ShoppingTask = Literal[
+    "recommend",
+    "evaluate",
+    "price_compare",
+    "landed_cost",
+    "category_intel",
+    "place_order",
+    "query_order",
+    "cancel_order",
+]
 
 # 本轮该怎么拿候选——**「要不要重新检索」由 planner 判，不由「候选池有没有货」猜**：
 #   reuse   —— 用户只是在上一轮结果上**收紧**条件（「只要防水的」「把塑料的去掉」）。新结果是旧
@@ -286,6 +298,8 @@ class PlanOutput(BaseModel):
             "**按用户明确表达来判**：只说「推荐/看看有啥」→ [recommend]；说「哪个便宜/多少钱」"
             "→ 加 price_compare；说「到手/含税含运多少」→ 加 landed_cost；说「这款值不值/好不好」"
             "→ evaluate；只问「这类东西行情/该看哪些维度」→ [category_intel]。别塞用户没要的。"
+            "交易类（与上面正交，可单独出现）：说「买/下单/就要这个」→ place_order；"
+            "说「我的订单/那单怎么样」→ query_order；说「取消/不要了」→ cancel_order。"
         ),
     )
     retrieval: RetrievalMode = Field(

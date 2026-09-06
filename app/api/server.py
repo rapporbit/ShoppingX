@@ -89,6 +89,10 @@ from app.observability.logging import configure_logging
 from app.recall import get_recall_client
 from app.recall.geo import SUPPORTED_COUNTRIES
 from app.tools.image_understand import sniff_image_mime
+from app.trade.order import OrderStateError
+from app.trade.repository_sql import order_repository
+from app.trade.usecases import OrderNotFoundError, query_orders
+from app.trade.usecases import cancel_order as trade_cancel_order
 from app.utils.env import env_int
 from app.utils.path_utils import (
     OUTPUT_ROOT,
@@ -1140,3 +1144,60 @@ async def metrics_endpoint() -> Response:
     metrics.refresh_circuit_breakers()
     body, content_type = metrics.render()
     return Response(content=body, media_type=content_type)
+
+
+# --- 订单（批 1 / 7.2 交易域）------------------------------------------------
+
+
+def _require_login(auth_uid: str | None) -> str:
+    """订单接口一律要求登录——订单是**归属**数据，没有「匿名的订单」这回事。
+
+    与偏好接口的 ``_assert_own`` 口径不同：那边关掉鉴权后退回「任意读」，因为偏好在关掉鉴权的
+    本地开发里还得能看；订单不行——鉴权一关就人人可读所有订单，那不是开发便利，是洞。
+    """
+    if not auth_uid:
+        raise HTTPException(401, "请先登录后查看订单")
+    return auth_uid
+
+
+@app.get("/api/orders")
+async def list_orders(
+    limit: int = 20, auth_uid: str | None = Depends(get_current_user_id)
+) -> dict[str, Any]:
+    """当前用户的订单列表（侧栏「我的订单」）。只列自己的——user_id 取自 token，不从查询参数收。"""
+    uid = _require_login(auth_uid)
+    orders = await query_orders(order_repository(), user_id=uid, limit=limit)
+    return {"orders": [o.snapshot() for o in orders], "count": len(orders)}
+
+
+@app.get("/api/orders/{order_id}")
+async def get_order(
+    order_id: str, auth_uid: str | None = Depends(get_current_user_id)
+) -> dict[str, Any]:
+    """单张订单详情。别人的单与不存在的单**回同一个 404**（理由见 usecases._load_owned）。"""
+    uid = _require_login(auth_uid)
+    try:
+        found = await query_orders(order_repository(), user_id=uid, order_id=order_id)
+    except OrderNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    return found[0].snapshot()
+
+
+@app.post("/api/orders/{order_id}/cancel")
+async def cancel_order_endpoint(
+    order_id: str,
+    auth_uid: str | None = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    """从前端直接取消一张订单（不经 Agent）。
+
+    这条路**没有**「先 query_order」的顺序闸——那道闸拦的是模型编订单号，而前端的取消按钮是长在
+    订单卡片上的，订单号来自刚渲染的那张卡，不存在编造。归属与状态机仍照常校验。
+    """
+    uid = _require_login(auth_uid)
+    try:
+        order = await trade_cancel_order(order_repository(), user_id=uid, order_id=order_id)
+    except OrderNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except OrderStateError as e:
+        raise HTTPException(409, str(e)) from e
+    return order.snapshot()

@@ -56,6 +56,7 @@ async def cancel_order(order_id: str, reason: str = "") -> CancelOrderOutput:
         await monitor.report_tool_end("cancel_order", error=str(e))
         return CancelOrderOutput(note=f"[error] {e}")
 
+    await monitor.report_order_card("cancelled", {"order": order.snapshot()})
     await monitor.report_tool_end("cancel_order", order_id=order.order_id)
     return CancelOrderOutput(
         cancelled=True,

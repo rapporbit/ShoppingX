@@ -334,3 +334,83 @@ async def test_sql_repository_round_trip() -> None:
     assert got.total().amount_minor == 19_99 * 2
     assert got.address.country == "CN"
     assert [o.order_id for o in await repo.list_by_user("u-sql")] == [order.order_id]
+
+
+# ---------- API：订单三端点 ----------
+
+
+@pytest.fixture
+async def _api_client(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
+    """开着鉴权的 ASGI 客户端（订单接口一律要求登录）。"""
+    from collections.abc import AsyncIterator  # noqa: F401
+
+    from httpx import ASGITransport, AsyncClient
+
+    import app.api.server as server
+
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+    monkeypatch.setenv("JWT_SECRET", "test-secret-not-real")
+    transport = ASGITransport(app=server.app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+async def _signup(client, username: str) -> tuple[str, dict[str, str]]:  # type: ignore[no-untyped-def]
+    resp = await client.post(
+        "/api/auth/register", json={"username": username, "password": "sup3r-secret"}
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    return body["user_id"], {"Authorization": f"Bearer {body['access_token']}"}
+
+
+@pytest.mark.usefixtures("_candidates")
+async def test_orders_api_requires_login_and_scopes_to_owner(_api_client) -> None:  # type: ignore[no-untyped-def]
+    """未登录 401；登录后只看得到自己的单；别人的单是 404（与不存在同一个码）。"""
+    from app.db.session import init_db
+    from app.trade.repository_sql import SqlOrderRepository
+
+    await init_db()
+    assert (await _api_client.get("/api/orders")).status_code == 401
+
+    uid, headers = await _signup(_api_client, "trader-a")
+    _, other_headers = await _signup(_api_client, "trader-b")
+    order = await place_order(
+        SqlOrderRepository(),
+        user_id=uid,
+        thread_id="t-api",
+        lines=[LineRequest("B01")],
+        address=_addr(),
+    )
+
+    mine = await _api_client.get("/api/orders", headers=headers)
+    assert mine.status_code == 200
+    assert order.order_id in [o["order_id"] for o in mine.json()["orders"]]
+    # 另一个人既列不到，也查不到
+    others = await _api_client.get("/api/orders", headers=other_headers)
+    assert order.order_id not in [o["order_id"] for o in others.json()["orders"]]
+    assert (
+        await _api_client.get(f"/api/orders/{order.order_id}", headers=other_headers)
+    ).status_code == 404
+    assert (await _api_client.get("/api/orders/GBX-999999", headers=headers)).status_code == 404
+
+
+@pytest.mark.usefixtures("_candidates")
+async def test_orders_api_cancel_twice_conflicts(_api_client) -> None:  # type: ignore[no-untyped-def]
+    """前端取消：第一次 200，第二次 409（状态机不允许，且不能静默成功）。"""
+    from app.db.session import init_db
+    from app.trade.repository_sql import SqlOrderRepository
+
+    await init_db()
+    uid, headers = await _signup(_api_client, "trader-c")
+    order = await place_order(
+        SqlOrderRepository(),
+        user_id=uid,
+        thread_id="t-api2",
+        lines=[LineRequest("B01")],
+        address=_addr(),
+    )
+    first = await _api_client.post(f"/api/orders/{order.order_id}/cancel", headers=headers)
+    assert first.status_code == 200 and first.json()["status"] == "CANCELLED"
+    second = await _api_client.post(f"/api/orders/{order.order_id}/cancel", headers=headers)
+    assert second.status_code == 409
