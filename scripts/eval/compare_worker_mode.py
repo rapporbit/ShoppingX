@@ -40,14 +40,18 @@ from app.eval.rubric import RubricResult, evaluate  # noqa: E402
 from app.eval.trace import extract_tool_calls  # noqa: E402
 from app.harness.middleware import harness_hook  # noqa: E402
 
-# 六条对照 query：三条跨平台（并行派发的主靶）、一条长链到手价、一条交易（写边界的唯一观测
-# 点——clone 下 worker 拿得到 create_order 且 depth_gate 名单里没有它）、一条闲聊（量「小事也
-# 派一趟」的多余开销）。刻意不含 q01：它触发 bundle 的 ask_user，评测无人应答会干等 120s，
-# 把 wall 这一列彻底污染（见手册 §0.1 L8 验收）。
+# 六条对照 query：**三条会真派发**（两条多类并列 + 一条套装槽位批）、一条长链到手价（单干）、
+# 一条交易（写边界的唯一观测点——clone 下 worker 拿得到 create_order 且 depth_gate 名单里没有
+# 它）、一条闲聊（量「小事也派一趟」的多余开销）。
+#
+# **第一版用的是三条跨平台 query，整批 24 轮一次派发都没发生**（`depth` 全 0，表里差异全是
+# LLM 噪声）——线上默认只启用 amazon，「跨平台并行」这条触发路径在默认配置下根本不成立。
+# 派发来源改成「品类」之后（批 1-7.4）才有了在默认配置下必然触发的靶子。刻意不含 q01/q22：
+# 它们触发 bundle 的 ask_user，评测无人应答会干等 120s，把 wall 那一列彻底污染。
 DEFAULT_QUERIES = [
-    "q05_price_compare_samsung",
-    "q15_full_chain_kitchen",
-    "q17_compare_hp_ink",
+    "pl01_parallel_two_categories",
+    "pl02_parallel_three_categories",
+    "q21_bundle_listed_slots",
     "q06_landed_cost_luggage",
     "tr01_order_needs_confirm",
     "q09_chitchat_capability",
