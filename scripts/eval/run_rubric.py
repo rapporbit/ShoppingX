@@ -110,6 +110,26 @@ def _load_queries(only: set[str] | None, limit: int | None) -> list[dict]:
     return rows
 
 
+def _prior_context(q: dict) -> str:
+    """这条 case 要告诉 judge 的跨轮 / 跨会话事实。
+
+    judge 只看最后一轮 query（多轮 case 只对最后一轮打分），所以「第二个我要了」「把上次那单取消
+    了」在它眼里没有主语——不给背景，它会把「引用上一轮清单里的真货」判成「凭空编造 item_id」。
+
+    两级：种子集显式写的 ``prior_context`` 优先；没写的多轮 case 用**用户前几轮的原话**兜底。
+    兜底刻意只用用户说过的话，**不含 Agent 的实际回答**——尺子必须与 Agent 表现无关，否则 Agent
+    变差时尺子跟着变松，回归对照就废了。
+    """
+    explicit = str(q.get("prior_context") or "").strip()
+    if explicit:
+        return explicit
+    turns: list[str] = q.get("turns") or []
+    if len(turns) <= 1:
+        return ""
+    said = "\n".join(f"- 第 {i} 轮用户说：{t}" for i, t in enumerate(turns[:-1], 1))
+    return f"本轮之前，同一会话里已经发生过以下几轮对话（Agent 均已正常作答）：\n{said}"
+
+
 async def _eval_one(q: dict, user_id: str | None, sem: asyncio.Semaphore, use_cache: bool) -> dict:
     """跑一条 query 并打分；异常**与挂起**都收成一条「评测失败」记录，不拖垮整批。"""
     async with sem:
@@ -126,7 +146,12 @@ async def _eval_one(q: dict, user_id: str | None, sem: asyncio.Semaphore, use_ca
                 await run_agent(warmup, thread_id=thread_id, user_id=user_id)
             run = await run_agent(turns[-1], thread_id=thread_id, user_id=user_id)
             scored: RubricResult = await evaluate(
-                turns[-1], run, q.get("constraints"), q.get("intent", "shopping"), use_cache
+                turns[-1],
+                run,
+                q.get("constraints"),
+                q.get("intent", "shopping"),
+                use_cache,
+                prior_context=_prior_context(q),
             )
             return run, scored
 

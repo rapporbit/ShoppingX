@@ -33,11 +33,19 @@ DEFAULT_QDRANT_PATH = "./data/qdrant"
 UPSERT_BATCH = 512
 
 
-def make_client() -> QdrantClient:
-    """按 env 造 Qdrant 客户端：server / on-disk 本地 / 内存。"""
+def make_client(timeout: float | None = None) -> QdrantClient:
+    """按 env 造 Qdrant 客户端：server / on-disk 本地 / 内存。
+
+    ``timeout`` 只对 server 模式生效（本地模式没有 HTTP 往返）。默认 ``None`` = 沿用
+    qdrant-client 自己的默认值，线上行为不变；批量评测要放宽它——向量与 HNSW 都 ``on_disk``，
+    冷 collection 的第一批查询要现读磁盘，实测会撞爆默认超时（现象是 `timed out`，不是慢）。
+    """
     url = os.environ.get("QDRANT_URL")
     if url:
-        return QdrantClient(url=url, api_key=os.environ.get("QDRANT_API_KEY"))
+        api_key = os.environ.get("QDRANT_API_KEY")
+        if timeout:
+            return QdrantClient(url=url, api_key=api_key, timeout=int(timeout))
+        return QdrantClient(url=url, api_key=api_key)
     path = os.environ.get("QDRANT_PATH", DEFAULT_QDRANT_PATH)
     if path == ":memory:":
         return QdrantClient(location=":memory:")
