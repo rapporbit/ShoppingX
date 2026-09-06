@@ -7,10 +7,10 @@ metric、minimal 档收走成本放大器工具、fallback 档不调 LLM 且不�
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage
 
 from app.agent import model_router as mr
 from app.agent import token_budget as tb
@@ -34,19 +34,13 @@ def budget_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _spend(fraction: float, mid: str) -> None:
     """烧掉预算的 ``fraction`` 比例。"""
-    tb.charge_tree_usage(
-        [
-            AIMessage(
-                content="",
-                id=mid,
-                usage_metadata={
-                    "input_tokens": int(1_000_000 * fraction),
-                    "output_tokens": 0,
-                    "total_tokens": int(1_000_000 * fraction),
-                    "input_token_details": {"cache_read": 0},
-                },
-            )
-        ]
+    tb.charge_usage(
+        mid,
+        SimpleNamespace(
+            input_tokens=int(1_000_000 * fraction),
+            output_tokens=0,
+            cache_input_tokens=0,
+        ),
     )
 
 
@@ -189,7 +183,7 @@ class TestBudgetRouterHook:
         assert out is not None
         assert out["model_override"] is sentinel
         assert len(out["messages"]) == 1
-        assert "预算提醒" in out["messages"][0].content
+        assert "预算提醒" in out["messages"][0].get_text_content()
         # hint 须同步登记 persist_messages（随 ModelResponse 落 state，不然只活一轮还斩缓存链）
         assert out["persist_messages"] == out["messages"]
 
@@ -241,30 +235,33 @@ class TestBudgetRouterHook:
 
 
 class TestAdapterWiring:
-    """Hook 决策 → 适配器执行的接线（Hook 逻辑对，不代表它在真实 Agent 生命周期里生效过）。"""
+    """Hook 决策 → 适配器执行的接线（Hook 逻辑对，不代表它在真实 Agent 生命周期里生效过）。
+
+    换档在 AgentScope 侧分两步：Hook 只产**档位名**（``model_tier``），适配器把它解析成本运行时
+    的模型对象塞进 ``current_model``。这条分工是踩出来的——Hook 直接产模型对象时，那对象是
+    LangChain 的 ``ChatOpenAI``，塞进去要到真正调用时才炸「object is not callable」。
+    """
 
     @staticmethod
-    def _fake_request() -> Any:
-        class _Req:
-            def __init__(self) -> None:
-                self.messages: list[Any] = []
-                self.system_message = None
-                self.tools: list[Any] = []
-                self.model: Any = "原始模型"
+    def _stub_agent() -> Any:
+        from agentscope.state import AgentState
 
-            def override(self, **kw: Any) -> Any:
-                out = _Req()
-                out.messages = kw.get("messages", self.messages)
-                out.system_message = kw.get("system_message", self.system_message)
-                out.model = kw.get("model", self.model)
-                return out
+        return SimpleNamespace(
+            name="shoppingx",
+            state=AgentState(),
+            model=SimpleNamespace(model="原始模型"),
+        )
 
-        return _Req()
+    @staticmethod
+    def _adapter() -> Any:
+        from app.harness.adapter import HarnessAgentAdapter, HarnessSession
+
+        session = HarnessSession(original_query="买包")
+        return HarnessAgentAdapter(session), session
 
     @pytest.mark.asyncio
     async def test_fallback_skips_the_model_call_entirely(self, monkeypatch: Any) -> None:
         """FALLBACK 档的全部意义：一次 LLM 都不调。handler 被调用即为失败。"""
-        from app.harness.agent_middleware import HarnessAgentMiddleware
         from app.harness.setup import setup_harness
 
         setup_harness()
@@ -273,64 +270,68 @@ class TestAdapterWiring:
 
         calls: list[Any] = []
 
-        async def handler(req: Any) -> Any:
-            calls.append(req)
+        async def handler(**kwargs: Any) -> Any:
+            calls.append(kwargs)
             raise AssertionError("fallback 档不该调用模型")
 
-        mw = HarnessAgentMiddleware(original_query="买包")
-        resp = await mw.awrap_model_call(self._fake_request(), handler)
+        adapter, session = self._adapter()
+        resp = await adapter.on_model_call(self._stub_agent(), {"messages": []}, handler)
 
         assert calls == []
-        assert resp.result[0].content == "已用尽预算的兜底清单"
-        assert not resp.result[0].tool_calls  # 无 tool_calls → AgentLoop 自然终止
-        # 置位终结标记：万一 loop 还想调工具，terminal_reached_gate 会拦下
-        assert mw._guard.terminal_reached is True
+        assert resp.content[0].text == "已用尽预算的兜底清单"
+        # 无 tool_call 块 → loop 自然终止；并置位终结标记，万一还想调工具会被闸拦下
+        assert all(b.type != "tool_call" for b in resp.content)
+        assert session.guard.terminal_reached is True
 
     @pytest.mark.asyncio
     async def test_lite_tier_overrides_the_model_on_request(self, monkeypatch: Any) -> None:
-        from langchain_core.messages import AIMessage as _AI
+        from agentscope.message import TextBlock
+        from agentscope.model import ChatResponse
 
-        from app.harness.agent_middleware import HarnessAgentMiddleware
+        import app.harness.adapter as adapter_mod
         from app.harness.setup import setup_harness
 
         setup_harness()
-        sentinel = object()
+        sentinel = SimpleNamespace(model="lite-model")
         monkeypatch.setattr(mr, "current_tier", lambda: Tier.LITE)
-        monkeypatch.setattr(mr, "tier_model", lambda t: sentinel)
+        # 档位名 → 模型对象的解析归适配器；这里替掉解析结果，验「Hook 判的档真的传到了调用上」。
+        monkeypatch.setattr(
+            adapter_mod, "_resolve_model_tier", lambda tier: sentinel if tier == "lite" else None
+        )
 
         seen: list[Any] = []
 
-        async def handler(req: Any) -> Any:
-            seen.append(req.model)
-            return _AI(content="ok")
+        async def handler(**kwargs: Any) -> Any:
+            seen.append(kwargs.get("current_model"))
+            return ChatResponse(content=[TextBlock(type="text", text="ok")], is_last=True)
 
-        mw = HarnessAgentMiddleware(original_query="买包")
-        await mw.awrap_model_call(self._fake_request(), handler)
+        adapter, _ = self._adapter()
+        await adapter.on_model_call(self._stub_agent(), {"messages": []}, handler)
         assert seen == [sentinel]  # 降档模型真的传到了模型调用上
 
     @pytest.mark.asyncio
     async def test_main_tier_leaves_the_model_untouched(self, monkeypatch: Any) -> None:
-        from langchain_core.messages import AIMessage as _AI
+        from agentscope.message import TextBlock
+        from agentscope.model import ChatResponse
 
         import app.harness.hooks.reasoning_boost as rb
-        from app.harness.agent_middleware import HarnessAgentMiddleware
         from app.harness.setup import setup_harness
 
         setup_harness()
         monkeypatch.setattr(mr, "current_tier", lambda: Tier.MAIN)
-        # 关掉「主 loop 第一轮开 reasoning」——它同样经 model_override 落地，会盖住本例要断言的
+        # 关掉「主 loop 第一轮开 reasoning」——它同样经 model_tier 落地，会盖住本例要断言的
         # 「预算 MAIN 档不碰模型」。两者的优先级协作另有专测（tests/test_reasoning_boost.py）。
         monkeypatch.setattr(rb, "BOOST_ENABLED", False)
 
         seen: list[Any] = []
 
-        async def handler(req: Any) -> Any:
-            seen.append(req.model)
-            return _AI(content="ok")
+        async def handler(**kwargs: Any) -> Any:
+            seen.append(kwargs.get("current_model"))
+            return ChatResponse(content=[TextBlock(type="text", text="ok")], is_last=True)
 
-        mw = HarnessAgentMiddleware(original_query="买包")
-        await mw.awrap_model_call(self._fake_request(), handler)
-        assert seen == ["原始模型"]
+        adapter, _ = self._adapter()
+        await adapter.on_model_call(self._stub_agent(), {"messages": []}, handler)
+        assert seen == [None]  # 没往 input_kwargs 里塞模型 = 用 Agent 自己的那个
 
 
 class TestTokenBudgetGate:

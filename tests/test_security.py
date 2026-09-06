@@ -27,7 +27,7 @@ from app.security.tool_whitelist import allowed_tools, validate_tool_call
 class TestToolWhitelist:
     def test_registered_tool_allowed(self) -> None:
         assert validate_tool_call("item_search")
-        assert validate_tool_call("dispatch_tool")
+        assert validate_tool_call("task_dispatch")
 
     def test_hallucinated_tool_rejected(self) -> None:
         assert not validate_tool_call("rm_database")
@@ -37,10 +37,10 @@ class TestToolWhitelist:
         assert not validate_tool_call("")
 
     def test_whitelist_covers_full_tool_set(self) -> None:
-        """白名单必须与 FULL_TOOL_SET 完全一致——漏一个工具就是把它锁死在门外。"""
-        from app.agent.tool_registry import FULL_TOOL_SET
+        """白名单必须与工具注册表完全一致——漏一个工具就是把它锁死在门外。"""
+        from app.agent.tool_registry import TOOLS
 
-        assert allowed_tools() == frozenset(t.name for t in FULL_TOOL_SET)
+        assert allowed_tools() == frozenset(t.name for t in TOOLS)
 
     @pytest.mark.asyncio
     async def test_hook_rejects_unknown_tool(self) -> None:

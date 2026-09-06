@@ -11,7 +11,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 
-from app.harness.sentinels import FORK_EXHAUSTED_PARALLEL, FORK_EXHAUSTED_SERIAL
+from app.harness.sentinels import FORK_EXHAUSTED
 from app.utils.env import env_int
 
 # 「商品检索」类工具：拿信息但不推进收尾，是「再找找更好的」这个动机最爱漏出来的两个口子。
@@ -51,8 +51,8 @@ DEPTH0_ONLY_TOOLS = frozenset({"price_compare", "shipping_calc", "item_picker", 
 # 纯属重复解码。
 MAIN_ONLY_CONTEXT_TOOLS = frozenset({"planner", "category_insight"})
 
-# fork 元工具：本项目里只有主 loop 会调（子 Agent 在 MAX_FORK_DEPTH=1 下 fork 即被深度护栏拒）。
-FORK_TOOLS = frozenset({"dispatch_tool", "parallel_dispatch_tool"})
+# 派发元工具：本项目里只有主 Agent 会调（worker 的工具集里根本没有它，深度闸是二道保险）。
+FORK_TOOLS = frozenset({"task_dispatch"})
 
 # 「成本放大器」工具：会派生更多模型调用 / 外呼、让 token 成本乘法累积的几个口子。token 预算越
 # 硬线时执行层硬挡这些工具，逼 Agent 用现有候选走收尾。便宜的收尾 / 精挑工具与终结工具保留，
@@ -66,43 +66,36 @@ TERMINAL_TOOLS = frozenset({"shopping_summary", "chat_fallback"})
 # 主 loop 没调终结工具就打算用纯文字收尾时，最多提醒一次——避免模型持续不听指令时无限重试。
 MAX_TERMINAL_NUDGE_RETRIES = 1
 
-# 并行 fork 轮数上限（标准购物流程：跨平台检索只用一次 parallel_dispatch_tool）。
-DEFAULT_MAX_PARALLEL_FORK = 1
-# 串行 dispatch_tool 上限（少量独立深子任务用；并行轮一旦跑过则一律不再放行）。
-DEFAULT_MAX_SERIAL_FORK = 4
+# 一棵树允许的派发**总次数**。旧口径是「1 轮并行（一次派一批）+ 4 次串行」，那是
+# parallel_dispatch_tool 时代的形状：一次调用派一批平台。改成 task_dispatch 之后，一条 demand
+# 就是一次调用（同轮多条由框架并发跑），所以额度只能按调用数给：6 ≈ 一次铺满 5 个启用平台
+# + 1 条补派。给得偏松是有意的——派发额度是**动机闸**（挡「再找找更好的」），不该在正常的
+# 跨平台铺开时就咬人；真正的资源背压在并发信号量那边（见 fork_concurrency_scope）。
+DEFAULT_MAX_DISPATCH = env_int("MAX_DISPATCH_CALLS", 6)
 
 
 class ForkBudget:
-    """一棵 fork 树共享的 fork 计数（可变对象，靠 ContextVar 把同一引用传给所有子任务）。
+    """一棵派发树共享的调用计数（可变对象，靠 ContextVar 把同一引用传给所有子任务）。
 
-    只有主 loop 会 charge 它（子 Agent 在 MAX_FORK_DEPTH=1 下无法再 fork）。语义：
-    - 跨平台并行 fork（``parallel_dispatch_tool``）只放行 ``max_parallel`` 轮（默认 1）。
-    - 串行 ``dispatch_tool`` 在并行轮之前可用 ``max_serial`` 次；并行轮一旦跑过，之后任何 fork
-      一律拒——此时该进比价/精挑/收尾，不该再拓宽。
+    只有主 Agent 会 charge 它（worker 的工具集里没有 task_dispatch）。语义就一条：整棵树最多
+    派 ``max_calls`` 次，超了硬挡并回哨兵文案。
     """
 
-    __slots__ = ("max_parallel", "max_serial", "parallel_calls", "serial_calls")
+    __slots__ = ("calls", "max_calls")
 
-    def __init__(self, max_parallel: int, max_serial: int) -> None:
-        self.max_parallel = max_parallel
-        self.max_serial = max_serial
-        self.parallel_calls = 0
-        self.serial_calls = 0
+    def __init__(self, max_calls: int) -> None:
+        self.max_calls = max_calls
+        self.calls = 0
 
     def charge(self, tool_name: str) -> str | None:
-        """记一次 fork 调用，返回 None=放行 / 拦截哨兵文案=拒（应硬挡）。
+        """记一次派发，返回 None=放行 / 哨兵文案=拒（应硬挡）。"""
+        self.calls += 1
+        return None if self.calls <= self.max_calls else FORK_EXHAUSTED
 
-        耗尽原因有两种、文案不同（拒的理由对模型必须真实，不能张冠李戴）：
-        - 并行轮已跑过一轮 → ``FORK_EXHAUSTED_PARALLEL``。
-        - 纯串行超过 ``max_serial``（可能从未跑过并行轮）→ ``FORK_EXHAUSTED_SERIAL``。
-        """
-        if tool_name == "parallel_dispatch_tool":
-            self.parallel_calls += 1
-            return None if self.parallel_calls <= self.max_parallel else FORK_EXHAUSTED_PARALLEL
-        if self.parallel_calls >= self.max_parallel:
-            return FORK_EXHAUSTED_PARALLEL
-        self.serial_calls += 1
-        return None if self.serial_calls <= self.max_serial else FORK_EXHAUSTED_SERIAL
+    @property
+    def dispatched(self) -> bool:
+        """本轮是否已经派出去过——「派过就别再自己直搜」那道闸的判据。"""
+        return self.calls > 0
 
 
 # ContextVar 存的是可变对象的引用：asyncio 子任务复制 context 拿到的是**同一个** ForkBudget，
@@ -116,12 +109,9 @@ def get_fork_budget() -> ForkBudget | None:
 
 
 @contextmanager
-def fork_budget_scope(
-    max_parallel: int = DEFAULT_MAX_PARALLEL_FORK,
-    max_serial: int = DEFAULT_MAX_SERIAL_FORK,
-) -> Iterator[ForkBudget]:
-    """开一棵 fork 树的 fork 预算作用域：``run_agent`` 入口套一次，拦住主 loop 多轮 re-fork。"""
-    budget = ForkBudget(max_parallel, max_serial)
+def fork_budget_scope(max_calls: int = DEFAULT_MAX_DISPATCH) -> Iterator[ForkBudget]:
+    """开一棵派发树的预算作用域：``run_agent`` 入口套一次，拦住主 Agent 一轮轮重复派发。"""
+    budget = ForkBudget(max_calls)
     token = _fork_budget.set(budget)
     try:
         yield budget

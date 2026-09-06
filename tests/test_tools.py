@@ -31,10 +31,10 @@ from app.tools.schemas import ItemCandidate
 # 注册表完整性
 # --------------------------------------------------------------------------
 def test_registry_complete() -> None:
-    from app.agent.tool_registry import FULL_TOOL_SET, TERMINAL_TOOLS
+    from app.agent.tool_registry import TERMINAL_TOOLS, TOOLS
 
-    names = [t.name for t in FULL_TOOL_SET]
-    # 九大业务工具 + 两个 dispatch 元工具。
+    names = [t.name for t in TOOLS]
+    # 九大业务工具 + 澄清 / 撤回偏好 + 派发入口。
     for expected in [
         "planner",
         "item_search",
@@ -45,11 +45,12 @@ def test_registry_complete() -> None:
         "web_search",
         "chat_fallback",
         "shopping_summary",
-        "dispatch_tool",
-        "parallel_dispatch_tool",
+        "ask_user",
+        "forget_preference",
+        "task_dispatch",
     ]:
         assert expected in names, f"{expected} 未注册"
-    # 无重名（同质 fork 共用唯一集合，重名会让子 Agent 拿到歧义工具）。
+    # 无重名（重名会让 Toolkit 里出现歧义工具）。
     assert len(names) == len(set(names))
     # 终结性工具确实在工具集中。
     assert TERMINAL_TOOLS <= set(names)
@@ -1684,7 +1685,7 @@ async def test_planner_intent_grounding_passthrough(monkeypatch: Any) -> None:
     payload = PlanOutput(
         category="解压小物", tasks=["recommend"], intent_grounding="web", keywords=["fidget"]
     )
-    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
     out = await mod.planner.ainvoke({"intent": "送女朋友一个今年最流行的那种解压小玩意"})
     assert out.intent_grounding == "web"
 
@@ -1703,7 +1704,7 @@ async def test_planner_returns_structured(monkeypatch: Any) -> None:
         prefer_keywords=["小众"],
         keywords=["travel", "pouch"],
     )
-    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
     out = await mod.planner.ainvoke(
         {"intent": "想买便宜抗造的旅行三件套，预算300，不要塑料，喜欢小众"}
     )
@@ -1731,7 +1732,7 @@ async def test_planner_auto_adds_landed_cost(monkeypatch: Any) -> None:
 
     # 模型只判了 recommend（它的纪律仍是「只填用户明确表达的」，不许自作主张加 tasks）。
     payload = PlanOutput(category="旅行收纳", tasks=["recommend"], keywords=["packing", "cubes"])
-    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
     out = await mod.planner.ainvoke({"intent": "推荐几个旅行收纳袋，寄到日本"})
 
     assert out.dest_country == "JP"
@@ -1745,7 +1746,7 @@ async def test_planner_skips_landed_cost_for_non_recommend(monkeypatch: Any) -> 
     from app.tools.planner import PlanOutput
 
     payload = PlanOutput(category="旅行收纳", tasks=["category_intel"])
-    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
     out = await mod.planner.ainvoke({"intent": "旅行收纳袋现在什么价位，我在日本"})
 
     assert out.dest_country == "JP"
@@ -1785,7 +1786,7 @@ async def test_planner_writes_session_pt_same_turn(monkeypatch: Any) -> None:
         soft_dislikes=["花哨"],
         prefer_keywords=["帆布", "小众"],
     )
-    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
 
     session_dir = Path(tempfile.mkdtemp())
     with thread_scope("t-pt", session_dir, user_id="u-pt"):
@@ -1827,7 +1828,7 @@ async def test_planner_pt_reaches_item_picker_same_turn(monkeypatch: Any) -> Non
 
     monkeypatch.setattr(
         pmod,
-        "get_as_fast_llm",
+        "get_fast_llm",
         lambda: _FakeLLM(
             structured_payload=PlanOutput(
                 exclude_terms=[ExcludeTerm(word="塑料", evidence="不要塑料")]
@@ -1860,7 +1861,7 @@ async def test_planner_soft_dislike_penalizes_not_excludes(monkeypatch: Any) -> 
     monkeypatch.setattr(imod, "_W_ATTEN_SEM", 0.0)
     monkeypatch.setattr(
         pmod,
-        "get_as_fast_llm",
+        "get_fast_llm",
         lambda: _FakeLLM(structured_payload=PlanOutput(soft_dislikes=["floral"])),
     )
     cands = [
@@ -1927,7 +1928,7 @@ async def test_chat_fallback_replies(monkeypatch: Any) -> None:
     import app.tools.chat_fallback as mod
 
     fake = _FakeLLM(content="你好！我可以帮你跨平台找商品。")
-    monkeypatch.setattr(mod, "get_as_llm", lambda: fake)
+    monkeypatch.setattr(mod, "get_llm", lambda: fake)
     out = await mod.chat_fallback.ainvoke({"message": "你好"})
     assert "你好" in out.reply
 
@@ -1939,7 +1940,7 @@ async def test_shopping_summary_returns_list(monkeypatch: Any) -> None:
     # LLM 只产一段 summary；title/platform/到手价/图/链接/每件 reason 全由收尾确定性组装。
     payload = _SummaryDraft(summary="为你精选了 1 件：帆布旅行包。")
     # shopping_summary 文案走非推理快模型（perf/model-tiering）→ monkeypatch get_fast_llm。
-    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
     # 候选带真实商品图，但 LLM 的结构化输出 item 里 image_url 为空——验证收尾按 item_id 回填。
     picks = [
         ItemCandidate(
@@ -2007,7 +2008,7 @@ async def test_shopping_summary_drops_off_intent_items(monkeypatch: Any) -> None
     from app.tools.shopping_summary import _SummaryDraft
 
     payload = _SummaryDraft(summary="为你精选了两台相机。", off_intent=["ACC1", "FILM"])
-    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
 
     msg = await mod.shopping_summary.ainvoke(
         {
@@ -2029,7 +2030,7 @@ async def test_shopping_summary_off_intent_guard_never_empties_list(monkeypatch:
     from app.tools.shopping_summary import _SummaryDraft
 
     payload = _SummaryDraft(summary="……", off_intent=["CAM1", "CAM2", "ACC1"])
-    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
 
     msg = await mod.shopping_summary.ainvoke(
         {
@@ -2058,7 +2059,7 @@ async def test_shopping_summary_defaults_to_all_picker_picks(
 
     monkeypatch.setattr(
         mod,
-        "get_as_fast_llm",
+        "get_fast_llm",
         lambda: _FakeLLM(structured_payload=_SummaryDraft(summary="清单如下。")),
     )
     cands = [
@@ -2105,7 +2106,7 @@ async def test_shopping_summary_tripwire_on_empty_picks_with_candidates(
 
     monkeypatch.setattr(
         mod,
-        "get_as_fast_llm",
+        "get_fast_llm",
         lambda: _FakeLLM(structured_payload=_SummaryDraft(summary="没找到合适的。")),
     )
     with thread_scope("t-tripwire", tmp_path):
@@ -2136,7 +2137,7 @@ async def test_shopping_summary_never_passes_price_off_as_landed(monkeypatch: An
     from app.tools.shopping_summary import _SummaryDraft
 
     payload = _SummaryDraft(summary="为你精选了 1 件。")
-    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
     # 只有货价、没有到手价（本轮没调 shipping_calc）——真实场景里这是最常见的一种候选。
     picks = [ItemCandidate(item_id="A1", platform="amazon", title="canvas bag", price_usd=36.99)]
     msg = await mod.shopping_summary.ainvoke(
@@ -2163,7 +2164,7 @@ async def test_shopping_summary_backfills_url_from_registry(
 
     # LLM 只产 summary；url/image/reason 由收尾按 item_id 从登记表回填，不经模型。
     payload = _SummaryDraft(summary="精选 1 件。")
-    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
 
     with thread_scope("t-reg", tmp_path):
         # item_search 阶段：把全量候选（含真实 url）登记到会话。
@@ -2271,7 +2272,7 @@ async def test_stream_draft_emits_prefix_deltas(monkeypatch: Any) -> None:
         '{"summary": "这批候选主打耐用',
         '与低调，都在预算内，可放心选。"}',
     ]
-    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakeStreamingLLM(pieces))
+    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeStreamingLLM(pieces))
     sent: list[str] = []
 
     async def _fake_delta(text: str) -> None:
@@ -2291,7 +2292,7 @@ async def test_generate_draft_falls_back_without_streaming(monkeypatch: Any) -> 
     from app.tools.shopping_summary import _SummaryDraft
 
     payload = _SummaryDraft(summary="打底文案")
-    monkeypatch.setattr(mod, "get_as_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
     draft = await mod._generate_draft([("system", "s"), ("user", "u")], {})
     assert draft.summary == "打底文案"
 
@@ -2349,7 +2350,7 @@ class TestNullIsAbsent:
 
     gcjp 会话 cdee1d6d（2026-07-17，童装追问「放开预算」）：deepseek-v4-flash（关思考 +
     function_calling）把 PlanOutput 的 5 个 list 字段吐成显式 null，default_factory 不接显式
-    null，planner 连挂 2 次——报错还被 langgraph 包成「Error invoking tool with kwargs
+    null，planner 连挂 2 次——报错还被外层包成「Error invoking tool with kwargs
     {外层入参}」，看着像入参问题。四处 with_structured_output 顶层 schema 全挂本容错。
     """
 

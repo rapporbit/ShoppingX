@@ -253,7 +253,7 @@ async def test_slot_backfill_grant_passes_once_per_slot(monkeypatch) -> None:
     from app.harness.middleware import HarnessMiddleware
     from app.harness.state import GuardState
 
-    monkeypatch.setattr(tg, "get_fork_budget", lambda: SimpleNamespace(parallel_calls=1))
+    monkeypatch.setattr(tg, "get_fork_budget", lambda: SimpleNamespace(dispatched=True))
     monkeypatch.setattr(tg, "candidate_count", lambda: 58)  # 池非空（badcase 形态）
     guard = GuardState()
     mw = HarnessMiddleware()
@@ -286,7 +286,7 @@ async def test_slot_backfill_grant_resolves_drifted_refs(monkeypatch) -> None:
     from app.harness.middleware import HarnessMiddleware
     from app.harness.state import GuardState
 
-    monkeypatch.setattr(tg, "get_fork_budget", lambda: SimpleNamespace(parallel_calls=1))
+    monkeypatch.setattr(tg, "get_fork_budget", lambda: SimpleNamespace(dispatched=True))
     monkeypatch.setattr(tg, "candidate_count", lambda: 40)
     guard = GuardState()
     mw = HarnessMiddleware()

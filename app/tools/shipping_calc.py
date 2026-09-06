@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 from typing import Annotated
 
-from langchain_core.tools import InjectedToolArg, tool
 from pydantic import BaseModel
 
 from app.api import monitor
@@ -23,6 +22,7 @@ from app.recall.duty import estimate_duty
 from app.recall.shipping import estimate_shipping
 from app.tools._args import StrListArg
 from app.tools._candidates import compact_candidates, hydrate, register_updates
+from app.tools._shell import InjectedToolArg, tool
 from app.tools.schemas import ItemCandidate
 
 

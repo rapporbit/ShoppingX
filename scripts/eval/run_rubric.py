@@ -30,15 +30,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from sqlalchemy import delete  # noqa: E402
 
-from app.agent.runtime import agent_runtime, resolve_run_agent  # noqa: E402
+from app.agent.orchestrator import run_agent  # noqa: E402
 from app.agent.tracing import flush_traces  # noqa: E402
 from app.db.models import Message  # noqa: E402
 from app.db.session import session_factory  # noqa: E402
 from app.eval.rubric import RubricResult, evaluate  # noqa: E402
-
-# 跑哪个运行时由 ``.env`` 的 ``AGENT_RUNTIME`` 定（批 0 迁移期）。**模块级解析一次**：一次评测
-# 跑批里所有 query 必须落在同一个运行时上，否则报告是两条链路的混合、与基线无从对照。
-run_agent = resolve_run_agent()
 
 # 单条 query 的墙钟上限（含所有铺垫轮 + 打分）。取 15 分钟：实测最慢的全链路 case 也在 4 分钟内，
 # 这个值只兜「永远回不来」的死挂，正常慢 case 碰不到。
@@ -188,9 +184,6 @@ async def main(
 ) -> int:
     queries = _load_queries(only, limit)
     cache_note = "复用缓存细则" if use_cache else "刷新细则缓存"
-    # 报告本身不带运行时字段（结构冻结，下游 distill_fewshot 按 list 读），所以在**开跑第一行**
-    # 就把它打出来：批 0 期间同一份报告文件会被两条链路轮流覆盖，事后靠日志才分得清这次是谁跑的。
-    print(f"运行时：{agent_runtime()}（AGENT_RUNTIME）")
     print(f"开跑 Rubric 评测：{len(queries)} 条 query，并发 {concurrency}，{cache_note}\n")
 
     sem = asyncio.Semaphore(concurrency)

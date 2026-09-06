@@ -2,7 +2,7 @@
 
 为什么标记非落在这一层不可：AgentScope 的 content block 是 pydantic 强类型（``TextBlock``
 不收未知字段），``cache_control`` 塞不进 ``Msg``；``Msg.metadata`` 又是**消息级**的，而
-AgentScope 一整轮就是一条 assistant 消息（见 :mod:`app.compress.as_blocks`），标记落在它上面
+AgentScope 一整轮就是一条 assistant 消息（见 :mod:`app.compress.blocks`），标记落在它上面
 等于标了一整轮。formatter 输出的 dict 序列则**就是**线上 payload 本身，标在这里所见即所得。
 
 **别把命中率归到这个标记头上**（L0 的 S1 实测）：本仓网关（DashScope OpenAI 兼容）是**隐式**
@@ -18,8 +18,7 @@ from typing import Any
 from agentscope.formatter import OpenAIChatFormatter
 from agentscope.message import Msg
 
-from app.compress.breakpoint import DEFAULT_KEEP_RECENT
-from app.compress.compressor import MIN_CACHE_PREFIX_TOKENS
+from app.compress.blocks import DEFAULT_KEEP_RECENT, MIN_CACHE_PREFIX_TOKENS
 from app.utils.tokens import count_tokens
 
 _EPHEMERAL: dict[str, str] = {"type": "ephemeral"}

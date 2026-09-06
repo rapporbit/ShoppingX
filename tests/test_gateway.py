@@ -241,8 +241,8 @@ def test_as_factories_build_throttled_models(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("LLM_MAX_CONCURRENCY", "3")
     _clear_factory_caches()
 
-    main = llm.get_as_llm()
-    fast = llm.get_as_fast_llm()
+    main = llm.get_llm()
+    fast = llm.get_fast_llm()
     assert isinstance(main, ThrottledChatModel)
     # 主 / 快档共用同一个闸门实例：网关 RPM 是按 key 算的，分池等于把限流让给运气
     assert main._throttle is fast._throttle is llm.get_gateway_throttle()
@@ -263,16 +263,16 @@ def test_fallback_model_disabled_when_unset_or_same(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.delenv("LLM_FALLBACK_MODEL", raising=False)
     _clear_factory_caches()
-    assert llm.get_as_fallback_llm() is None
+    assert llm.get_fallback_llm() is None
     assert llm.get_model_config().fallback_model is None
 
     monkeypatch.setenv("LLM_FALLBACK_MODEL", "main-model")
     _clear_factory_caches()
-    assert llm.get_as_fallback_llm() is None
+    assert llm.get_fallback_llm() is None
 
     monkeypatch.setenv("LLM_FALLBACK_MODEL", "backup-model")
     _clear_factory_caches()
-    fb = llm.get_as_fallback_llm()
+    fb = llm.get_fallback_llm()
     assert fb is not None and fb.model == "backup-model" and fb._role == "fallback"
     # Agent 层不再叠加重试：模型自己那层已经重试过，两层相乘会把 429 火上浇油
     assert llm.get_model_config().max_retries == 0

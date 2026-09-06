@@ -61,13 +61,13 @@ async def _strong_plan(row: dict) -> dict | None:
     """线上 API 模型的真实产出。只复用 prompt + schema，**不碰工具体**——那里面有
     reset_candidates / P_t 写入 / 计费 / AGUI 上报一堆会话副作用，批量跑会互相污染。"""
     from app.agent.invoke import call_structured
-    from app.agent.llm import get_as_fast_llm
+    from app.agent.llm import get_fast_llm
     from app.tools.planner import PlanOutput, get_planner_prompt
 
     prior = "".join(f"用户上一轮：{t}\n" for t in row.get("prior_turns") or [])
     try:
         out = await call_structured(
-            get_as_fast_llm(),
+            get_fast_llm(),
             [("system", get_planner_prompt()), ("user", prior + row["text"])],
             PlanOutput,
         )

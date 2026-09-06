@@ -14,14 +14,13 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from langchain_core.tools import tool
-
 from app.agent.fork_guard import current_fork_depth
 from app.api import monitor
 from app.api.clarification import create_pending
 from app.api.context import get_thread_id
 from app.tools._args import StrListArg
 from app.tools._bundle import reconcile_slots_from_reply
+from app.tools._shell import tool
 from app.utils.env import env_int
 
 logger = logging.getLogger("shoppingx.tools.ask_user")

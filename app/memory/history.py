@@ -37,8 +37,6 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from langchain_core.messages import AnyMessage, messages_to_dict
-from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -60,10 +58,6 @@ _VALID_ROLES = {"user", "assistant"}
 def _turns_path(session_dir: Path) -> Path:
     """旧会话的正文文件（库上线前的产物）。只读、不再写——见模块 docstring 的惰性迁移。"""
     return session_dir / "turns.json"
-
-
-def _history_path(session_dir: Path) -> Path:
-    return session_dir / "history.json"
 
 
 def _new_id() -> str:
@@ -136,15 +130,6 @@ async def _backfill_legacy(db: AsyncSession, thread_id: str, session_dir: Path |
     await db.commit()
     logger.info("旧会话正文已迁入库（thread=%s，%d 条）", thread_id, len(legacy))
     return len(legacy)
-
-
-def _json_default(obj: object) -> object:
-    """``json.dumps`` 的兜底序列化：完整轨迹里 ToolMessage.artifact 可能挂自定义 Pydantic 对象
-    （如 ``ShoppingSummaryOutput``），标准 JSON 不认。Pydantic 走 ``model_dump``，其余退 ``repr``——
-    审计产物宁可「字段降级成字符串」也别让整次落盘抛异常。"""
-    if isinstance(obj, BaseModel):
-        return obj.model_dump()
-    return repr(obj)
 
 
 def _load_turns_raw(path: Path) -> list[dict[str, Any]]:
@@ -277,17 +262,3 @@ async def append_turn(
         logger.warning("追加对话轮次失败，本轮未落库（thread=%s）：%s", thread_id, exc)
 
 
-def save_full_trace(session_dir: Path, messages: list[AnyMessage]) -> None:
-    """把最近一次 run 的完整 message 轨迹落到 history.json（覆盖式，供深度审计 / 排障）。
-
-    用 LangChain 的 ``messages_to_dict`` 标准序列化（稳，含 tool_calls / tool_call_id），
-    artifact 等非标类型走 ``_json_default`` 兜底。任一环出错只记日志，不反噬主链路。
-    """
-    try:
-        data = messages_to_dict(messages)
-        _history_path(session_dir).write_text(
-            json.dumps(data, ensure_ascii=False, indent=2, default=_json_default),
-            encoding="utf-8",
-        )
-    except Exception:
-        logger.warning("写完整对话轨迹失败（session_dir=%s），降级跳过", session_dir, exc_info=True)

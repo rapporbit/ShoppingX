@@ -13,10 +13,10 @@ from __future__ import annotations
 import os
 
 import httpx
-from langchain_core.tools import tool
 from pydantic import BaseModel
 
 from app.api import monitor
+from app.tools._shell import tool
 from app.utils.circuit_breaker import CircuitBreaker
 from app.utils.env import env_float, env_int
 from app.utils.retry import call_with_retry

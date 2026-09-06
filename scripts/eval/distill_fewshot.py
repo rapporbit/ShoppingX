@@ -99,10 +99,10 @@ def _render_traces(traces: list[dict]) -> str:
 
 async def _distill(traces: list[dict], top_n: int) -> list[FewShotExample]:
     from app.agent.invoke import call_structured
-    from app.agent.llm import get_as_judge_llm
+    from app.agent.llm import get_judge_llm
 
     fs = await call_structured(
-        get_as_judge_llm(),
+        get_judge_llm(),
         _DISTILL_PROMPT.format(n=top_n, traces=_render_traces(traces)),
         _FewShotSet,
     )

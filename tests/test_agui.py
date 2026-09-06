@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from app.agent.dispatch_tool import _run_sub_agent
+from app.agent.dispatch_tool import _run_worker
 from app.api import monitor
 from app.api.connection import ConnectionManager
 from app.utils.thread_ctx import thread_scope
@@ -200,24 +200,28 @@ async def test_fork_event_reported_to_parent_thread() -> None:
     parent_ws = FakeWebSocket()
     await mgr.connect(parent_ws, "parent")
 
-    # provider 返回空工具集会让 create_agent 在子 Agent 里很快失败——无所谓，
-    # 我们只验证「fork 事件在子任务真正跑起来之前已发给父 thread」。
-    def empty_provider() -> list[Any]:
-        return []
+    # 让 worker 一建就失败——无所谓，我们只验证「fork 事件在子任务真正跑起来之前已发给父 thread」。
+    import app.agent.agents as agents_mod
 
+    async def boom(_kind: str) -> Any:
+        raise RuntimeError("不必真的起 worker")
+
+    original = agents_mod.build_worker_agent
+    agents_mod.build_worker_agent = boom
     try:
         with thread_scope("parent", Path("/tmp/parent")):
-            result = await _run_sub_agent("去 amazon 搜帐篷", empty_provider, "you are a test")
+            result = await _run_worker("去 amazon 搜帐篷", "search")
     finally:
+        agents_mod.build_worker_agent = original
         monitor.set_connection_manager(ConnectionManager())
 
-    # 子任务失败与否都该返回字符串（dispatch 容错），不抛。
+    # 子任务失败与否都该返回字符串（派发容错），不抛。
     assert isinstance(result, str)
     fork_events = [m for m in parent_ws.sent if m["event"] == "fork"]
     assert len(fork_events) == 1
     data = fork_events[0]["data"]
     assert data["demands"] == "去 amazon 搜帐篷"
-    assert data["sub_thread_id"].startswith("sub-")
+    assert data["sub_thread_id"].startswith("search-")
     # 事件落在父 thread 的连接上（不是子 thread）。
     assert fork_events[0]["thread_id"] == "parent"
 

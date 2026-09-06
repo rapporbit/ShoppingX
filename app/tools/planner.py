@@ -28,12 +28,11 @@ import os
 import re
 from typing import Literal
 
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field, model_validator
 
 from app.agent.fork_guard import current_fork_depth
 from app.agent.invoke import call_structured
-from app.agent.llm import get_as_fast_llm
+from app.agent.llm import get_fast_llm
 from app.agent.prompts import get_planner_prompt
 from app.api import monitor
 from app.api.context import (
@@ -75,6 +74,7 @@ from app.tools._bundle import (
     set_session_bundle,
 )
 from app.tools._candidates import registry_snapshot, reset_candidates
+from app.tools._shell import tool
 
 logger = logging.getLogger("shoppingx.planner")
 
@@ -673,7 +673,7 @@ async def planner(intent: str) -> PlanOutput:
         # AgentScope 的 generate_structured_output 自带策略梯（forced→auto→no_think→none），
         # 这个坑结构上不存在，也没有 method 可钉（L0/S2 实测）。用量由 call_structured 入账。
         plan = await call_structured(
-            get_as_fast_llm(),
+            get_fast_llm(),
             [("system", get_planner_prompt()), ("user", prior + intent if prior else intent)],
             PlanOutput,
         )

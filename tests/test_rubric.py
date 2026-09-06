@@ -11,8 +11,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-
 from app.eval.rubric import (
     P1_PENALTY,
     CriterionScore,
@@ -84,20 +82,33 @@ def test_no_p2_defaults_to_full_baseline() -> None:
 
 # ---------- 轨迹抽取 ----------
 def test_extract_tool_calls_in_order() -> None:
+    """迁移前落盘的历史（``messages_to_dict`` 形态）照样抽得出工具序列——评测取样会读到它们。"""
     messages = [
-        HumanMessage(content="买个旅行包"),
-        AIMessage(
-            content="",
-            tool_calls=[{"name": "planner", "args": {"intent": "买包"}, "id": "1"}],
-        ),
-        ToolMessage(content="{...}", tool_call_id="1"),
-        AIMessage(
-            content="",
-            tool_calls=[
-                {"name": "item_search", "args": {"query": "旅行包", "platform": "all"}, "id": "2"}
-            ],
-        ),
-        AIMessage(content="给你清单"),  # 终结回复，无 tool_calls
+        {"type": "human", "data": {"content": "买个旅行包", "type": "human"}},
+        {
+            "type": "ai",
+            "data": {
+                "content": "",
+                "type": "ai",
+                "tool_calls": [{"name": "planner", "args": {"intent": "买包"}, "id": "1"}],
+            },
+        },
+        {"type": "tool", "data": {"content": "{...}", "type": "tool", "tool_call_id": "1"}},
+        {
+            "type": "ai",
+            "data": {
+                "content": "",
+                "type": "ai",
+                "tool_calls": [
+                    {
+                        "name": "item_search",
+                        "args": {"query": "旅行包", "platform": "all"},
+                        "id": "2",
+                    }
+                ],
+            },
+        },
+        {"type": "ai", "data": {"content": "给你清单", "type": "ai"}},  # 终结回复，无 tool_calls
     ]
     calls = extract_tool_calls(messages)
     assert [c["name"] for c in calls] == ["planner", "item_search"]

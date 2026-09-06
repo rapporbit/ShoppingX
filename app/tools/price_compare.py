@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 from typing import Annotated
 
-from langchain_core.tools import InjectedToolArg, tool
 from pydantic import BaseModel
 
 from app.api import monitor
@@ -34,6 +33,7 @@ from app.tools._candidates import (
     register_updates,
     registry_snapshot,
 )
+from app.tools._shell import InjectedToolArg, tool
 from app.tools.schemas import ItemCandidate
 
 # 比价后默认只保留前 N 条进入下游（到手价计算），上游剪枝省下游算力。

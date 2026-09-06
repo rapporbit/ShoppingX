@@ -11,12 +11,12 @@
 
 from __future__ import annotations
 
-from langchain_core.tools import tool
 from pydantic import BaseModel
 
 from app.agent.invoke import call_text
-from app.agent.llm import get_as_llm
+from app.agent.llm import get_llm
 from app.api import monitor
+from app.tools._shell import tool
 
 _SYSTEM = (
     "你是 ShoppingX 购物助手。用户这句不是购物检索需求，请用一两句话友好回应，"
@@ -42,7 +42,7 @@ async def chat_fallback(message: str) -> ChatFallbackOutput:
     # 用量由 call_text 入账（与 planner / shopping_summary 同口径：工具内部 LLM 调用不经过
     # agent middleware，不入账就是漏账，见 token_budget.charge_tool_llm_usage）。
     try:
-        reply = await call_text(get_as_llm(), [("system", _SYSTEM), ("user", message)])
+        reply = await call_text(get_llm(), [("system", _SYSTEM), ("user", message)])
     except Exception:
         # 模型调用失败也要补一条 end 事件，否则前端（M8）会看到工具「永远在跑」。
         await monitor.report_tool_end("chat_fallback", error=True)

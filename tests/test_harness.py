@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
 import pytest
 
 from app.harness.hooks.drift_detector import DriftState, _extract_keywords
@@ -494,79 +497,117 @@ class TestPhaseHooks:
 
         assert REUSE_RETRIEVAL_BUDGET >= 1
 
-    def test_middleware_tracks_planner_signal(self) -> None:
-        """HarnessAgentMiddleware 记录 planner 已执行。"""
-        from app.harness.agent_middleware import HarnessAgentMiddleware
-
-        m = HarnessAgentMiddleware(original_query="test")
-        assert not m._planner_done
-        m._called_tools.add("planner")
-        m._planner_done = True  # awrap_tool_call 中 planner 执行后置位
-        assert m._planner_done
+    def test_session_tracks_planner_signal(self) -> None:
+        """控制面状态记录 planner 已执行（post_reflect 据它把 PLANNING 推到 SEARCHING）。"""
+        session = _mw("test")
+        assert not session.planner_done
+        session.called_tools.add("planner")
+        session.planner_done = True  # 工具适配器在 planner 执行成功后置位
+        assert session.planner_done
 
     @pytest.mark.asyncio
-    async def test_prefill_planner_writes_messages_and_phase_signal(
+    async def test_prefill_writes_tool_blocks_and_phase_signal(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """开局预置：planner 在第 1 次模型调用**之前**就跑掉，结果写进 state。
+        """开局预置：planner 在第 1 次模型调用**之前**跑掉，结果落进 ``state.context``。
 
         省掉的是「模型花一整轮只为说出 planner 这个词」那次往返；阶段信号照常置位，
         第 1 轮 post_reflect 因此仍能把 PLANNING 推到 SEARCHING。
         """
-        from types import SimpleNamespace
-
-        from langchain_core.messages import AIMessage, ToolMessage
-
         import app.tools.planner as planner_mod
-        from app.harness.agent_middleware import HarnessAgentMiddleware
+        from app.harness.adapter import HarnessAgentAdapter
+        from app.tools.planner import PlanOutput
 
-        async def fake_planner(call: dict) -> ToolMessage:
-            return ToolMessage(content='{"tasks": ["recommend"]}', tool_call_id=call["id"])
+        async def fake_planner(args):
+            return PlanOutput(tasks=["recommend"])
 
-        # 整体替换模块属性（StructuredTool 是 pydantic 模型，setattr 不进去）——middleware 里是
-        # 函数内懒 import，取的正是这个模块属性。
+        # 整体替换模块属性：适配器里是函数内懒 import，取的正是这个模块属性。
         monkeypatch.setattr(planner_mod, "planner", SimpleNamespace(ainvoke=fake_planner))
 
-        m = HarnessAgentMiddleware(original_query="买个旅行收纳袋")
-        update = await m.abefore_agent(state={}, runtime=None)
+        session = _mw("买个旅行收纳袋")
+        agent = _StubAgent()
+        await HarnessAgentAdapter(session)._prefill(agent)
 
-        assert update is not None
-        ai, tool_msg = update["messages"]
-        assert isinstance(ai, AIMessage) and ai.tool_calls[0]["name"] == "planner"
-        assert isinstance(tool_msg, ToolMessage)
-        assert tool_msg.tool_call_id == ai.tool_calls[0]["id"]  # 两条必须对得上，否则 LC 校验失败
-        assert m._planner_done and "planner" in m._called_tools
+        assert session.planner_done and "planner" in session.called_tools
+        blocks = agent.state.context[-1].content
+        assert [b.type for b in blocks] == ["tool_call", "tool_result"]
+        assert blocks[0].name == "planner"
+        # 入参是 JSON 字符串（框架的形态）——当 dict 用会让轨迹渲染成 planner()、评测看不到入参
+        assert isinstance(blocks[0].input, str) and "旅行收纳袋" in blocks[0].input
+        assert blocks[1].id == blocks[0].id  # 两块必须对得上，否则模型看到无主的结果
 
     @pytest.mark.asyncio
-    async def test_prefill_planner_skipped_in_fork(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """子 Agent 不预置：它的活是按 demands 检索，demands 里已带主流程拆好的字段。"""
+    async def test_prefill_skipped_in_worker(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """worker 不预置：它的活是按 demands 检索，demands 里已带主流程拆好的字段。"""
         from app.agent.fork_guard import _fork_depth
-        from app.harness.agent_middleware import HarnessAgentMiddleware
+        from app.harness.adapter import HarnessAgentAdapter
 
         token = _fork_depth.set(1)
         try:
-            m = HarnessAgentMiddleware(original_query="在 amazon 搜收纳袋")
-            assert await m.abefore_agent(state={}, runtime=None) is None
-            assert not m._planner_done
+            session = _mw("在 amazon 搜收纳袋")
+            agent = _StubAgent()
+            await HarnessAgentAdapter(session)._prefill(agent)
+            assert not session.planner_done
+            assert agent.state.context == []
         finally:
             _fork_depth.reset(token)
 
     @pytest.mark.asyncio
-    async def test_prefill_planner_degrades_on_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_prefill_degrades_on_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """planner 抛错 → 不预置、不炸整轮：回到老路（模型自己决定调 planner）。"""
-        from types import SimpleNamespace
-
         import app.tools.planner as planner_mod
-        from app.harness.agent_middleware import HarnessAgentMiddleware
+        from app.harness.adapter import HarnessAgentAdapter
 
-        async def boom(call: dict) -> None:
+        async def boom(args):
             raise RuntimeError("planner 挂了")
 
         monkeypatch.setattr(planner_mod, "planner", SimpleNamespace(ainvoke=boom))
 
-        m = HarnessAgentMiddleware(original_query="买个旅行收纳袋")
-        assert await m.abefore_agent(state={}, runtime=None) is None
-        assert not m._planner_done  # 没跑成就不能置阶段信号，否则阶段机会凭空推进
+        session = _mw("买个旅行收纳袋")
+        agent = _StubAgent()
+        await HarnessAgentAdapter(session)._prefill(agent)
+        # 没跑成就不能置阶段信号，否则阶段机会凭空推进
+        assert not session.planner_done
+        assert agent.state.context == []
+
+    @pytest.mark.asyncio
+    async def test_prefill_looks_at_images_before_planner(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """有参考图时**先看图**：图的结论要并进 intent 再拆，否则 planner 拆出一片空白。"""
+        import app.tools.image_understand as vision_mod
+        import app.tools.planner as planner_mod
+        from app.harness.adapter import HarnessAgentAdapter
+        from app.tools.image_understand import ImageUnderstanding
+        from app.tools.planner import PlanOutput
+
+        seen: dict = {}
+
+        async def fake_vision(args):
+            return ImageUnderstanding(
+                filename="a.jpg",
+                subject="帆布托特包",
+                category="bag",
+                search_query="canvas tote bag",
+            )
+
+        async def fake_planner(args):
+            seen["intent"] = args["intent"]
+            return PlanOutput(tasks=["recommend"])
+
+        monkeypatch.setattr(vision_mod, "image_understand", SimpleNamespace(ainvoke=fake_vision))
+        monkeypatch.setattr(planner_mod, "planner", SimpleNamespace(ainvoke=fake_planner))
+
+        session = _mw("想买这个")
+        session.image_paths = ("a.jpg",)
+        agent = _StubAgent()
+        await HarnessAgentAdapter(session)._prefill(agent)
+
+        assert "canvas tote bag" in seen["intent"], "图的结论没并进 planner 的 intent"
+        names = [b.name for b in agent.state.context[-1].content]
+        assert names == ["image_understand", "image_understand", "planner", "planner"]
+
+
 
     @pytest.mark.asyncio
     async def test_phase_transition_on_planner(self) -> None:
@@ -660,12 +701,21 @@ class TestGlobalHarnessSetup:
         }
         assert expected.issubset(names), f"Missing hooks: {expected - names}"
 
-    def test_middleware_stack_is_harness_only(self) -> None:
-        """控制面全在 Hook 里 → LangChain 中间件栈只剩唯一的适配器，没有并行的第二套控制逻辑。"""
-        from app.harness.agent_middleware import build_agent_middleware
+    @pytest.mark.asyncio
+    async def test_middleware_stack_is_harness_and_tracing_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """控制面全在 Hook 里 → 框架的中间件栈只剩适配器（+ 可选观测）。
 
-        stack = build_agent_middleware(original_query="test")
-        assert [type(m).__name__ for m in stack] == ["HarnessAgentMiddleware"]
+        并行的第二套控制逻辑是最难查的那类 bug：两处都在改 messages，谁后跑谁说了算。
+        """
+        import app.agent.agents as agents_mod
+
+        monkeypatch.setattr(agents_mod, "tracing_middlewares", list)
+        agent, _ = await agents_mod.build_main_agent(original_query="test")
+        # 框架按实现了哪些钩子把中间件分桶，这里挑模型调用那桶（控制面的主落点）看。
+        names = [type(m).__name__ for m in agent._model_call_middlewares]
+        assert names == ["HarnessAgentAdapter"]
 
     def test_control_plane_lives_entirely_in_hooks(self) -> None:
         """六个 Hook 点全部有主——迁移后不该再有空的生命周期阶段。"""
@@ -681,35 +731,31 @@ class TestInjectMechanism:
     """验证 inject_messages 的端到端回注。"""
 
     def test_pending_inject_consumed(self) -> None:
-        """_pending_inject 存入后被 _consume_pending_inject 正确消费并清空。"""
-        from app.harness.agent_middleware import HarnessAgentMiddleware
-
-        m = HarnessAgentMiddleware(original_query="test")
-        m._pending_inject = [
+        """挂起的注入被消费成消息并清空（消费是一次性的，重复消费拿不到第二份）。"""
+        session = _mw("test")
+        session.pending_inject = [
             {"role": "system", "content": "漂移纠正提示"},
             {"role": "system", "content": "断言纠正提示"},
         ]
-        msgs = m._consume_pending_inject()
+        msgs = session.consume_inject()
         assert len(msgs) == 2
-        assert "漂移纠正" in msgs[0].content
-        assert "断言纠正" in msgs[1].content
-        # 消费后清空
-        assert m._pending_inject == []
-        assert m._consume_pending_inject() == []
+        assert "漂移纠正" in msgs[0].get_text_content()
+        assert "断言纠正" in msgs[1].get_text_content()
+        assert session.pending_inject == []
+        assert session.consume_inject() == []
 
     def test_collect_inject_from_context(self) -> None:
-        """_collect_inject 从 Hook context 收集注入消息到 _pending_inject。"""
-        from app.harness.agent_middleware import HarnessAgentMiddleware
-
-        m = HarnessAgentMiddleware(original_query="test")
-        ctx = {
-            "inject_messages": [
-                {"role": "system", "content": "msg1"},
-                {"role": "system", "content": "msg2"},
-            ]
-        }
-        m._collect_inject(ctx)
-        assert len(m._pending_inject) == 2
+        """Hook context 里的 inject_messages 被收进接力通道。"""
+        session = _mw("test")
+        session.collect(
+            {
+                "inject_messages": [
+                    {"role": "system", "content": "msg1"},
+                    {"role": "system", "content": "msg2"},
+                ]
+            }
+        )
+        assert len(session.pending_inject) == 2
 
     def test_candidate_count_zero_without_session(self) -> None:
         """无 session 作用域时 candidate_count 返回 0（不崩）。"""
@@ -719,26 +765,33 @@ class TestInjectMechanism:
 
 
 class TestInjectPersistence:
-    """注入随 ModelResponse.result 落 state。
+    """注入必须落进 ``state.context``，不能只活在这一次请求里。
 
     曾经注入只进当轮请求视图、下一轮消失 → 第 N+1 轮 prompt 不再是第 N 轮的字节延伸，
-    隐式前缀缓存链每轮被斩断（eval q05/q03/q16 命中率卡死在 system 段）。"""
+    隐式前缀缓存链每轮被斩断（eval q05/q03/q16 命中率卡死在 system 段）。
+    落盘形态与前缀稳定性由 tests/test_harness_adapter.py 两例把关，这里只验「有没有落」。"""
 
     @pytest.mark.asyncio
-    async def test_consumed_inject_rides_response_result(self, clean_phase) -> None:
-        """挂起注入消费后必须出现在 result 里（模型所见顺序：注入在前、AI 回复在后）。"""
+    async def test_consumed_inject_lands_in_state_context(self, clean_phase) -> None:
+        """挂起注入消费后必须写进 state，且这一轮的视图里也看得到。"""
         mw = _mw()
-        mw._pending_inject = [{"role": "system", "content": "[漂移提醒] 保持方向"}]
-        out = await _run_model(mw)
-        assert "[漂移提醒]" in out.result[0].content
-        assert out.result[-1].content == "ok"
+        mw.pending_inject = [{"role": "system", "content": "[漂移提醒] 保持方向"}]
+        _, agent = await _run_model(mw)
+        dumped = json.dumps(
+            [m.model_dump() for m in agent.state.context], default=str, ensure_ascii=False
+        )
+        assert "[漂移提醒]" in dumped
+        assert mw.pending_inject == []  # 消费一次就清空，不会逐轮叠加
 
     @pytest.mark.asyncio
-    async def test_no_inject_keeps_result_untouched(self, clean_phase) -> None:
-        """无注入时不包一层、不添消息。"""
+    async def test_no_inject_keeps_context_untouched(self, clean_phase) -> None:
+        """无注入时不往 state 里添任何东西（只剩模型自己那条回复）。"""
         mw = _mw()
-        out = await _run_model(mw)
-        assert [m.content for m in out.result] == ["ok"]
+        _, agent = await _run_model(mw)
+        dumped = json.dumps(
+            [m.model_dump() for m in agent.state.context], default=str, ensure_ascii=False
+        )
+        assert "harness" not in dumped
 
 
 # ============================================================
@@ -749,26 +802,35 @@ class TestInjectPersistence:
 # ============================================================
 
 
-class _FakeModelRequest:
-    """最小 ModelRequest 替身：messages / system_message / tools + 链式 override。"""
+class _StubAgent:
+    """最小 Agent 替身：适配器只用到 name / state.context / model.model 这三样。
 
-    def __init__(self, messages: list, system_message: object = None) -> None:
-        self.messages = messages
-        self.system_message = system_message
-        self.tools: list = []
+    真 Agent 要模型凭证与 Toolkit（那条路径由 tests/test_harness_adapter.py 用假模型跑真
+    Agent 覆盖）。这里测的是 **hook 的业务行为**，宿主只需把 state 与消息传对。
+    """
 
-    def override(self, **kw: object) -> _FakeModelRequest:
-        out = _FakeModelRequest(
-            kw.get("messages", self.messages),  # type: ignore[arg-type]
-            kw.get("system_message", self.system_message),
+    def __init__(self, messages: list | None = None) -> None:
+        from agentscope.state import AgentState
+
+        self.name = "shoppingx"
+        self.state = AgentState()
+        for m in messages or []:
+            self.state.context.append(m)
+        self.model = SimpleNamespace(model="test-model")
+
+
+def _assistant(text: str = "ok", *, tool_calls: bool = True):
+    """一条 assistant 消息（AgentScope 把整轮的 tool_call/tool_result 都塞进这一条）。"""
+    from agentscope.message import Msg, TextBlock, ToolCallBlock
+
+    content: list = [TextBlock(type="text", text=text)]
+    if tool_calls:
+        # 挂一个假 tool_call：接线测试模拟的是循环中段（模型还在干活），不带 tool_calls
+        # 会触发 terminal_enforce 的催收，平白多一轮。
+        content.append(
+            ToolCallBlock(type="tool_call", id="call_fake", name="item_search", input="{}")
         )
-        out.tools = self.tools
-        return out
-
-
-class _FakeToolRequest:
-    def __init__(self, name: str, args: dict | None = None) -> None:
-        self.tool_call = {"name": name, "args": args or {}, "id": f"call_{name}"}
+    return Msg(name="shoppingx", role="assistant", content=content)
 
 
 @pytest.fixture()
@@ -787,85 +849,144 @@ def clean_phase():
 
 
 def _mw(query: str = "想买便宜又抗造的旅行三件套，预算300"):
-    from app.harness.agent_middleware import HarnessAgentMiddleware
+    """一次 loop 的控制面状态。适配器是无状态的壳，状态全在 session 上（见 adapter.py）。"""
+    from app.harness.adapter import HarnessSession
 
-    return HarnessAgentMiddleware(original_query=query)
+    return HarnessSession(original_query=query)
 
 
 async def _run_tool(
     mw, name: str, args: dict | None = None, result: str = "{}", diag: dict | None = None
 ):
-    """驱动一次 awrap_tool_call。``diag`` 模拟真实工具在返回前往诊断侧信道登记
-    （见 app/tools/_diagnostics.py）——需要测试跑在 thread_scope 里，否则登记静默 no-op。"""
-    from langchain_core.messages import ToolMessage
+    """驱动一次 ``HarnessToolAdapter.on_tool_call``，返回聚合后的结果（``.content`` 是文本）。
 
+    ``diag`` 模拟真实工具在返回前往诊断侧信道登记（见 app/tools/_diagnostics.py）——需要测试
+    跑在 thread_scope 里，否则登记静默 no-op。
+    """
+    from agentscope.message import TextBlock
+    from agentscope.tool._response import ToolChunk, ToolResultState
+
+    from app.harness.adapter import HarnessToolAdapter
     from app.tools._diagnostics import report_diagnostics
 
-    async def handler(req):
+    async def handler(**_kwargs):
         if diag is not None:
             report_diagnostics(name, diag)
-        return ToolMessage(content=result, tool_call_id=req.tool_call["id"], name=name)
+        yield ToolChunk(
+            content=[TextBlock(type="text", text=result)],
+            state=ToolResultState.SUCCESS,
+        )
 
-    return await mw.awrap_tool_call(_FakeToolRequest(name, args), handler)
-
-
-async def _run_model(mw, *, with_tool_results: bool = True):
-    """驱动一次 awrap_model_call；with_tool_results 决定是否触发 post_reflect。
-
-    handler 按生产契约返回 ModelResponse（LangChain 的 _execute_model_async 即如此）——
-    persist_messages 落 state 依赖 response.result 可拼接，替身返回裸 AIMessage 会失真。"""
-    from langchain.agents.middleware import ModelResponse
-    from langchain_core.messages import AIMessage, ToolMessage
-
-    msgs = (
-        [ToolMessage(content="{}", tool_call_id="x", name="item_search")]
-        if with_tool_results
-        else []
+    adapter = HarnessToolAdapter(mw)
+    chunks = []
+    async for chunk in adapter.on_tool_call(SimpleNamespace(name=name), args or {}, handler):
+        chunks.append(chunk)
+    text = "".join(
+        b.text for c in chunks for b in c.content if getattr(b, "type", None) == "text"
+    )
+    last = chunks[-1] if chunks else None
+    return SimpleNamespace(
+        content=text,
+        state=last.state if last is not None else None,
+        chunks=chunks,
     )
 
-    async def handler(req):
-        # 挂一个假 tool_call：这些接线测试模拟的是循环中段（模型还在干活），
-        # 不带 tool_calls 会触发 terminal_enforcer 的催收重发，平白多一次 handler 调用。
-        ai = AIMessage(
-            content="ok",
-            tool_calls=[{"name": "item_search", "args": {}, "id": "call_fake"}],
-        )
-        return ModelResponse(result=[ai])
 
-    return await mw.awrap_model_call(_FakeModelRequest(msgs), handler)
+async def _run_model(mw, *, with_tool_results: bool = True, agent=None):
+    """驱动一次「模型调用 + 推理收尾」：pre_think 在前、post_reflect 在后。
+
+    AgentScope 把这两件事拆在两个钩子上（``on_model_call`` / ``on_reasoning``），
+    LangChain 版则同在一次 ``awrap_model_call`` 里——所以这里连着驱动两个，语义才对得上。
+    返回 ``(响应, agent)``：注入是否落进 ``state.context`` 得看 agent。
+    """
+    from agentscope.message import TextBlock
+    from agentscope.model import ChatResponse
+
+    from app.harness.adapter import HarnessAgentAdapter
+
+    agent = agent if agent is not None else _StubAgent()
+    adapter = HarnessAgentAdapter(mw)
+
+    async def model_handler(**kwargs):
+        return ChatResponse(content=[TextBlock(type="text", text="ok")], is_last=True)
+
+    kwargs = {"messages": list(agent.state.context)}
+    resp = await adapter.on_model_call(agent, kwargs, model_handler)
+    # 模型这一轮的产出进 state（与框架真实行为一致）：post_reflect 要据它判「这轮调没调工具」。
+    agent.state.context.append(_assistant(tool_calls=with_tool_results))
+
+    async def reasoning_handler(**_kwargs):
+        return
+        yield  # pragma: no cover - 空生成器
+
+    async for _ in adapter.on_reasoning(agent, {}, reasoning_handler):
+        pass
+    return resp, agent
+
+
+def _tool_result_blocks(name: str, output: str) -> list:
+    """一条 assistant 消息里的「调用 + 结果」块（AgentScope 把整轮都塞在同一条消息里）。"""
+    from agentscope.message import ToolCallBlock, ToolResultBlock
+
+    return [
+        ToolCallBlock(type="tool_call", id="c-term", name=name, input="{}"),
+        ToolResultBlock(type="tool_result", id="c-term", name=name, output=output),
+    ]
+
+
+async def _drive_tool(mw, name: str, handler, args: dict | None = None):
+    """用调用方给的 handler 驱动一次 ``on_tool_call``（handler 可抛异常 / 吐 ERROR chunk）。"""
+    from app.harness.adapter import HarnessToolAdapter
+
+    chunks = []
+    async for chunk in HarnessToolAdapter(mw).on_tool_call(
+        SimpleNamespace(name=name), args or {}, handler
+    ):
+        chunks.append(chunk)
+    text = "".join(
+        b.text for c in chunks for b in c.content if getattr(b, "type", None) == "text"
+    )
+    last = chunks[-1] if chunks else None
+    return SimpleNamespace(content=text, state=last.state if last is not None else None)
 
 
 class TestTerminalDirectClose:
     """终结直出（延迟归因 round2 刀2）：shopping_summary 执行后不再唤起模型复述清单。"""
 
     @pytest.mark.asyncio
-    async def test_summary_artifact_short_circuits_model(self, clean_phase) -> None:
-        from langchain_core.messages import ToolMessage
+    async def test_summary_result_short_circuits_model(self, clean_phase) -> None:
+        """已产出清单 → 直接把它当模型输出返回，不再花一次往返让模型复述一遍。"""
+        from agentscope.message import Msg
 
+        from app.harness.adapter import HarnessAgentAdapter
         from app.tools.shopping_summary import ShoppingSummaryOutput
 
         mw = _mw()
-        mw._guard.terminal_reached = True
+        mw.guard.terminal_reached = True
         art = ShoppingSummaryOutput(summary="## 清单\n- A 好货")
         msgs = [
-            ToolMessage(
-                content=art.summary, tool_call_id="x", name="shopping_summary", artifact=art
+            Msg(
+                name="shoppingx",
+                role="assistant",
+                content=_tool_result_blocks("shopping_summary", art.model_dump_json()),
             )
         ]
 
-        async def handler(req):  # 模型不该被调
+        async def handler(**_kwargs):  # 模型不该被调
             raise AssertionError("终结直出后不应再唤起模型")
 
-        resp = await mw.awrap_model_call(_FakeModelRequest(msgs), handler)
-        assert resp.result[0].content == art.summary
+        resp = await HarnessAgentAdapter(mw).on_model_call(
+            _StubAgent(), {"messages": msgs}, handler
+        )
+        assert resp.content[0].text == art.summary
 
     @pytest.mark.asyncio
-    async def test_no_artifact_falls_through_to_model(self, clean_phase) -> None:
-        """chat_fallback 等无 summary artifact 的终结 → 照常唤起模型收尾。"""
+    async def test_no_summary_falls_through_to_model(self, clean_phase) -> None:
+        """chat_fallback 等没有清单产物的终结 → 照常唤起模型收尾。"""
         mw = _mw()
-        mw._guard.terminal_reached = True
-        out = await _run_model(mw, with_tool_results=False)
-        assert out.result[-1].content == "ok"
+        mw.guard.terminal_reached = True
+        resp, _ = await _run_model(mw, with_tool_results=False)
+        assert resp.content[0].text == "ok"
 
 
 class TestAssertionWiring:
@@ -878,12 +999,12 @@ class TestAssertionWiring:
         mw = _mw()
         # item_picker 的前置是 item_search，此处未调过 → 触发 sequencing 断言
         await _run_tool(mw, "item_picker", {"query": "旅行三件套"})
-        assert mw._pending_assertions, "sequencing 断言未被中间件接住"
+        assert mw.pending_assertions, "sequencing 断言未被中间件接住"
 
         await _run_model(mw)
-        contents = [m["content"] for m in mw._pending_inject]
+        contents = [m["content"] for m in mw.pending_inject]
         assert any("[顺序问题]" in c for c in contents), f"断言未转成纠正提示: {contents}"
-        assert not mw._pending_assertions, "断言消费后应清空"
+        assert not mw.pending_assertions, "断言消费后应清空"
 
     @pytest.mark.asyncio
     async def test_schema_assertion_reaches_model(self, clean_phase) -> None:
@@ -892,10 +1013,10 @@ class TestAssertionWiring:
         mw = _mw()
         # 合法 JSON 但不符合 ItemSearchOutput → ValidationError
         await _run_tool(mw, "item_search", {"query": "旅行三件套"}, result='{"bogus": 1}')
-        assert mw._pending_assertions, "schema 断言未被中间件接住"
+        assert mw.pending_assertions, "schema 断言未被中间件接住"
 
         await _run_model(mw)
-        assert any("[格式问题]" in m["content"] for m in mw._pending_inject)
+        assert any("[格式问题]" in m["content"] for m in mw.pending_inject)
 
 
 class TestDriftWiring:
@@ -906,15 +1027,13 @@ class TestDriftWiring:
         self, clean_phase, monkeypatch
     ) -> None:
         """行为摘要含 query 关键词时不得误报「目标遗忘」——旧实现只喂工具名，命中恒为 0。"""
-        import app.agent.llm as llm_mod
+        # 漂移的第二关走 app.agent.invoke.call_text（函数内 import，所以 patch 源模块）。
+        import app.agent.invoke as invoke_mod
 
-        class _FakeLLM:
-            async def ainvoke(self, _msgs):
-                from langchain_core.messages import AIMessage
+        async def fake_call_text(_model, _prompt, **_kw):
+            return "正常"
 
-                return AIMessage(content="正常")
-
-        monkeypatch.setattr(llm_mod, "get_judge_llm", lambda: _FakeLLM())
+        monkeypatch.setattr(invoke_mod, "call_text", fake_call_text)
         set_phase_machine(PhaseStateMachine(Phase.SEARCHING))
         mw = _mw("想买便宜又抗造的旅行三件套")
 
@@ -926,7 +1045,7 @@ class TestDriftWiring:
         for _ in range(3):  # drift 每 3 轮检一次
             await _run_model(mw)
 
-        contents = [m["content"] for m in mw._pending_inject]
+        contents = [m["content"] for m in mw.pending_inject]
         assert not any("漂移提醒" in c for c in contents), f"在目标上却误报漂移: {contents}"
 
     @pytest.mark.asyncio
@@ -940,7 +1059,7 @@ class TestDriftWiring:
         for _ in range(3):
             await _run_model(mw)
 
-        assert any("漂移提醒" in m["content"] for m in mw._pending_inject)
+        assert any("漂移提醒" in m["content"] for m in mw.pending_inject)
 
     @pytest.mark.asyncio
     async def test_blacklist_hit_triggers_preference_loss(self, clean_phase, monkeypatch) -> None:
@@ -955,11 +1074,11 @@ class TestDriftWiring:
         await _run_tool(
             mw, "item_picker", {"query": "旅行三件套"}, result='{"picks": ["塑料收纳盒"]}'
         )
-        assert mw._drift_state.blacklist_violations > 0, "黑名单命中未被记录"
+        assert mw.drift_state.blacklist_violations > 0, "黑名单命中未被记录"
 
         for _ in range(3):
             await _run_model(mw)
-        assert any("偏好丢失" in m["content"] for m in mw._pending_inject)
+        assert any("偏好丢失" in m["content"] for m in mw.pending_inject)
 
     @pytest.mark.asyncio
     async def test_severe_signal_not_masked_by_mild_one(self, clean_phase, monkeypatch) -> None:
@@ -980,7 +1099,7 @@ class TestDriftWiring:
         for _ in range(3):
             await _run_model(mw)
 
-        contents = [m["content"] for m in mw._pending_inject]
+        contents = [m["content"] for m in mw.pending_inject]
         assert any("偏好丢失" in c for c in contents), f"严重信号被轻微信号遮蔽: {contents}"
 
     @pytest.mark.asyncio
@@ -992,23 +1111,23 @@ class TestDriftWiring:
         set_phase_machine(PhaseStateMachine(Phase.SEARCHING))
         mw = _mw("旅行三件套")
         await _run_tool(mw, "item_search", {"query": "三件套"}, result='{"candidates": ["塑料盒"]}')
-        assert mw._drift_state.blacklist_violations == 0
+        assert mw.drift_state.blacklist_violations == 0
 
     @pytest.mark.asyncio
     async def test_token_history_is_populated(self, clean_phase, monkeypatch) -> None:
         """信号 4：token_history 必须真的有人写——旧实现从无写入点，成本失控是死代码。"""
-        import app.harness.agent_middleware as am
+        import app.harness.adapter as adapter_mod
 
         totals = iter([100, 250, 500])
         monkeypatch.setattr(
-            am, "tree_snapshot", lambda: {"input_tokens": next(totals), "output_tokens": 0}
+            adapter_mod, "tree_snapshot", lambda: {"input_tokens": next(totals), "output_tokens": 0}
         )
         set_phase_machine(PhaseStateMachine(Phase.SEARCHING))
         mw = _mw()
         for _ in range(3):
             await _run_model(mw, with_tool_results=False)
 
-        assert mw._drift_state.token_history == [100, 150, 250]
+        assert mw.drift_state.token_history == [100, 150, 250]
 
 
 class TestPhaseGateTerminalExemption:
@@ -1083,7 +1202,7 @@ class TestPhaseGateTerminalExemption:
 
 @pytest.mark.asyncio
 class TestToolErrorNotProgress:
-    """status="error" 的 ToolMessage（ToolNode 把参数校验失败转成的）不算执行成功。
+    """``state=ERROR`` 的工具结果（入参校验失败转成的）不算执行成功。
 
     gcjp 会话 d0724e95（2026-07-16）：qwen3.5-flash 把 list 参数吐成 JSON 字符串，
     item_picker 同参连挂 4 次，全被记成「已精挑」——phase_check 底线 3 判据被污染放行
@@ -1092,27 +1211,32 @@ class TestToolErrorNotProgress:
 
     @staticmethod
     async def _run_error_tool(mw, name: str = "item_picker"):
-        from langchain_core.messages import ToolMessage
+        """工具内部报错的形态：``state=ERROR`` 的 chunk（工具不外抛，见 tools/_shell.py）。"""
+        from agentscope.message import TextBlock
+        from agentscope.tool._response import ToolChunk, ToolResultState
 
-        async def handler(req):
-            return ToolMessage(
-                content=f"Error invoking tool '{name}': Input should be a valid list",
-                tool_call_id=req.tool_call["id"],
-                name=name,
-                status="error",
+        async def handler(**_kwargs):
+            yield ToolChunk(
+                content=[
+                    TextBlock(
+                        type="text",
+                        text=f"Error invoking tool '{name}': Input should be a valid list",
+                    )
+                ],
+                state=ToolResultState.ERROR,
             )
 
-        return await mw.awrap_tool_call(_FakeToolRequest(name, {}), handler)
+        return await _drive_tool(mw, name, handler)
 
     async def test_error_result_not_recorded_as_progress(self, clean_phase) -> None:
         """失败调用不进 called_tools / 阶段信号 / 看门狗，错误消息不被收线通告污染。"""
         set_phase_machine(PhaseStateMachine(Phase.COMPARING))
         mw = _mw()
-        watchdog_before = mw._guard.last_progress_at
+        watchdog_before = mw.guard.last_progress_at
         out = await self._run_error_tool(mw)
-        assert "item_picker" not in mw._called_tools
-        assert mw._picker_attempted is False
-        assert mw._guard.last_progress_at == watchdog_before, "失败调用不给看门狗续命"
+        assert "item_picker" not in mw.called_tools
+        assert mw.picker_attempted is False
+        assert mw.guard.last_progress_at == watchdog_before, "失败调用不给看门狗续命"
         # post_tool_call 全程没跑：错误消息原样回模型，不缀收线通告（线上实锤的教唆路径）
         assert out.content == "Error invoking tool 'item_picker': Input should be a valid list"
 
@@ -1120,7 +1244,7 @@ class TestToolErrorNotProgress:
         """同参硬撞同一个校验错误正是打转——攒到阈值要在错误尾部追加升级提示。"""
         mw = _mw()
         contents = []
-        for _ in range(mw._guard.loop_threshold):
+        for _ in range(mw.guard.loop_threshold):
             msg = await self._run_error_tool(mw)
             contents.append(str(msg.content))
         assert "重复调用" not in contents[0]
@@ -1183,14 +1307,14 @@ class TestPicksSignalIsReal:
     """picks_count 必须来自 item_picker 的真实返回，不能是「调过就算数」。"""
 
     def test_count_picks_parses_json(self) -> None:
-        from app.harness.agent_middleware import _count_picks
+        from app.harness._tool_signals import _count_picks
 
         assert _count_picks('{"picks": [{"a": 1}, {"b": 2}], "excluded": []}') == 2
         assert _count_picks('{"picks": [], "excluded": ["x"], "over_budget": ["y"]}') == 0
 
     def test_count_picks_survives_truncation(self) -> None:
-        """TGM 按 token 预算截断长结果 → JSON 解析失败，但长结果必然意味着 picks 非空。"""
-        from app.harness.agent_middleware import _count_picks
+        """按 token 预算截断长结果 → JSON 解析失败，但长结果必然意味着 picks 非空。"""
+        from app.harness._tool_signals import _count_picks
 
         truncated = '{"picks": [{"item_id": "A1", "pick_reason": "耐磨"' + "x" * 50
         assert _count_picks(truncated) >= 1
@@ -1250,9 +1374,9 @@ class TestPicksSignalIsReal:
                 result=mutilated,
                 diag={"picks": 5, "must_have_hits": 2, "oncat_count": 4, "offcat_count": 6},
             )
-            assert mw._last_picks == 5
-            assert mw._last_must_hits == 2
-            assert (mw._last_oncat, mw._last_offcat) == (4, 6)
+            assert mw.last_picks == 5
+            assert mw.last_must_hits == 2
+            assert (mw.last_oncat, mw.last_offcat) == (4, 6)
 
     @pytest.mark.asyncio
     async def test_diagnostics_missing_fails_open(self, clean_phase, tmp_path) -> None:
@@ -1263,9 +1387,9 @@ class TestPicksSignalIsReal:
         with thread_scope("t-diag-missing", tmp_path):
             mw = _mw()
             await _run_tool(mw, "item_picker", {}, result='{"picks": [{"item_id": "A1"}]}')
-            assert mw._last_picks == 1  # 文本兜底仍数得出
-            assert mw._last_must_hits is None
-            assert mw._last_oncat is None and mw._last_offcat is None
+            assert mw.last_picks == 1  # 文本兜底仍数得出
+            assert mw.last_must_hits is None
+            assert mw.last_oncat is None and mw.last_offcat is None
 
     @pytest.mark.asyncio
     async def test_empty_picks_does_not_advance_to_concluding(self, clean_phase) -> None:
@@ -1372,23 +1496,25 @@ class TestToolBreakerHook:
 
         mw = _mw()
 
-        async def boom(_req):
+        async def boom(**_kwargs):
             raise RuntimeError("平台 API 挂了")
+            yield  # pragma: no cover - 让它成为 async generator
 
         for _ in range(_FAILURE_THRESHOLD):
             with pytest.raises(RuntimeError):
-                await mw.awrap_tool_call(_FakeToolRequest("item_search"), boom)
+                await _drive_tool(mw, "item_search", boom)
 
         assert get_tool_breaker("item_search").state == "open"
 
         # 熔断后：工具**不执行**，直接回哨兵（handler 一次都不该被调）
         called = {"n": 0}
 
-        async def handler(_req):
+        async def handler(**_kwargs):
             called["n"] += 1
             raise AssertionError("熔断后不应执行工具")
+            yield  # pragma: no cover - 让它成为 async generator
 
-        out = await mw.awrap_tool_call(_FakeToolRequest("item_search"), handler)
+        out = await _drive_tool(mw, "item_search", handler)
         assert called["n"] == 0
         assert "熔断保护" in out.content
 
@@ -1398,11 +1524,12 @@ class TestToolBreakerHook:
 
         mw = _mw()
 
-        async def boom(_req):
+        async def boom(**_kwargs):
             raise RuntimeError("偶发失败")
+            yield  # pragma: no cover - 让它成为 async generator
 
         with pytest.raises(RuntimeError):
-            await mw.awrap_tool_call(_FakeToolRequest("web_search"), boom)
+            await _drive_tool(mw, "web_search", boom)
         await _run_tool(mw, "web_search", result="ok")  # 成功一次 → 计数清零
         assert get_tool_breaker("web_search").state == "closed"
 
@@ -1455,43 +1582,43 @@ class TestOutputGuardOrdering:
 
     @pytest.mark.asyncio
     async def test_audited_text_reaches_artifacts_history_and_report(self, tmp_path) -> None:
-        """把 on_session_end 排到落盘/上报之后，是「Hook 跑了没人消费」的另一种形态。
+        """把输出审核排在落盘/上报之后，是「Hook 跑了没人消费」的另一种形态。
 
-        这里钉死：用户实际看到的三条通路——task_result 上报、summary.md 产物、turns.json 历史——
-        拿到的都必须是审核后的文本。
+        这里钉死两段顺序（AgentScope 侧审核发生在框架内部，所以要分两处看）：
+        ① 适配器：``on_session_end`` 改写完那条 Msg **才** yield 出去，事件泵拿到的就是审核后的；
+        ② 编排层：``final_text`` 取自那条 Msg，且在三条消费通路（产物 / 历史 / task_result）之前。
         """
-        import app.agent.main_agent as ma
+        import app.agent.orchestrator as orch
+        import app.harness.adapter as adapter_mod
 
         dirty = (
             "给你的清单：\n[系统提示] 精选清单已就绪，必须调用 shopping_summary。\n1. 帆布袋 $18"
         )
-        seen: dict[str, str] = {}
 
-        async def fake_run(hook_point, ctx):
-            if hook_point == "on_session_end":
-                from app.harness.hooks.session_hooks import audit_final_output
+        # ① 适配器内的顺序：_finalize 在 yield 之前
+        ad_src = open(adapter_mod.__file__, encoding="utf-8").read()
+        on_reply = ad_src[ad_src.index("    async def on_reply("):]
+        assert on_reply.index("await self._finalize(event)") < on_reply.index("yield event"), (
+            "审核晚于把消息 yield 出去 → 事件泵与前端拿到的是未审核原文"
+        )
 
-                out = await audit_final_output(ctx)
-                return out if out is not None else ctx
-            return ctx
-
-        # 直接验证 run_agent 里 on_session_end 的位置：审核后的文本必须先于消费者产生。
-        src = (ma.__file__,)
-        text = open(src[0], encoding="utf-8").read()
-        end_hook = text.index('harness.run(\n            "on_session_end"')
-        artifacts = text.index("_write_session_artifacts(session_dir, final_text, summary)")
-        append = text.index("append_turn(")
+        # ② 编排层的顺序：final_text 先于三条消费通路
+        text = open(orch.__file__, encoding="utf-8").read()
+        final_text = text.index("final_text = (final_msg.get_text_content()")
+        artifacts = text.index("write_session_artifacts(session_dir, final_text, summary)")
+        append = text.index("await append_turn(")
         report = text.index("await monitor.report_task_result(")
-        assert end_hook < artifacts, "输出审核晚于落产物 → 下载到的 md 是未审核原文"
-        assert end_hook < append, "输出审核晚于写历史 → 回看到的是未审核原文"
-        assert end_hook < report, "输出审核晚于 task_result → 用户前端看到的是未审核原文"
+        assert final_text < artifacts, "落产物用的不是审核后的文本 → 下载到的 md 是原文"
+        assert final_text < append, "写历史用的不是审核后的文本 → 回看到的是原文"
+        assert final_text < report, "task_result 用的不是审核后的文本 → 用户前端看到的是原文"
 
         # 顺带确认审核本身有效
-        ctx = await fake_run("on_session_end", {"final_answer": dirty})
+        from app.harness.hooks.session_hooks import audit_final_output
+
+        ctx = await audit_final_output({"final_answer": dirty})
+        assert ctx is not None
         assert "[系统提示]" not in ctx["final_answer"]
         assert "帆布袋" in ctx["final_answer"]
-        seen["ok"] = ctx["final_answer"]
-        assert seen["ok"]
 
 
 class TestGateOrderingContracts:
@@ -1635,7 +1762,7 @@ class TestPostforkGateRelease:
         from app.harness.hooks.tool_gates import check_search_authority
 
         with fork_budget_scope() as budget:
-            budget.charge("parallel_dispatch_tool")
+            budget.charge("task_dispatch")
             assert await check_search_authority(self._ctx()) is None
 
     async def test_nonempty_pool_still_denied(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1645,7 +1772,7 @@ class TestPostforkGateRelease:
 
         monkeypatch.setattr(tool_gates, "candidate_count", lambda: 5)
         with fork_budget_scope() as budget:
-            budget.charge("parallel_dispatch_tool")
+            budget.charge("task_dispatch")
             with pytest.raises(HookRejectSignal):
                 await tool_gates.check_search_authority(self._ctx())
 
@@ -1660,7 +1787,7 @@ class TestPostforkGateRelease:
         guard = GuardState()
         guard.postfork_search_grants = 1
         with fork_budget_scope() as budget:
-            budget.charge("parallel_dispatch_tool")
+            budget.charge("task_dispatch")
             assert await tool_gates.check_search_authority(self._ctx(guard)) is None
             with pytest.raises(HookRejectSignal):
                 await tool_gates.check_search_authority(self._ctx(guard))
@@ -1695,9 +1822,9 @@ class TestRejectedCallsFeedLoopDetector:
         """模型换着参数硬撞同一道闸时（哨兵文案每次相同、无升级），拒绝路径攒到阈值要在
         哨兵尾部追加打转升级提示——否则闸拒绝是循环检测的盲区，只剩 recursion_limit 硬兜底。"""
         mw = _mw()
-        mw._guard.terminal_reached = True  # 让 terminal_reached_gate 拦下一切工具
+        mw.guard.terminal_reached = True  # 让 terminal_reached_gate 拦下一切工具
         contents: list[str] = []
-        for i in range(mw._guard.loop_threshold):
+        for i in range(mw.guard.loop_threshold):
             msg = await _run_tool(mw, "item_search", {"query": f"q{i}"})
             contents.append(str(msg.content))
         assert "重复调用" not in contents[0]
@@ -1716,24 +1843,22 @@ class TestBreakerParamErrorExemption:
         class _Args(BaseModel):
             x: int
 
-        async def bad_args_handler(req):
+        async def bad_args_handler(**_kwargs):
             _Args.model_validate({"x": "oops"})
+            yield  # pragma: no cover - 让它成为 async generator
 
-        async def broken_infra_handler(req):
+        async def broken_infra_handler(**_kwargs):
             raise RuntimeError("infra down")
+            yield  # pragma: no cover - 让它成为 async generator
 
         reset_tool_breakers()
         try:
             mw = _mw()
             with pytest.raises(ValidationError):
-                await mw.awrap_tool_call(
-                    _FakeToolRequest("web_search", {"query": "q"}), bad_args_handler
-                )
+                await _drive_tool(mw, "web_search", bad_args_handler, {"query": "q"})
             assert get_tool_breaker("web_search")._fail_count == 0
             with pytest.raises(RuntimeError):
-                await mw.awrap_tool_call(
-                    _FakeToolRequest("web_search", {"query": "q2"}), broken_infra_handler
-                )
+                await _drive_tool(mw, "web_search", broken_infra_handler, {"query": "q2"})
             assert get_tool_breaker("web_search")._fail_count == 1
         finally:
             reset_tool_breakers()
@@ -1818,7 +1943,7 @@ class TestWatchdog:
             result = await check_liveness(ctx)
             assert result is not None
             assert len(ctx["messages"]) == 1
-            assert "看门狗" in ctx["messages"][0].content
+            assert "看门狗" in ctx["messages"][0].get_text_content()
             assert guard.watchdog_nudged_at > 0
             assert "fallback_answer" not in ctx  # 第一级只提醒，不硬停
         finally:
@@ -1920,7 +2045,7 @@ class TestUnifiedGateEscape:
         import app.harness.hooks.tool_gates as tg
         from app.harness.state import GuardState
 
-        monkeypatch.setattr(tg, "get_fork_budget", lambda: SimpleNamespace(parallel_calls=1))
+        monkeypatch.setattr(tg, "get_fork_budget", lambda: SimpleNamespace(dispatched=True))
         monkeypatch.setattr(tg, "candidate_count", lambda: 5)
         guard = GuardState()
         guard.notified_transitions.add("search_close")

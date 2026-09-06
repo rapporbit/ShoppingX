@@ -55,7 +55,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from app.agent.runtime import agent_runtime, resolve_run_agent
+from app.agent.orchestrator import run_agent
 from app.api import accounts, admin, dedup, event_log, monitor
 from app.api.auth import (
     auth_enabled,
@@ -100,14 +100,8 @@ from app.utils.tokens import warm_tokenizer
 
 logger = logging.getLogger("shoppingx.server")
 
-# 主链路跑在哪个运行时（批 0 迁移期）：``agentscope`` = 新的 orchestrator，其余（默认）=
-# 原 LangChain 版 main_agent。两个实现签名逐字相同，API 层除了这一行之外一处不用改。
-#
-# 选择逻辑住在 :mod:`app.agent.runtime`（L6 起离线评测脚本也共用它）；这里在**模块级**解析一次，
-# 于是 ``run_agent`` 仍是本模块的一个名字——测试大量 ``monkeypatch.setattr(server, "run_agent", …)``
-# 靠的就是这点，改成每次调用现取会让那些桩全部失效。
-AGENT_RUNTIME = agent_runtime()
-run_agent = resolve_run_agent()
+# ``run_agent`` 在模块级 import 进来（而不是每次调用现取）：测试大量
+# ``monkeypatch.setattr(server, "run_agent", …)`` 靠的就是「它是本模块的一个名字」这点。
 
 # 上传文件大小上限（参考图通常是截图；防一把超大文件打爆磁盘/内存）。
 # **与 image_understand 读同一个 env**：两处各写一个数字的话，中间地带的图会「传得上去却看不了」——

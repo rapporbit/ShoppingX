@@ -12,21 +12,22 @@
 """
 
 import os
+from collections.abc import Sequence
 
 from agentscope.agent import Agent, ContextConfig, ReActConfig
 from agentscope.middleware import MiddlewareBase
 from agentscope.state import AgentState
 
-from app.agent.llm import get_as_fast_llm, get_as_llm, get_model_config
+from app.agent.llm import get_fast_llm, get_llm, get_model_config
 from app.agent.permissions import allow_tools
 from app.agent.prompts import get_system_prompt
 from app.agent.tool_registry import build_toolkit
-from app.agent.tracing import as_tracing_middlewares
+from app.agent.tracing import tracing_middlewares
 from app.harness.adapter import HarnessAgentAdapter, HarnessSession, HarnessToolAdapter
 from app.utils.env import env_int
 
-# 主 loop 的迭代上限（防失控之②）。与 LangChain 版的 MAIN_AGENT_MAX_ITERATIONS 同口径，
-# 但这里是**真·迭代数**，不必再换算 langgraph 的「超步」。
+# 主 loop 的迭代上限（防失控之②）。这是**真·迭代数**（一轮 Think→Act 算一次），
+# 不是某些框架里按「超步」计数的那种口径。
 MAIN_MAX_ITERS = env_int("MAIN_AGENT_MAX_ITERATIONS", 30)
 # worker 的迭代上限：单平台检索子任务 category_insight 校准 + 几次自我纠偏 item_search 就够收敛。
 WORKER_MAX_ITERS = env_int("SUB_AGENT_MAX_ITERATIONS", 6)
@@ -43,6 +44,7 @@ async def _assemble(
     role: str,
     max_iters: int,
     original_query: str = "",
+    image_paths: Sequence[str] = (),
     state: AgentState | None = None,
     fast_model: bool = False,
 ) -> tuple[Agent, HarnessSession]:
@@ -51,7 +53,7 @@ async def _assemble(
     ``state`` 非空即**会话恢复**：把落盘读回来的那份 ``AgentState`` 原样交给 Agent，它的
     context / permission / tool 上下文一并接上（见 orchestrator 的 agent_state.json）。
     """
-    session = HarnessSession(original_query=original_query)
+    session = HarnessSession(original_query=original_query, image_paths=image_paths)
     # 工具适配器挂在**工具实例**上，所以工具实例不能跨 loop 复用 —— build_toolkit 每次按需
     # 重建一批壳（壳很薄，底下的实现函数与 schema 仍是同一份，见 tool_registry）。
     toolkit = await build_toolkit(role, tool_middlewares=[HarnessToolAdapter(session)])
@@ -62,7 +64,7 @@ async def _assemble(
     # 包装）的 span 过滤器按 ``gen_ai.*`` 放行 —— 两头自动对上，不需要胶水（见 tracing.py 尾部）。
     # 未启用观测时返回空表，主 + worker 一视同仁：trace 里不会出现「有的轮有、有的轮没有」的空洞。
     # 顺序上放在控制面**后面**：适配器改写 messages / 换档发生在前，trace 记的是真正发出去的那份。
-    middlewares: list[MiddlewareBase] = [HarnessAgentAdapter(session), *as_tracing_middlewares()]
+    middlewares: list[MiddlewareBase] = [HarnessAgentAdapter(session), *tracing_middlewares()]
     agent = Agent(
         name=name,
         # system prompt 纯静态（无运行时注入）→ 跨轮 / 跨会话字节稳定、可命中 prompt cache；
@@ -70,7 +72,7 @@ async def _assemble(
         system_prompt=get_system_prompt(),
         # 模型分层：worker 用快档（关思考）砍解码延迟——它在收窄后的子任务里只做 1~2 跳检索，
         # 不需要深推理。换的只是「档位」，工具集与 prompt 仍与主 Agent 一致。
-        model=get_as_fast_llm() if fast_model else get_as_llm(),
+        model=get_fast_llm() if fast_model else get_llm(),
         toolkit=toolkit,
         middlewares=middlewares,
         state=agent_state,
@@ -87,13 +89,15 @@ async def _assemble(
 async def build_main_agent(
     *,
     original_query: str = "",
+    image_paths: Sequence[str] = (),
     state: AgentState | None = None,
 ) -> tuple[Agent, HarnessSession]:
     """装配主 Agent（Supervisor）。
 
     ``original_query`` 是**未经 LLM 转述**的本轮用户原文，交给控制面当漂移检测与语义断言的
     对齐基准（见 harness 的 drift_detector）——不是给模型看的，模型看的是 orchestrator 拼的
-    那条 human message。
+    那条用户消息。``image_paths`` 同理交给控制面：开局预置要先把图看掉再拆意图
+    （见 ``HarnessAgentAdapter._prefill``）。
 
     基座模型是主档（开思考）：主 loop 第 1 轮是全链路唯一没被机制锁死的决策（购物还是闲聊、
     先拆解还是先查品类、自己干还是派 worker），值得让它想清楚；第 2 轮起决策空间已被阶段机
@@ -104,6 +108,7 @@ async def build_main_agent(
         role="main",
         max_iters=MAIN_MAX_ITERS,
         original_query=original_query,
+        image_paths=image_paths,
         state=state,
     )
 

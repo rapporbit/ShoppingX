@@ -1,17 +1,17 @@
-"""``app/eval/trace.py``：评测侧轨迹解析的**双运行时**契约（批 0 / L6）。
+"""``app/eval/trace.py``：评测侧的轨迹解析契约。
 
 钉三件事：
-1. 两套运行时的**内存对象**都能抽出同一串工具序列——AgentScope 是「一轮一条 assistant Msg、
-   所有 tool_use block 塞在它的 content 里」，LangChain 是「一条 AIMessage 一组 tool_calls」。
-   写反了症状不是报错而是**轨迹恒为空**，judge 会把每条 query 都判成「一个工具没调」。
-2. 两套**落盘格式**都能读回（``Msg.model_dump()`` vs ``messages_to_dict``）。
+1. 当前形态（AgentScope）的内存对象能抽出工具序列——「一轮一条 assistant Msg、所有
+   tool_call block 塞在它的 content 里」。写反了症状不是报错而是**轨迹恒为空**，judge 会把
+   每条 query 都判成「一个工具没调」。
+2. **历史落盘格式也要能读回**：线上还躺着迁移前用 ``messages_to_dict`` 落的 history.json，
+   评测取样与 few-shot 蒸馏都会去读它们。这里用固化的 dump 字面量来验，不依赖旧框架包。
 3. 「最终回复」取的是 assistant 的正文，不能把 tool_result 的 JSON 或注入的 HintBlock 当成回复。
 """
 
 import json
 
 from agentscope.message import Msg, TextBlock, ToolCallBlock, ToolResultBlock
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.eval.trace import (
     extract_tool_calls,
@@ -48,19 +48,38 @@ def _as_turn() -> list[Msg]:
     ]
 
 
-def _lc_turn() -> list:
-    return [
-        HumanMessage(content="买个旅行包"),
-        AIMessage(
-            content="", tool_calls=[{"name": "planner", "args": {"intent": "买包"}, "id": "1"}]
-        ),
-        ToolMessage(content="{...}", tool_call_id="1"),
-        AIMessage(
-            content="",
-            tool_calls=[{"name": "item_search", "args": {"query": "旅行包"}, "id": "2"}],
-        ),
-        AIMessage(content="给你清单"),
-    ]
+# 迁移前落盘的 history.json 长这样（``messages_to_dict`` 的产物，此处已固化为字面量：
+# 旧格式是既成事实、不会再变，为它保留一个框架依赖不值得）。
+_LEGACY_DUMP: list[dict] = [
+    {"type": "human", "data": {"content": "买个旅行包", "type": "human"}},
+    {
+        "type": "ai",
+        "data": {
+            "content": "",
+            "type": "ai",
+            "tool_calls": [
+                {"name": "planner", "args": {"intent": "买包"}, "id": "1", "type": "tool_call"}
+            ],
+        },
+    },
+    {"type": "tool", "data": {"content": "{...}", "type": "tool", "tool_call_id": "1"}},
+    {
+        "type": "ai",
+        "data": {
+            "content": "",
+            "type": "ai",
+            "tool_calls": [
+                {
+                    "name": "item_search",
+                    "args": {"query": "旅行包"},
+                    "id": "2",
+                    "type": "tool_call",
+                }
+            ],
+        },
+    },
+    {"type": "ai", "data": {"content": "给你清单", "type": "ai"}},
+]
 
 
 def test_agentscope_blocks_yield_ordered_calls() -> None:
@@ -70,16 +89,20 @@ def test_agentscope_blocks_yield_ordered_calls() -> None:
     assert calls[1]["args"]["query"] == "旅行包"
 
 
-def test_both_runtimes_agree_on_tool_sequence() -> None:
-    """同一段业务过程，两套运行时抽出的工具序列必须一致——这是 L8 拿新旧链路对照的前提。"""
+def test_current_and_legacy_formats_agree_on_tool_sequence() -> None:
+    """同一段业务过程，新形态与历史落盘格式抽出的工具序列必须一致。
+
+    这是拿迁移前后的评测报告做对照的前提：序列对不上，「迁移后少调了一个工具」这种结论就
+    分不清是真退化还是解析口径变了。
+    """
     assert [c["name"] for c in extract_tool_calls(_as_turn())] == [
-        c["name"] for c in extract_tool_calls(_lc_turn())
+        c["name"] for c in extract_tool_calls(normalize_messages(_LEGACY_DUMP))
     ]
 
 
 def test_last_assistant_text_skips_tool_output() -> None:
     assert last_assistant_text(_as_turn()) == "先拆一下需求\n给你清单"
-    assert last_assistant_text(_lc_turn()) == "给你清单"
+    assert last_assistant_text(normalize_messages(_LEGACY_DUMP)) == "给你清单"
     assert last_assistant_text([]) == ""
 
 
@@ -95,13 +118,10 @@ def test_load_history_agentscope_dump(tmp_path) -> None:
     assert "给你清单" in last_assistant_text(msgs)
 
 
-def test_load_history_langchain_dump(tmp_path) -> None:
-    from langchain_core.messages import messages_to_dict
-
+def test_load_history_legacy_dump(tmp_path) -> None:
+    """迁移前落的 history.json 照样读得回——旧会话的评测取样不能因为换运行时就全废。"""
     path = tmp_path / "history.json"
-    path.write_text(
-        json.dumps(messages_to_dict(_lc_turn()), ensure_ascii=False), encoding="utf-8"
-    )
+    path.write_text(json.dumps(_LEGACY_DUMP, ensure_ascii=False), encoding="utf-8")
     msgs = load_history(path)
     assert [c["name"] for c in extract_tool_calls(msgs)] == ["planner", "item_search"]
     assert last_assistant_text(msgs) == "给你清单"

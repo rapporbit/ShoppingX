@@ -21,7 +21,7 @@ from typing import Any, Literal, TypeVar
 from agentscope.message import Msg, TextBlock
 from pydantic import BaseModel
 
-from app.agent.token_budget import charge_as_usage
+from app.agent.token_budget import charge_usage
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -75,14 +75,14 @@ async def call_text(model: Any, prompt: Prompt) -> str:
     """
     result = await model(to_msgs(prompt))
     if not hasattr(result, "__aiter__"):
-        charge_as_usage(getattr(model, "model", ""), getattr(result, "usage", None))
+        charge_usage(getattr(model, "model", ""), getattr(result, "usage", None))
         return _text_of(result)
     last: Any = None
     async for chunk in result:
         last = chunk
     if last is None:
         return ""
-    charge_as_usage(getattr(model, "model", ""), getattr(last, "usage", None))
+    charge_usage(getattr(model, "model", ""), getattr(last, "usage", None))
     return _text_of(last)
 
 
@@ -130,5 +130,5 @@ async def call_structured(model: Any, prompt: Prompt, schema: type[T]) -> T:
     （planner 回退规则解析、curator 整轮跳过），收在这里只会把它们抹平。
     """
     response = await model.generate_structured_output(to_msgs(prompt), schema)
-    charge_as_usage(getattr(model, "model", ""), getattr(response, "usage", None))
+    charge_usage(getattr(model, "model", ""), getattr(response, "usage", None))
     return schema.model_validate(_unwrap_structured(response.content or {}, schema))

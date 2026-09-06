@@ -27,7 +27,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.agent.invoke import call_text  # noqa: E402
-from app.agent.llm import get_as_llm  # noqa: E402
+from app.agent.llm import get_llm  # noqa: E402
 
 DATA_DIR = PROJECT_ROOT / "data" / "train"
 BATCH = 20
@@ -58,7 +58,7 @@ def _parse_array(text: str, expect: int) -> list[str] | None:
 
 
 async def translate(rows: list[dict]) -> list[dict]:
-    llm, sem = get_as_llm(), asyncio.Semaphore(CONCURRENCY)
+    llm, sem = get_llm(), asyncio.Semaphore(CONCURRENCY)
     batches = [rows[i : i + BATCH] for i in range(0, len(rows), BATCH)]
 
     async def one(batch: list[dict]) -> list[dict]:

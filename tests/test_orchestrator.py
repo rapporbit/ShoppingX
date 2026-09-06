@@ -327,7 +327,7 @@ async def test_allow_tools_is_precise_and_idempotent() -> None:
     from agentscope.permission import PermissionBehavior, PermissionEngine
 
     from app.agent.permissions import allow_tools
-    from app.agent.tool_registry import AS_TOOLS_BY_NAME
+    from app.agent.tool_registry import TOOLS_BY_NAME
 
     state = AgentState()
     allow_tools(state)
@@ -335,12 +335,12 @@ async def test_allow_tools_is_precise_and_idempotent() -> None:
     assert len(state.permission_context.allow_rules["ask_user"]) == 1
 
     engine = PermissionEngine(state.permission_context)
-    granted = await engine.check_permission(AS_TOOLS_BY_NAME["ask_user"], {})
+    granted = await engine.check_permission(TOOLS_BY_NAME["ask_user"], {})
     assert granted.behavior == PermissionBehavior.ALLOW
 
     # 没进放行表的写工具照样要问——这正是「不用 BYPASS」买到的东西：批 1 的 create_order
     # 默认是被拦的，作者必须显式决定放不放。
-    outsider = AS_TOOLS_BY_NAME["shopping_summary"]
+    outsider = TOOLS_BY_NAME["shopping_summary"]
     state2 = AgentState()
     allow_tools(state2, {"ask_user"})
     decision = await PermissionEngine(state2.permission_context).check_permission(outsider, {})
@@ -449,8 +449,8 @@ async def test_assembly_binds_one_session_per_loop(monkeypatch: pytest.MonkeyPat
     from app.agent import agents as ag
     from app.harness.adapter import HarnessToolAdapter
 
-    monkeypatch.setattr(ag, "get_as_llm", _fake_model)
-    monkeypatch.setattr(ag, "get_as_fast_llm", _fake_model)
+    monkeypatch.setattr(ag, "get_llm", _fake_model)
+    monkeypatch.setattr(ag, "get_fast_llm", _fake_model)
 
     agent, session = await ag.build_main_agent(original_query="买个包")
     names = ["planner", "item_search", "task_dispatch", "shopping_summary"]
@@ -485,10 +485,10 @@ async def test_assembled_agent_runs_with_terminal_discipline(
 
     setup_harness()
     monkeypatch.setattr(ag, "MAIN_MAX_ITERS", 2)
-    monkeypatch.setattr(ag, "get_as_llm", _fake_model)
+    monkeypatch.setattr(ag, "get_llm", _fake_model)
     # 第一轮 reasoning_boost 会换档：适配器按**档位名**去 app.agent.llm 现取模型（见
     # adapter._resolve_model_tier），所以这里也得把那一处顶掉，否则冒烟测试会真打网络。
-    monkeypatch.setattr("app.agent.llm.get_as_llm", _fake_model)
+    monkeypatch.setattr("app.agent.llm.get_llm", _fake_model)
     agent, session = await ag.build_main_agent(original_query="你好")
     msg = Msg(name="user", role="user", content=[TextBlock(type="text", text="你好")])
     out = await agent.reply(msg)

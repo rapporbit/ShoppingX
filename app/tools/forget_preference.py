@@ -13,12 +13,12 @@ from __future__ import annotations
 
 from typing import Literal
 
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from app.api import monitor
 from app.api.context import get_user_id
 from app.memory.injector import forget_preferences
+from app.tools._shell import tool
 
 
 class ForgetPreferenceOutput(BaseModel):

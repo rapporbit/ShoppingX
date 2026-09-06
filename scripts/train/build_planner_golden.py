@@ -290,11 +290,11 @@ def _parse(text: str, n: int) -> list[dict] | None:
 
 
 def _llm(temperature: float):
-    """judge 模型 + 指定温度。不复用 ``get_as_judge_llm()``：它的温度钉在 env 上（0.0），
+    """judge 模型 + 指定温度。不复用 ``get_judge_llm()``：它的温度钉在 env 上（0.0），
     而这里要的恰恰是**三档不同温度**——投票的扰动源之一。其余参数与线上判官一致。"""
-    from app.agent.llm import build_as_judge_llm
+    from app.agent.llm import build_judge_llm
 
-    return build_as_judge_llm(temperature)
+    return build_judge_llm(temperature)
 
 
 async def _one_vote(llm, session: dict, cfg: dict) -> list[dict] | None:
