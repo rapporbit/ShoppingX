@@ -72,15 +72,28 @@ _COUNTRY_NAME_PATTERNS: list[tuple[str, str]] = [
     ("TH", r"泰国|泰國|Thailand"),
     ("VN", r"越南|Vietnam"),
     ("PH", r"菲律宾|菲律賓|Philippines"),
-    ("US", r"美国|美國|United\s?States|America"),
+    ("US", r"美国|美國|United\s?States|America|USA|U\.S\.A?\.?"),
     ("CA", r"加拿大|Canada"),
     ("MX", r"墨西哥|Mexico"),
     ("BR", r"巴西|Brazil"),
-    ("GB", r"英国|英國|United\s?Kingdom|Britain|England"),
+    ("GB", r"英国|英國|United\s?Kingdom|Britain|England|UK"),
     ("DE", r"德国|德國|Germany"),
     ("FR", r"法国|法國|France"),
     ("AU", r"澳大利亚|澳洲|Australia"),
 ]
+
+
+def _bounded(pattern: str) -> str:
+    """给国名 pattern 套上**只对 ASCII 字母生效**的词边界。
+
+    不能直接用 ``\\b``：Python 的 ``\\w`` 含中文，「寄到日本」里「日」前面是「到」，``\\b``
+    不成立，整张中文表会全部失配。而不加边界的裸 ``re.search`` 会吃子串——真实误判：
+    ``Indianapolis`` 含 ``India`` → 印第安纳波利斯判成寄往印度，关税整条算废（US $800
+    vs IN 的免征额差着数量级）；``Ukraine`` 含 ``UK``、``Indonesia`` 含 ``India`` 同理。
+    前后各加一条 ASCII 字母的否定断言：对英文等价于词边界，对中文两条断言恒真、行为不变。
+    """
+    return rf"(?<![A-Za-z])(?:{pattern})(?![A-Za-z])"
+
 
 # 二、裸 ISO 码（**大小写敏感，只认大写**，理由见模块 docstring）。
 _ISO_CODE_RE = re.compile(r"\b(" + "|".join(SUPPORTED_COUNTRIES) + r")\b")
@@ -101,16 +114,25 @@ _CTX_BEFORE = (
 _CTX_AFTER = r"收货|直邮|清关|入关"
 
 
-def match_country_name(text: str) -> str:
+def match_country_name(text: str, *, allow_iso_code: bool = True) -> str:
     """无门控的裸国名 / ISO 码匹配，命中返回 ISO 码、否则空串。
 
     **只给语义已确定是收货地的文本用**（如长期记忆里 ``category="location"`` 的条目
-    「常用收货地：中国」）——条目类目本身就是门控，再要求语境词反而会把它漏掉。
+    「常用收货地：中国」、订单的收货地址行）——文本本身的语义就是门控，再要求语境词反而会把它
+    漏掉：地址行写的是「Tokyo, Japan」，永远凑不出「寄到」这种动词。
     用户自由发言一律走门控版 :func:`resolve_dest_country`。
+
+    ``allow_iso_code=False`` 关掉裸 ISO 码那一路，**专给整段自由地址文本用**：美国地址的州缩写
+    与国家码大面积撞车（``CA`` 加州/加拿大、``IN`` 印第安纳/印度、``DE`` 特拉华/德国、``ID``
+    爱达荷/印尼、``MO`` 密苏里/澳门），「Mountain View, CA 94043」会被判成寄往加拿大。地址行
+    里的国家几乎总是写全名（Japan / 日本 / United States），漏掉裸码这一路的代价远小于误判。
+    反之 ``country_hint`` 那种**专门的国家字段**该保持默认 ``True``——模型传「JP」是常态。
     """
     for code, pattern in _COUNTRY_NAME_PATTERNS:
-        if re.search(pattern, text, re.IGNORECASE):
+        if re.search(_bounded(pattern), text, re.IGNORECASE):
             return code
+    if not allow_iso_code:
+        return ""
     m = _ISO_CODE_RE.search(text)
     return m.group(1) if m else ""
 
@@ -126,8 +148,9 @@ def resolve_dest_country(text: str) -> tuple[str, bool]:
     仍按 :data:`_COUNTRY_NAME_PATTERNS` 的特异性顺序，第一个命中即返回（印尼先于印度）。
     """
     for code, pattern in _COUNTRY_NAME_PATTERNS:
-        if re.search(rf"(?:{_CTX_BEFORE})[的\s]*(?:{pattern})", text, re.IGNORECASE) or re.search(
-            rf"(?:{pattern})\s*(?:{_CTX_AFTER})", text, re.IGNORECASE
+        bounded = _bounded(pattern)  # 见 :func:`_bounded`：ship to Indianapolis ≠ 寄往印度
+        if re.search(rf"(?:{_CTX_BEFORE})[的\s]*{bounded}", text, re.IGNORECASE) or re.search(
+            rf"{bounded}\s*(?:{_CTX_AFTER})", text, re.IGNORECASE
         ):
             return code, True
     m = _ISO_CODE_RE.search(text)  # 大小写敏感：只认 "JP" 不认 "jp"/"in"/"id"

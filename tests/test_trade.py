@@ -6,6 +6,7 @@
 
 import pytest
 
+from app.recall.geo import DEFAULT_DEST_COUNTRY, resolve_dest_country
 from app.trade.address import Address
 from app.trade.money import CurrencyMismatchError, Money, minor_factor
 from app.trade.order import Order, OrderLine, OrderStateError, OrderStatus
@@ -86,6 +87,54 @@ def test_zero_decimal_currency_factor() -> None:
 def test_money_rejects_cross_currency_add() -> None:
     with pytest.raises(CurrencyMismatchError):
         Money.from_major(1, "USD").add(Money.from_major(1, "EUR"))
+
+
+# ---------- 地址：收货国解析 ----------
+# 这一组是补的回归：`parse` 原先走**门控版** resolve_dest_country，它要求国名紧邻「寄到 /
+# ship to」才算数，而地址行天生是纯地名 —— 于是「Tokyo, Japan」静默落默认 CN，订单存错收货国
+# 且不报错。测试此前只直接构造 Address(country="CN")，把整条解析路径漏在覆盖之外。
+
+
+@pytest.mark.parametrize(
+    "line,expected",
+    [
+        ("Tokyo, Japan", "JP"),  # 纯地名：门控版在这里全军覆没
+        ("日本东京都涩谷区 1-2-3", "JP"),
+        ("Japan", "JP"),
+        ("1600 Amphitheatre Pkwy, Mountain View, United States", "US"),
+        ("New York, USA", "US"),  # 与 America 同表
+        ("上海市某路 1 号，中国", "CN"),
+        ("Jl. Sudirman, Jakarta, Indonesia", "ID"),  # 印尼先于印度，别判成 IN
+    ],
+)
+def test_parse_reads_country_from_plain_address_line(line: str, expected: str) -> None:
+    assert Address.parse("张三", line).country == expected
+
+
+@pytest.mark.parametrize("line", ["Mountain View, CA 94043", "Indianapolis, IN 46204"])
+def test_parse_ignores_us_state_codes(line: str) -> None:
+    """州缩写与国家码撞车（CA 加州/加拿大、IN 印第安纳/印度）：宁可落默认，不可判成外国。"""
+    assert Address.parse("张三", line).country == DEFAULT_DEST_COUNTRY
+
+
+def test_parse_country_hint_takes_precedence_and_accepts_bare_iso() -> None:
+    """hint 是专门的国家字段，裸码要认，且压过地址行。"""
+    assert Address.parse("张三", "Tokyo, Japan", country_hint="JP").country == "JP"
+    assert Address.parse("张三", "Tokyo, Japan", country_hint="美国").country == "US"
+
+
+def test_parse_falls_back_to_line_when_hint_unrecognizable() -> None:
+    """hint 认不出就回落地址行，而不是直接吃默认国。"""
+    assert Address.parse("张三", "Tokyo, Japan", country_hint="???").country == "JP"
+
+
+def test_parse_falls_back_to_default_when_nothing_matches() -> None:
+    assert Address.parse("张三", "某路 1 号 2 单元").country == DEFAULT_DEST_COUNTRY
+
+
+def test_parse_agrees_with_shipping_path_on_same_country() -> None:
+    """与到手价那条通路同表：用户说「寄到日本」、地址行写「Tokyo, Japan」，两边都得是 JP。"""
+    assert resolve_dest_country("寄到日本")[0] == Address.parse("张三", "Tokyo, Japan").country
 
 
 # ---------- 状态机 ----------
