@@ -4,16 +4,19 @@
   1. **上下文越长模型越笨**（注意力稀释 / lost-in-the-middle），即便不溢出也会掉召回质量；
   2. **成本**：每轮都重发压缩后的历史，input 计费随轮数累积。
 
-本模块从「一轮跑完的 messages」里把每次模型调用的 ``usage_metadata`` 聚合出来：
-  - ``carried_input_tokens``：本轮各次模型调用发出的 input token 之和（= 压缩后真实携带量）。
+四个指标：
+  - ``model_calls``：本轮真实的模型调用次数。
+  - ``carried_input_tokens``：各次调用发出的 input token 之和（= 压缩后真实携带量）。
   - ``peak_input_tokens``：单次调用的最大 input（≈ 本轮上下文峰值，最贴近「会不会变笨」）。
-  - ``cache_read_tokens`` / ``cache_hit_rate``：验证 M6 的 cache-breakpoint 是否真命中（应偏高）。
+  - ``cache_read_tokens`` / ``cache_hit_rate``：验证 cache-breakpoint 是否真命中（应偏高）。
 
-这些数发给 Langfuse（score）+ 日志，作为「是否 / 何时上 L3 摘要」的**判据闸门**，而不是预先建 L3。
+这些数发给 Langfuse（score）+ 日志，作为「是否 / 何时上摘要压缩」的**判据闸门**。
 
-用量来自 ``Msg.usage``：AgentScope 在 ``OpenAIChatModel`` 里已把响应的
-``prompt_tokens_details.cached_tokens`` 映射进 ``cache_input_tokens``，不用自己解析。供应商不报
-缓存时该项为 0——命中率如实反映「网关到底报没报缓存」，不夸大。
+**数据源要看清楚**：``Msg.usage`` 是**每条消息**一份，而一次 reply（一整轮，含十几次模型调用）
+在这里只落成**一条** assistant 消息——直接数消息就会得到「model_calls 恒为 1」这种废指标，
+而且 carried / cache_read 只反映最后一次调用。所以真实口径要从**记账树**取
+（:func:`app.agent.token_budget.tree_snapshot`，那里每次调用都入过一次账），消息侧只用来补
+``peak``（树只累加、不留单次极值）。传 ``tree`` 就走这条真实口径。
 """
 
 from __future__ import annotations
@@ -37,14 +40,20 @@ class UsageSummary:
         return asdict(self)
 
 
-def summarize_usage(messages: Sequence[object]) -> UsageSummary:
-    """从一轮 ``list[Msg]`` 聚合 token 用量。
+def summarize_usage(
+    messages: Sequence[object],
+    tree: dict[str, float | int] | None = None,
+) -> UsageSummary:
+    """聚合一轮的 token 用量。
 
-    字段口径与迁移前（LangChain 版读 ``usage_metadata``）**逐字一致**，这样两条链路的用量表
-    能直接对照——否则「迁移后 token 涨了」这种结论根本没法判是真涨了还是换了口径。
+    Args:
+        messages: 本轮的 ``list[Msg]``，用来取 ``peak``（单次最大 input）。
+        tree: 记账树快照（``tree_snapshot()``）。**给了就以它为准**——每次模型调用都在那里入过
+            账，才是真实的次数与总量；不给则退回只数消息（次数会偏小，见模块 docstring）。
 
-    只认带 ``usage`` 的 assistant 消息（一次模型调用一条）。任一字段缺失按 0，绝不抛——
-    观测是附属品，不能反噬主链路。
+    字段口径与迁移前**逐字一致**，这样两条链路的用量表能直接对照——否则「迁移后 token 涨了」
+    这种结论根本没法判是真涨了还是换了口径。任一字段缺失按 0，绝不抛：观测是附属品，
+    不能反噬主链路。
     """
     calls = 0
     carried = 0
@@ -63,6 +72,12 @@ def summarize_usage(messages: Sequence[object]) -> UsageSummary:
         peak = max(peak, inp)
         output += int(getattr(usage, "output_tokens", 0) or 0)
         cache_read += int(getattr(usage, "cache_input_tokens", 0) or 0)
+    if tree:
+        # 树是权威：次数与总量都以它为准，消息侧只留 peak（树只累加，不记单次极值）。
+        calls = int(tree.get("model_calls", 0) or 0)
+        carried = int(tree.get("input_tokens", 0) or 0)
+        output = int(tree.get("output_tokens", 0) or 0)
+        cache_read = int(tree.get("cache_read_tokens", 0) or 0)
     rate = round(cache_read / carried, 4) if carried else 0.0
     return UsageSummary(
         model_calls=calls,

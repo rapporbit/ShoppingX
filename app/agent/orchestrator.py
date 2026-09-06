@@ -319,7 +319,9 @@ async def run_agent(
         # 本轮结束态落盘，供下一轮 / 换进程恢复（与 append_turn 双做，见 _save_state）。
         _save_state(session_dir, agent.state)
 
-        usage = summarize_usage(messages)
+        # 用量以**记账树**为准（snap 在 finally 里取，那时树还没 reset）：一次 reply 只落一条
+        # assistant 消息，光数消息会得到 model_calls 恒为 1 的废指标。
+        usage = summarize_usage(messages, tree=snap)
         logger.info(
             "usage thread=%s calls=%d carried=%d peak=%d out=%d cache_read=%d hit=%.1f%%",
             thread_id,
