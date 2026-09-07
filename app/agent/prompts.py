@@ -14,16 +14,83 @@ from typing import Any
 import yaml
 
 # prompts.yml 在仓库根的 prompt/ 下；本文件位于 app/agent/，向上两级到根。
-# 全仓只此一份提示词文件（旧的 full / slim 变体与 PROMPT_VARIANT 开关已删，历史版本见
-# prompt/archive/，仅供翻阅、不参与运行）。system_prompt 即原「冲 2k」版：<2000 tok、无 few-shot。
+# **提示词正文全仓只此一份**，system_prompt 即原「冲 2k」版：<2000 tok、无 few-shot。
+#
+# 与已删的 PROMPT_VARIANT 机制的区别（别把旧机制原样复活）：旧机制是「几份互相独立的完整
+# prompts_*.yml，按 env 整份切换」——改一处要同步 N 份，且切换是全局的、没有分桶也没有对照。
+# 现在是「一份正文 + prompt/versions/<semver>.yml 叠加层 + 按 user_id 分桶」（批 4 / 18-3）：
+# 版本文件只存差异，A/B 按人分流，桶号与版本进 trace 与配额账本，用 Rubric 分桶对照来判优劣。
+# 更早的 full / slim 全量副本仍在 prompt/archive/，仅供翻阅、不参与运行。
 _PROMPT_DIR = Path(__file__).resolve().parents[2] / "prompt"
 _PROMPTS_PATH = _PROMPT_DIR / "prompts.yml"
+_VERSIONS_DIR = _PROMPT_DIR / "versions"
+
+#: 基线版本号：``prompt/versions/1.0.0.yml`` 是零覆盖的 ``prompts.yml`` 本身。
+BASE_VERSION = "1.0.0"
+#: ``base: prompts.yml`` 的字面量——版本链的终点。
+_BASE_DOC = "prompts.yml"
+_MAX_CHAIN = 16  # 版本链深度上限，兜住 A→B→A 这类环
 
 
 @lru_cache(maxsize=1)
-def _load_prompts() -> dict[str, Any]:
+def _load_base_prompts() -> dict[str, Any]:
     with _PROMPTS_PATH.open("r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        return dict(yaml.safe_load(f))
+
+
+def available_versions() -> list[str]:
+    """``prompt/versions/`` 下已声明的版本号（字典序；目录不存在时只有基线版）。"""
+    if not _VERSIONS_DIR.is_dir():
+        return [BASE_VERSION]
+    return sorted(p.stem for p in _VERSIONS_DIR.glob("*.yml"))
+
+
+def _merge(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    """把叠加层合进基线：顶层键替换，值为 dict 的键（如 ``sub_agents``）做一层递归合并。
+
+    **覆盖的键必须在 base 里已存在**——拼错一个键名（``sytem_prompt``）若被静默接受，那个桶的
+    用户就会一直跑在未改动的提示词上，而 A/B 报告照样出数、看起来一切正常。宁可开机就炸。
+    """
+    merged = dict(base)
+    for key, value in overrides.items():
+        if key not in base:
+            raise KeyError(f"prompt 版本覆盖了不存在的键 {key!r}（基线里没有它，八成是拼错了）")
+        if isinstance(value, dict) and isinstance(base[key], dict):
+            merged[key] = _merge(base[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+@lru_cache(maxsize=8)
+def _load_prompts(version: str | None = None) -> dict[str, Any]:
+    """解析某个版本的完整提示词表（``None`` / 基线版 → 主文件原样）。
+
+    版本文件只存差异，正文永远来自 ``prompts.yml``：**主文件改一个字，所有版本同时跟着变**，
+    没有「手工同步 N 份副本」这道会漂的工序（见 ``prompt/versions/1.0.0.yml`` 头部）。
+    """
+    if version is None:
+        return _load_base_prompts()
+    chain: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    cur = version
+    while cur != _BASE_DOC:
+        if cur in seen:
+            raise ValueError(f"prompt 版本链成环：{cur} 已在链上 {sorted(seen)}")
+        if len(chain) >= _MAX_CHAIN:
+            raise ValueError(f"prompt 版本链过深（>{_MAX_CHAIN}），八成是配错了 base")
+        seen.add(cur)
+        path = _VERSIONS_DIR / f"{cur}.yml"
+        if not path.exists():
+            raise KeyError(f"找不到 prompt 版本 {cur}（期望 {path}）")
+        with path.open("r", encoding="utf-8") as f:
+            doc = dict(yaml.safe_load(f) or {})
+        chain.append(doc)
+        cur = str(doc.get("base") or _BASE_DOC)
+    resolved = _load_base_prompts()
+    for doc in reversed(chain):  # 从最靠近基线的那层往外叠
+        resolved = _merge(resolved, dict(doc.get("overrides") or {}))
+    return resolved
 
 
 # curator 与 preference_parse 共用的「长期偏好字段规则」占位符——两者落同一张表，规则必须逐字
@@ -32,12 +99,27 @@ def _load_prompts() -> dict[str, Any]:
 _PREF_RULES_PLACEHOLDER = "<<PREF_FIELD_RULES>>"
 
 
-def _inject_pref_rules(text: str) -> str:
-    rules = str(_load_prompts().get("pref_field_rules", "")).rstrip()
+def _inject_pref_rules(text: str, version: str | None) -> str:
+    rules = str(_resolved(version).get("pref_field_rules", "")).rstrip()
     return text.replace(_PREF_RULES_PLACEHOLDER, rules)
 
 
-def get_worker_system_prompt(kind: str) -> str:
+def _resolved(version: str | None) -> dict[str, Any]:
+    """``version=None`` → 取**当前分桶**的版本（A/B）。
+
+    默认不是「基线版」而是「分桶版」，为的是让 A/B 覆盖到任意一个键：若这里退回基线，某个变体
+    改了 ``planner_prompt`` 却因为 planner 工具没显式传版本而**静默不生效**——报告照样出数，
+    实验却什么也没测。函数内延迟 import：``ab`` 要用本模块的 :func:`available_versions` 校验，
+    模块级 import 会成环。
+    """
+    if version is not None:
+        return _load_prompts(version)
+    from app.agent.ab import active_version
+
+    return _load_prompts(active_version())
+
+
+def get_worker_system_prompt(kind: str, version: str | None = None) -> str:
     """worker 的**专职** system prompt（``sub_agents.search`` / ``sub_agents.trade``）。
 
     批 1 起 worker 不再复用主 prompt：读写切分之后，主 prompt 里的收尾判据、bundle 槽位流程、
@@ -50,13 +132,13 @@ def get_worker_system_prompt(kind: str) -> str:
     批 0 的 ``clone`` 模式不走这里——它的定义就是「与主 Agent 同工具集、同 system prompt」，
     换 prompt 就不是对照组了（见 :func:`app.agent.agents.build_worker_agent`）。
     """
-    sub_agents = _load_prompts().get("sub_agents", {})
+    sub_agents = _resolved(version).get("sub_agents", {})
     if kind not in sub_agents:
         raise KeyError(f"prompts.yml 缺少 sub_agents.{kind} 段")
     return str(sub_agents[kind])
 
 
-def get_system_prompt() -> str:
+def get_system_prompt(version: str | None = None) -> str:
     """主 / 子 AgentLoop 共用的**纯静态** system prompt（无任何运行时变量，逐字稳定）。
 
     **不注入 few-shot**：当前 system prompt 是 2k 版，为压 token 整段删掉了 ``<examples>``。
@@ -68,25 +150,29 @@ def get_system_prompt() -> str:
     prompt cache 前缀。它们改由 ``main_agent._inject_runtime_context`` 拼进当轮 human message——
     那是缓存断点之后、永不缓存的部分，把「每轮必变」彻底隔离在缓存区外（对齐 refdocs/05 §4.4
     「按易变性分层，越易变越靠后」）。
+
+    ``version`` 缺省 = 当前用户所在 A/B 桶的版本（见 :mod:`app.agent.ab`）。**版本按 user_id
+    稳定**，所以同一个人跨轮拿到的 system prompt 逐字不变，prompt cache 前缀照旧命中；变的只是
+    「不同人前缀不同」，那本来就是多用户的常态。
     """
-    return str(_load_prompts()["system_prompt"])
+    return str(_resolved(version)["system_prompt"])
 
 
-def get_planner_prompt() -> str:
+def get_planner_prompt(version: str | None = None) -> str:
     """planner 工具的提示词。"""
-    return _load_prompts()["planner_prompt"]
+    return _resolved(version)["planner_prompt"]
 
 
-def get_shopping_summary_prompt() -> str:
+def get_shopping_summary_prompt(version: str | None = None) -> str:
     """shopping_summary 工具的提示词。"""
-    return _load_prompts()["shopping_summary_prompt"]
+    return _resolved(version)["shopping_summary_prompt"]
 
 
-def get_memory_curator_prompt() -> str:
+def get_memory_curator_prompt(version: str | None = None) -> str:
     """记忆管家（curator）的提示词——独立于购物工作流的偏好判定器。"""
-    return _inject_pref_rules(_load_prompts()["memory_curator_prompt"])
+    return _inject_pref_rules(_resolved(version)["memory_curator_prompt"], version)
 
 
-def get_preference_parse_prompt() -> str:
+def get_preference_parse_prompt(version: str | None = None) -> str:
     """把用户手填的一句话拆成结构化偏好条目（偏好页面的「添加」入口用）。"""
-    return _inject_pref_rules(_load_prompts()["preference_parse_prompt"])
+    return _inject_pref_rules(_resolved(version)["preference_parse_prompt"], version)

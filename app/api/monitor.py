@@ -30,7 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from app.api import event_log
+from app.api import backplane, event_log
 from app.api.connection import ConnectionManager
 from app.api.context import get_session_dir, get_thread_id
 from app.observability import metrics
@@ -196,10 +196,18 @@ async def _emit(
 
     if thread_id is None:
         return
+    delivered = False
     try:
-        await _manager.send_to_thread(thread_id, payload)
+        delivered = await _manager.send_to_thread(thread_id, payload)
     except Exception:  # 兜底：上报链路任何异常都不许冒泡进 AgentLoop
         logger.exception("monitor emit failed: event=%s thread_id=%s", event, thread_id)
+
+    # 本进程投不出去时才上事件背板广播（跨进程转发，见 app/api/backplane.py）。
+    # **只在投不到时发**：worker 进程一条 WS 都没有，所以它的每条事件都会广播出去；而 API 进程
+    # 自己那条 WS 就在手边，直投成功了再广播一遍纯属白烧 Redis 带宽——接收端也只会发现「这个
+    # thread 我没有连接」然后丢掉。背板没开（单进程部署，默认）时这里是空操作。
+    if not delivered:
+        backplane.publish_event(payload)
 
 
 # --- 七类标准事件 + fork 的上报入口 -------------------------------------------
@@ -431,14 +439,28 @@ async def report_task_result(
     await _emit(EVENT_TASK_RESULT, "任务完成", data)
 
 
-async def report_task_cancelled() -> None:
-    """任务被用户取消时上报（AgentLoop 捕获 CancelledError 后发）。"""
-    await _emit(EVENT_TASK_CANCELLED, "任务已取消", {})
+async def report_task_cancelled(thread_id: str | None = None) -> None:
+    """任务被用户取消时上报（AgentLoop 捕获 CancelledError 后发）。
+
+    ``thread_id`` 显式传入的场景同 :func:`report_error`：队列模式下用户可能在任务**还没被 worker
+    领走**时就取消，那一刻它连 ``thread_scope`` 都没进过，ContextVar 是空的——不递进来这条事件就
+    发不出去，前端永远停在转圈。
+    """
+    await _emit(EVENT_TASK_CANCELLED, "任务已取消", {}, thread_id=thread_id)
 
 
-async def report_error(error_type: str, message: str) -> None:
-    """执行异常时上报（前端显示错误，便于定位卡在哪一步）。"""
-    await _emit(EVENT_ERROR, "执行出错", {"error_type": error_type, "message": _clip(message)})
+async def report_error(error_type: str, message: str, thread_id: str | None = None) -> None:
+    """执行异常时上报（前端显示错误，便于定位卡在哪一步）。
+
+    ``thread_id`` 显式传入的场景同 :func:`report_queue_status`：入队失败发生在任务进
+    ``thread_scope`` **之前**，ContextVar 还是空的，不递进来这条错误就只剩日志、前端永远转圈。
+    """
+    await _emit(
+        EVENT_ERROR,
+        "执行出错",
+        {"error_type": error_type, "message": _clip(message)},
+        thread_id=thread_id,
+    )
 
 
 async def report_model_fallback(model: str) -> None:

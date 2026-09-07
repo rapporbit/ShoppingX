@@ -60,6 +60,67 @@ def test_turn_span_swallows_span_failure(monkeypatch: pytest.MonkeyPatch) -> Non
         pass  # 不抛即通过
 
 
+class _FakeSpanClient:
+    """能正常起 span 的假 client（span 收尾不吞异常，跟 Langfuse 真实行为一致）。"""
+
+    def start_as_current_observation(self, **_kw: Any) -> Any:
+        import contextlib
+
+        @contextlib.contextmanager
+        def _span() -> Any:
+            yield "span"
+
+        return _span()
+
+    def get_current_trace_id(self) -> str:
+        return "trace-1"
+
+
+def test_turn_span_lets_body_errors_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    """with 体里的业务异常必须原样穿透，不能被 "generator didn't stop after throw()" 盖掉。
+
+    真实事故：q03 撞上游内容审核，``openai.APIError`` 被这里吞掉后生成器又 yield 了一次，
+    终端只剩 ``RuntimeError``，归因要往上翻 50 行栈。
+    """
+    monkeypatch.setattr(T, "_get_client", lambda: _FakeSpanClient())
+
+    class _Boom(Exception):
+        pass
+
+    with pytest.raises(_Boom):
+        with T.turn_span(session_id="t1"):
+            raise _Boom("上游内容审核拦截")
+
+
+def test_turn_span_lets_cancellation_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    """取消（``BaseException`` 一族）同样得穿透——否则前端点「取消」会变成一条假 RuntimeError。"""
+    import asyncio
+
+    monkeypatch.setattr(T, "_get_client", lambda: _FakeSpanClient())
+    with pytest.raises(asyncio.CancelledError):
+        with T.turn_span(session_id="t1"):
+            raise asyncio.CancelledError()
+
+
+def test_turn_span_swallows_span_teardown_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """span **收尾**失败仍是观测自身的毛病：吞掉记日志，主链路当没事发生。"""
+
+    class _TeardownBoom(_FakeSpanClient):
+        def start_as_current_observation(self, **_kw: Any) -> Any:
+            import contextlib
+
+            @contextlib.contextmanager
+            def _span() -> Any:
+                yield "span"
+                raise RuntimeError("上报失败")
+
+            return _span()
+
+    monkeypatch.setattr(T, "_get_client", lambda: _TeardownBoom())
+    with T.turn_span(session_id="t1") as span:
+        assert span == "span"  # 不抛即通过
+
+
 def test_scores_skipped_without_trace(monkeypatch: pytest.MonkeyPatch) -> None:
     """本轮没有 trace（未启用观测）时，回注分数直接跳过——不该凭空造一条 trace 出来。"""
     calls: list[Any] = []
@@ -83,3 +144,51 @@ def test_flush_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(T, "_get_client", lambda: _Client())
     T.flush_traces()  # 不抛即通过
+
+
+def test_turn_span_propagates_prompt_version_and_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A/B 归属要**顺着 propagate 通道抹到本轮所有子 span**，不能只设在根上（批 4 / 18-3）。
+
+    只设在根 span 上时，Langfuse 里按 version 聚合会漏掉所有模型 / 工具 span——版本对比表
+    看起来「有数据」，但成本与延迟那两列是空的。
+    """
+    import contextlib
+
+    import langfuse
+
+    captured: dict[str, Any] = {}
+
+    @contextlib.contextmanager
+    def _fake_propagate(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        yield None
+
+    monkeypatch.setattr(langfuse, "propagate_attributes", _fake_propagate, raising=False)
+    monkeypatch.setattr(T, "_get_client", lambda: _FakeSpanClient())
+    with T.turn_span(session_id="t1", user_id="u1", prompt_version="1.1.0", ab_bucket=7):
+        pass
+
+    assert captured["version"] == "1.1.0"  # Langfuse 原生维度，UI 里可直接切分
+    assert captured["metadata"] == {"ab_bucket": 7}
+    assert captured["session_id"] == "t1" and captured["user_id"] == "u1"
+
+
+def test_turn_span_without_ab_info_sends_no_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    """没有 A/B 信息时不塞空 metadata：trace 上多一个恒为 None 的维度只会污染聚合。"""
+    import contextlib
+
+    import langfuse
+
+    captured: dict[str, Any] = {}
+
+    @contextlib.contextmanager
+    def _fake_propagate(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        yield None
+
+    monkeypatch.setattr(langfuse, "propagate_attributes", _fake_propagate, raising=False)
+    monkeypatch.setattr(T, "_get_client", lambda: _FakeSpanClient())
+    with T.turn_span(session_id="t1"):
+        pass
+
+    assert captured["metadata"] is None and captured["version"] is None

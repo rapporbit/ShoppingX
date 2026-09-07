@@ -11,12 +11,10 @@
 与基线迁移等价，于是只 ``stamp`` 贴上版本号（不执行任何 DDL），再继续 upgrade 后续迁移。空库则直接
 从头跑全部迁移。两条路都幂等，重启多少次都一样。
 
-**SQLite 的两处必要调教**（不做的话单机也会出问题）：
-
-- ``check_same_thread=False``：SQLite 默认禁止跨线程复用连接，而 async 引擎本就会在不同线程间调度，
-  不关掉这条会随机报 "SQLite objects created in a thread can only be used in that same thread"。
-- ``PRAGMA foreign_keys=ON``：**SQLite 默认不执行外键约束**（为兼容老库），不显式打开的话，
-  ``threads.user_id`` 指向一个不存在的用户也能插进去，外键形同虚设。
+**驱动相关的调教全在 :func:`_engine_kwargs` 与 :func:`_tune_sqlite_connection` 两处**（逐条理由见
+它们的 docstring）：SQLite 走「连接级 PRAGMA」（外键 / WAL / busy_timeout），MySQL / PostgreSQL 走
+「连接池参数」（限池 / 预检 / 回收）。**WAL 是批 2 多进程的前提**——API 与 worker 拆成两个进程后，
+默认的 rollback journal 会让它们的读写互相把对方挡在 "database is locked" 上。
 """
 
 from __future__ import annotations
@@ -38,6 +36,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from app.utils.env import env_int
 from app.utils.path_utils import PROJECT_ROOT
 
 logger = logging.getLogger("shoppingx.db")
@@ -60,29 +59,82 @@ def database_url() -> str:
     return f"sqlite+aiosqlite:///{_DEFAULT_DB}"
 
 
+def _engine_kwargs(dsn: str) -> dict[str, Any]:
+    """按驱动分支引擎参数——**池参数对 SQLite 与对网络库根本不是一回事**。
+
+    - **SQLite**：库就是本地一个文件，"连接" 只是打开文件，没有握手 / 认证 / 空闲被服务端掐断
+      这些问题，所以 ``pool_size`` / ``pool_recycle`` 之类**一个都不设**（设了也只是让 SQLAlchemy
+      多绕一层）。它真正需要的是连接级 PRAGMA，见 :func:`_tune_sqlite_connection`。
+    - **MySQL / PostgreSQL**：连接是网络资源，要限池、要预检、要定期回收。``pool_pre_ping`` 是
+      这里最值钱的一条：连接在池里躺着时被服务端/中间件单方面关掉，是**取出来用的那一刻**才发现
+      的——表现为随机一次请求 500，重试就好，最难查的一类。
+    - ``pool_recycle`` 在 **MySQL 上必须给**：服务端 ``wait_timeout``（云厂商常调到几分钟）到点
+      就掐空闲连接，池自己不知道。PostgreSQL 默认不掐空闲连接，给一个更宽松的值即可。
+    """
+    if dsn.startswith("sqlite"):
+        # SQLite 默认禁止跨线程复用连接，而 async 引擎本就会在不同线程间调度，不关掉这条会随机
+        # 报 "SQLite objects created in a thread can only be used in that same thread"。
+        return {"connect_args": {"check_same_thread": False}}
+
+    kwargs: dict[str, Any] = {
+        "pool_size": env_int("DB_POOL_SIZE", 5),
+        "max_overflow": env_int("DB_MAX_OVERFLOW", 10),
+        "pool_timeout": env_int("DB_POOL_TIMEOUT", 30),
+        "pool_pre_ping": True,
+    }
+    if "mysql" in dsn:
+        kwargs["pool_recycle"] = env_int("DB_POOL_RECYCLE", 1800)
+        # utf8mb4 而不是 MySQL 那个名不副实的 "utf8"（只有 3 字节，装不下 emoji 与部分生僻字）。
+        # 商品标题里 emoji 遍地，编码不对不是乱码而是**插入直接报错**。
+        kwargs["connect_args"] = {"charset": "utf8mb4"}
+    else:
+        kwargs["pool_recycle"] = env_int("DB_POOL_RECYCLE", 3600)
+    return kwargs
+
+
 def make_engine(url: str | None = None) -> AsyncEngine:
-    """按 DSN 造一个 async 引擎，并挂上 SQLite 的必要调教。
+    """按 DSN 造一个 async 引擎，并挂上该驱动需要的调教。
 
     独立成函数是为了让**迁移能用自己的临时引擎**：Alembic 的入口是同步 API，应用启动时得在
     ``asyncio.to_thread`` 里调它，线程里会开一个**新的事件循环**——而 async 引擎的连接池绑定创建它的
     循环，把应用那个共享引擎拿去跨循环用是自找偶发故障。故迁移一律现造现弃（用完 ``dispose``）。
     """
     dsn = url or database_url()
-    engine = create_async_engine(
-        dsn,
-        connect_args={"check_same_thread": False} if dsn.startswith("sqlite") else {},
-    )
+    engine = create_async_engine(dsn, **_engine_kwargs(dsn))
     if dsn.startswith("sqlite"):
-        event.listen(engine.sync_engine, "connect", _enable_sqlite_fk)
+        event.listen(engine.sync_engine, "connect", _tune_sqlite_connection)
     return engine
 
 
-def _enable_sqlite_fk(dbapi_conn: Any, _record: Any) -> None:
-    """每条新连接都开一次外键强制——SQLite 的 PRAGMA 是**连接级**的，不是库级的，
-    连接池里换一条连接就得重开一次，所以只能挂在 connect 事件上。"""
+def _tune_sqlite_connection(dbapi_conn: Any, _record: Any) -> None:
+    """每条新连接都设一遍 PRAGMA——SQLite 的 PRAGMA 是**连接级**的（``journal_mode`` 除外，
+    它写在库文件头里、一次生效永久有效），连接池里换一条连接就得重设，所以只能挂 connect 事件。
+
+    三条各管一件事：
+
+    - ``foreign_keys=ON``：**SQLite 默认不执行外键约束**（为兼容老库）。不显式打开的话，
+      ``threads.user_id`` 指向一个不存在的用户也能插进去，外键形同虚设。
+    - ``journal_mode=WAL``：**多进程写同一个库的前提**（批 2 起 API 与 worker 是两个进程）。
+      默认的 rollback journal 下，写事务会拿排他锁**把读也挡住**，两个进程稍一并发就互相 "database
+      is locked"；WAL 下读写不互斥（读旧快照、写追加到 -wal），只有写与写才排队。
+    - ``busy_timeout``：写与写终究要排队，默认 busy handler 是**立刻**抛 "database is locked"——
+      连 1 毫秒都不等。设成 5 秒 = 撞上并发写时先自旋等一会儿，绝大多数争用在这几毫秒里就化解了。
+
+    WAL 设不上（内存库 / 只读挂载 / 网络文件系统上不支持）时**只告警不抛**：那种部署本来就不是
+    多进程写，退回默认日志模式照样能跑，为它把整个应用起不来是本末倒置。
+    """
     cur = dbapi_conn.cursor()
-    cur.execute("PRAGMA foreign_keys=ON")
-    cur.close()
+    try:
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.execute(f"PRAGMA busy_timeout={env_int('SQLITE_BUSY_TIMEOUT_MS', 5000)}")
+        cur.execute("PRAGMA journal_mode=WAL")
+        mode = (cur.fetchone() or [""])[0]
+        if str(mode).lower() != "wal":
+            logger.warning("SQLite 未能切到 WAL（当前 %s），多进程并发写会更容易撞锁", mode)
+    except Exception:  # noqa: BLE001 —— 调教失败不该让应用起不来，见 docstring
+        logger.warning("SQLite PRAGMA 调教失败，退回默认设置", exc_info=True)
+    finally:
+        cur.close()
 
 
 _engine = make_engine()

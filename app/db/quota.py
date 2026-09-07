@@ -156,7 +156,11 @@ async def remaining_usd(user_id: str | None) -> float | None:
 
 
 async def add_usage(
-    user_id: str | None, cost_usd: float, input_tokens: int = 0, output_tokens: int = 0
+    user_id: str | None,
+    cost_usd: float,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    prompt_version: str = "",
 ) -> None:
     """把一次任务的全树用量累加进当前周期的账本。**记账失败绝不反噬主链路**（吞异常记日志）。
 
@@ -165,6 +169,10 @@ async def add_usage(
     后到的那个，捕获 :class:`IntegrityError` 后重跑一次 UPDATE 即可。方言无关，换 Postgres 照跑。
 
     **鉴权关闭时不记账**（``quota_enabled()`` 为假）：那时所有人共用假身份，记出来的账没有意义。
+
+    ``prompt_version`` 是标签列（本次记账时该用户所在的 A/B 版本），**空串不覆盖**已有值：调用方
+    拿不到版本时，宁可保留上一次记下的归属，也别把它抹成空——账本里一行「版本未知」比一行旧版本
+    更难查。
     """
     if not quota_enabled() or not user_id or cost_usd <= 0:
         return
@@ -172,15 +180,18 @@ async def add_usage(
     try:
         async with session_factory()() as db:
             for attempt in range(2):
+                values: dict[str, Any] = {
+                    "cost_usd": UsageLedger.cost_usd + cost_usd,
+                    "input_tokens": UsageLedger.input_tokens + input_tokens,
+                    "output_tokens": UsageLedger.output_tokens + output_tokens,
+                    "task_count": UsageLedger.task_count + 1,
+                }
+                if prompt_version:
+                    values["prompt_version"] = prompt_version
                 stmt = (
                     update(UsageLedger)
                     .where(UsageLedger.user_id == user_id, UsageLedger.period_key == period)
-                    .values(
-                        cost_usd=UsageLedger.cost_usd + cost_usd,
-                        input_tokens=UsageLedger.input_tokens + input_tokens,
-                        output_tokens=UsageLedger.output_tokens + output_tokens,
-                        task_count=UsageLedger.task_count + 1,
-                    )
+                    .values(**values)
                 )
                 res = cast(CursorResult[Any], await db.execute(stmt))
                 if res.rowcount:
@@ -198,6 +209,7 @@ async def add_usage(
                         input_tokens=input_tokens,
                         output_tokens=output_tokens,
                         task_count=1,
+                        prompt_version=prompt_version,
                     )
                 )
                 try:

@@ -236,6 +236,31 @@ P0/P1 填 passed（布尔）、score 置 null；P2 填 score（1-5 整数）、p
 每条细则对应一条打分，id 用细则前的编号。不要输出 json 以外的任何文字。"""
 
 
+# ── 前情（跨轮 / 跨会话事实）──────────────────────────────────────────────
+# judge 只拿到**最后一轮**的 query（多轮 case 只对最后一轮打分），于是「第二个我要了」「把上次
+# 那单取消了」这类话在它眼里是无主语的：上一轮有没有清单？这个用户有没有历史订单？有没有长期
+# 偏好？不给背景，judge 只能靠猜——猜出来的红线要么误伤（判 Agent「凭空编造 item_id」，其实那
+# 是上一轮清单里的真货），要么漏判（Agent 真编了它也看不出来）。
+#
+# **刻意做成「声明式的事实」而不是「把前几轮的实际回答塞进来」**：尺子必须与 Agent 表现无关。
+# 把 Agent 上一轮的输出喂给 judge，Agent 变差时尺子跟着变松，回归对照就废了。
+#
+# **前置拼接、不改 `_GEN_PROMPT` 常量**：缓存 key 里掺着生成 prompt 的全文，改动那份常量会让
+# 全部 95 条尺子失效重建——与批 0/1/2 基线的尺子不再逐字相同，跨批分数直接失去可比性。没写
+# prior_context 的 case 因此逐字不变、缓存照常命中。
+_PRIOR_BLOCK = """【前情：本条评测的跨轮 / 跨会话客观事实。这些是**已经发生的**、可信的背景，\
+判定时直接当真，不要要求 Agent 在本轮重新交代或重新验证；也不要据此新增用户没提的要求。】
+{prior}
+
+"""
+
+
+def _with_prior(prompt: str, prior_context: str) -> str:
+    """把前情段前置到 judge prompt。空前情 → 原样返回（保住既有缓存与既有行为）。"""
+    prior = (prior_context or "").strip()
+    return _PRIOR_BLOCK.format(prior=prior) + prompt if prior else prompt
+
+
 def _enumerate_rubric(rubric: Rubric) -> tuple[str, dict[str, RubricCriterion]]:
     """给细则编号（P0-1/P1-1/...），返回渲染文本 + id→细则映射（聚合时回填 dimension 用）。"""
     lines: list[str] = []
@@ -250,11 +275,17 @@ def _enumerate_rubric(rubric: Rubric) -> tuple[str, dict[str, RubricCriterion]]:
 
 
 # ────────────────────────────── 主流程 ──────────────────────────────
-def _rubric_cache_key(query: str, constraints: dict[str, Any] | None, intent: str) -> str:
-    """缓存 key：query + 约束 + intent + 生成 prompt 文本，全量 hash。
+def _rubric_cache_key(
+    query: str, constraints: dict[str, Any] | None, intent: str, prior_context: str = ""
+) -> str:
+    """缓存 key：query + 约束 + intent + 前情 + 生成 prompt 文本，全量 hash。
 
     掺入 prompt 文本，使「改了细则生成 prompt」自动让旧缓存失效——回归对照里，尺子定义没变就复用、
     变了就重建，二者都正确。
+
+    ``prior_context`` **只在非空时进 payload**：给一条 case 补前情，理应让它的尺子重建（背景变了，
+    红线该跟着变）；但不该连累另外几十条没有前情的 case 一起失效——那批的尺子必须与既有基线逐字
+    相同，否则跨批分数不可比。
     """
     payload = {
         "query": query,
@@ -262,6 +293,8 @@ def _rubric_cache_key(query: str, constraints: dict[str, Any] | None, intent: st
         "intent": intent,
         "prompt": _GEN_PROMPT + _INTENT_RULE_NON_SHOPPING,
     }
+    if (prior_context or "").strip():
+        payload["prior"] = prior_context.strip()
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
@@ -285,24 +318,30 @@ async def generate_rubric(
     intent: str = "shopping",
     use_cache: bool = True,
     cache_dir: Path = RUBRIC_CACHE_DIR,
+    prior_context: str = "",
 ) -> Rubric:
     """调 judge 模型为这条 query 动态生成 P0/P1/P2 细则（命中缓存则直接复用，不调 judge）。
 
     ``intent`` 非 ``shopping``（闲聊/拒绝）时切换细则导向：评收尾是否得体，不强加检索/比价规范。
     ``use_cache=True``：命中缓存直接返回；未命中生成后写缓存。``use_cache=False``：跳过读、强制
     重新生成并覆盖写（``--refresh-rubric`` 走这条，用于刷新尺子）。
+    ``prior_context`` 是跨轮 / 跨会话事实，见 :data:`_PRIOR_BLOCK`。
     """
     from app.agent.llm import get_judge_llm
 
-    cache_file = cache_dir / f"{_rubric_cache_key(query, constraints, intent)}.json"
+    key = _rubric_cache_key(query, constraints, intent, prior_context)
+    cache_file = cache_dir / f"{key}.json"
     if use_cache:
         cached = _read_cached_rubric(cache_file)
         if cached is not None:
             return cached
 
     intent_rule = "" if intent == "shopping" else _INTENT_RULE_NON_SHOPPING
-    prompt = _GEN_PROMPT.format(
-        query=query, constraints=constraints or "（无）", intent_rule=intent_rule
+    prompt = _with_prior(
+        _GEN_PROMPT.format(
+            query=query, constraints=constraints or "（无）", intent_rule=intent_rule
+        ),
+        prior_context,
     )
     # 重试一次：模型层的 max_retries 只兜网络/限流，**吐回来的 JSON 结构不合格它不会重来**
     # （AgentScope 的策略梯换的是 tool_choice，不是重新采样）。judge 的字段遗漏是随机的，
@@ -327,15 +366,24 @@ async def generate_rubric(
 
 
 async def score_against_rubric(
-    query: str, rubric: Rubric, agent_output: str
+    query: str, rubric: Rubric, agent_output: str, prior_context: str = ""
 ) -> list[CriterionScore]:
-    """调 judge 模型，按细则给 Agent 回答逐条打分，并把 dimension 回填到每条打分上。"""
+    """调 judge 模型，按细则给 Agent 回答逐条打分，并把 dimension 回填到每条打分上。
+
+    ``prior_context`` 与生成细则时用的是同一段前情——两处都要给：细则写得再对，打分时不知道
+    「上一轮真给过两件包」，照样会把正确引用判成编造。
+    """
     from app.agent.llm import get_judge_llm
 
     rubric_text, by_id = _enumerate_rubric(rubric)
     sheet = await call_structured(
         get_judge_llm(),
-        _SCORE_PROMPT.format(query=query, rubric_text=rubric_text, agent_output=agent_output),
+        _with_prior(
+            _SCORE_PROMPT.format(
+                query=query, rubric_text=rubric_text, agent_output=agent_output
+            ),
+            prior_context,
+        ),
         _ScoreSheet,
     )
     for s in sheet.scores:
@@ -377,12 +425,15 @@ async def evaluate(
     constraints: dict[str, Any] | None = None,
     intent: str = "shopping",
     use_cache: bool = True,
+    prior_context: str = "",
 ) -> RubricResult:
     """端到端评测一条 query：生成细则 → 渲染回答 → 打分 → 聚合。
 
     ``run_result`` 为 :func:`app.agent.main_agent.run_agent` 的返回
     （含 final_text / messages / items / trace_id）。``intent`` 透传给细则生成（闲聊类换导向）。
     ``use_cache`` 控制细则是否复用缓存（回归对照固定尺子用 True，刷新尺子用 False）。
+    ``prior_context`` 是本条 case 的跨轮 / 跨会话事实，生成细则与打分两处都会看到（见
+    :data:`_PRIOR_BLOCK`）；不给就是既有行为。
     生成与打分分两次 judge 调用，各自结构化；任一异常向上抛，由跑批脚本捕获并记为该条评测失败。
 
     收尾把结论作为 score 挂回 ``run_result["trace_id"]`` 那条 Langfuse trace（refdocs 16-3 §2.4），
@@ -396,8 +447,10 @@ async def evaluate(
     trajectory = render_trajectory(extract_tool_calls(messages))
     agent_output = render_agent_output(final_text, items, trajectory)
 
-    rubric = await generate_rubric(query, constraints, intent, use_cache=use_cache)
-    scores = await score_against_rubric(query, rubric, agent_output)
+    rubric = await generate_rubric(
+        query, constraints, intent, use_cache=use_cache, prior_context=prior_context
+    )
+    scores = await score_against_rubric(query, rubric, agent_output, prior_context)
     result = aggregate(query, rubric, scores)
     record_rubric_scores(run_result.get("trace_id"), result)
     return result

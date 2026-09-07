@@ -16,7 +16,7 @@ import logging
 
 from app.agent.fork_guard import current_fork_depth
 from app.api import monitor
-from app.api.clarification import create_pending
+from app.api.clarification import clear_waiter, create_pending, register_waiter
 from app.api.context import get_thread_id
 from app.tools._args import StrListArg
 from app.tools._bundle import reconcile_slots_from_reply
@@ -66,6 +66,13 @@ async def ask_user(
     # 只把真在 options 里的项当默认勾选（模型偶尔会把 preselected 写成 options 外的词）。
     opts = [o for o in (options or []) if o and o.strip()]
     pre = [p for p in (preselected or []) if p in opts] if opts else []
+
+    # **先登记等待、再把问题发出去**：队列模式下问题经背板到浏览器只是几毫秒，而登记要写一次
+    # Redis。反过来写就有一个「回复已经打回来、还没人登记在等」的窗口，那条回复只能被拒收。
+    # 单进程模式下 register_waiter 只动一个内存 dict，与原先的顺序无可观测差异。
+    fut = create_pending(thread_id)
+    token = await register_waiter(thread_id, timeout_sec=ASK_USER_TIMEOUT_SEC)
+
     await monitor.report_clarification_request(
         question,
         options=opts or None,
@@ -73,7 +80,6 @@ async def ask_user(
         preselected=pre or None,
     )
 
-    fut = create_pending(thread_id)
     responded = True
     try:
         response = await asyncio.wait_for(fut, timeout=ASK_USER_TIMEOUT_SEC)
@@ -83,9 +89,13 @@ async def ask_user(
         # 任务永远掐不死。cancelling()>0 说明取消是冲着任务来的，必须向上传播。
         cur = asyncio.current_task()
         if cur is not None and cur.cancelling() > 0:
-            raise
+            raise  # 令牌由下面的 finally 撤（同步操作，取消路径上照样跑得完）
         response = "（用户未在规定时间内回复，请基于已有信息继续）"
         responded = False
+    finally:
+        # 令牌与这一问同生共死：撤了它，迟到的回复就会被 deliver_reply 拒收（= 按取消处理），
+        # 而不是塞给下一问。同步撤本地 + 异步删远端，故取消路径上也跑得完（见 clear_waiter）。
+        clear_waiter(thread_id, token)
 
     if responded:
         # 套装组成确认的「删」通路（机制判，模型只负责问）：用户点名了要哪些槽，没点名的

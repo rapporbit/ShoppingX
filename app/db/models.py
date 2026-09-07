@@ -213,6 +213,13 @@ class UsageLedger(Base):
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     task_count: Mapped[int] = mapped_column(Integer, default=0)
 
+    # 该用户当时所处的提示词 A/B 版本（批 4 / 18-3）。**不进唯一键**：唯一键一旦变成
+    # (user, period, version)，同一个人跨版本就会各拿一份日额度——改一次放量比例等于给一批人
+    # 免费续杯，配额闸当场漏。这里只是「最近一次记账时他在哪一版」的标签，后写覆盖先写；版本按
+    # user_id 稳定，同一天内改变只可能发生在「运维刚好调了放量比例」的那一刻，对成本归因的影响
+    # 是一天里的一行，可接受。要逐轮精确归因看 Langfuse trace（那里每轮都带 version + ab_bucket）。
+    prompt_version: Mapped[str] = mapped_column(String(16), default="")
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=func.now()
     )
@@ -351,3 +358,46 @@ class OrderLineRow(Base):
     landed_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     order: Mapped[OrderRow] = relationship(back_populates="lines")
+
+
+class StrategyRow(Base):
+    """一条**成功策略**（18-4）：从高分轨迹蒸馏出来的「遇到这类局面就这么办」。
+
+    与 :class:`Preference` 正交，两张表谁也别兼任谁：偏好是**某个人**的取向（user_id 是它的
+    第一列），策略是**全局**的打法（没有 user_id 这一列——「预算陷阱要先算到手价再排序」对谁
+    都成立）。把策略塞进偏好表，等于给每个用户各存一份同样的话，还得回答「A 的策略淘汰了，
+    B 那份算不算数」这种无意义的问题。
+
+    ``dedup_key`` 与 ``PreferenceEntry`` 同一取向：由 ``category:slug`` **派生**，不由 LLM 手拼。
+
+    **生命周期三列**（``health`` / ``hits`` / ``consecutive_failures``）是这张表存在的理由。
+    蒸馏出来的策略是**假设**不是结论：门禁重放只证明它在 3 条同类 query 上不退化，证不了它在
+    真实流量里长期有用。所以每条策略带血量，命中即回血、连续失败即淘汰——让不灵的策略自己
+    退场，而不是靠人定期回来清理一张只增不减的表。
+    """
+
+    __tablename__ = "strategies"
+    __table_args__ = (UniqueConstraint("dedup_key", name="uq_strategy_key"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    dedup_key: Mapped[str] = mapped_column(String(200))
+
+    category: Mapped[str] = mapped_column(String(64), default="", index=True)
+    slug: Mapped[str] = mapped_column(String(64), default="")
+    trigger: Mapped[str] = mapped_column(String(300))
+    # 触发词：确定性匹配的唯一抓手（trigger 是给人 / 给模型读的整句，匹配不了）。
+    trigger_keywords: Mapped[list[str]] = mapped_column(JSON, default=list)
+    actions: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # 出处：来源报告 + query id + 当时的分数。没有它就没法回答「这条是哪来的」。
+    evidence: Mapped[list[str]] = mapped_column(JSON, default=list)
+
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    health: Mapped[int] = mapped_column(Integer, default=3)
+    hits: Mapped[int] = mapped_column(Integer, default=0)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+
+    source_report: Mapped[str] = mapped_column(String(200), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )

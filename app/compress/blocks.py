@@ -38,7 +38,16 @@ DEFAULT_MAX_TOOL_TOKENS = 1500
 _TRUNCATE_HINT = "\n\n[…较旧工具结果已精简；如需细节可用更窄查询重取]"
 
 # ---- JSON 字段抽取（较旧区工具结果智能压缩）----
-# 工具返回的候选列表字段名（item_search/price_compare/shipping_calc/item_picker）。
+# 工具返回的候选列表字段名（item_search.candidates / price_compare.ranked /
+# shipping_calc.items / item_picker.picks / shopping_summary.items）。
+#
+# **这个集合与下面的 `_KEEP_FIELDS` 是一对，只能一起改。** 加一个键进来，就等于宣布「这个列表
+# 里的元素只留 _KEEP_FIELDS 那几个字段」。批 1 的交易工具（`query_order.orders` /
+# `create_order.preview`）**刻意不在这里**：它们的关键字段是 order_no / status / 金额，一个都
+# 不在 _KEEP_FIELDS 里，抽取会把订单号整个丢光——而「取消前必须先 query_order」那条红线，靠的
+# 正是模型能从历史里读回那个订单号。它们体积也小（远低于 max_tool_tokens），本来就不触发压缩。
+# 批 3-1 的 `filtered_out` 同理不进：它是「被挡住的货」的证据，本身就只有 4 个字段。
+# 回归见 tests/test_compress.py::test_order_result_keeps_order_no。
 _CANDIDATE_LIST_KEYS = frozenset({"candidates", "ranked", "items", "picks"})
 # 较旧区只保留决策相关字段：身份+标题+价格+评分+到手价+入选理由。
 _KEEP_FIELDS = frozenset(

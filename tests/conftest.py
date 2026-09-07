@@ -43,6 +43,11 @@ os.environ.setdefault("LANGFUSE_ENABLED", "false")
 # 限流本身的行为由 tests/test_ratelimit.py 显式打开开关来验。
 os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
 
+# 批 4-3：消费侧 MCP 默认关。开发者 .env 里指着一台真 MCP server 时，SearchAgent 的工具集会
+# 随「那台机器起没起」在两种形态间飘——同一个用例两次跑出不同的工具表。要验 MCP 通路的用例
+# 自己起进程 + monkeypatch 这个变量（见 tests/test_mcp.py），别靠环境碰巧配着。
+os.environ.setdefault("MCP_SEARCH_URL", "")
+
 # M16：账户库钉到临时文件，且**强制覆盖**（不是 setdefault）——单测会真的写库（注册用户、认领
 # 会话），若落到开发者的 var/globex.db 上，跑一遍 pytest 就往真实账户表里塞一堆测试用户。每次
 # pytest 启动先删掉旧的临时库，保证从空表开始（用例间的隔离则靠各自用不同用户名）。
@@ -94,7 +99,10 @@ def _clean_memory_tables() -> Iterator[None]:
     ``usage_ledger`` 也在此列且尤其要清：它按 ``(user_id, 当天)`` 累加，不清的话「上一个用例烧了
     多少 credit」会直接算进下一个用例的额度里——配额相关的断言会随**用例执行顺序**忽红忽绿。
 
-    只清这五张，不动 ``users`` / ``threads``（账户测试自己靠不同用户名隔离，且它们之间没有
+    ``strategies`` 是第六张，也是唯一**全局**的一张（无 user_id）——上面几张还能靠「用例各用各的
+    user_id」兜底，它连这条退路都没有，一个用例写进去的策略会被下一个用例的注入位读到。
+
+    只清这六张，不动 ``users`` / ``threads``（账户测试自己靠不同用户名隔离，且它们之间没有
     「同名 user 反复写」的问题）。
     """
     yield
@@ -110,6 +118,9 @@ def _clean_memory_tables() -> Iterator[None]:
                 "favorites",
                 "messages",
                 "usage_ledger",
+                # 策略是**全局**的（没有 user_id 这一列），所以它比上面几张更容易串台：
+                # 用例之间连「换个 user_id 隔离」这条退路都没有，必须清。
+                "strategies",
             ):
                 await db.execute(text(f"DELETE FROM {table}"))  # noqa: S608 —— 表名是字面量常量
             await db.commit()

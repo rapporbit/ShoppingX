@@ -1,0 +1,91 @@
+# globex 在 K8s 上的编排 —— 命名空间 / 配置 / 密钥 / 共享卷。
+#
+# 这一批 yaml 的唯一目的，是把批 2 做出来的「API 收请求、worker 跑 Agent」这套双进程形态，用
+# K8s 能理解的方式表达出来：**同一个镜像、两种 command、各自独立扩容**，中间靠 Redis Stream
+# 削峰。除此之外的一切（Ingress、证书、HPA、监控栈）刻意不写，见 README 的「未做」。
+#
+# 应用顺序：kubectl apply -f 00- → 10- → 20- → 30- → 40- → 50-（编号即依赖顺序）。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: globex
+---
+# 非密配置。**为什么单独一份 ConfigMap 而不是把 env 写进两个 Deployment**：api 与 worker 必须
+# 看到**同一份**队列地址 / 频道名 / 分流阈值。写两处的失败形态很难查——API 往 db2 入队、worker
+# 蹲在 db0 上，双方都不报错，任务只是永远排队。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: globex-config
+  namespace: globex
+data:
+  # ---- 削峰队列（批2-1/2-2）。K8s 形态下必须开：不开的话 worker 进程起来就 SystemExit ----
+  QUEUE_ENABLED: "1"
+  QUEUE_REDIS_URL: "redis://redis:6379/2"
+  # 背板与控制面缺省跟随 QUEUE_ENABLED，这里显式写出来只是为了让人读 yaml 就知道它们开着。
+  # 背板（批2-3）不开 = 事件由 worker 发、浏览器连的是 api，前端全程转圈；
+  # 控制面（批2-4）不开 = 取消按钮和澄清回复跨不过进程边界。K8s 下这两样都不是可选项。
+  BACKPLANE_ENABLED: "1"
+  CONTROL_ENABLED: "1"
+  # ---- 共享熔断（批2-5）。多副本时才有意义：一个副本探到下游挂了，别的副本不必再各撞一遍 ----
+  BREAKER_SHARED: "1"
+  # ---- 事件回放（断线重连补缺口）与向量 / 全文检索 ----
+  EVENT_REDIS_URL: "redis://redis:6379/2"
+  QDRANT_URL: "http://qdrant:6333"
+  OPENSEARCH_HOST: "opensearch"
+  OPENSEARCH_PORT: "9200"
+  OPENSEARCH_USE_SSL: "false"
+  # ---- 库。**单副本 SQLite 是过渡态，不是推荐** ----
+  # 批2-5 给 SQLite 开了 WAL + busy_timeout，同一台机器上多进程写同一个文件是稳的；但放到 K8s
+  # 上，这个文件在网络卷（NFS/EFS）上，而 SQLite 的锁依赖 POSIX advisory lock —— NFS 上它时灵
+  # 时不灵，坏起来是静默丢写。真上量就把这行换成下面那条 PostgreSQL（批2-5 已按驱动分好池参数，
+  # 镜像里 uv sync --extra db 装 asyncpg 即可）。
+  DATABASE_URL: "sqlite+aiosqlite:////app/var/globex.db"
+  # DATABASE_URL: "postgresql+asyncpg://globex:***@postgres:5432/globex"
+  # ---- worker 优雅退出。这两个数与 50-worker.yaml 的 grace 是一组，改一个必须改另一个 ----
+  WORKER_CONCURRENCY: "4"
+  WORKER_GRACE_SECONDS: "120"
+  # ---- 整轮缓存（批2-5）：压测 / 演示开关，线上必须关。开着跑评测，分数是上一次那份的复读 ----
+  TURN_CACHE_ENABLED: "0"
+  AUTH_ENABLED: "true"
+  DEFAULT_DEST_COUNTRY: "CN"
+  LANGFUSE_ENABLED: "false"
+---
+# 密钥占位。**这份文件里一个真 key 都没有，也永远不要有**——它进 git。
+# 真部署时用 `kubectl create secret generic globex-secrets --from-env-file=.env`（.env 不入库），
+# 或接 External Secrets / Sealed Secrets。留这份骨架是为了让 Deployment 的 envFrom 有东西可引，
+# 也为了把「需要哪些密钥」这件事写在版本库里。
+apiVersion: v1
+kind: Secret
+metadata:
+  name: globex-secrets
+  namespace: globex
+type: Opaque
+stringData:
+  OPENAI_API_KEY: "replace-me"
+  EMBED_API_KEY: "replace-me"
+  RERANKER_API_KEY: "replace-me"
+  TAVILY_API_KEY: "replace-me"
+  OPENSEARCH_PASS: "replace-me"
+  # 至少 32 字节随机串。换掉它 = 所有已签发的登录态立刻失效（这是特性不是 bug）。
+  JWT_SECRET: "replace-me-with-32-bytes-of-randomness"
+---
+# api 与 worker 共用的会话产物卷：output/<thread_id>/ 与 uploaded/。
+#
+# **为什么必须是 ReadWriteMany**：产物由 worker 写（它才是跑 Agent 的那个），却由 api 的
+# `GET /api/files/{thread_id}/{filename}` 读。两者是不同 Pod，很可能在不同节点上。用 RWO 的话
+# 表现是「任务跑完了，点下载 404」，且只在跨节点时复现——最难查的那类。
+#
+# 代价要说清楚：EBS / GCE PD 这类块存储**不支持 RWM**，得上 EFS / Filestore / CephFS / NFS，
+# 贵且慢。单节点 kind / minikube 上可以把 accessModes 改成 ReadWriteOnce 跑通，但那样
+# api 与 worker 必须调度到同一个节点、且 api 副本数只能是 1。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: globex-artifacts
+  namespace: globex
+spec:
+  accessModes: ["ReadWriteMany"]
+  resources:
+    requests:
+      storage: 10Gi

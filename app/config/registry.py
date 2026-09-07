@@ -423,6 +423,21 @@ PARAMS: tuple[Param, ...] = (
             "，10 条里 8 条皮的，杀完只剩 2 条还无处补货。"
         ),
     ),
+    Param(
+        key="ITEM_SEARCH_PROBE_LIMIT",
+        group="retrieval",
+        label="被挡商品探测条数",
+        kind="int",
+        default=8,
+        minimum=0,
+        maximum=30,
+        reload=_SEARCH,
+        const="PROBE_LIMIT",
+        help=(
+            "命中不足且带了硬过滤（预算 / 评分 / 排除偏好）时，再打一次不带这些过滤的召回做差集，"
+            "产出 filtered_out——让模型分得清「库里没这类货」和「有货但都超预算」。设 0 关闭。"
+        ),
+    ),
     # ---------------- 展示商品卡 ----------------
     Param(
         key="PICK_DISPLAY_CAP",

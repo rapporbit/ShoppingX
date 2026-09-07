@@ -163,7 +163,9 @@ def write_session_artifacts(
 _pending_charges: set[asyncio.Task[None]] = set()
 
 
-async def charge_quota(user_id: str | None, snap: dict[str, float | int]) -> None:
+async def charge_quota(
+    user_id: str | None, snap: dict[str, float | int], prompt_version: str = ""
+) -> None:
     """把本轮全树成本记进用户配额账本，**取消路径下也要记完**。
 
     为什么绕这一圈而不是直接 ``await add_usage(...)``：本函数跑在 run_agent 的 finally 里，而这条
@@ -178,6 +180,7 @@ async def charge_quota(user_id: str | None, snap: dict[str, float | int]) -> Non
             float(snap["cost_usd"]),
             int(snap["input_tokens"]),
             int(snap["output_tokens"]),
+            prompt_version=prompt_version,
         )
     )
     _pending_charges.add(task)
