@@ -15,6 +15,9 @@ RUN uv sync --frozen --no-dev --no-install-project
 # 应用代码（data/ 与 .env 走挂载，不进镜像——数据大且含密钥）
 COPY app/ ./app/
 COPY prompt/ ./prompt/
+# skills/<name>/SKILL.md：app/agent/skills.py 按 PROJECT_ROOT/skills 读。漏拷的后果不是报错，
+# 是 LocalSkillLoader 静默加载到 0 个 skill——线上三个 skill 整体空转（2026-09-08 部署清单核出）。
+COPY skills/ ./skills/
 COPY scripts/ ./scripts/
 # 数据库迁移（M17）。**漏了这两行 = 容器起不来**：启动时 init_db() 要跑 alembic upgrade，
 # 找不到 alembic.ini / migrations/ 就直接抛。它俩必须跟着代码一起进镜像、一起版本化——
