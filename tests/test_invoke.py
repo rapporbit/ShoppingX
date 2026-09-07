@@ -94,6 +94,36 @@ async def test_call_structured_unwraps_end_to_end() -> None:
     assert plan.category == "背包"  # 空壳（全默认值）就是这条测试要挡的假绿
 
 
+async def test_call_structured_prefers_auto_then_falls_back_to_ladder() -> None:
+    """auto 优先：forced 在 DashScope/deepseek 上只回存根（合法 JSON、全默认值 → 假绿），
+    显式 auto 才拿得到整张表；auto 没产出（模型没调工具）时再回落框架默认梯。"""
+    from agentscope.exception import StructuredOutputError
+
+    calls: list[Any] = []
+
+    class _Model(_FakeModel):
+        def __init__(self, fail_auto: bool) -> None:
+            super().__init__()
+            self._fail_auto = fail_auto
+
+        async def generate_structured_output(self, _m: Any, _s: Any, **kw: Any) -> Any:
+            calls.append(kw.get("tool_choice"))
+            if kw.get("tool_choice") is not None:
+                if self._fail_auto:
+                    raise StructuredOutputError("no tool call")
+                return SimpleNamespace(content={"category": "auto 给的"}, usage=None)
+            return SimpleNamespace(content={"category": "梯子给的"}, usage=None)
+
+    plan = await call_structured(_Model(fail_auto=False), "q", _Plan)
+    assert plan.category == "auto 给的"
+    assert len(calls) == 1 and getattr(calls[0], "mode", None) == "auto"
+
+    calls.clear()
+    plan = await call_structured(_Model(fail_auto=True), "q", _Plan)
+    assert plan.category == "梯子给的"
+    assert [getattr(c, "mode", None) for c in calls] == ["auto", None]
+
+
 # ---------- 流式取尾 ----------
 async def test_call_text_takes_last_chunk() -> None:
     """chunk 是累积快照，取最后一个；取第一个只会拿到一个字。"""
