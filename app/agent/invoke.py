@@ -15,13 +15,18 @@ AgentScope 侧则要自己处理三件事：
 :func:`call_structured`，同样别各写各的。
 """
 
+import logging
 from collections.abc import Sequence
 from typing import Any, Literal, TypeVar
 
+from agentscope.exception import StructuredOutputError
 from agentscope.message import Msg, TextBlock
+from agentscope.tool import ToolChoice
 from pydantic import BaseModel
 
 from app.agent.token_budget import charge_usage
+
+logger = logging.getLogger("shoppingx.invoke")
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -126,9 +131,38 @@ async def call_structured(model: Any, prompt: Prompt, schema: type[T]) -> T:
     ② 部分供应商把入参多包一层壳，见 :func:`_unwrap_structured`；③ 用量在 ``.usage`` 上，
     顺手入账（LangChain 侧要挂 ``UsageMetadataCallbackHandler`` 才有账）。
 
+    **第四个坑（2026-09-08 挖出，比前三个都大）：forced tool_choice 拿到的是存根。** DashScope 上的
+    ``deepseek-v4-flash`` 被 ``tool_choice`` 强制指定函数时，只回 ``{"tasks": ["recommend"]}`` 这种
+    一两个字段的入参（思考开关无关、stream 无关、绕开框架直连 OpenAI 客户端同样复现）；换成
+    ``auto`` 就回完整参数（q21 五次采样全部拆出三个槽 + 预算 300）。框架的策略梯把 forced 排第一，
+    而存根是合法 JSON、全默认值的 schema 照样校验通过——于是永远轮不到 auto，线上多数轮次拿着
+    一张空计划在跑（15 次采样 13 次只有 1~4 个字段），planner 的预算 / 品类 / 槽位全靠下游规则
+    兜底。这是批 0 迁移漏掉的第 6 个静默失效。
+
+    所以这里**auto 优先**：先显式 ``tool_choice=auto`` 走一次（框架里显式 tool_choice 绕过策略梯），
+    模型没调工具（``StructuredOutputError``）或供应商拒绝时，再回落框架默认梯（forced → …）。
+    auto 路径下模型可能先写一段推理文本再调工具，多花的是几十个 token，换回来的是整张表。
+
     失败照抛（``StructuredOutputError`` / 校验错），由调用方决定降级——各处的降级语义不一样
     （planner 回退规则解析、curator 整轮跳过），收在这里只会把它们抹平。
     """
-    response = await model.generate_structured_output(to_msgs(prompt), schema)
+    messages = to_msgs(prompt)
+    fallback_on: tuple[type[Exception], ...] = (StructuredOutputError, *_fallback_exceptions(model))
+    try:
+        response = await model.generate_structured_output(
+            messages, schema, tool_choice=ToolChoice(mode="auto")
+        )
+    except fallback_on as exc:
+        logger.info("结构化输出 auto 路径未产出（%s），回落框架策略梯", type(exc).__name__)
+        response = await model.generate_structured_output(messages, schema)
     charge_usage(getattr(model, "model", ""), getattr(response, "usage", None))
     return schema.model_validate(_unwrap_structured(response.content or {}, schema))
+
+
+def _fallback_exceptions(model: Any) -> tuple[type[Exception], ...]:
+    """供应商侧「拒绝这种 tool_choice」的异常类（框架按模型类给），拿不到就只认框架自己的。"""
+    getter = getattr(model, "_get_structured_output_fallback_exceptions", None)
+    try:
+        return tuple(getter()) if callable(getter) else ()
+    except Exception:  # noqa: BLE001 —— 假模型 / 老版本没有这个钩子
+        return ()
