@@ -313,6 +313,103 @@ async def test_evaluate_passes_trace_id_from_run_result(monkeypatch: Any) -> Non
     assert seen["res"] is result
 
 
+# ---------- P0 复核：一票否决不由一次采样说了算 ----------
+def _p0_rubric() -> Rubric:
+    return Rubric(
+        criteria=[
+            RubricCriterion(tier="P0", dimension="预算", criterion="主体不超预算"),
+            RubricCriterion(tier="P2", dimension="覆盖度", criterion="1-5"),
+        ]
+    )
+
+
+def _sheet(p0_passed: bool) -> list[CriterionScore]:
+    return [
+        CriterionScore(id="P0-1", tier="P0", dimension="预算", passed=p0_passed, rationale="判语"),
+        CriterionScore(id="P2-1", tier="P2", dimension="覆盖度", score=4),
+    ]
+
+
+async def test_p0_recheck_flips_back_when_second_sample_passes(monkeypatch: Any) -> None:
+    """首判破红线、复判通过 → 视为噪声翻回 pass；rationale 保留两次判语以便回看。"""
+    from app.eval import rubric as R
+
+    calls: list[int] = []
+
+    async def _fake_gen(*_: Any, **__: Any) -> Rubric:
+        return _p0_rubric()
+
+    async def _fake_score(*_: Any, **__: Any) -> list[CriterionScore]:
+        calls.append(1)
+        return _sheet(p0_passed=len(calls) > 1)  # 第一次 fail，第二次 pass
+
+    monkeypatch.setattr(R, "generate_rubric", _fake_gen)
+    monkeypatch.setattr(R, "score_against_rubric", _fake_score)
+    monkeypatch.setattr(R, "record_rubric_scores", lambda *_: None)
+    monkeypatch.setattr(R, "P0_RECHECK", True)
+
+    result = await R.evaluate("q", {"final_text": "x", "items": [], "messages": []})
+    assert len(calls) == 2
+    assert result.overall_pass and result.p0_failures == []
+    assert result.scores[0].rationale.startswith("[复核翻绿]")
+
+
+async def test_p0_recheck_keeps_failure_when_both_samples_fail(monkeypatch: Any) -> None:
+    """两次都 fail 才算真破红线——复核只翻假阳性，不给真违规放水。"""
+    from app.eval import rubric as R
+
+    calls: list[int] = []
+
+    async def _fake_gen(*_: Any, **__: Any) -> Rubric:
+        return _p0_rubric()
+
+    async def _fake_score(*_: Any, **__: Any) -> list[CriterionScore]:
+        calls.append(1)
+        return _sheet(p0_passed=False)
+
+    monkeypatch.setattr(R, "generate_rubric", _fake_gen)
+    monkeypatch.setattr(R, "score_against_rubric", _fake_score)
+    monkeypatch.setattr(R, "record_rubric_scores", lambda *_: None)
+    monkeypatch.setattr(R, "P0_RECHECK", True)
+
+    result = await R.evaluate("q", {"final_text": "x", "items": [], "messages": []})
+    assert len(calls) == 2
+    assert not result.overall_pass and result.p0_failures == ["预算"]
+    assert result.scores[0].rationale.startswith("[复核维持]")
+
+
+async def test_p0_recheck_never_runs_when_first_pass_is_clean_or_disabled(
+    monkeypatch: Any,
+) -> None:
+    """全绿的 case 不多花一次 judge；关掉开关时首判即定论（与历史基线同一把尺子）。"""
+    from app.eval import rubric as R
+
+    calls: list[int] = []
+
+    async def _fake_gen(*_: Any, **__: Any) -> Rubric:
+        return _p0_rubric()
+
+    async def _fake_score_pass(*_: Any, **__: Any) -> list[CriterionScore]:
+        calls.append(1)
+        return _sheet(p0_passed=True)
+
+    monkeypatch.setattr(R, "generate_rubric", _fake_gen)
+    monkeypatch.setattr(R, "score_against_rubric", _fake_score_pass)
+    monkeypatch.setattr(R, "record_rubric_scores", lambda *_: None)
+    monkeypatch.setattr(R, "P0_RECHECK", True)
+    await R.evaluate("q", {"final_text": "x", "items": [], "messages": []})
+    assert len(calls) == 1
+
+    async def _fake_score_fail(*_: Any, **__: Any) -> list[CriterionScore]:
+        calls.append(1)
+        return _sheet(p0_passed=False)
+
+    monkeypatch.setattr(R, "score_against_rubric", _fake_score_fail)
+    monkeypatch.setattr(R, "P0_RECHECK", False)
+    result = await R.evaluate("q", {"final_text": "x", "items": [], "messages": []})
+    assert len(calls) == 2 and not result.overall_pass
+
+
 # ---------- prior_context：跨轮 / 跨会话事实注入 judge（批 3-2）----------
 def test_prior_block_is_noop_when_empty() -> None:
     """没写前情的 case 必须逐字不变——它们的尺子要与既有基线一致，否则跨批分数不可比。"""
