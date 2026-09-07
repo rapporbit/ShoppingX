@@ -343,8 +343,12 @@ def _negated(text: str, lo: int, hi: int, *, ascii_kw: bool) -> bool:
     )
 
 
-def normalize_terms(words: list[str] | tuple[str, ...] | None) -> list[str]:
+def normalize_terms(words: list[str] | tuple[str, ...] | None, *, quiet: bool = False) -> list[str]:
     """把原子词扩成**中英标题都能匹**的小写词表（原词保留 + 双向补词，去重保序）。
+
+    ``quiet=True`` 关掉「补不出英文」的留痕日志：那条日志是给**约束词**（排除 / 必须 / 偏好）
+    看的健康指标，调用方若传的是整句 query 的滑窗切片（漂移检测），每轮会刷十几行
+    「着这」「图找」这类无意义碎片，把真正该看的那几条淹掉。
 
     一个中文词可能补出多个英文词（「防水」→ waterproof / water-resistant），全部保留——标题写法
     不统一，命中任一即算命中。英文词反向补出词表内 ≥2 字的中文变体（plastic → 塑料），只有英文
@@ -371,7 +375,8 @@ def normalize_terms(words: list[str] | tuple[str, ...] | None) -> list[str]:
         if not mapped:
             # 补不出英文：这条约束对英文库就是空转的。不报错（语义通道仍在用它），但要留痕——
             # 「有多少词补不出英文」是这层的健康指标，长期为高说明词表该扩了。
-            logger.info("匹配词无英文映射（对英文标题不会命中）：%s", word)
+            if not quiet:
+                logger.info("匹配词无英文映射（对英文标题不会命中）：%s", word)
             continue
         for en in mapped:
             _add(en)

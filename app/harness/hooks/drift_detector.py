@@ -171,7 +171,10 @@ def _computational_precheck(
     # normalize_terms（中文材质/功能词补出英文变体，能匹上英文检索参数）∪ P_t 词桥
     # （state.goal_terms）。命中判定走 term_hits 而非裸 in：英文词要词边界（"in" 不该撞进
     # "insulated"），中文词照旧子串。
-    keywords = set(normalize_terms(sorted(_extract_keywords(original_query)))) | state.goal_terms
+    keywords = (
+        set(normalize_terms(sorted(_extract_keywords(original_query)), quiet=True))
+        | state.goal_terms
+    )
     if keywords and recent_actions:
         actions_lower = recent_actions.lower()
         hits = sum(1 for kw in keywords if term_hits(kw, actions_lower))
