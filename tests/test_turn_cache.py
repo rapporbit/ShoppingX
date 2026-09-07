@@ -23,6 +23,9 @@ def test_key_changes_with_every_component(monkeypatch: pytest.MonkeyPatch) -> No
     assert base != sc.turn_cache_key(buyer="u1", prefs_fp="p2", query="买个包", model="m1")
     assert base != sc.turn_cache_key(buyer="u1", prefs_fp="p1", query="买个箱", model="m1")
     assert base != sc.turn_cache_key(buyer="u1", prefs_fp="p1", query="买个包", model="m2")
+    assert base != sc.turn_cache_key(
+        buyer="u1", prefs_fp="p1", query="买个包", model="m1", prompt_version="1.1.0"
+    )
 
 
 def test_key_changes_when_prompts_yml_changes(monkeypatch: pytest.MonkeyPatch) -> None:
