@@ -4,17 +4,30 @@
 业务字段全默认值——都不报错，只是产出恒定为空。所以断言一律落在业务字段上，不看形状。
 """
 
+from collections.abc import Sequence
 from types import SimpleNamespace
 from typing import Any
 
-from pydantic import BaseModel, Field
+import pytest
+from pydantic import BaseModel, Field, model_validator
 
-from app.agent.invoke import _unwrap_structured, call_structured, call_text, to_msgs
+from app.agent.invoke import (
+    EmptyStructuredOutput,
+    _unwrap_structured,
+    call_structured,
+    call_text,
+    to_msgs,
+)
+from app.tools._args import drop_none_values
 
 
 class _Plan(BaseModel):
+    # 与线上 schema 同形：挂了「显式 null 归一为缺席」的 before validator（badcase cdee1d6d）。
+    _null_is_absent = model_validator(mode="before")(staticmethod(drop_none_values))
+
     category: str = ""
     keywords: list[str] = Field(default_factory=list)
+    tasks: list[str] = Field(default_factory=list)
 
 
 class _Wrapper(BaseModel):
@@ -26,12 +39,19 @@ class _Wrapper(BaseModel):
 class _FakeModel:
     model = "fake"
 
-    def __init__(self, content: Any = None, text: str = "") -> None:
-        self._content = content
+    def __init__(
+        self, content: Any = None, text: str = "", contents: Sequence[Any] | None = None
+    ) -> None:
+        # contents = 每次结构化调用依次吐一份（用尽后重复最后一份），用来演「第一次空、
+        # 第二次满」这种**跨采样**的行为；calls 记调用次数，断言「真的重采样了」。
+        self._contents = list(contents) if contents is not None else [content]
         self._text = text
+        self.calls = 0
 
     async def generate_structured_output(self, _messages: Any, _schema: Any, **_kw: Any) -> Any:
-        return SimpleNamespace(content=self._content, usage=None)
+        content = self._contents[min(self.calls, len(self._contents) - 1)]
+        self.calls += 1
+        return SimpleNamespace(content=content, usage=None)
 
     async def __call__(self, _messages: Any, **_kw: Any) -> Any:
         pieces = self._text
@@ -122,6 +142,79 @@ async def test_call_structured_prefers_auto_then_falls_back_to_ladder() -> None:
     plan = await call_structured(_Model(fail_auto=True), "q", _Plan)
     assert plan.category == "梯子给的"
     assert [getattr(c, "mode", None) for c in calls] == ["auto", None]
+
+
+# ---------- 空表闸（required_any） ----------
+async def test_resamples_once_when_first_sample_is_a_stub() -> None:
+    """第一次只回 ``{"tasks": [...]}`` 这种存根 → 重采样，第二次的满表才是结果。
+
+    存根形态照实测抄（DashScope / deepseek-v4-flash 被 forced tool_choice 时的原样返回）：
+    它校验得过，业务字段全落默认值，不加这道闸就是一张「看起来合法」的空表。
+    """
+    model = _FakeModel(contents=[{"tasks": ["recommend"]}, {"category": "背包", "tasks": []}])
+    plan = await call_structured(model, "q", _Plan, required_any=("category", "keywords"))
+    assert plan.category == "背包"
+    assert model.calls == 2  # 真的重采样了，不是把第一次的空表放过去
+
+
+async def test_raises_when_both_samples_are_stubs() -> None:
+    """两次都空 → 抛明确异常（带 schema 名与判据字段），由调用方按各自语义降级。"""
+    model = _FakeModel(contents=[{"tasks": ["recommend"]}])
+    with pytest.raises(EmptyStructuredOutput) as exc:
+        await call_structured(model, "q", _Plan, required_any=("category", "keywords"))
+    assert model.calls == 2  # 只重采样一次，不无限重试
+    assert exc.value.schema_name == "_Plan"
+    assert exc.value.missing == ("category", "keywords")
+
+
+async def test_without_required_any_behaviour_unchanged() -> None:
+    """不传 required_any = 老行为一字不变：存根照收、只调一次模型。
+
+    空结果本就合法的调用点（偏好解析 / 记忆管家「本轮没有可提升的偏好」）靠的就是这条——
+    给它们上闸只会把合法的空结果误判成失败。
+    """
+    model = _FakeModel(contents=[{"tasks": ["recommend"]}])
+    plan = await call_structured(model, "q", _Plan)
+    assert plan.category == "" and model.calls == 1
+
+
+async def test_explicit_null_counts_as_present() -> None:
+    """模型显式吐 ``category: null`` = 它在认真回答「这项没有」，不是存根，不该重采样。
+
+    这条不能用 ``model_fields_set`` 单独判：``drop_none_values`` 在校验前就把显式 null 的键
+    丢了，只看 fields_set 会把「明确说没有」误判成「压根没提」。
+    """
+    model = _FakeModel(contents=[{"category": None, "keywords": None}])
+    plan = await call_structured(model, "q", _Plan, required_any=("category", "keywords"))
+    assert plan.category == "" and plan.keywords == [] and model.calls == 1
+
+
+async def test_after_validator_assignment_does_not_fake_presence() -> None:
+    """schema 的 after 校验器自己赋过的字段**不算**模型吐过 —— 否则这道闸自己就是静默失效。
+
+    照 ``PlanOutput`` 的真实形态写：它有两个 ``mode="after"`` 校验器会给 exclude_keywords /
+    bundle_slots 赋值，于是一张 ``{"tasks": [...]}`` 的存根，``model_fields_set`` 里凭空多出
+    这两个名字。第一版判据用 fields_set，闸门因此恒不触发（实测）。
+    """
+
+    class _SelfAssigning(BaseModel):
+        tasks: list[str] = Field(default_factory=list)
+        keywords: list[str] = Field(default_factory=list)
+
+        @model_validator(mode="after")
+        def _normalize(self) -> "_SelfAssigning":
+            self.keywords = [k.strip() for k in self.keywords]
+            return self
+
+    model = _FakeModel(contents=[{"tasks": ["recommend"]}])
+    with pytest.raises(EmptyStructuredOutput):
+        await call_structured(model, "q", _SelfAssigning, required_any=("keywords",))
+
+
+async def test_required_any_typo_fails_loudly() -> None:
+    """判据字段名不在 schema 上 → 当场炸。字段改名后这道闸会静默失效，那比炸难查得多。"""
+    with pytest.raises(ValueError, match="required_any"):
+        await call_structured(_FakeModel(content={}), "q", _Plan, required_any=("categorie",))
 
 
 # ---------- 流式取尾 ----------

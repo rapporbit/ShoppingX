@@ -1721,6 +1721,23 @@ async def test_planner_returns_structured(monkeypatch: Any) -> None:
     assert out.target_refs == []
 
 
+async def test_planner_raises_on_empty_structured_output(monkeypatch: Any) -> None:
+    """模型两次都只回存根 → planner 报错，**不许**返回一张全默认值的空 PlanOutput。
+
+    存根（``{"tasks": ["recommend"]}``）校验得过，不上闸就是「拆解成功但什么都没拆出来」：
+    下游按空 keywords 去检索、按空 category 判域，全程零报错，症状只有「推荐得莫名其妙」。
+    planner 没有规则回退路径（品类/检索词无法纯规则解析），所以正确的降级就是让它失败——
+    异常经工具外壳统一转成 ``[error]`` + state=ERROR（见 test_tool_shell.py），主 loop 看得见。
+    """
+    import app.tools.planner as mod
+    from app.agent.invoke import EmptyStructuredOutput
+
+    model = _FakeLLM(structured_payload={"tasks": ["recommend"]})
+    monkeypatch.setattr(mod, "get_fast_llm", lambda: model)
+    with pytest.raises(EmptyStructuredOutput):
+        await mod.planner.ainvoke({"intent": "推荐几个旅行收纳袋"})
+
+
 async def test_planner_auto_adds_landed_cost(monkeypatch: Any) -> None:
     """要推荐 → 自动补 landed_cost，用户没开口也把到手价算了。
 

@@ -462,7 +462,8 @@ async def test_score_against_rubric_also_sees_prior(monkeypatch: Any) -> None:
 
     seen: dict[str, Any] = {}
 
-    async def _fake_structured(_llm: Any, prompt: str, _schema: Any) -> Any:
+    async def _fake_structured(_llm: Any, prompt: str, _schema: Any, **_kw: Any) -> Any:
+        # **_kw 吃掉 required_any（打分那次挂了空表闸）：桩要跟着真签名走，否则测的是桩自己。
         seen["prompt"] = prompt
         return R._ScoreSheet(scores=[CriterionScore(id="P0-1", tier="P0", passed=True)])
 
