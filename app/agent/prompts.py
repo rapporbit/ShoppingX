@@ -55,11 +55,43 @@ def _merge(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
     for key, value in overrides.items():
         if key not in base:
             raise KeyError(f"prompt 版本覆盖了不存在的键 {key!r}（基线里没有它，八成是拼错了）")
-        if isinstance(value, dict) and isinstance(base[key], dict):
+        if isinstance(value, dict) and _PATCH_KEY in value:
+            merged[key] = _apply_patches(key, base[key], value[_PATCH_KEY])
+        elif isinstance(value, dict) and isinstance(base[key], dict):
             merged[key] = _merge(base[key], value)
         else:
             merged[key] = value
     return merged
+
+
+#: 字符串键的**补丁**形态：``system_prompt: {__patch__: [{old: …, new: …}, …]}``。
+#: 整键替换对 ``system_prompt`` 这种几百行的长文本是错的——它会把该版本**冻结**在写它那天的
+#: 全文上，此后基线修一个错别字、加一条硬约束，这个桶的用户都拿不到；A/B 量到的也不再是
+#: 「那一句话的差异」而是「一整份旧文 vs 新文」。补丁只写改的那一句，其余逐字跟着基线走。
+_PATCH_KEY = "__patch__"
+
+
+def _apply_patches(key: str, text: Any, patches: Any) -> str:
+    """按顺序把 ``{old, new}`` 补丁打到基线文本上。**每条 ``old`` 必须恰好命中一次**：
+    命不中说明基线那句话已经改掉了（补丁失效，得重写），命中多次说明锚点太短（会改到别处）——
+    两种情况都不该静默，宁可开机就炸。"""
+    if not isinstance(text, str):
+        raise TypeError(f"prompt 版本对非字符串键 {key!r} 用了 {_PATCH_KEY}")
+    if not isinstance(patches, list):
+        raise TypeError(f"prompt 版本 {key!r} 的 {_PATCH_KEY} 必须是 [{{old, new}}, …] 列表")
+    out = text
+    for idx, patch in enumerate(patches):
+        if not isinstance(patch, dict) or "old" not in patch or "new" not in patch:
+            raise ValueError(f"prompt 版本 {key!r} 的第 {idx} 条补丁缺 old / new")
+        old, new = str(patch["old"]), str(patch["new"])
+        hits = out.count(old)
+        if hits != 1:
+            raise ValueError(
+                f"prompt 版本 {key!r} 的第 {idx} 条补丁锚点命中 {hits} 次（须恰好 1 次）："
+                f"{old[:60]!r}"
+            )
+        out = out.replace(old, new, 1)
+    return out
 
 
 @lru_cache(maxsize=8)

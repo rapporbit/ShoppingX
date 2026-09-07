@@ -67,6 +67,51 @@ def test_override_of_unknown_key_raises(tmp_path: Any, monkeypatch: Any) -> None
     _load_prompts.cache_clear()
 
 
+def test_overlay_string_patch_only_touches_the_anchored_sentence(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """``__patch__`` 只改锚定的那一句，其余逐字跟基线；锚点命不中 / 命中多次都要炸。"""
+    import app.agent.prompts as prompts
+
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+    monkeypatch.setattr(prompts, "_VERSIONS_DIR", versions_dir)
+    monkeypatch.setattr(
+        prompts,
+        "_load_base_prompts",
+        lambda: {
+            "system_prompt": "甲。乙。丙。",
+            "planner_prompt": "p",
+            "sub_agents": {"search": "s"},
+        },
+    )
+    prompts._load_prompts.cache_clear()
+    (versions_dir / "1.1.0.yml").write_text(
+        "base: prompts.yml\noverrides:\n  system_prompt:\n    __patch__:\n"
+        "      - old: 乙。\n        new: 乙改。\n",
+        encoding="utf-8",
+    )
+    assert prompts.get_system_prompt("1.1.0") == "甲。乙改。丙。"
+    assert prompts.get_planner_prompt("1.1.0") == "p"
+
+    (versions_dir / "1.1.1.yml").write_text(
+        "base: prompts.yml\noverrides:\n  system_prompt:\n    __patch__:\n"
+        "      - old: 不存在的锚点\n        new: x\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="命中 0 次"):
+        prompts.get_system_prompt("1.1.1")
+
+    (versions_dir / "1.1.2.yml").write_text(
+        "base: prompts.yml\noverrides:\n  system_prompt:\n    __patch__:\n"
+        "      - old: 。\n        new: ！\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="命中 3 次"):
+        prompts.get_system_prompt("1.1.2")
+    prompts._load_prompts.cache_clear()
+
+
 def test_overlay_merges_one_level_and_keeps_rest(tmp_path: Any, monkeypatch: Any) -> None:
     """只写改动的子键：``sub_agents.search`` 换掉，``sub_agents.trade`` 与其余键原样继承。"""
     import app.agent.prompts as prompts_mod
@@ -112,9 +157,7 @@ def test_bucket_is_stable_across_processes() -> None:
         "import sys; sys.path.insert(0, '.');"
         "from app.agent.ab import bucket_of; print(bucket_of('user-42'))"
     )
-    out = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, check=True
-    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert int(out.stdout.strip()) == same
 
 
@@ -168,8 +211,15 @@ def test_variant_weights_cap_at_100(monkeypatch: Any) -> None:
 # ──────────────────────────── 判读口径与「达标扩桶」 ────────────────────────────
 
 
-def _rec(version: str, *, ok: bool = True, passed: bool = True, p2: float = 4.0,
-         calls: int = 5, tokens: int = 10000) -> dict[str, Any]:
+def _rec(
+    version: str,
+    *,
+    ok: bool = True,
+    passed: bool = True,
+    p2: float = 4.0,
+    calls: int = 5,
+    tokens: int = 10000,
+) -> dict[str, Any]:
     if not ok:
         return {"id": "x", "ok": False, "prompt_version": version, "error": "EvalTimeout: ..."}
     return {
@@ -184,9 +234,9 @@ def _rec(version: str, *, ok: bool = True, passed: bool = True, p2: float = 4.0,
 
 def test_aggregate_separates_infra_failures_from_p0_breaks() -> None:
     """跑挂的条目只进 errored，不许伪装成 P0 退化——否则一次网络抖动就能否掉一个好版本。"""
-    stats = aggregate(
-        [_rec("1.0.0"), _rec("1.0.0", passed=False), _rec("1.0.0", ok=False)]
-    )["1.0.0"]
+    stats = aggregate([_rec("1.0.0"), _rec("1.0.0", passed=False), _rec("1.0.0", ok=False)])[
+        "1.0.0"
+    ]
     assert (stats.n, stats.errored) == (2, 1)
     assert stats.p0_fail_rate == 0.5
 
@@ -209,16 +259,26 @@ def test_records_without_version_are_bucketed_separately() -> None:
 
 
 _POLICY = RolloutPolicy(
-    min_samples=2, max_p0_regression=0.0, min_p2_delta=0.0, max_token_ratio=1.2,
+    min_samples=2,
+    max_p0_regression=0.0,
+    min_p2_delta=0.0,
+    max_token_ratio=1.2,
     steps=(10, 30, 50, 100),
 )
 
 
-def _stats(version: str, p0: float, p2: float, tokens: float, rounds: float = 5.0,
-           n: int = 10) -> VariantStats:
+def _stats(
+    version: str, p0: float, p2: float, tokens: float, rounds: float = 5.0, n: int = 10
+) -> VariantStats:
     return VariantStats(
-        version=version, n=n, errored=0, p0_fail_rate=p0, p2_avg=p2,
-        avg_rounds=rounds, avg_tokens=tokens, avg_total=70.0,
+        version=version,
+        n=n,
+        errored=0,
+        p0_fail_rate=p0,
+        p2_avg=p2,
+        avg_rounds=rounds,
+        avg_tokens=tokens,
+        avg_total=70.0,
     )
 
 
@@ -241,8 +301,9 @@ def test_rollout_gate_requires_all_three() -> None:
 def test_rollout_needs_enough_samples() -> None:
     """样本不够就不给结论——judge 单样本会 0↔100 对翻，小样本上的「达标」是噪声。"""
     policy = RolloutPolicy(2, 0.0, 0.0, 1.2, (10, 30))
-    d = rollout_decision(_stats("1.0.0", 0.0, 4.0, 1e4, n=1), _stats("1.1.0", 0.0, 4.5, 1e4, n=1),
-                         10, policy)
+    d = rollout_decision(
+        _stats("1.0.0", 0.0, 4.0, 1e4, n=1), _stats("1.1.0", 0.0, 4.5, 1e4, n=1), 10, policy
+    )
     assert d.meets is False
     assert any("样本不足" in r for r in d.reasons)
 
