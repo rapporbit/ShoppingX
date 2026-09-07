@@ -232,11 +232,21 @@ def preference_fingerprint(entries: Sequence[Any]) -> str:
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
-def turn_cache_key(*, buyer: str, prefs_fp: str, query: str, model: str = "") -> str:
-    """buyer + 偏好指纹 + prompt 指纹 + 模型 → 一个键。四个成分的理由见本节开头。"""
+def turn_cache_key(
+    *, buyer: str, prefs_fp: str, query: str, model: str = "", prompt_version: str = ""
+) -> str:
+    """buyer + 偏好指纹 + prompt 指纹 + 模型（+ 提示词版本）→ 一个键。四个成分的理由见本节开头。
+
+    ``prompt_version`` 是 A/B 叠加层的版本号（批 4）：主文件指纹只盯得住 ``prompts.yml``，
+    版本文件改了 overrides、或运维把某个人从对照组切进实验组，主文件一个字节没变——不把版本
+    写进键，那个人会继续拿到旧版本提示词跑出来的答案，A/B 报告里却记着他在新版本。
+    """
     prompt_fp = hashlib.sha256(query.strip().encode("utf-8")).hexdigest()[:24]
     model_name = model or os.environ.get("LLM_MAIN", "")
-    return f"{buyer or 'anon'}|{prefs_fp}|{prompt_fp}|{_prompts_fingerprint()}|{model_name}"
+    return (
+        f"{buyer or 'anon'}|{prefs_fp}|{prompt_fp}|{_prompts_fingerprint()}"
+        f"|{model_name}|{prompt_version}"
+    )
 
 
 def turn_is_cacheable(tool_names: Iterable[str], final_text: str) -> bool:

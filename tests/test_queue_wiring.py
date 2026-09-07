@@ -425,6 +425,38 @@ async def test_graceful_shutdown_cancel_still_returns_the_message_to_pending(
     assert status is not None and status.state == "running"  # 不写终态：它待会儿还会活过来
 
 
+async def test_user_cancel_during_pre_run_awaits_is_still_a_user_cancel(
+    queue: InProcessQueue, monkeypatch: pytest.MonkeyPatch, spy_bus: Any
+) -> None:
+    """取消落在 ``run_agent`` **之前**的那几个 await 上（清残留令牌 / 写 running），也得按用户
+    取消收尾：正常返回（= 消息被 ack）、状态 cancelled、在飞登记摘掉。
+
+    曾经的写法把在飞登记放在第一次 await 之后、又把这几个 await 放在 try 之外：落在这个窗口里的
+    取消要么两头落空（查表查不到、标记又已经读过了），要么当成优雅退出往外抛——消息留在 PEL
+    里，十分钟后被下一个 worker 领回来**再跑一遍**，而登记表里还挂着一条早已结束的句柄。
+    """
+    ran = _stub_agent(monkeypatch)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _slow_drop(thread_id: str, *, turn_id: str) -> None:
+        entered.set()
+        await release.wait()
+
+    monkeypatch.setattr(worker.clarification, "drop_stale_waiter", _slow_drop)
+    intent = server.IntentTask.create(task_id="ct-4", thread_id="ct-4", query="买帐篷")
+    running = asyncio.create_task(worker.handle_task(intent, queue))
+    await asyncio.wait_for(entered.wait(), 2.0)
+
+    assert control.cancel_local(task_id="ct-4") is True  # 登记先于第一个 await，查得到
+    await asyncio.wait_for(running, 2.0)  # 正常返回，没有 CancelledError 漏出去
+
+    assert ran == []  # 没跑到 run_agent
+    status = await queue.get_status("ct-4")
+    assert status is not None and status.state == "cancelled"
+    assert control.cancel_local(task_id="ct-4") is False  # 在飞登记已摘
+
+
 # ---------- POST /api/clarify/{thread_id}：没有 WS 的调用方也能回答提问 ----------
 async def test_clarify_endpoint_delivers_to_a_local_waiter(client: AsyncClient) -> None:
     """本进程就有人等 → 就地 resolve。前端不用这个口子（它走 WS），脚本 / 冒烟用它。"""

@@ -190,7 +190,9 @@ def _save_trace(session_dir: Path, messages: Sequence[Msg]) -> None:
         logger.warning("写完整对话轨迹失败（session_dir=%s），降级跳过", session_dir, exc_info=True)
 
 
-async def _turn_cache_key(query: str, user_id: str | None, *, first_turn: bool) -> str | None:
+async def _turn_cache_key(
+    query: str, user_id: str | None, *, first_turn: bool, prompt_version: str = ""
+) -> str | None:
     """算这一轮的整轮缓存键；不参与缓存时返回 ``None``（关着 / 不是干净的第一轮 / 算不出来）。
 
     返回 ``None`` 同时意味着**本轮结束也不写缓存**——查与写用同一个判据，不会出现「查的时候说
@@ -201,7 +203,10 @@ async def _turn_cache_key(query: str, user_id: str | None, *, first_turn: bool) 
     try:
         entries = await get_store().read(user_id or "")
         return turn_cache_key(
-            buyer=user_id or "", prefs_fp=preference_fingerprint(entries), query=query
+            buyer=user_id or "",
+            prefs_fp=preference_fingerprint(entries),
+            query=query,
+            prompt_version=prompt_version,
         )
     except Exception:
         # 偏好读不到就宁可不缓存：拿一个「假装没有偏好」的指纹去命中，等于把别人的偏好结果给你。
@@ -342,7 +347,10 @@ async def run_agent(
         # 「干净的第一轮」= 两条恢复腿都空。**只看 prior_turns 是不够的**：有 agent_state.json 时
         # 那条腿根本不会去读历史（恒为空列表），于是第二轮会被误判成第一轮、直接命中上一轮的答案。
         cache_key = await _turn_cache_key(
-            query, user_id, first_turn=prior_state is None and not prior_turns
+            query,
+            user_id,
+            first_turn=prior_state is None and not prior_turns,
+            prompt_version=ab_assign.version,
         )
         if cache_key is not None:
             cached = get_turn_cache().get(cache_key)

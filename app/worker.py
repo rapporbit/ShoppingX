@@ -35,7 +35,7 @@ from contextlib import suppress
 from typing import Any
 
 from app.agent.orchestrator import run_agent
-from app.api import clarification, control
+from app.api import clarification, control, monitor
 from app.config import store as config_store
 from app.db.session import init_db
 from app.observability.logging import configure_logging
@@ -79,23 +79,35 @@ async def handle_task(task: IntentTask, queue: TaskQueue | None = None) -> None:
     命中就吞掉取消、把消息 ack 掉、状态落 ``cancelled``；没命中照旧往外抛（= 交还队列）。
     """
     q = queue or get_task_queue()
-    # 排队期间就被取消的：领到手先自查标记，一步都不用跑。这是「还在排队的任务也取消得掉」的落点
-    # ——广播只能送到已经领走它的那个 worker，还没被领走的只能靠这张标记。
-    if await control.consume_cancel_mark(task.task_id):
-        logger.info("任务在排队期间已被取消，跳过：%s（thread=%s）", task.task_id, task.thread_id)
-        await q.set_status(
-            TaskStatus(task_id=task.task_id, state="cancelled", thread_id=task.thread_id)
-        )
-        return
+    # **先登记、再做任何 await**。取消指令与任务领取之间没有先后保证：登记放在第一次 await 之后，
+    # 落在那个窗口里的取消就会两头落空——``cancel_local`` 查表查不到（还没登记）、标记又已经被
+    # 下面的自查读过了（读的时候还没写）。登记先行之后，早到的取消走标记、晚到的取消走登记，
+    # 没有第三种时序。
     current = asyncio.current_task()
     if current is not None:
         control.register_inflight(task.task_id, task.thread_id, current)
-    # 澄清的两件前置：本轮 turn_id 绑上下文（等待令牌要带它），并清掉上一轮崩溃留下的残留令牌
-    # ——否则用户的回复会被转发给一个早已不存在的等待方，界面上表现为「答了没反应」。
-    clarification.set_turn_id(task.task_id)
-    await clarification.drop_stale_waiter(task.thread_id, turn_id=task.task_id)
-    await q.set_status(TaskStatus(task_id=task.task_id, state="running", thread_id=task.thread_id))
+    agent_started = False
     try:
+        # 排队期间就被取消的：领到手先自查标记，一步都不用跑。这是「还在排队的任务也取消得掉」
+        # 的落点——广播只能送到已经领走它的那个 worker，还没被领走的只能靠这张标记。
+        if await control.consume_cancel_mark(task.task_id):
+            logger.info(
+                "任务在排队期间已被取消，跳过：%s（thread=%s）", task.task_id, task.thread_id
+            )
+            await q.set_status(
+                TaskStatus(task_id=task.task_id, state="cancelled", thread_id=task.thread_id)
+            )
+            return
+        # 澄清的两件前置：本轮 turn_id 绑上下文（等待令牌要带它），并清掉上一轮崩溃留下的残留
+        # 令牌——否则用户的回复会被转发给一个早已不存在的等待方，界面上表现为「答了没反应」。
+        # 这几个 await 也在 try 里：落在它们身上的用户取消同样要按「用户取消」收尾（ack 掉、
+        # 落 cancelled），而不是当成优雅退出往外抛——那会让消息留在 PEL 里十分钟后再跑一遍。
+        clarification.set_turn_id(task.task_id)
+        await clarification.drop_stale_waiter(task.thread_id, turn_id=task.task_id)
+        await q.set_status(
+            TaskStatus(task_id=task.task_id, state="running", thread_id=task.thread_id)
+        )
+        agent_started = True
         result = await run_agent(
             task.query,
             task.thread_id,
@@ -108,12 +120,16 @@ async def handle_task(task: IntentTask, queue: TaskQueue | None = None) -> None:
     except asyncio.CancelledError:
         if not control.was_cancelled_locally(task.task_id):
             raise  # 优雅退出：不 ack，留在 PEL 里等下一个 worker 领回重跑
-        # 用户取消：run_agent 的 finally 已经上报 task_cancelled 并把这一轮的账记完（「取消即
-        # 免单」的洞早堵住了，见 session_io.charge_quota）。这里只负责让消息被 ack 掉。
+        # 用户取消：run_agent 跑起来了的话，它的 finally 已经上报 task_cancelled 并把这一轮的账
+        # 记完（「取消即免单」的洞早堵住了，见 session_io.charge_quota）。这里只负责让消息被
+        # ack 掉；取消落在 run_agent 之前那几个 await 上时没人报过事件，得由这里补一条，否则
+        # 前端永远转圈（API 侧只在状态仍是 queued 时补发，而 running 可能已经写进去了）。
         if current is not None:
             current.uncancel()  # 取消已被消费，后面几个 await 才不会立刻再抛
         logger.info("任务被用户取消：%s（thread=%s）", task.task_id, task.thread_id)
         with suppress(Exception, asyncio.CancelledError):
+            if not agent_started:
+                await monitor.report_task_cancelled(thread_id=task.thread_id)
             await q.set_status(
                 TaskStatus(task_id=task.task_id, state="cancelled", thread_id=task.thread_id)
             )
