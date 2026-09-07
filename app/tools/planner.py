@@ -716,6 +716,12 @@ async def planner(intent: str) -> PlanOutput:
             get_fast_llm(),
             [("system", get_planner_prompt()), ("user", prior + intent if prior else intent)],
             PlanOutput,
+            # 空表闸：这三个字段一个都没出现 = 模型只回了存根（PlanOutput 全字段带默认值，
+            # model_validate 照过），拆解结果恒定为空、下游直奔空池子，且全程零报错。它们是
+            # 「本轮到底要买什么」的唯一载体——单品类走 category / keywords、跨品类走
+            # bundle_slots，一个都没有就没有任何可执行的意图。重采样一次仍空则抛，走下面的
+            # except 补 end 事件后外抛，由工具外壳转成 [error] + ERROR 让主 loop 看得见。
+            required_any=("category", "keywords", "bundle_slots"),
         )
     except Exception:
         # 模型调用失败也要补一条 end 事件，否则前端（M8）会看到工具「永远在跑」。

@@ -384,6 +384,10 @@ async def score_against_rubric(
             prior_context,
         ),
         _ScoreSheet,
+        # 空表闸：judge 回一张 scores=[] 的存根时，aggregate 会算出「P0 一条没破 →
+        # overall_pass=True」——评测越坏分越绿，这种假绿会直接污染回归结论。宁可整条 case
+        # 报错（本函数的异常本就由跑批脚本捕获记为该条失败）。
+        required_any=("scores",),
     )
     for s in sheet.scores:
         if s.id in by_id and not s.dimension:

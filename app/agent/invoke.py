@@ -118,7 +118,47 @@ def _unwrap_structured(content: Any, schema: type[BaseModel]) -> Any:
     return content
 
 
-async def call_structured(model: Any, prompt: Prompt, schema: type[T]) -> T:
+class EmptyStructuredOutput(RuntimeError):
+    """连续两次采样都拿回一张「校验得过的空表」——调用方据此走各自的降级。
+
+    单独立一个异常类（而不是复用 ``ValueError``）是为了让调用点能把它**和真的解析失败区分开**：
+    解析失败是「这次请求坏了」，空表是「模型在这条 prompt 上退化了」，两者该记的日志和该给用户
+    的话都不一样。带上 schema 名与判据字段，是因为线上只看得到一行日志。
+    """
+
+    def __init__(self, schema_name: str, missing: Sequence[str]) -> None:
+        self.schema_name = schema_name
+        self.missing = tuple(missing)
+        super().__init__(
+            f"{schema_name} 连续两次结构化输出都是空表："
+            f"{'/'.join(self.missing)} 一个都没出现（模型只回了存根）"
+        )
+
+
+def _present_fields(instance: BaseModel, raw: Any) -> set[str]:
+    """这次模型**真正吐出来过**的字段名 —— 判据是**剥壳后原始 dict 的键**。
+
+    为什么判「键出现过」而不是「值不等于默认值」：用户确实没给预算时 ``budget_amount=None``
+    是合法结果，按值比较会把它误判成空表，于是每条无预算的 query 都白白多采样一次。同理，
+    模型显式吐 ``"category": null`` 是它在认真回答「这项没有」（本仓多个 schema 挂了
+    ``drop_none_values`` 把显式 null 归一为缺席），不是退化成存根，该算出现过。
+
+    为什么**不用** ``model_fields_set``：它记的不只是输入里的键，还包括 ``mode="after"``
+    校验器自己赋过的字段。实测 ``PlanOutput`` 的 ``_resolve_exclude_strength`` /
+    ``_clean_bundle_slots`` 会在校验期给 ``exclude_keywords`` / ``bundle_slots`` 赋值，于是
+    对一张 ``{"tasks": [...]}`` 的存根，``model_fields_set`` 里凭空多出这两个名字——闸门恒不
+    触发，本身就成了一处静默失效。只有 ``raw`` 不是 dict（供应商吐了别的形态）时才退回它。
+    """
+    if not isinstance(raw, dict):
+        return set(instance.model_fields_set)
+    # 模型按 alias 吐键时归一回字段名，否则 required_any 写字段名会匹配不上。
+    alias_to_name = {f.alias: n for n, f in type(instance).model_fields.items() if f.alias}
+    return {alias_to_name.get(k, k) for k in raw if isinstance(k, str)}
+
+
+async def call_structured(
+    model: Any, prompt: Prompt, schema: type[T], *, required_any: Sequence[str] = ()
+) -> T:
     """给模型一段 prompt，拿回一个**已验证**的 ``schema`` 实例。
 
     取代 LangChain 的 ``llm.with_structured_output(S, method="function_calling").ainvoke(...)``。
@@ -145,18 +185,46 @@ async def call_structured(model: Any, prompt: Prompt, schema: type[T]) -> T:
 
     失败照抛（``StructuredOutputError`` / 校验错），由调用方决定降级——各处的降级语义不一样
     （planner 回退规则解析、curator 整轮跳过），收在这里只会把它们抹平。
+
+    ``required_any``:**空表闸**。剥完壳、校验完了，结果里这几个字段一个都没出现过 → 这次采样
+    是张存根（实测：DashScope 上的 ``deepseek-v4-flash`` 被 forced tool_choice 时只回
+    ``{"tasks":["recommend"]}``；auto 策略也偶发回 0 个字段），**重采样一次**；第二次仍空则抛
+    :class:`EmptyStructuredOutput`。为什么非得有这道闸：本仓的输出 schema 几乎全字段带默认值，
+    ``model_validate(存根)`` 校验照过，调用方拿到一张「看起来合法」的空表，全程零报错——planner
+    恒定解析出空意图、judge 恒定 0 条打分，症状全是静默跑空。默认不传 = 老行为一字不变
+    （空结果本就合法的调用点——偏好解析、记忆管家——不该被逼着重采样）。
     """
-    messages = to_msgs(prompt)
+    unknown = [name for name in required_any if name not in schema.model_fields]
+    if unknown:
+        # 字段改名后这道闸会静默失效（永远判不出空表），比当场炸难查得多。
+        raise ValueError(f"required_any 里的字段不在 {schema.__name__} 上：{unknown}")
+    msgs = to_msgs(prompt)
+    for attempt in range(2):
+        response = await _generate_auto_first(model, msgs, schema)
+        charge_usage(getattr(model, "model", ""), getattr(response, "usage", None))
+        raw = _unwrap_structured(response.content or {}, schema)
+        out = schema.model_validate(raw)
+        if not required_any or _present_fields(out, raw) & set(required_any):
+            return out
+        logger.warning(
+            "%s 第 %d 次结构化输出是空表（%s 一个都没出现），重采样",
+            schema.__name__,
+            attempt + 1,
+            "/".join(required_any),
+        )
+    raise EmptyStructuredOutput(schema.__name__, required_any)
+
+
+async def _generate_auto_first(model: Any, msgs: list[Msg], schema: type[BaseModel]) -> Any:
+    """一次结构化采样：显式 ``tool_choice=auto`` 优先，模型没调工具 / 供应商拒绝时回落框架梯。"""
     fallback_on: tuple[type[Exception], ...] = (StructuredOutputError, *_fallback_exceptions(model))
     try:
-        response = await model.generate_structured_output(
-            messages, schema, tool_choice=ToolChoice(mode="auto")
+        return await model.generate_structured_output(
+            msgs, schema, tool_choice=ToolChoice(mode="auto")
         )
     except fallback_on as exc:
         logger.info("结构化输出 auto 路径未产出（%s），回落框架策略梯", type(exc).__name__)
-        response = await model.generate_structured_output(messages, schema)
-    charge_usage(getattr(model, "model", ""), getattr(response, "usage", None))
-    return schema.model_validate(_unwrap_structured(response.content or {}, schema))
+        return await model.generate_structured_output(msgs, schema)
 
 
 def _fallback_exceptions(model: Any) -> tuple[type[Exception], ...]:
