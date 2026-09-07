@@ -123,6 +123,18 @@ export type TurnTokens = {
   cache_hit_rate?: number;
 };
 
+// 本轮的「实验与自进化」归属（批 4）：提示词版本 / A/B 桶号 / 注入了哪几条策略 / 读了哪些 skill。
+// 随 task_result 下发、随 turns 落盘回看。此前这些只在 Langfuse trace 里看得到，产品面全盲。
+// ab_bucket = -1 表示匿名（不参与实验）；in_experiment=false 即对照组 / 匿名 / 实验未开。
+// MCP 工具调用不在这里：它们发生在 SearchAgent（worker）那侧，主 loop 看不到。
+export type TurnExperiment = {
+  prompt_version: string;
+  ab_bucket: number;
+  in_experiment: boolean;
+  strategies: string[];
+  skills: string[];
+};
+
 // 长期偏好（GET /api/preferences/{user_id} 返回）。
 // dedup_key 是删除时的 handle；source 区分「Agent 学到的」和「你手填的」。
 //
@@ -194,6 +206,7 @@ export type HistoryTurn = {
   activity?: AguiEvent[];
   elapsed_ms?: number; // 本轮总耗时（毫秒），前端在该轮右下角显示「用时」。
   tokens?: TurnTokens; // 本轮 token 用量，前端在该轮右下角与「用时」并排显示「token 消耗」。
+  experiment?: TurnExperiment; // 提示词版本 / A/B 桶 / 策略 / skill，回看时画成一行 chip。
 };
 
 // 侧栏历史列表的一条会话。后端按 threadId 存逐轮对话，但「有哪些会话」这层索引后端没有，

@@ -8,7 +8,7 @@ import {
   removeFavorite,
   type Quota,
 } from "./api";
-import type { ProductItem } from "./types";
+import type { ProductItem, TurnExperiment } from "./types";
 import { ActivityFeed } from "./components/ActivityFeed";
 import { ClarificationChoices } from "./components/ClarificationChoices";
 import { FavoritesDrawer } from "./components/FavoritesDrawer";
@@ -111,6 +111,38 @@ function formatTokens(n: number): string {
   if (n < 1000) return String(n);
   if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
   return `${(n / 1_000_000).toFixed(2)}M`;
+}
+
+// 本轮「实验与自进化」chip 行：提示词版本（实验组高亮）/ 注入的策略 / 读过的 skill。
+// 对照组且没策略没 skill 时整行不画——绝大多数轮次就是这样，别让每条回复都挂一排灰字。
+function ExperimentChips({ exp }: { exp: TurnExperiment }) {
+  const hasStrategies = exp.strategies.length > 0;
+  const hasSkills = exp.skills.length > 0;
+  if (!exp.in_experiment && !hasStrategies && !hasSkills) return null;
+  return (
+    <div className="turn-experiment" aria-label="本轮实验与自进化归属">
+      <span
+        className={`exp-chip${exp.in_experiment ? " exp-chip-live" : ""}`}
+        title={
+          exp.ab_bucket < 0
+            ? "匿名，不参与提示词 A/B"
+            : `提示词 A/B 桶 ${exp.ab_bucket}${exp.in_experiment ? "（实验组）" : "（对照组）"}`
+        }
+      >
+        prompt {exp.prompt_version}
+      </span>
+      {exp.strategies.map((k) => (
+        <span key={`s-${k}`} className="exp-chip exp-chip-strategy" title="本轮注入的成功策略（system prompt 末尾）">
+          策略 {k.split(":").pop()}
+        </span>
+      ))}
+      {exp.skills.map((k) => (
+        <span key={`k-${k}`} className="exp-chip exp-chip-skill" title="本轮按 description 读取的 skill 正文">
+          skill {k}
+        </span>
+      ))}
+    </div>
+  );
 }
 
 // 空态的示例意图：点一下即作为 query 发起，降低首屏「不知道说什么」的门槛。
@@ -375,6 +407,9 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
 
                           {/* 本轮结束后在右下角用小字标注用时 + token 消耗（后端权威口径，实时与回看一致）。
                               token 总量主显，hover 看输入/输出/成本拆分（全树记账，含 fork 子 Agent）。 */}
+                          {/* 实验与自进化归属：提示词版本 / 注入策略 / 读过的 skill（后端随 task_result 下发，回看同源）。 */}
+                          {turn.experiment && <ExperimentChips exp={turn.experiment} />}
+
                           {(turn.elapsedMs != null || turn.tokens != null) && (
                             <div className="turn-elapsed">
                               {turn.elapsedMs != null && formatElapsed(turn.elapsedMs)}
