@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field, model_validator
 from app.agent.invoke import call_structured
 from app.agent.tracing import record_rubric_scores
 from app.eval.trace import extract_tool_calls
+from app.utils.env import env_bool
 
 logger = logging.getLogger(__name__)
 
@@ -379,9 +380,7 @@ async def score_against_rubric(
     sheet = await call_structured(
         get_judge_llm(),
         _with_prior(
-            _SCORE_PROMPT.format(
-                query=query, rubric_text=rubric_text, agent_output=agent_output
-            ),
+            _SCORE_PROMPT.format(query=query, rubric_text=rubric_text, agent_output=agent_output),
             prior_context,
         ),
         _ScoreSheet,
@@ -419,6 +418,51 @@ def aggregate(query: str, rubric: Rubric, scores: list[CriterionScore]) -> Rubri
     )
 
 
+#: P0 复核开关（默认开）。judge 单样本有 0↔100 对翻的前科（记忆 rubric-judge-calibration-pitfalls，
+#: 批 4 的 q28 又添一例：同一份输出三次采样 0 / 0 / 90）。一票否决的红线不该由一次采样说了算：
+#: 首判有 P0 fail 时**独立再打一次分**，只有两次都 fail 的红线才算破。代价只落在「首判破红线」的
+#: 那些 case 上（一次额外 judge 调用），全绿的 case 一分钱不多花。
+#: 方向是刻意的：它只会把假阳性翻回来、不会把假阴性翻出去——本仓 judge 的系统性偏差就是假阳性
+#: 一侧（轨迹当泄露、软偏好升 P0）。要对比历史基线时记得两边同一把尺子（``RUBRIC_P0_RECHECK=0``）。
+P0_RECHECK = env_bool("RUBRIC_P0_RECHECK", True)
+
+
+async def _recheck_p0(
+    query: str,
+    rubric: Rubric,
+    agent_output: str,
+    prior_context: str,
+    scores: list[CriterionScore],
+) -> list[CriterionScore]:
+    """首判有 P0 fail → 独立复判一次；复判 pass 的红线翻回 pass（rationale 保留两次判语）。"""
+    failed = {s.id for s in scores if s.tier == "P0" and s.passed is False}
+    if not failed:
+        return scores
+    second = {
+        s.id: s for s in await score_against_rubric(query, rubric, agent_output, prior_context)
+    }
+    out: list[CriterionScore] = []
+    for s in scores:
+        again = second.get(s.id) if s.id in failed else None
+        if again is None:
+            out.append(s)
+            continue
+        if again.passed is True:
+            logger.info("P0 复核翻绿：%s（%s）", s.id, s.dimension or "")
+            s = s.model_copy(
+                update={
+                    "passed": True,
+                    "rationale": f"[复核翻绿] 首判：{s.rationale} ‖ 复核：{again.rationale}",
+                }
+            )
+        else:
+            s = s.model_copy(
+                update={"rationale": f"[复核维持] {s.rationale} ‖ 复核：{again.rationale}"}
+            )
+        out.append(s)
+    return out
+
+
 async def evaluate(
     query: str,
     run_result: dict[str, Any],
@@ -451,6 +495,8 @@ async def evaluate(
         query, constraints, intent, use_cache=use_cache, prior_context=prior_context
     )
     scores = await score_against_rubric(query, rubric, agent_output, prior_context)
+    if P0_RECHECK:
+        scores = await _recheck_p0(query, rubric, agent_output, prior_context, scores)
     result = aggregate(query, rubric, scores)
     record_rubric_scores(run_result.get("trace_id"), result)
     return result
