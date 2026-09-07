@@ -19,6 +19,7 @@ import type {
   ProductItem,
   SessionMeta,
   SessionSnapshot,
+  TurnExperiment,
   TurnTokens,
 } from "../types";
 
@@ -49,6 +50,8 @@ export type Turn = {
   elapsedMs: number | null;
   // 本轮 token 用量（后端全树记账）。完成后才有值，与「用时」并排显示「token 消耗」。
   tokens: TurnTokens | null;
+  // 本轮实验与自进化归属（提示词版本 / A/B 桶 / 策略 / skill）。完成后才有值，画成一行小 chip。
+  experiment: TurnExperiment | null;
   // Agent 正在等待用户澄清时的问题文本（status="waiting" 时有值）。
   clarificationQuestion: string | null;
   // 澄清带的可点选项（ask_user 传了 options 时有值）：前端在展示区内嵌一张可点选卡片、不复用聊天框。
@@ -134,6 +137,7 @@ function rebuildTurns(history: HistoryTurn[]): Turn[] {
         errorMsg: null,
         elapsedMs: null,
         tokens: null,
+        experiment: null,
         clarificationQuestion: null,
         learnedPrefs: [],
       });
@@ -144,6 +148,7 @@ function rebuildTurns(history: HistoryTurn[]): Turn[] {
       last.events = h.activity ?? [];
       last.elapsedMs = h.elapsed_ms ?? null;
       last.tokens = h.tokens ?? null;
+      last.experiment = h.experiment ?? null;
     }
   }
   return turns;
@@ -304,6 +309,7 @@ export function useShoppingXTask() {
               errorMsg: null,
               elapsedMs: null,
               tokens: null,
+              experiment: null,
               clarificationQuestion: pendingQuestion,
               clarificationOptions: pendingOptions,
               clarificationMultiSelect: pendingMulti,
@@ -468,6 +474,7 @@ export function useShoppingXTask() {
               : t.items,
             elapsedMs: (evt.data.elapsed_ms as number) ?? null,
             tokens: (evt.data.tokens as TurnTokens) ?? null,
+            experiment: (evt.data.experiment as TurnExperiment) ?? null,
             status: "done",
           }));
           setStatusSafe("done");
@@ -565,7 +572,7 @@ export function useShoppingXTask() {
       // 追加一条活动轮（其余轮已冻结为历史）。不复位别的轮，多轮对话流逐条累加。
       setTurns((prevTurns) => [
         ...prevTurns,
-        { id: newId(), query, images: [], events: [], items: [], orderCard: null, finalAnswer: null, streamingText: null, status: "connecting", errorMsg: null, elapsedMs: null, tokens: null, clarificationQuestion: null, learnedPrefs: [] },
+        { id: newId(), query, images: [], events: [], items: [], orderCard: null, finalAnswer: null, streamingText: null, status: "connecting", errorMsg: null, elapsedMs: null, tokens: null, experiment: null, clarificationQuestion: null, learnedPrefs: [] },
       ]);
       setStatusSafe("connecting");
 

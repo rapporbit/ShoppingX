@@ -473,6 +473,35 @@ button:disabled {
   font-variant-numeric: tabular-nums;
 }
 
+/* 实验与自进化 chip 行（提示词版本 / 策略 / skill）：与用时行同级的小字，靠右。 */
+.turn-experiment {
+  align-self: flex-end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+.exp-chip {
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  background: var(--surface-soft);
+  font-variant-numeric: tabular-nums;
+}
+.exp-chip-live {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+.exp-chip-strategy {
+  border-style: dashed;
+}
+.exp-chip-skill {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
 /* ============================ 活动流 / 思考过程 ============================
    一比一对齐 Accio (phoenix-web) 的思考过程组件，动画参数取自其线上样式表：
    - 思考中的标题：渐变文字扫光（background-clip:text + background-position 位移），3.2s linear infinite

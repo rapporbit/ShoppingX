@@ -256,6 +256,47 @@ async def _replay_cached_turn(
     }
 
 
+def _skills_read(messages: Sequence[Msg]) -> list[str]:
+    """本轮主 Agent 读过的 skill 名（``Skill(skill=…)`` 的入参），按首次出现顺序去重。
+
+    ``Skill`` 是框架内置工具、不过 harness 的工具中间件，所以没有 tool_start / tool_end 事件；
+    要让产品面看见「这轮读了哪个 skill」，只能从消息里的 tool_call 块回收。入参可能是 dict
+    也可能是 JSON 串（取决于框架版本怎么存），两种都认。
+    """
+    out: list[str] = []
+    for msg in messages:
+        for block in getattr(msg, "content", []) or []:
+            if getattr(block, "type", None) != "tool_call" or getattr(block, "name", "") != "Skill":
+                continue
+            raw = getattr(block, "input", None)
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except ValueError:
+                    raw = None
+            name = str((raw or {}).get("skill") or "") if isinstance(raw, dict) else ""
+            if name and name not in out:
+                out.append(name)
+    return out
+
+
+def _experiment_summary(ab_assign: Any, messages: Sequence[Msg]) -> dict[str, Any]:
+    """本轮「实验与自进化」归属：提示词版本 / A/B 桶 / 注入的策略 / 读过的 skill。
+
+    MCP 工具**不在这里**：它们只发给 SearchAgent，调用发生在 worker 的消息里，主 loop 看不到，
+    且同样不过 harness（见 mcp_registry 的诚实标注）——要看去 Langfuse 的 acting span。
+    """
+    from app.harness.hooks.strategy_inject import injected_strategy_keys
+
+    return {
+        "prompt_version": ab_assign.version,
+        "ab_bucket": ab_assign.bucket,
+        "in_experiment": bool(ab_assign.in_experiment),
+        "strategies": list(injected_strategy_keys()),
+        "skills": _skills_read(messages),
+    }
+
+
 def _called_tool_names(messages: Sequence[Msg]) -> set[str]:
     """本轮出现过的工具名（判「能不能入缓存」用）。
 
@@ -480,6 +521,7 @@ async def run_agent(
                 "cache_hit_rate": round(cache_read / inp, 4) if inp else 0.0,
             }
 
+        experiment = _experiment_summary(ab_assign, messages)
         await append_turn(
             thread_id,
             query,
@@ -490,6 +532,7 @@ async def run_agent(
             tokens=tokens,
             session_dir=session_dir,
             images=list(image_paths or ()),
+            experiment=experiment,
         )
         _save_trace(session_dir, messages)
 
@@ -499,7 +542,7 @@ async def run_agent(
             await record_search_history(user_id or "", f"搜了「{query[:60]}」")
 
         await monitor.report_task_result(
-            final_text, items=items, elapsed_ms=elapsed_ms, tokens=tokens
+            final_text, items=items, elapsed_ms=elapsed_ms, tokens=tokens, experiment=experiment
         )
 
         # 记忆判定（后处理）：主回复已下发，用户零感知延迟。curator 只判长期库，P_t 归 planner。

@@ -225,6 +225,7 @@ async def append_turn(
     tokens: dict[str, Any] | None = None,
     session_dir: Path | None = None,
     images: list[str] | None = None,
+    experiment: dict[str, Any] | None = None,
 ) -> None:
     """把本轮 ``user → assistant`` 这一对追加进 ``messages`` 表（累加写，供下次续聊 / 前端回看）。
 
@@ -246,6 +247,8 @@ async def append_turn(
         assistant["elapsed_ms"] = elapsed_ms
     if tokens is not None:
         assistant["tokens"] = tokens
+    if experiment:
+        assistant["experiment"] = experiment  # 提示词版本 / A/B 桶 / 策略 / skill（回看那行 chip）
     user: dict[str, Any] = {"role": "user", "content": query}
     if images:
         # 参考图挂 user 轮：它是用户这次「说的话」的一部分，回看时该跟 query 一起显示。
@@ -260,5 +263,3 @@ async def append_turn(
             await db.commit()
     except SQLAlchemyError as exc:
         logger.warning("追加对话轮次失败，本轮未落库（thread=%s）：%s", thread_id, exc)
-
-

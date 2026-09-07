@@ -416,6 +416,7 @@ async def report_task_result(
     items: list[dict[str, Any]] | None = None,
     elapsed_ms: int | None = None,
     tokens: dict[str, Any] | None = None,
+    experiment: dict[str, Any] | None = None,
 ) -> None:
     """任务完成、给出最终回答时上报（前端渲染最终清单 + 商品卡）。
 
@@ -436,6 +437,10 @@ async def report_task_result(
         data["elapsed_ms"] = elapsed_ms
     if tokens is not None:
         data["tokens"] = tokens
+    if experiment:
+        # 本轮的「实验与自进化」归属（批 4）：提示词版本 / A/B 桶号 / 注入了哪几条策略 / 读了哪些
+        # skill。前端画成一行小 chip——这些东西此前只在 Langfuse trace 里看得到，产品面全盲。
+        data["experiment"] = experiment
     await _emit(EVENT_TASK_RESULT, "任务完成", data)
 
 
