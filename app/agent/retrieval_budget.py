@@ -62,6 +62,11 @@ class _TreeRetrieval:
     # 隔离作用域内，按 thread_id 记「这个子任务自己是否搜到过候选」——只在 isolated_retrieval_scope
     # 内才写入 / 读取，供 web_search_allowed 在隔离场景下只看自己、不看全树。
     scoped_nonempty: dict[str, int] = field(default_factory=dict)
+    # ── item_search 探测召回（filtered_out）的全树汇总，供「该建议放宽预算还是该补搜」判定 ──
+    probe_runs: int = 0  # 跑过探测的 item_search 次数（＝带硬过滤且命中不足的那些）
+    probe_price_blocked: int = 0  # 探测差集里「只差预算」的条数
+    probe_other_blocked: int = 0  # 探测差集里因排除词 / 品牌 / 评分被挡的条数
+    probe_hits: int = 0  # 上述那些 item_search 各自的实际命中数之和
 
 
 # session_dir(str) → 该任务一棵 fork 树的检索状态。主 / 各子 Agent 共享同一条目。
@@ -130,6 +135,40 @@ def note_item_search(total_recall: int) -> None:
             tid = get_thread_id()
             if tid is not None:
                 st.scoped_nonempty[tid] = st.scoped_nonempty.get(tid, 0) + 1
+
+
+def note_filtered_probe(*, hits: int, price_blocked: int, other_blocked: int) -> None:
+    """登记一次 item_search 探测召回的结论（见 ``app.tools.item_search`` 的探测段）。
+
+    全树聚合（同 session_dir）：跨平台并行时各 worker 各搜一份，「预算内到底有没有货」是
+    合流后的结论，不该由某一个平台单独说了算。
+    """
+    st = _state()
+    if st is None:
+        return
+    st.probe_runs += 1
+    st.probe_hits += max(0, hits)
+    st.probe_price_blocked += max(0, price_blocked)
+    st.probe_other_blocked += max(0, other_blocked)
+
+
+def budget_relax_due() -> bool:
+    """是否已有确凿证据表明「库里有相关货，但在用户预算内一件都没有」。
+
+    判据刻意保守（三条全要）——它要否掉的是补搜闸的「带 price_usd_max 重搜一次」，误判的代价
+    是本可捞回的货被放弃：
+
+    1. 探测跑过且**只**被价格挡（``other_blocked == 0``）：混着排除词 / 低评分被挡时，放宽预算
+       也未必能买，说「放宽预算就有」是误导；
+    2. 带过滤的那几次检索命中数合计为 0：只要捞到过一件预算内的货，就轮不到谈放宽；
+    3. 至少有一条被价格挡下（``price_blocked > 0``）——否则没有任何「库里其实有货」的证据。
+
+    无 session 作用域（单测直调）返回 False：失效方向中性，维持既有补搜行为。
+    """
+    st = _state(create=False)
+    if st is None:
+        return False
+    return st.probe_price_blocked > 0 and st.probe_other_blocked == 0 and st.probe_hits == 0
 
 
 def web_search_allowed() -> bool:

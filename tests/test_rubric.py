@@ -311,3 +311,106 @@ async def test_evaluate_passes_trace_id_from_run_result(monkeypatch: Any) -> Non
 
     assert seen["tid"] == "trace-xyz"
     assert seen["res"] is result
+
+
+# ---------- prior_context：跨轮 / 跨会话事实注入 judge（批 3-2）----------
+def test_prior_block_is_noop_when_empty() -> None:
+    """没写前情的 case 必须逐字不变——它们的尺子要与既有基线一致，否则跨批分数不可比。"""
+    from app.eval import rubric as R
+
+    assert R._with_prior("原文", "") == "原文"
+    assert R._with_prior("原文", "   ") == "原文"
+    assert "上一轮给过清单" in R._with_prior("原文", "上一轮给过清单")
+    assert R._with_prior("原文", "背景").endswith("原文")  # 前情前置，原 prompt 不被打断
+
+
+def test_cache_key_stable_without_prior_and_changes_with_it() -> None:
+    """加前情只让**这一条** case 的尺子重建，不连累其余几十条一起失效。"""
+    from app.eval import rubric as R
+
+    assert R._rubric_cache_key("q", {}, "shopping") == R._rubric_cache_key("q", {}, "shopping", "")
+    with_prior = R._rubric_cache_key("q", {}, "shopping", "背景")
+    assert R._rubric_cache_key("q", {}, "shopping") != with_prior
+
+
+async def test_generate_rubric_puts_prior_into_judge_prompt(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    from app.eval import rubric as R
+
+    seen: dict[str, Any] = {}
+
+    async def _fake_structured(_llm: Any, prompt: str, _schema: Any) -> Rubric:
+        seen["prompt"] = prompt
+        return Rubric(criteria=[RubricCriterion(tier="P0", dimension="订单", criterion="不许编造")])
+
+    monkeypatch.setattr(R, "call_structured", _fake_structured)
+    monkeypatch.setattr("app.agent.llm.get_judge_llm", lambda: object())
+
+    await R.generate_rubric(
+        "把上次那单取消了",
+        None,
+        "shopping",
+        use_cache=False,
+        cache_dir=tmp_path,
+        prior_context="该用户此前已下过一张 CONFIRMED 订单",
+    )
+    assert "CONFIRMED 订单" in seen["prompt"]
+    assert "购物意图：把上次那单取消了" in seen["prompt"]  # 原 prompt 完整保留
+
+
+async def test_score_against_rubric_also_sees_prior(monkeypatch: Any) -> None:
+    """打分那次也要给前情：细则写得再对，不知道背景照样把正确引用判成编造。"""
+    from app.eval import rubric as R
+
+    seen: dict[str, Any] = {}
+
+    async def _fake_structured(_llm: Any, prompt: str, _schema: Any) -> Any:
+        seen["prompt"] = prompt
+        return R._ScoreSheet(scores=[CriterionScore(id="P0-1", tier="P0", passed=True)])
+
+    monkeypatch.setattr(R, "call_structured", _fake_structured)
+    monkeypatch.setattr("app.agent.llm.get_judge_llm", lambda: object())
+
+    rubric = Rubric(criteria=[RubricCriterion(tier="P0", dimension="订单", criterion="不许编造")])
+    await R.score_against_rubric("q", rubric, "回答", "上一轮给过两件真实商品")
+    assert "上一轮给过两件真实商品" in seen["prompt"]
+
+
+async def test_evaluate_forwards_prior_to_both_judge_calls(monkeypatch: Any) -> None:
+    from app.eval import rubric as R
+
+    seen: dict[str, Any] = {}
+
+    async def _fake_gen(*args: Any, **kw: Any) -> Rubric:
+        seen["gen"] = kw.get("prior_context")
+        return Rubric(criteria=[RubricCriterion(tier="P2", dimension="覆盖度", criterion="1-5")])
+
+    async def _fake_score(_q: Any, _r: Any, _o: Any, prior: str = "") -> list[CriterionScore]:
+        seen["score"] = prior
+        return [CriterionScore(id="P2-1", tier="P2", score=4)]
+
+    monkeypatch.setattr(R, "generate_rubric", _fake_gen)
+    monkeypatch.setattr(R, "score_against_rubric", _fake_score)
+    monkeypatch.setattr(R, "record_rubric_scores", lambda *_: None)
+
+    await R.evaluate("q", {"final_text": "x", "items": [], "messages": []}, prior_context="背景")
+    assert seen["gen"] == seen["score"] == "背景"
+
+
+def test_prior_context_prefers_explicit_then_falls_back_to_user_turns() -> None:
+    """种子集写死的前情优先；多轮 case 没写就用**用户前几轮的原话**兜底。
+
+    兜底刻意不含 Agent 的实际回答——尺子必须与被测对象无关，否则 Agent 变差时尺子跟着变松。
+    """
+    from scripts.eval.run_rubric import _prior_context
+
+    assert _prior_context({"query": "q"}) == ""  # 单轮且没写 → 不注入，行为与从前一致
+    assert _prior_context({"query": "q", "turns": ["q"]}) == ""  # 单轮 turns 同理
+
+    explicit = _prior_context({"prior_context": "库里没有这张单", "turns": ["a", "b"]})
+    assert explicit == "库里没有这张单"
+
+    fallback = _prior_context({"turns": ["推荐两个包，预算300", "第二个我要了"]})
+    assert "第 1 轮用户说：推荐两个包，预算300" in fallback
+    assert "第二个我要了" not in fallback  # 最后一轮是被评的那轮，不算前情

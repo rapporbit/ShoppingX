@@ -34,6 +34,19 @@ dependencies = [
     # 服务的部署照样能跑（连不上会熔断降级，语义不变）。
     "redis>=5.0",
     "agentscope>=2.0.7,<3",
+    # MCP 两侧（批 4-3）。agentscope 本来就把它拖进来了（agentscope.mcp 依赖它），但
+    # app/mcp/*.py 是**直接** import mcp.server.fastmcp 的——直接依赖就该写进来，否则哪天
+    # agentscope 换掉这条依赖，我们的 server 会在一次 uv sync 之后凭空消失。
+    "mcp>=1.9",
+]
+
+[project.optional-dependencies]
+# 换库驱动（批 2）。**刻意不进主依赖**：默认部署是 SQLite（``var/globex.db``），多装两个数据库
+# 驱动只是让镜像变大、且 asyncpg 要编译。真把 DATABASE_URL 指向 MySQL / PostgreSQL 时才装：
+# ``uv sync --extra db``。app/db/session.py 已按驱动分支好池参数，装上即用，代码零改动。
+db = [
+    "aiomysql>=0.3.2",
+    "asyncpg>=0.31.0",
 ]
 
 [dependency-groups]

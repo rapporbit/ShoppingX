@@ -28,6 +28,8 @@ from app.agent.prompts import get_system_prompt, get_worker_system_prompt
 from app.agent.tool_registry import build_toolkit
 from app.agent.tracing import tracing_middlewares
 from app.harness.adapter import HarnessAgentAdapter, HarnessSession, HarnessToolAdapter
+from app.harness.middleware import harness
+from app.harness.setup import setup_harness
 from app.utils.env import env_int
 
 # 主 loop 的迭代上限（防失控之②）。这是**真·迭代数**（一轮 Think→Act 算一次），
@@ -43,6 +45,24 @@ TRADE_MAX_ITERS = env_int("TRADE_AGENT_MAX_ITERATIONS", 4)
 # 过渡形态）。开关留着不是为了「以后可能要用」，而是为了能在**同一运行时、同一批 query**
 # 上量出两种结构的差异——否则「Supervisor-Workers 比同质 fork 好」就只是一句话。
 WORKER_MODE = os.environ.get("WORKER_MODE", "split")
+
+
+async def _run_system_prompt_hooks(prompt: str, *, role: str, query: str) -> str:
+    """跑 ``on_system_prompt`` 钩子，返回定稿后的 system prompt。
+
+    钩子的契约是**只许往末尾追加**（``context["append"]`` 收集，本函数负责拼）——不给它们
+    ``system_prompt`` 的改写权。让钩子随便重写整段的代价太大：谁都能悄悄删掉 ``<termination>``
+    那一段，而那正是本仓最贵的一条纪律（Agent 最常见的失败是不收尾死循环）。只许追加，最坏
+    情况也只是尾巴上多了段废话。
+
+    追加内容按注册顺序（priority 升序）拼接，所以同一批策略每轮渲染出的字节完全一致。
+    """
+    setup_harness()  # 幂等；worker 装配时主 loop 早已初始化过，这里只兜离线脚本 / 单测
+    ctx = await harness.run(
+        "on_system_prompt", {"role": role, "query": query, "system_prompt": prompt, "append": []}
+    )
+    extra = [str(x).strip() for x in (ctx.get("append") or []) if str(x).strip()]
+    return prompt + "\n\n" + "\n\n".join(extra) if extra else prompt
 
 
 async def _assemble(
@@ -62,6 +82,8 @@ async def _assemble(
     context / permission / tool 上下文一并接上（见 orchestrator 的 agent_state.json）。
     """
     session = HarnessSession(original_query=original_query, image_paths=image_paths)
+    base_prompt = system_prompt or get_system_prompt()
+    base_prompt = await _run_system_prompt_hooks(base_prompt, role=role, query=original_query)
     # 工具适配器挂在**工具实例**上，所以工具实例不能跨 loop 复用 —— build_toolkit 每次按需
     # 重建一批壳（壳很薄，底下的实现函数与 schema 仍是同一份，见 tool_registry）。
     toolkit = await build_toolkit(role, tool_middlewares=[HarnessToolAdapter(session)])
@@ -75,10 +97,12 @@ async def _assemble(
     middlewares: list[MiddlewareBase] = [HarnessAgentAdapter(session), *tracing_middlewares()]
     agent = Agent(
         name=name,
-        # system prompt 纯静态（无运行时注入）→ 跨轮 / 跨会话字节稳定、可命中 prompt cache。
+        # system prompt 在**装配期**定稿（``on_system_prompt`` 钩子跑完就不再动）→ 一次任务内
+        # 跨轮字节稳定、可命中 prompt cache；钩子唯一允许的动作是往**末尾**追加，前面那段
+        # （role / workflow / tool_policy / …）逐字不变，所以缓存前缀照常从头命中。
         # 主 Agent 用主 prompt；split 模式的 worker 用自己那段专职 prompt（同类 worker 之间
         # 共用一条前缀），clone 模式的 worker 仍与主 Agent 逐字相同——那是对照组的定义。
-        system_prompt=system_prompt or get_system_prompt(),
+        system_prompt=base_prompt,
         # 模型分层：worker 用快档（关思考）砍解码延迟——它在收窄后的子任务里只做 1~2 跳检索，
         # 不需要深推理。换的只是「档位」，工具集与 prompt 仍与主 Agent 一致。
         model=get_fast_llm() if fast_model else get_llm(),

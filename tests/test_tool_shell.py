@@ -167,7 +167,9 @@ async def test_build_toolkit_roles_produce_schemas() -> None:
     main = await build_toolkit("main")
     schemas = await main.get_tool_schemas()
     # 主 Agent 拿全集：15 业务工具 + task_dispatch（单干优先的前提是它自己什么都能干）
-    assert len(schemas) == 16
+    # + 框架内置的 skill 阅读器 Skill（批 4-3：注册了 skill 就自动挂上，只读、权限恒 ALLOW）
+    assert len(schemas) == 17
+    assert {s["function"]["name"] for s in schemas} >= {"task_dispatch", "Skill"}
     assert all(s["function"]["description"] for s in schemas)
 
     with pytest.raises(ValueError):

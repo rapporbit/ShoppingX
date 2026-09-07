@@ -593,6 +593,8 @@ async def test_health(client: AsyncClient) -> None:
     # 双池明细：normal / heavy 各自的容量与排队深度。
     assert set(body["pools"]) == {"normal", "heavy"}
     assert body["pools"]["normal"]["pending"] == 0
+    # 整轮缓存状态（批2-5）：评测脚本靠这一项拒跑，缺了它 run_rubric 就探不到后端开着缓存。
+    assert body["turn_cache"] == {"enabled": False, "entries": 0}
 
 
 # ---------- 偏好写入 / 删除 / 我的资料（偏好管理页的三个写口）----------

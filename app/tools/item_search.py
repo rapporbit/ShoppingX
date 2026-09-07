@@ -10,9 +10,9 @@ filter 维度：platform + price_usd_max + min_rating（Qdrant Range）+ brand_e
 精排**——候选的二次质量把关交给下游 item_picker（按用户偏好精挑）。这样每次检索少一次 rerank
 网络往返，跨平台 fork 放大时收益明显。
 
-**单平台**：一次只搜一个平台。跨平台并行检索由主 loop 通过 ``parallel_dispatch_tool`` fork 多个
-同质子 Agent、每个子 Agent 搜一个平台来完成（fork 三件事之「能并行」），本工具不自己
-循环多平台——把「要不要并行」的决策权留给主 loop 的 fork 判断。
+**单平台**：一次只搜一个平台。跨平台并行检索由主 loop 同轮多派 ``task_dispatch``（每条 demands
+一个平台、由框架批并发）来完成（派发三件事之「能并行」），本工具不自己循环多平台——把
+「要不要并行」的决策权留给主 loop 的派发判断。
 
 **个性化改走「拼进检索词」，不再走 user 塔向量画像**（Mmem）：本工具把用户本轮域内的 like
 偏好原子词并进 query 文本再编码。原来那条路（把所有 like 加权平均成一个 user 向量、按 β 融进
@@ -35,7 +35,7 @@ import numpy as np
 from pydantic import BaseModel
 
 from app.agent.platform_scope import resolve_search_platforms
-from app.agent.retrieval_budget import note_item_search
+from app.agent.retrieval_budget import note_filtered_probe, note_item_search
 from app.api import monitor
 from app.api.context import get_user_id
 from app.memory.assemble import assemble
@@ -46,8 +46,9 @@ from app.recall.towers import TowerClient
 from app.tools._args import StrListArg
 from app.tools._bundle import current_slot, note_slot_searched, register_slot
 from app.tools._candidates import compact_candidates, enrich, register
+from app.tools._diagnostics import report_diagnostics
 from app.tools._shell import tool
-from app.tools.schemas import ItemCandidate
+from app.tools.schemas import FilteredOutItem, ItemCandidate
 from app.utils.env import env_float, env_int
 from app.utils.terms import normalize_terms, term_hits
 
@@ -63,6 +64,11 @@ RELEVANCE_FLOOR: float
 CATEGORY_MATCH_FLOOR: float
 RETRY_MIN_HITS: int
 EXCLUDE_FETCH_BUFFER: int
+PROBE_LIMIT: int
+
+# 回给模型的 filtered_out 条数上限。它是**证据**不是候选池：3 条不足以让模型判断「差得多还是差
+# 一点」（价格分布看不出来），10 条纯烧 token 且这批货本就不该被推荐。5 条够说明问题。
+FILTERED_OUT_CAP = 5
 
 
 def _load_params() -> None:
@@ -72,6 +78,7 @@ def _load_params() -> None:
     """
     global DEFAULT_TOP_K, MAX_TOP_K, SINGLE_PLATFORM_POOL_K, RENDER_CAP
     global RELEVANCE_FLOOR, CATEGORY_MATCH_FLOOR, RETRY_MIN_HITS, EXCLUDE_FETCH_BUFFER
+    global PROBE_LIMIT
 
     # 召回条数默认值：跨平台 fork 时**每个**子 Agent 都要吃一份这么大的候选 JSON——20 条 ≈ 3.7K token
     # fresh（缓存必 miss，因为它是新内容），5 个平台就是 ~18K。实测一条 query 最终只出 4~5 件
@@ -138,6 +145,12 @@ def _load_params() -> None:
     # 永远残缺——「不要皮革」的用户搜公文包，10 条里 8 条皮的，杀完只剩 2 条还无处补货。
     # Qdrant 多取 10 条近邻的成本可忽略，而少取的代价是残缺候选池。
     EXCLUDE_FETCH_BUFFER = env_int("ITEM_SEARCH_EXCLUDE_BUFFER", 10)
+
+    # 探测召回条数（filtered_out 用）：命中不足且**确有硬过滤条件**时，再打一次不带 price /
+    # rating / 记忆排除的召回，与正式结果做差，回答「库里到底是没货，还是有货但被挡了」。
+    # 只多一次 Qdrant 近邻查询（请求向量复用，不重编码，实测 ~10ms 级），不额外调模型。
+    # 设 0 关闭探测（返回体里就不再有 filtered_out）。
+    PROBE_LIMIT = env_int("ITEM_SEARCH_PROBE_LIMIT", 8)
 
 
 _load_params()
@@ -258,6 +271,85 @@ def _apply_filters(
     return relevant, target_dropped, memory_dropped
 
 
+def _blocked_reason(
+    rc: RecallCandidate,
+    *,
+    price_usd_max: float | None,
+    min_rating: float | None,
+    brand_exclude: list[str] | None,
+    exclude_terms: list[str] | None,
+) -> tuple[str, bool] | None:
+    """这条探测候选是被哪个硬条件挡下的？返回 (人话原因, 是否「只差预算」)；不是被挡的返回 None。
+
+    **判定顺序是刻意的**：先结构性排除（品牌黑名单 / 排除词 / 评分），最后才判价格。一条既踩
+    排除词又超预算的货，若报成「超预算」，会让上游得出「放宽预算就能买到」的错结论——放宽了它
+    照样被排除词杀。所以第二个返回值（``price_only``）只在**其余条件都不沾**时才为真，
+    :func:`app.agent.retrieval_budget.budget_relax_due` 的「只差预算」判据全靠它干净。
+
+    ``price_usd`` 缺失（历史索引里出现过，见 price-usd-filter-empty-bug）不判超预算：拿不到价格
+    就不敢说它超没超，宁可不报——报错原因比不报更坏。
+    """
+    if brand_exclude and rc.brand and rc.brand.lower() in {b.lower() for b in brand_exclude}:
+        return f"品牌 {rc.brand} 在你的排除清单里", False
+    if exclude_terms:
+        hit = next((kw for kw in exclude_terms if term_hits(kw, _searchable(rc))), "")
+        if hit:
+            return f"命中你的排除偏好「{hit}」", False
+    if min_rating is not None and rc.rating is not None and rc.rating < min_rating:
+        return f"评分 {rc.rating} 低于门槛 {min_rating}", False
+    if price_usd_max is not None and rc.price_usd is not None and rc.price_usd > price_usd_max:
+        # 预算按原样显示（整数不拖小数尾，小数不四舍五入）：这句话模型会照抄给用户，把
+        # $1.5 的预算写成 $2 就是当着用户的面改他的硬约束。
+        budget = (
+            f"{price_usd_max:.0f}" if float(price_usd_max).is_integer() else f"{price_usd_max:.2f}"
+        )
+        return f"超预算（${rc.price_usd:.2f} > ${budget}）", True
+    return None
+
+
+def _probe_filtered_out(
+    probed: list[RecallCandidate],
+    kept_ids: set[str],
+    *,
+    price_usd_max: float | None,
+    min_rating: float | None,
+    brand_exclude: list[str] | None,
+    exclude_terms: list[str] | None,
+) -> tuple[list[FilteredOutItem], int, int]:
+    """探测召回 → 差集 → 被挡样本，返回 (样本 ≤CAP, 只差预算的条数, 其余原因的条数)。
+
+    相关度红线（``RELEVANCE_FLOOR``）在探测里照旧生效——挡不住的乱码级无关货本来就不该被当成
+    「库里有」的证据。已进候选池的、以及说不清为什么没进池的（名次外等），都不算被挡。
+    """
+    items: list[FilteredOutItem] = []
+    price_blocked = 0
+    other_blocked = 0
+    for rc in probed:
+        if rc.item_id in kept_ids or rc.score < RELEVANCE_FLOOR:
+            continue
+        verdict = _blocked_reason(
+            rc,
+            price_usd_max=price_usd_max,
+            min_rating=min_rating,
+            brand_exclude=brand_exclude,
+            exclude_terms=exclude_terms,
+        )
+        if verdict is None:
+            continue
+        reason, price_only = verdict
+        if price_only:
+            price_blocked += 1
+        else:
+            other_blocked += 1
+        if len(items) < FILTERED_OUT_CAP:
+            items.append(
+                FilteredOutItem(
+                    item_id=rc.item_id, title=rc.title, price_usd=rc.price_usd, reason=reason
+                )
+            )
+    return items, price_blocked, other_blocked
+
+
 class ItemSearchOutput(BaseModel):
     """item_search 的结构化返回。"""
 
@@ -277,6 +369,12 @@ class ItemSearchOutput(BaseModel):
     # 折叠成 id 列表、不再全文回显——完整字段模型早看过一遍，重复回显纯烧 token（相机 bad case
     # 实测第 4 次检索 10 条里 5 条是重复全文）。
     known_ids: list[str] = []
+    # 库里有、但被本次硬条件挡在池外的样本（≤5 条，见 FilteredOutItem）。空列表＝没探测或
+    # 确实没被挡的货。**这些不是候选**，不能进清单/商品卡，只作「不是没货，是被 X 挡了」的证据。
+    filtered_out: list[FilteredOutItem] = []
+    # 本次召回实际走了哪条路（可观测）：基线 "dense"，按实际生效的过滤 / 放宽 / 探测追加后缀。
+    # 只在偏离基线时回给模型（见 __str__），常态不占 token。
+    recall_strategy: str = "dense"
 
     def __str__(self) -> str:
         """喂给模型的紧凑投影（见 :func:`compact_candidates`：只留决策要用的字段）。
@@ -299,6 +397,18 @@ class ItemSearchOutput(BaseModel):
                 "truncated": self.truncated,
                 # 只在真放宽过时才带这个键：没放宽时是默认状态，写进去纯属每轮多烧 token。
                 **({"relaxed": True} if self.relaxed else {}),
+                # 同理：与基线一致时不写。
+                **(
+                    {"recall_strategy": self.recall_strategy}
+                    if self.recall_strategy != "dense"
+                    else {}
+                ),
+                # 「库里有但被挡了」的证据：模型据此说清是没货还是超预算，别把后者说成前者。
+                **(
+                    {"filtered_out": [f.model_dump(exclude_none=True) for f in self.filtered_out]}
+                    if self.filtered_out
+                    else {}
+                ),
                 # 同理：只在真有排除时才带（常态是 0，写进去纯烧 token）。
                 **({"memory_excluded": self.memory_excluded} if self.memory_excluded else {}),
                 "candidates": compact_candidates(
@@ -332,11 +442,14 @@ async def item_search(
 ) -> ItemSearchOutput:
     """在【单个】平台检索商品（dense 召回；用户长期偏好词已由系统自动并入检索词）。
 
-    何时调用：需要在某平台搜商品时。跨多个平台请用 parallel_dispatch_tool 并行 fork、每个
-    子任务搜一个平台，不要自己串行多次调本工具。
+    何时调用：需要在某平台搜商品时。跨多个平台请同轮多派 task_dispatch（一个平台一条
+    demands）并行，不要自己串行多次调本工具。
     用户的硬排除偏好（「绝不推荐」黑名单 + 本轮明说的「不要 X」）已由系统在召回阶段自动过滤
     （返回的 memory_excluded 计数），不需要你转述进参数；total_recall 为 0 且 memory_excluded>0
     时，如实告诉用户「符合的商品都被你的排除偏好筛掉了」，而不是「库里没有」。
+    返回里出现 filtered_out（库里有、但被本次预算 / 评分 / 排除偏好挡在池外的样本）时，同理不能
+    说「没找到」：如实说清被哪个条件挡的、最接近的价位，再问用户要不要放宽。这些不是候选，
+    绝不能进清单或商品卡。
     参数：
       - query：这次要搜什么（自然语言意图，走 dense 语义检索）。**用品类核心词**（如
         men's wristwatch / laptop backpack），场景 / 人群 / 正式度词（formal、business、
@@ -353,7 +466,7 @@ async def item_search(
       - target_name：**定点商品调查时传**被点名的商品名/型号原文（如 "Sony WH-1000XM5"）。
         传入后额外按型号过滤召回，语义相关但型号不符的候选不算命中（如搜索该型号时召回到
         同品牌其它便宜型号），避免"库里没这型号却拿相似品硬凑"。跨平台泛搜
-        （parallel_dispatch_tool 场景）不传。
+        （task_dispatch 逐平台派发的场景）不传。
       - expected_category：**定点商品调查时配合 target_name 一起传**目标商品所属品类
         （如 planner 拆出的 "降噪耳机"）。用于过滤"型号 token 对得上但其实是配件/耗材"的
         假阳性（如该型号的充电线、保护壳——标题必然带宿主型号，型号过滤拦不住，但配件在
@@ -467,6 +580,48 @@ async def item_search(
         category_dropped = before - len(relevant)
     truncated = len(relevant) > capped_k
 
+    # ── 探测召回：命中不足时问一句「库里到底是没这类货，还是有货但被硬条件挡了」 ──
+    # 两者在返回体里长得一模一样（total_recall 都很小），模型只能猜，实测常把「都超预算」说成
+    # 「没找到」。再打一次**不带 price / rating / 记忆排除**的召回做差集，把被挡的样本如实回给
+    # 模型。只在确有硬过滤条件时跑——没有过滤，差集必然为空，那一次查询纯属白花。
+    # 定点调查（target_name）不跑：那时「差集」全是同型号的配件与相似型号，不是「被挡的货」。
+    strategy = ["dense"]
+    if price_usd_max is not None:
+        strategy.append("price_filter")
+    if min_rating is not None:
+        strategy.append("rating_relaxed" if relaxed else "rating_filter")
+    if mem_exclude:
+        strategy.append("memory_exclude")
+    if brand_exclude:
+        strategy.append("brand_exclude")
+    if target_name:
+        strategy.append("target_name")
+    filtered_out: list[FilteredOutItem] = []
+    has_hard_filter = (
+        price_usd_max is not None
+        or min_rating is not None
+        or bool(mem_exclude)
+        or bool(brand_exclude)
+    )
+    if PROBE_LIMIT > 0 and not target_name and has_hard_filter and len(relevant) < capped_k:
+        probed = await asyncio.to_thread(recall.search, request_vec, PROBE_LIMIT, search_platforms)
+        filtered_out, price_blocked, other_blocked = _probe_filtered_out(
+            probed,
+            {rc.item_id for rc in relevant},
+            price_usd_max=price_usd_max,
+            min_rating=min_rating,
+            brand_exclude=brand_exclude,
+            exclude_terms=mem_exclude,
+        )
+        strategy.append("probe")
+        # 全树登记：「预算内到底有没有货」是跨平台合流后的结论，供补搜闸判「该补搜还是该
+        # 建议放宽预算」（见 retrieval_budget.budget_relax_due）。
+        note_filtered_probe(
+            hits=len(relevant[:capped_k]),
+            price_blocked=price_blocked,
+            other_blocked=other_blocked,
+        )
+
     candidates = [ItemCandidate.from_recall(rc) for rc in relevant[:capped_k]]
     out = ItemSearchOutput(
         platform=platform,
@@ -477,6 +632,8 @@ async def item_search(
         memory_excluded=memory_dropped,
         # 必须在 register() 之前判：登记完这批自己就全「已在池内」了。
         known_ids=[c.item_id for c in candidates if enrich(c.item_id) is not None],
+        filtered_out=filtered_out,
+        recall_strategy="+".join(strategy),
     )
     # 套装槽位盖章：显式入参优先（用户确认后新加的槽走这条），退回 dispatch 派发时从 demand
     # 确定性解析并经 ContextVar 传下来的槽名（机制主通路，不依赖子 Agent 转述）。盖在 register
@@ -507,6 +664,17 @@ async def item_search(
         search_result += f"（另有 {target_dropped} 条语义相关但型号不符，已排除）"
     if category_dropped:
         search_result += f"（另有 {category_dropped} 条型号相符但品类不符，疑似配件，已排除）"
+    if filtered_out:
+        search_result += f"（探测到库内另有 {len(filtered_out)} 条相关商品被硬条件挡下）"
+        # 结构化诊断走侧信道给 harness（result_nudges 据此提示模型别把「被挡」说成「没货」）：
+        # 与模型可见文本解耦，截断 / 措辞改动都伤不到信号。
+        report_diagnostics(
+            "item_search",
+            {
+                "filtered_out": [f.model_dump() for f in filtered_out],
+                "filtered_price_only": all(f.reason.startswith("超预算") for f in filtered_out),
+            },
+        )
     await monitor.report_tool_end(
         "item_search",
         platform=platform,

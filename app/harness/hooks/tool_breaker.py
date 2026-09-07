@@ -17,6 +17,7 @@ from typing import Any
 
 from app.harness.middleware import HookRejectSignal, harness_hook
 from app.harness.sentinels import tool_breaker_open
+from app.utils import shared_breaker
 from app.utils.circuit_breaker import CircuitBreaker
 from app.utils.env import env_bool, env_int
 
@@ -72,7 +73,9 @@ async def check_tool_breaker(context: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     breaker = get_tool_breaker(tool_name)
-    if not breaker.allow():
+    # 走 shared_breaker 而不是直接 ``breaker.allow()``：``BREAKER_SHARED=0``（默认）时它就是
+    # 后者的透明转发，开着时多问一次 Redis —— 让别的副本已经踩满的熔断在本副本立即生效。
+    if not await shared_breaker.allow(breaker):
         logger.warning("工具 %s 处于熔断态，快速失败", tool_name)
         raise HookRejectSignal(tool_breaker_open(tool_name), raw=True)
     context["_breaker_armed"] = tool_name  # 已放行：适配器/下游必须成对记一次成败
@@ -90,5 +93,5 @@ async def record_tool_outcome(context: dict[str, Any]) -> dict[str, Any] | None:
         return None
     tool_name = context.get("tool_name", "")
     if tool_name:
-        get_tool_breaker(tool_name).record_success()
+        await shared_breaker.record_success(get_tool_breaker(tool_name))
     return None

@@ -25,6 +25,7 @@ from typing import Any, Literal
 from agentscope.message import Msg, TextBlock
 from agentscope.state import AgentState
 
+from app.agent.ab import assign as assign_prompt_version
 from app.agent.agents import build_main_agent
 from app.agent.events import pump_events
 from app.agent.platform_scope import platform_scope
@@ -64,7 +65,16 @@ from app.memory.curator import curate_turn
 from app.memory.history import append_turn, load_prior_turns
 from app.memory.injector import build_history_block, record_search_history
 from app.memory.session_state import load_pt
+from app.memory.store import get_store
 from app.observability import metrics
+from app.recall.semantic_cache import (
+    TurnCacheEntry,
+    get_turn_cache,
+    preference_fingerprint,
+    turn_cache_enabled,
+    turn_cache_key,
+    turn_is_cacheable,
+)
 from app.tools._bundle import reset_session_bundle
 from app.tools._candidates import (
     load_candidates,
@@ -180,6 +190,88 @@ def _save_trace(session_dir: Path, messages: Sequence[Msg]) -> None:
         logger.warning("写完整对话轨迹失败（session_dir=%s），降级跳过", session_dir, exc_info=True)
 
 
+async def _turn_cache_key(
+    query: str, user_id: str | None, *, first_turn: bool, prompt_version: str = ""
+) -> str | None:
+    """算这一轮的整轮缓存键；不参与缓存时返回 ``None``（关着 / 不是干净的第一轮 / 算不出来）。
+
+    返回 ``None`` 同时意味着**本轮结束也不写缓存**——查与写用同一个判据，不会出现「查的时候说
+    不能复用、跑完又把它存下来」这种自相矛盾。
+    """
+    if not first_turn or not turn_cache_enabled():
+        return None
+    try:
+        entries = await get_store().read(user_id or "")
+        return turn_cache_key(
+            buyer=user_id or "",
+            prefs_fp=preference_fingerprint(entries),
+            query=query,
+            prompt_version=prompt_version,
+        )
+    except Exception:
+        # 偏好读不到就宁可不缓存：拿一个「假装没有偏好」的指纹去命中，等于把别人的偏好结果给你。
+        logger.warning("整轮缓存键计算失败，本轮不走缓存", exc_info=True)
+        return None
+
+
+async def _replay_cached_turn(
+    cached: TurnCacheEntry,
+    query: str,
+    thread_id: str,
+    session_dir: Path,
+    user_id: str | None,
+    started_at: float,
+    image_paths: Sequence[str] | None,
+) -> dict[str, Any]:
+    """整轮缓存命中：把上次那轮的文案与商品卡原样发出去，一次模型调用都不发起。
+
+    仍然**照常落一轮历史**（``append_turn``）——命中与否对用户是透明的，聊天记录不能因为走了
+    缓存就缺一轮。不落的是 ``agent_state.json`` / 候选池：那两样是给续聊用的，而带上文的轮次
+    本就不进缓存，这一轮之后的追问会退回「有历史但无 state」那条腿（精简 (q,a) 回放）。
+    """
+    elapsed_ms = int((time.monotonic() - started_at) * 1000)
+    logger.info("整轮缓存命中 thread=%s（%d 件商品，未调用模型）", thread_id, len(cached.items))
+    await append_turn(
+        thread_id,
+        query,
+        cached.final_text,
+        items=cached.items,
+        activity=[],
+        elapsed_ms=elapsed_ms,
+        tokens=None,
+        session_dir=session_dir,
+        images=list(image_paths or ()),
+    )
+    await monitor.report_task_result(
+        cached.final_text, items=cached.items, elapsed_ms=elapsed_ms, tokens=None
+    )
+    return {
+        "thread_id": thread_id,
+        "trace_id": current_trace_id(),
+        "final_text": cached.final_text,
+        "messages": [],
+        "items": cached.items,
+        "learned_preferences": get_learned_prefs(),
+        "cached": True,
+    }
+
+
+def _called_tool_names(messages: Sequence[Msg]) -> set[str]:
+    """本轮出现过的工具名（判「能不能入缓存」用）。
+
+    认的是 ``tool_call`` 块而不是 ``tool_result``：被 harness 闸拦下的调用没有结果块，但它**表达
+    了写意图**（模型确实想下单），这种轮次同样不该被复用。
+    """
+    names: set[str] = set()
+    for msg in messages:
+        for block in getattr(msg, "content", []) or []:
+            if getattr(block, "type", None) == "tool_call":
+                name = getattr(block, "name", "")
+                if name:
+                    names.add(name)
+    return names
+
+
 async def run_agent(
     query: str,
     thread_id: str,
@@ -194,13 +286,21 @@ async def run_agent(
     """
     started_at = time.monotonic()
     session_dir = ensure_session_dir(thread_id)
+    # 提示词 A/B：桶号与版本本轮**只算一次**，trace / 账本 / 返回值共用同一份结论。分开各算各的
+    # 会在「刚好跨过热更新」的那一轮记出互相矛盾的归属——A/B 报告最怕的就是这种错行。
+    ab_assign = assign_prompt_version(user_id)
     with (
         thread_scope(thread_id, session_dir, user_id=user_id),
         platform_scope(platforms) as enabled_platforms,
         # 一轮 = 一条 trace 的根 span。主 loop 与 worker 的 span 靠 OTEL 上下文自动挂进来
         # （不像 LangChain 侧要手工传 trace_id），多轮再靠 session_id=thread_id 聚成 Session。
         # 未启用观测时它是个空壳。
-        turn_span(session_id=thread_id, user_id=user_id),
+        turn_span(
+            session_id=thread_id,
+            user_id=user_id,
+            prompt_version=ab_assign.version,
+            ab_bucket=ab_assign.bucket,
+        ),
     ):
         activity_rec = monitor.begin_activity_capture()
         await monitor.report_session_created(session_dir)
@@ -238,14 +338,33 @@ async def run_agent(
 
         # 续聊恢复两条腿：优先 AgentState（模型视野的完整上下文），缺失退回精简 (q,a) 回放。
         prior_state = _load_state(session_dir)
+        prior_turns = (
+            [] if prior_state is not None else await load_prior_turns(thread_id, session_dir)
+        )
+
+        # 整轮结果缓存（默认关，压测 / 演示用）。**只有干净的第一轮才参与**：带上文的轮次，
+        # 答案依赖的上文根本不在 key 里，命中就是串味。查得到就直接回放，一轮 LLM 都不跑。
+        # 「干净的第一轮」= 两条恢复腿都空。**只看 prior_turns 是不够的**：有 agent_state.json 时
+        # 那条腿根本不会去读历史（恒为空列表），于是第二轮会被误判成第一轮、直接命中上一轮的答案。
+        cache_key = await _turn_cache_key(
+            query,
+            user_id,
+            first_turn=prior_state is None and not prior_turns,
+            prompt_version=ab_assign.version,
+        )
+        if cache_key is not None:
+            cached = get_turn_cache().get(cache_key)
+            if cached is not None:
+                return await _replay_cached_turn(
+                    cached, query, thread_id, session_dir, user_id, started_at, image_paths
+                )
+
         agent, _session = await build_main_agent(
             original_query=query,
             image_paths=tuple(image_paths or ()),
             state=prior_state,
         )
-        replay: list[Msg] = []
-        if prior_state is None:
-            replay = _replay_msgs(await load_prior_turns(thread_id, session_dir))
+        replay: list[Msg] = _replay_msgs(prior_turns)
 
         turn_query = inject_runtime_context(
             query,
@@ -309,7 +428,7 @@ async def run_agent(
             reset_original_query()
             reset_session_pt()
             if snap is not None:
-                await charge_quota(user_id, snap)
+                await charge_quota(user_id, snap, prompt_version=ab_assign.version)
 
         messages: list[Msg] = list(agent.state.context)
         # **final_text 取事件泵拿到的那条 Msg，不从 context 尾部取**：on_session_end 的输出审核
@@ -342,6 +461,10 @@ async def run_agent(
             final_text = summary.summary
 
         write_session_artifacts(session_dir, final_text, summary)
+
+        # 写整轮缓存：查得到键（= 关着 / 非第一轮时压根不写）且这轮不含写意图 / 交互工具。
+        if cache_key is not None and turn_is_cacheable(_called_tool_names(messages), final_text):
+            get_turn_cache().put(cache_key, TurnCacheEntry(final_text=final_text, items=items))
 
         elapsed_ms = int((time.monotonic() - started_at) * 1000)
         tokens: dict[str, Any] | None = None
@@ -398,4 +521,10 @@ async def run_agent(
             "messages": messages,
             "items": items,
             "learned_preferences": get_learned_prefs(),
+            # 以下四项给离线 A/B 报告按桶聚合用（`scripts/eval/ab_report.py`）：光有版本号还
+            # 判不了优劣，「轮数 / token」是版本变化最先反映出来的两处代价。
+            "prompt_version": ab_assign.version,
+            "ab_bucket": ab_assign.bucket,
+            "tokens": tokens,
+            "model_calls": usage.model_calls,
         }

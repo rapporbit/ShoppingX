@@ -11,6 +11,8 @@
 from agentscope.tool import FunctionTool, Toolkit, ToolMiddlewareBase
 
 from app.agent.dispatch_tool import task_dispatch
+from app.agent.mcp_registry import mcp_clients
+from app.agent.skills import skill_loaders
 from app.tools._shell import ToolShell, to_function_tool
 from app.tools.ask_user import ask_user
 from app.tools.cancel_order import cancel_order
@@ -159,11 +161,17 @@ async def build_toolkit(
 
     每次调用新建 Toolkit **与工具实例**：Toolkit 带角色态（激活的 tool group 等）不能跨 Agent
     共享，工具实例则因为要挂 per-loop 的中间件而必须一 loop 一份（见 :func:`_make_tools`）。
+
+    批 4-3 起同一个「发放范围」口径多管两样东西，都走框架原生、都按 role 切：
+    **Skill**（``skills_or_loaders``，只发 main，见 ``app.agent.skills``）与 **MCP**
+    （``mcps``，只发 search 且只放只读白名单，见 ``app.agent.mcp_registry``）。它们都进
+    Toolkit 的 ``basic`` 组——本仓不用 ToolGroup 表达权限（理由见上方 ``_ROLE_TOOLS`` 注释），
+    组只有一个，边界仍然是「这份 Toolkit 里有没有」。
     """
     if role not in _ROLE_TOOLS:
         raise ValueError(f"未知角色 {role!r}，可选：{sorted(_ROLE_TOOLS)}")
     allowed = _ROLE_TOOLS[role]
-    toolkit = Toolkit()
+    toolkit = Toolkit(skills_or_loaders=skill_loaders(role), mcps=mcp_clients(role))
     for tool_obj in _make_tools(tool_middlewares) if tool_middlewares else TOOLS:
         if allowed is None or tool_obj.name in allowed:
             await toolkit.add_tool(tool_obj)

@@ -723,8 +723,11 @@ class HarnessToolAdapter(ToolMiddlewareBase):
             # 全进程所有会话熔断 60s。不记也不会卡死断路器：HALF_OPEN 下一次调用照常放行探测。
             if ctx.get("_breaker_armed") == tool_name and not isinstance(exc, ValidationError):
                 from app.harness.hooks.tool_breaker import get_tool_breaker
+                from app.utils import shared_breaker
 
-                get_tool_breaker(tool_name).record_failure()
+                # 这条 if 就是「谁算失败」的唯一判据（含 ValidationError 豁免）；shared_breaker
+                # 只负责把判定结果多写一份到 Redis，不做二次判断。
+                await shared_breaker.record_failure(get_tool_breaker(tool_name))
             raise
 
         last = chunks[-1] if chunks else None
@@ -791,6 +794,8 @@ def _collect_call_signals(s: HarnessSession, tool_name: str, result_text: str) -
     call_offcat: int | None = None
     call_excluded: int | None = None
     call_over_budget: int | None = None
+    call_filtered_out: list[Any] = []
+    call_filtered_price_only = False
     if tool_name == "planner":
         s.planner_done = True
     elif tool_name == "item_picker":
@@ -815,8 +820,18 @@ def _collect_call_signals(s: HarnessSession, tool_name: str, result_text: str) -
     elif tool_name in _SEARCH_TOOLS:
         call_candidates = _count_candidates(result_text)
         s.fresh_candidates += call_candidates
+        if tool_name == "item_search":
+            # 探测召回的结论（「库里有但被硬条件挡了」）同样走侧信道，不从模型可见文本正则抠。
+            # 只有真探测到东西时工具才登记，故 None＝这次没被挡住任何货。
+            diag = consume_diagnostics("item_search")
+            if diag is not None:
+                blocked = diag.get("filtered_out")
+                call_filtered_out = list(blocked) if isinstance(blocked, list) else []
+                call_filtered_price_only = bool(diag.get("filtered_price_only"))
     return {
         "call_candidates": call_candidates,
+        "call_filtered_out": call_filtered_out,
+        "call_filtered_price_only": call_filtered_price_only,
         "call_picks": call_picks,
         "call_must_hits": call_must_hits,
         "call_oncat": call_oncat,

@@ -1,0 +1,100 @@
+# worker —— 真正跑 AgentLoop 的那一半。没有 Service（它不收请求，只从 Redis Stream 领任务），
+# 所以这份 yaml 的全部重点就一件事：**滚动更新时别把用户已经提交的任务弄丢**。
+#
+# ────────────────────────────────────────────────────────────────────────────
+# 时间线（记反了就白配）：Pod 被删 → 【preStop 与摘 Endpoints 并行开始】→ preStop 跑完
+# → kubelet 发 SIGTERM → 应用自己收尾 → terminationGracePeriodSeconds 到点 → SIGKILL。
+#
+# 关键在于 **preStop 的耗时算在 grace 里面**，不是加在外面。所以三个数的大小关系必须是：
+#
+#     terminationGracePeriodSeconds (150s)  >  preStop (5s) + WORKER_GRACE_SECONDS (120s)
+#
+# 留出的 25s 是给「等完在飞任务之后」的收尾用的：停控制面订阅、关队列客户端、把最后一批事件
+# 发出去。写成刚好相等（125s）也能跑，但任何一点抖动都会让 SIGKILL 抢在收尾前面。
+#
+# 配反的后果分两种，都不报错：
+#   - grace < WORKER_GRACE_SECONDS：应用还在乖乖等在飞任务，kubelet 已经 SIGKILL 了。消息没
+#     ack、留在 PEL 里，最终会被下一个 worker 领回重跑 —— **任务不丢，但白跑了半程**，用户看到
+#     的是「进度条走到一半退回起点」。
+#   - grace 很大但应用不理 SIGTERM：Pod 一直不退，滚动更新卡住，直到超时被强杀。
+# ────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: globex-worker
+  namespace: globex
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: globex-worker
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # maxUnavailable: 0 + maxSurge: 1 —— 先起一个新 worker 并等它 Ready，再动旧的。
+      # 消费能力在滚动全程不掉到 0，排队中的任务不会出现「没人领」的窗口。
+      # 反过来（maxUnavailable: 1）在两副本上就是先砍掉一半消费能力，峰值期滚动 = 自制拥堵。
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: globex-worker
+    spec:
+      terminationGracePeriodSeconds: 150
+      containers:
+        - name: worker
+          image: globex-backend:latest # 与 api 同一个镜像，见 40-api.yaml 的注释
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "app.worker"]
+          envFrom:
+            - configMapRef:
+                name: globex-config
+            - secretRef:
+                name: globex-secrets
+          env:
+            # consumer 名字直接用 Pod 名。XREADGROUP 按 consumer 名维护各自的 PEL，重名会让两个
+            # 进程共用一份 pending 记录，谁 ack 了谁的都说不清。用 Pod 名还有一个附带好处：
+            # XPENDING 打出来的名字能直接 kubectl logs 过去，不用再猜是哪台机器上的哪个 pid。
+            - name: WORKER_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            # worker 是烧 token 不是烧 CPU 的（大部分时间挂在等模型返回的 await 上），所以
+            # request 给得低、不设 CPU limit —— CPU limit 会触发 cgroup 限流，表现是「偶尔某一轮
+            # 特别慢」，而它恰恰发生在并发最高的时候。内存要设上限：一轮里的候选池 + 事件缓冲
+            # 是真占内存的，漏了它就是把整个节点拖下水。
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              memory: "4Gi"
+          lifecycle:
+            preStop:
+              exec:
+                # worker 没有 Service，这 5s **不是**为了等摘流量（那是 api 的理由，别照抄）。
+                # 它在这里买的是一点时间差：滚动更新时新 worker 已经起来了，让它先把消费者组
+                # 建好、开始 XREADGROUP，旧 worker 再进入「停领新任务」的收尾——避免出现两边都
+                # 不领的短暂空窗（虽然只是几百毫秒的排队延迟，不会丢任务）。
+                command: ["sh", "-c", "sleep 5"]
+          # **没有 readinessProbe，也不该有**：worker 不在任何 Service 的 Endpoints 里，
+          # readiness 对它唯一的作用是影响滚动更新的推进节奏。没有探针时，容器起来即 Ready，
+          # maxSurge 那一步会立刻放行——对一个「起来就开始领任务」的进程来说这是对的。
+          # liveness 也刻意不加：worker 正常状态就是长时间挂在 await 上，任何基于「有没有响应」
+          # 的探针都容易把正在跑长任务的健康进程判死，然后把这一轮的进度打掉。真要监控它活没活，
+          # 看的是队列 depth 与 XPENDING 的年龄，那是告警的事，不是探针的事。
+          volumeMounts:
+            - name: artifacts
+              mountPath: /app/output
+              subPath: output
+            - name: artifacts
+              mountPath: /app/uploaded
+              subPath: uploaded
+            - name: artifacts
+              mountPath: /app/var
+              subPath: var
+      volumes:
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: globex-artifacts

@@ -37,10 +37,19 @@ class TestToolWhitelist:
         assert not validate_tool_call("")
 
     def test_whitelist_covers_full_tool_set(self) -> None:
-        """白名单必须与工具注册表完全一致——漏一个工具就是把它锁死在门外。"""
+        """白名单必须覆盖工具注册表全集——漏一个工具就是把它锁死在门外。
+
+        批 4-3 起白名单是**超集**：除了本仓注册的工具，还包含框架内置的 skill 阅读器
+        （``Skill``）与已配置的 MCP 工具名。所以判据从「相等」放宽成「覆盖」，另加一条
+        「多出来的只能是那两类」，免得放宽之后什么野名字都能混进来。
+        """
+        from app.agent.skills import SKILL_VIEWER_TOOL_NAME
         from app.agent.tool_registry import TOOLS
 
-        assert allowed_tools() == frozenset(t.name for t in TOOLS)
+        registered = frozenset(t.name for t in TOOLS)
+        extra = allowed_tools() - registered
+        assert registered <= allowed_tools()
+        assert all(n == SKILL_VIEWER_TOOL_NAME or n.startswith("mcp__") for n in extra), extra
 
     @pytest.mark.asyncio
     async def test_hook_rejects_unknown_tool(self) -> None:
