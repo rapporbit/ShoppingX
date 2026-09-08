@@ -6,13 +6,22 @@
 不要塑料的」），系统并行检索不同电商平台、比价、估算到手价（关税 + 运费），输出带选购理由的
 清单，并把偏好沉淀为跨会话记忆。
 
-**技术栈**：FastAPI · Qdrant · OpenSearch · Langfuse · AG-UI · WebSocket · React
+**技术栈**：AgentScope 2.0 · FastAPI · Redis · Qdrant · OpenSearch · Langfuse · AG-UI · WebSocket · React
 
 ## 特性
 
 - **意图驱动循环** — Think → Act → Observe → Reflect，由模型判断信息是否足够后自行收尾。
-- **并行子 Agent** — 跨平台检索时派生共享工具集的子 Agent 并发执行，上下文隔离；深度、超时、
-  结果截断与循环检测在运行时强制约束，避免递归失控。
+- **AgentScope 2.0 运行时** — 主循环由框架的 Agent + Toolkit 承载；控制面挂在框架的模型侧 /
+  工具侧中间件上，不改框架内部。
+- **Supervisor-Workers（读写切分）** — 主 Agent 持全部业务工具、单干优先；worker 能力不重叠：
+  SearchAgent 只有只读检索工具，TradeAgent 只有交易工具且没有检索能力。深度、超时、结果截断与
+  循环检测在运行时强制约束，避免递归失控。
+- **削峰队列与独立 worker** — API 进程只做鉴权 / 配额 / 幂等 / 入队，worker 进程跑 AgentLoop；
+  Redis Stream at-least-once，重启不丢任务。默认关（回落为单进程内执行）。
+- **自进化** — 提示词版本是基线的叠加层，按 user 稳定分桶做 A/B；高分轨迹蒸馏的策略须过门禁重放
+  才入库、入库后带血量自动退场；Skill 只有 name + description 常驻，正文由模型按需读取。
+- **MCP 两侧** — 消费侧把一个只读汇率 MCP 的工具挂进 SearchAgent；生产侧对外开放只读三工具
+  （`item_search` / `price_compare` / `shipping_calc`）。
 - **向量召回 + 精排** — 商品侧 Qdrant dense（BGE-M3，1024 维）+ payload filter；品类知识库
   OpenSearch Hybrid（KNN + BM25）+ cross-encoder 精排。
 - **分层记忆** — 跨会话长期偏好 + 会话短期状态；会话结束后由记忆管家离线写入与矛盾消解。
@@ -24,19 +33,28 @@
 ## 架构
 
 ```
-用户 ──▶ FastAPI ──▶ AgentLoop ──┬──▶ 工具（检索 / 比价 / 运费 / 精挑 / 收尾）
-              │                  └──▶ 子 Agent（跨平台并行）
-              │
-              ├──▶ Qdrant（商品向量）  OpenSearch（品类知识库）
-              ├──▶ 记忆 Store（长期偏好）
-              └──▶ WebSocket ──▶ React（AG-UI 事件流）
+用户 ──▶ API 进程（FastAPI）
+           鉴权 / 配额 / 幂等 / 入队 ──▶ 队列（Redis Stream，可选；关则同进程直接跑）
+                                              │
+                                              ▼
+                          worker 进程 ──▶ 主 Agent（Supervisor，单干优先）
+                                            ├─▶ 业务工具（检索 / 比价 / 运费 / 精挑 / 收尾）
+                                            ├─▶ SearchAgent（只读 worker，跨平台并行）
+                                            └─▶ TradeAgent（写 worker，交易域）
+                                              │
+              控制面（中间件）：断言 / 漂移 / 阶段 / 预算 / 熔断
+                                              │
+                        ├──▶ Qdrant（商品向量）  OpenSearch（品类知识库）
+                        ├──▶ 记忆 Store（长期偏好 / 策略库）
+                        └──▶ 事件背板 ──▶ WebSocket ──▶ React（AG-UI 事件流）
 ```
 
-主循环经 Hook 管道插入断言、权限与熔断；会话阶段单向推进（规划 → 检索 → 比价 → 收尾），
-避免在检索与比价之间来回抖动。
+控制面挂在框架的模型侧与工具侧中间件上，插入断言、权限与熔断；会话阶段单向推进
+（规划 → 检索 → 比价 → 收尾），避免在检索与比价之间来回抖动。
 
-请求形态：`POST /api/task` 立即返回 `thread_id`，Agent 后台执行；前端 `WS /ws/{thread_id}`
-订阅事件。信息足够时调用终结工具给出清单，否则继续循环。
+请求形态：`POST /api/task` 立即返回 `thread_id`，Agent 在 worker 侧执行（队列关闭时即 API 进程
+自身）；前端 `WS /ws/{thread_id}` 订阅事件，事件经背板跨进程回放。信息足够时调用终结工具给出
+清单，否则继续循环。
 
 ## 工具（摘要）
 
@@ -85,7 +103,7 @@ cd frontend && npm install && npm run dev
 - embedding / reranker / OpenSearch / Langfuse 均有本地 fallback，远程故障只降级不中断主链路。
 
 ```bash
-uv run ruff check . && uv run mypy app && uv run pytest   # 927 tests
+uv run ruff check . && uv run mypy app && uv run pytest   # 1355 tests
 ```
 
 ## 配置
@@ -99,6 +117,16 @@ uv run ruff check . && uv run mypy app && uv run pytest   # 927 tests
 | 知识库 | `OPENSEARCH_*` / `CATEGORY_CARDS_PATH` |
 | 记忆与账户 | `DATABASE_URL`（缺省 SQLite `var/globex.db`） |
 | 预算 / 压缩 | `RETRIEVAL_BUDGET` / `TOKEN_BUDGET_USD` / `COMPRESS_*` |
+
+可选能力开关（默认值同 `.env.example`）：
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `QUEUE_ENABLED` | `0` | 开削峰队列；开了要另起 `uv run python -m app.worker`，API 只入队 |
+| `PROMPT_VERSION` / `PROMPT_AB_VARIANTS` | `1.0.0` / 空 | 默认（对照组）提示词版本 / 候选版本与放量百分比，留空即不做实验 |
+| `SKILLS_ENABLED` | 开 | `skills/*/SKILL.md` 按需知识；关掉则三个 skill 都不注入 |
+| `MCP_SEARCH_URL` | 空 | 挂进 SearchAgent 的外部只读 MCP；留空 = 不挂 |
+| `RUBRIC_P0_RECHECK` | `1` | 离线评测：首判破 P0 的 case 再打一次分，两次都破才算破 |
 
 ## API（核心）
 
@@ -232,20 +260,31 @@ uv run python scripts/eval/evolve_p0.py         # 可选：P0 类 → 防护规�
 
 ```
 app/
-  agent/          主循环、子 Agent、模型路由、预算
+  agent/          主循环、worker 装配、模型路由、预算
+    ab.py         提示词版本 A/B 分桶
+    skills.py     Skill 发放（只发主 Agent）
+    mcp_registry.py  外部 MCP 消费侧接线
   harness/        Hook、断言、漂移、阶段、熔断
   tools/          业务工具 + dispatch
   recall/         向量召回、精排、汇率/关税/运费、品类库
   memory/         长期偏好、记忆管家
+    strategies.py 成功策略库（门禁 + 血量）
   compress/       上下文压缩
+  queue/          削峰队列端口 + Redis Stream / 进程内两份实现
+  worker.py       独立 worker 进程入口（领任务、跑 AgentLoop、优雅退出）
+  mcp/            MCP 生产侧：只读三工具 server + 自建汇率 server
   security/       输入过滤、白名单、输出审核、脱敏
   observability/  Langfuse、metrics、日志
   eval/           Rubric 与召回指标
   evolution/      bad case → 规则
-  api/            FastAPI、WebSocket、AG-UI
+  api/            FastAPI、WebSocket、AG-UI、事件背板
+prompt/versions/  提示词版本（基线的叠加层，非副本）
+skills/           Skill 目录（正文按需读取）
+migrations/       Alembic 迁移
+deploy/k8s/       API / worker / Redis / Qdrant / OpenSearch 编排
 frontend/         React + Vite
 scripts/          ETL、索引、评测（scripts/eval/）
-tests/            927 tests
+tests/            1355 tests
 ```
 
 
@@ -257,5 +296,13 @@ tests/            927 tests
   确认卡（先出卡、用户确认后才落库），确认与「取消前必须先查单」都由机制把关而非提示词。
 - 汇率 / 关税 / 运费为查表估算，演示 landed cost，非财务级对账。
 - 评测以离线回归为主；种子集规模有限，不是大规模公开榜。
+- **策略库目前是空的**：蒸馏 + 门禁重放 + 血量退场的机制都在，但唯一走完门禁的候选策略被重放
+  判为退化（带策略侧破 P0、且每轮多 3 次模型调用），按规则拒绝入库。所以线上没有任何一条策略
+  在注入。
+- **MCP 工具不过 harness 的工具中间件**：MCP 工具对象由框架内部创建，够不着我们挂在
+  `FunctionTool` 实例上的那层控制面，因此它不走白名单 / 阶段门 / 截断，也不发 AG-UI 的
+  `tool_start` / `tool_end`（框架原生 tracing 里仍可见）。故对端只接受只读、无副作用的 server。
+- **提示词 A/B 尚无变体上线**：首个真实变体 1.1.0 离线未达标（P2 与 token 两项退化，P0 因两侧
+  尺子不一致不判），维持 0% 放量。链路本身跑通了，只是第一次跑出的是否定结论。
 
 
