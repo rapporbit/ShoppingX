@@ -15,6 +15,7 @@ data/platforms/clean/*
 
 # Secrets / local config
 .env
+.env.bak*
 !.env.example
 
 # Per-session artifacts (created at runtime)
@@ -54,3 +55,4 @@ __pycache__/
 
 # M16：SQLite 库文件（账户 / 会话归属）——数据不入库，靠注册流程重建
 /var/
+
