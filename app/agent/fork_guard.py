@@ -13,14 +13,13 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 
+from app.agent.limits import MAX_FORK_DEPTH
 from app.observability.logging import bind_log_context, unbind_log_context
 
 # 当前 fork 深度。主 loop=0，子 loop=1。
 _fork_depth: ContextVar[int] = ContextVar("shoppingx_fork_depth", default=0)
 
-# 深度上限：只允许一层 fork（主→子）。子任务是被收窄的单次检索（见 prompts.yml <fork_protocol>），
-# 不该再 fork 孙；第二层被拦。需要更深的子链时再按 YAGNI 调大。
-MAX_FORK_DEPTH = 1
+# 深度上限（只允许主→子一层）的定义在 app.agent.limits，与其余三层上限放在同一页。
 
 
 class ForkLimitExceeded(Exception):

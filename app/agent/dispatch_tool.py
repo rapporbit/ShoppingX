@@ -22,6 +22,7 @@ from agentscope.message import Msg, TextBlock
 from agentscope.tool._response import ToolChunk, ToolResultState
 
 from app.agent.fork_guard import ForkLimitExceeded, enter_fork
+from app.agent.limits import SUB_AGENT_TIMEOUT_SEC
 from app.agent.platform_scope import get_enabled_platforms
 from app.agent.retrieval_budget import isolated_retrieval_scope
 from app.api import monitor
@@ -33,10 +34,8 @@ from app.tools._bundle import detect_slot, ensure_dispatch_slot, slot_scope
 from app.utils.clean import PLATFORMS
 from app.utils.thread_ctx import thread_scope
 
-# 子 Agent 防失控参数之①（超时）。迭代上限那一半在 ``agents.WORKER_MAX_ITERS`` /
-# ``TRADE_MAX_ITERS``——那里才是真正被 ``ReActConfig`` 读走的地方。本文件曾另存一份
-# ``SUB_AGENT_MAX_ITERATIONS = 6`` 的字面量，零引用却让人以为「改这里就生效」，已删。
-SUB_AGENT_TIMEOUT_SEC = 90
+# 子 Agent 防失控参数之①（超时）。定义与其余三层一起在 ``app.agent.limits``；本文件曾另存
+# 一份 ``SUB_AGENT_MAX_ITERATIONS = 6`` 的字面量，零引用却让人以为「改这里就生效」，已删。
 
 
 def _detect_platform(demand: str) -> str | None:
