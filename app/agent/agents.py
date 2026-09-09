@@ -22,7 +22,7 @@ from agentscope.agent import Agent, ContextConfig, ReActConfig
 from agentscope.middleware import MiddlewareBase
 from agentscope.state import AgentState
 
-from app.agent.llm import get_fast_llm, get_llm, get_model_config
+from app.agent.llm import get_model_config, get_tier_llm, main_loop_tier_base, worker_tier
 from app.agent.permissions import allow_tools
 from app.agent.prompts import get_system_prompt, get_worker_system_prompt
 from app.agent.tool_registry import build_toolkit
@@ -73,7 +73,7 @@ async def _assemble(
     original_query: str = "",
     image_paths: Sequence[str] = (),
     state: AgentState | None = None,
-    fast_model: bool = False,
+    tier: str,
     system_prompt: str | None = None,
 ) -> tuple[Agent, HarnessSession]:
     """按「一个 session + 一份 Toolkit + 一个 Agent」装一套，返回 Agent 与它的 session。
@@ -103,9 +103,10 @@ async def _assemble(
         # 主 Agent 用主 prompt；split 模式的 worker 用自己那段专职 prompt（同类 worker 之间
         # 共用一条前缀），clone 模式的 worker 仍与主 Agent 逐字相同——那是对照组的定义。
         system_prompt=base_prompt,
-        # 模型分层：worker 用快档（关思考）砍解码延迟——它在收窄后的子任务里只做 1~2 跳检索，
-        # 不需要深推理。换的只是「档位」，工具集与 prompt 仍与主 Agent 一致。
-        model=get_fast_llm() if fast_model else get_llm(),
+        # 模型分层只换「档位」，工具集与 prompt 不动。取值由 llm.py 的档位策略表统一给
+        # （``MAIN_LOOP_TIER_BASE`` / ``WORKER_TIER``），装配处不再自己判断该用哪档——这正是
+        # P0-1 的教训：装配写死一档、Hook 假设另一档，两边都不会报错。
+        model=get_tier_llm(tier),
         toolkit=toolkit,
         middlewares=middlewares,
         state=agent_state,
@@ -132,9 +133,10 @@ async def build_main_agent(
     那条用户消息。``image_paths`` 同理交给控制面：开局预置要先把图看掉再拆意图
     （见 ``HarnessAgentAdapter._prefill``）。
 
-    基座模型是主档（开思考）：主 loop 第 1 轮是全链路唯一没被机制锁死的决策（购物还是闲聊、
-    先拆解还是先查品类、自己干还是派 worker），值得让它想清楚；第 2 轮起决策空间已被阶段机
-    与候选 id 化夹死，由 ``harness.hooks.reasoning_boost`` 决定还要不要继续开。
+    基座档由 ``MAIN_LOOP_TIER_BASE`` 决定（默认 fast，关思考）：第 2 轮起决策空间已被阶段机与
+    候选 id 化夹死，thinking token 买不到东西。第 1 轮是全链路唯一没被机制锁死的决策（购物还是
+    闲聊、先拆解还是先查品类、自己干还是派 worker），由 ``MAIN_LOOP_TIER_FIRST`` 单独加档，
+    落点在 ``HarnessAgentAdapter.on_model_call``。
     """
     return await _assemble(
         name="shoppingx",
@@ -143,6 +145,7 @@ async def build_main_agent(
         original_query=original_query,
         image_paths=image_paths,
         state=state,
+        tier=main_loop_tier_base(),
     )
 
 
@@ -166,14 +169,14 @@ async def build_worker_agent(kind: str = "search") -> Agent:
             name=f"shoppingx-{kind}",
             role="main",
             max_iters=WORKER_MAX_ITERS,
-            fast_model=True,
+            tier=worker_tier(),
         )
         return agent
     agent, _ = await _assemble(
         name=f"shoppingx-{kind}",
         role=kind,
         max_iters=TRADE_MAX_ITERS if kind == "trade" else WORKER_MAX_ITERS,
-        fast_model=True,
+        tier=worker_tier(),
         system_prompt=get_worker_system_prompt(kind),
     )
     return agent

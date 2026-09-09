@@ -8,11 +8,15 @@
 模型、endpoint、温度全部走 ``.env``（见 ``.env.example``），代码里不写死。
 判官模型 :func:`get_judge_llm` 给 Rubric 评测用，默认更强、temperature=0 保证评分稳定。
 
-**本模块有两套并存的工厂**（批 0 迁移期）：上半部分 ``get_*`` 返回 LangChain 的
-``BaseChatModel``（旧运行时在用），下半部分 ``get_as_*`` 返回 AgentScope 的
-``ThrottledChatModel``（新运行时）。并存的理由与摘除时机见下半部分的分隔注释。
+工厂只有一套：``get_*`` 一律返回 AgentScope 的 ``ThrottledChatModel``。迁移期曾经并排放过
+两套（另一套返回 LangChain 的 ``BaseChatModel``、供旧运行时用），LangChain 摘干净后
+``get_as_*`` 那批别名连同旧工厂一起删了——现在看到 ``get_llm()`` 就是唯一那份。
+
+「哪一轮用哪一档」不在这里的任何一个 ``get_*`` 里判，而是由文件后半的**档位策略表**
+（:func:`get_tier_llm`）单点决定，装配与换档读同一份取值。理由见那段注释。
 """
 
+import logging
 import os
 from functools import lru_cache
 
@@ -27,6 +31,8 @@ from app.agent.gateway import GatewayThrottle, ThrottledChatModel
 
 # 模块导入即加载 .env，使后续 os.environ 读取生效（已设置的环境变量优先，不覆盖）。
 load_dotenv()
+
+logger = logging.getLogger("shoppingx.llm")
 
 
 def _env_float(key: str, default: float) -> float:
@@ -71,14 +77,14 @@ def _load_params() -> None:
     global LLM_REQUEST_TIMEOUT, LLM_MAX_RETRIES, _throttle
     LLM_REQUEST_TIMEOUT = _env_float("LLM_REQUEST_TIMEOUT", 60.0)
     LLM_MAX_RETRIES = _env_int("LLM_MAX_RETRIES", 2)
+    # 每加一个 ``@lru_cache`` 工厂就要加进这张表，否则热更新对那一档静默失效。
+    # （这里曾有一半是重复项——双工厂时代两批别名各列一遍，摘掉 LangChain 后重名了。
+    #   cache_clear 幂等所以没人发现，但重复会掩盖「漏登记」，比如 get_planner_llm。）
     for factory in (
         get_llm,
         get_fast_llm,
-        get_vision_llm,
-        get_judge_llm,
-        get_llm,
-        get_fast_llm,
         get_lite_llm,
+        get_planner_llm,
         get_vision_llm,
         get_judge_llm,
         get_fallback_llm,
@@ -173,7 +179,7 @@ def build_model(
         max_retries=LLM_MAX_RETRIES,
         client_kwargs={"timeout": LLM_REQUEST_TIMEOUT},
         # hybrid 模型（DashScope / Qwen / DeepSeek）经 OpenAI 兼容层读 extra_body 里的
-        # enable_thinking；不支持的供应商忽略该字段（无害）。口径与上面的 LangChain 档一致。
+        # enable_thinking；不支持的供应商忽略该字段（无害）。
         extra_body=None if thinking else {"enable_thinking": False},
         throttle=get_gateway_throttle(),
         role=role,
@@ -207,6 +213,49 @@ def get_fast_llm() -> ThrottledChatModel:
 
 
 @lru_cache(maxsize=1)
+def get_planner_llm() -> ThrottledChatModel:
+    """planner 专用档。**不配 ``LLM_PLANNER`` 就是快档**，与改之前逐字等价。
+
+    为什么值得单开一档：planner 是**链路外**的一次性调用（自己的 prompt 前缀，不在主 loop 的
+    messages 里），换模型名不会打断主 loop 的前缀缓存——主 loop 内换名会，所以那里只能切
+    thinking。链路外的调用是本仓做模型组合的唯一空间。
+
+    选型依据（2026-09-09，dev92 + `app/eval/planner_reward`，四个候选的完整数据见
+    `docs/plans/baseline-artifacts/planner_model_eval.json`）。planner 占一次任务墙钟约 19%，
+    是仅次于 shopping_summary 的第二大单点。
+
+    | 模型 | reward | 延迟中位 | 该弃权→真弃权 |
+    |---|---|---|---|
+    | deepseek-v4-flash（原） | 0.805 | 6.8s | 1/36 |
+    | qwen3.6-flash | 0.789 | 3.0s | 8/36 |
+    | glm-5.2-fast-preview | 0.801 | 2.1s | 12/36 |
+    | **qwen3.8-flash（现）** | 0.786 | 4.9s | **26/36** |
+
+    **总分完全分不出高下**（0.786~0.805 全在噪声内），区分它们的是 reward 看不见的两维：延迟
+    差 3 倍，以及「信息不足时会不会硬编」。dev92 里 36 条 golden 判该弃权（追问轮片段，没有
+    新品类），而 `compute_reward` 在 `gold.category is None` 时跳过那一维，**硬编不扣分**——所以
+    「打平」和「抗幻觉差一个数量级」是同时成立的。选型时这一列必须单独看。
+
+    选 qwen3.8-flash 而不是更快的 qwen3.6：抛 1.9s（占用户感知延迟约 5%）换抗硬编强 3 倍。
+    planner 的 category 是整条链的锚点，锚错了后面每步都在错误的轨道上跑得飞快，而域漂移是
+    prompt 治不死的老账。它也没有矫枉过正——误弃权仅 1 次，R_retrieval 反是四家最高。
+
+    **一个必须记住的限定**：dev92 是孤立片段，线上追问轮有 ``_render_prior_context()`` 的上文，
+    那时「沿用上一轮品类」是正确行为、不算硬编。所以那一列测的是「上下文缺失时的行为」，
+    不能直接当成线上漂移率。
+    """
+    name = os.environ.get("LLM_PLANNER", "").strip()
+    if not name:
+        return get_fast_llm()
+    return build_model(
+        name,
+        temperature=_env_float("LLM_FAST_TEMPERATURE", _env_float("LLM_TEMPERATURE", 0.3)),
+        role="planner",
+        thinking=False,
+    )
+
+
+@lru_cache(maxsize=1)
 def get_lite_llm() -> ThrottledChatModel:
     """便宜档（AgentScope 侧），对应 LangChain 的 ``model_router._lite_llm``。
 
@@ -222,6 +271,63 @@ def get_lite_llm() -> ThrottledChatModel:
         role="lite",
         thinking=False,
     )
+
+
+# ── 档位策略表 ───────────────────────────────────────────────────────────────
+#
+# 「哪一轮用哪一档」从此**只在这里**定义，装配（agents.py）与换档（adapter.on_model_call）
+# 读同一份取值。此前这条口径散在两处——基座在 agents.py 写死 ``get_llm()``，而
+# ``hooks/reasoning_boost`` 的整个前提是「基座是快档、我只顶第一轮」。两处一脱钩，boost 就
+# 成了「把 reasoning 换成 reasoning」的空操作，主 loop 每轮都在付 thinking 解码，且没有任何
+# 测试会红（见 docs/plans/agent系统审查报告-2026-09-09.md P0-1）。同一处读、同一处用，
+# 那类静默失效在结构上就不可能再发生。
+TIERS = ("reasoning", "fast", "lite")
+
+
+def get_tier_llm(tier: str) -> ThrottledChatModel:
+    """按档位名取模型。认不出的档位**不抛**，回退 reasoning 并告警。
+
+    不抛的理由：本函数的调用点之一是 Agent 装配期，而 ``_load_params()`` 允许后台管理页热更新
+    env——一个拼错的档位名不该把整条服务或管理页打挂。回退方向选 reasoning（能力更强那档）：
+    配置错误的代价是多花钱，不是把决策质量悄悄降下去。
+
+    刻意写成 if 链而不是「档位名 → 工厂函数」的字典：字典一旦建好就把函数**对象**捂住了，
+    测试里 monkeypatch 本模块的 ``get_llm`` 再也顶不掉它（冒烟测试会真打网络）。
+    """
+    t = (tier or "").strip().lower()
+    if t == "fast":  # 同款模型关思考（默认不换模型名 → 不断前缀缓存）
+        return get_fast_llm()
+    if t == "lite":  # 便宜档，配了 LLM_LITE 才真换模型名
+        return get_lite_llm()
+    if t != "reasoning":
+        logger.warning("未知模型档位 %r，回退 reasoning 档", tier)
+    return get_llm()
+
+
+def main_loop_tier_base() -> str:
+    """主 loop 基座档。默认 ``fast``——第 2 轮之后决策空间已被阶段机 + 候选 id 化夹死，
+    模型基本只是在允许的一两个工具里挑一个、把几个 item_id 传进去，thinking token 买不到东西。
+    """
+    return os.environ.get("MAIN_LOOP_TIER_BASE", "fast").strip().lower()
+
+
+def main_loop_tier_first() -> str:
+    """主 loop 第一轮档；``same``（默认）= 与基座相同，即**全程零思考**。
+
+    第 1 轮曾单独开 reasoning：它是整条链路上唯一没被机制锁死的决策——读懂 query（购物 / 闲聊 /
+    追问）、决定先拆解还是先查品类常识、单平台直搜还是跨平台派发。2026-09-09 用户决定先把
+    thinking 这个变量整体固定为 off，转而在**模型组合**上找空间（主 loop 内换模型名会断前缀
+    缓存，组合空间在链路外的一次性调用上）。留着这个键是为了随时把那一轮加回来做对照。
+
+    未实测的风险在**编排稳定性**而非延迟：A/B 里 3/3 编排逐字一致的那组恰恰是第一轮开思考的
+    那组，「全关」这一组当时没跑。要判它，看的是工具序列的一致性，不是墙钟。
+    """
+    return os.environ.get("MAIN_LOOP_TIER_FIRST", "same").strip().lower()
+
+
+def worker_tier() -> str:
+    """worker（SearchAgent / TradeAgent）档。worker 在收窄后的子任务里只做 1~2 跳，恒为快档。"""
+    return os.environ.get("WORKER_TIER", "fast").strip().lower()
 
 
 @lru_cache(maxsize=1)
