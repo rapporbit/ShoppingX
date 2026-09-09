@@ -691,7 +691,6 @@ class TestGlobalHarnessSetup:
         expected = {
             "schema_assertion",
             "sequencing_assertion",
-            "semantic_assertion",
             "drift_detector",
             "drift_result_tracker",
             "assertion_handler",

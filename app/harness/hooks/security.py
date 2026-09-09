@@ -3,7 +3,7 @@
 四层里 L2（system prompt 的 ``<security_boundary>`` 边界声明）是纯 prompt，不需要 Hook；另外三层
 都是确定性代码，各挂一个 Hook 点：
 
-    pre_tool_call   priority=1   tool_whitelist   非白名单工具名 → 拒绝执行
+    pre_tool_call   priority=1   tool_whitelist   非白名单工具名 → **告警**（拒绝由框架做）
     post_tool_call  priority=5   content_filter   外部数据源返回 → 洗掉注入指令
     on_session_end  priority=20  output_audit     最终回答 → 脱敏内部信息
 
@@ -11,7 +11,8 @@
 
 - 白名单是 ``pre_tool_call`` 的**第一道**（1 < 5 的 terminal_reached）。理由：一个根本不存在的
   工具名，没必要先过阶段门 / 预算闸 / 熔断器——那些闸的语义都建立在「这是我们的工具」之上。
-  先确认身份，再谈授权。
+  先确认身份，再谈授权。（它自 2026-09-10 只报警不拒绝，见函数 docstring；位置照旧第一道，
+  这样那条 error 记的是「模型意图调它」，不受后面任何闸的先手影响。）
 - 内容过滤是 ``post_tool_call`` 的**第一道**（5 < 10 的 truncate_result）。理由有两条：截断会把
   长结果尾部切掉，注入若藏在尾部就会被截断「顺手清掉」——看起来安全，实则是运气；更要命的是
   ``result_nudges``（priority 20）会往结果尾部追加我们自己的哨兵文案，那些文案里带
@@ -23,8 +24,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from app.harness.middleware import HookRejectSignal, harness_hook
-from app.harness.sentinels import TOOL_NOT_ALLOWED
+from app.harness.middleware import harness_hook
 from app.observability import metrics
 from app.security.content_filter import EXTERNAL_SOURCE_TOOLS, sanitize_tool_output
 from app.security.output_guard import audit_output
@@ -35,17 +35,21 @@ logger = logging.getLogger("shoppingx.harness.security")
 
 @harness_hook("pre_tool_call", name="tool_whitelist", priority=1)
 async def check_tool_whitelist(context: dict[str, Any]) -> dict[str, Any] | None:
-    """L1：工具名不在 ``FULL_TOOL_SET`` 里 → 直接拒，工具不执行。
+    """L1 **断言**：工具名不在 ``FULL_TOOL_SET`` 里就报警——但不再拒。
 
-    正常情况下这道闸永远不开火（LangChain 只会执行注册过的工具）。它开火意味着两件事之一：
-    模型被诱导幻觉出了工具名，或者工具表被动态改过——两者都值得一条 warning + 一个 metric。
+    **拒绝这件事框架已经做了**：Toolkit 里没有的工具名，AgentScope 根本不会执行。这道闸
+    301 会话 0 触发，自述也写着「正常永不开火」。它真正的价值是那条 error + metric：开火
+    意味着模型被诱导幻觉出了工具名，或工具表被动态改过——这是**要被看见的异常**，不是
+    要被执法的越界。2026-09-10 由 ``raise`` 降为告警（A4）。
     """
     tool_name = context.get("tool_name", "")
     if validate_tool_call(tool_name):
         return None
     metrics.record_security_event("tool_not_allowed")
-    logger.warning("L1 工具白名单拦截：tool=%r 不在 FULL_TOOL_SET 内", tool_name)
-    raise HookRejectSignal(TOOL_NOT_ALLOWED.format(tool=tool_name), raw=True)
+    logger.error(
+        "L1 工具白名单告警：tool=%r 不在 FULL_TOOL_SET 内（框架侧会自行拒绝执行）", tool_name
+    )
+    return None
 
 
 @harness_hook("post_tool_call", name="content_filter", priority=5)

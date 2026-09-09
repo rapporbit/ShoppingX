@@ -53,7 +53,7 @@ async def route_by_budget(context: dict[str, Any]) -> dict[str, Any] | None:
 
     三个出口，都不在这里直接操作模型——Hook 拿不到 ``ModelRequest``：
 
-    - ``model_override``：适配器 ``request.override(model=...)``（lite / minimal 档换便宜模型）
+    - ``model_tier``：适配器按档位名解析出本运行时的模型（lite / minimal 档换便宜模型）
     - ``messages`` 追加 hint：minimal 档让模型自己也知道该收了
     - ``fallback_answer``：适配器**跳过模型调用**，直接把这段文本当 AIMessage 返回，loop 自然终止
 
@@ -84,14 +84,11 @@ async def route_by_budget(context: dict[str, Any]) -> dict[str, Any] | None:
         logger.warning("预算耗尽，走 fallback 规则兜底（不调 LLM）")
         return context
 
-    model = model_router.tier_model(tier)
-    if model is not None:
-        context["model_override"] = model
-        # 两个运行时各读各的键：``model_override`` 是 LangChain 的模型**对象**，AgentScope 侧
-        # 塞不进去（它要 ``ChatModelBase``，塞错的症状是「'ChatOpenAI' object is not callable」）。
-        # 所以 Hook 再产一个**档位名**，由各自的适配器解析成本运行时的模型——这才符合
-        # 「Hook 只做决策、适配器落地」这条分工。
-        context["model_tier"] = "lite"
+    # Hook 只产**档位名**，由适配器解析成本运行时的模型——「Hook 决策、适配器落地」的分工。
+    # 这里曾并存一个 ``model_override`` 键（装 LangChain 的模型**对象**），迁到 AgentScope 后
+    # 生产代码零处读（``adapter.py`` 明确「刻意不读」），只剩每次降档白构造一个模型对象、
+    # 外加给读者「这里在换模型」的假象，已删。
+    context["model_tier"] = "lite"
 
     if tier is Tier.MINIMAL and entered_new_tier:
         # 只在**进入** minimal 那一轮注入：hint 经 persist_messages 落 state 后长驻历史，

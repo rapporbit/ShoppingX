@@ -366,9 +366,8 @@ class HarnessAgentAdapter(MiddlewareBase):
 
         input_kwargs["messages"] = ctx["messages"]
         _persist_injections(agent, ctx.get("persist_messages"))
-        # 换档（预算降 lite / 第一轮加档）：Hook 只给**档位名**，模型对象在这里解析。
-        # 刻意不读 ``model_override``——那个键装的是 LangChain 模型对象，塞进 current_model
-        # 会在调用时炸「'ChatOpenAI' object is not callable」（L3 的冒烟测试抓到过）。
+        # 换档（预算降 lite / 第一轮加档）：Hook 只给**档位名**，模型对象在这里解析——
+        # 这是「Hook 决策、适配器落地」的落点，也是档位→模型解析的**唯一**一处。
         # 顺序即优先级：Hook（budget_router）写过档就照它的来，没写才轮到第一轮加档。
         tier = ctx.get("model_tier") or _first_round_tier(ctx)
         model = _resolve_model_tier(tier)

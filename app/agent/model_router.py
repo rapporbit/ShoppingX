@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import logging
 from enum import IntEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from app.agent.token_budget import remaining_ratio
 from app.utils.env import env_float
@@ -87,22 +87,11 @@ def current_tier() -> Tier:
     return Tier.MAIN
 
 
-def tier_model(tier: Tier) -> Any | None:
-    """该档位该用哪个模型。``FALLBACK`` 返回 ``None``——那一档根本不调 LLM。
-
-    ``MAIN`` 也返回 ``None``：表示「不覆盖，用 request 里原本那个」。这让适配器的逻辑退化成
-    「拿到模型就 override，拿不到就不动」，不必区分「主力档」和「降级档」。
-    """
-    if tier in (Tier.FALLBACK, Tier.MAIN):
-        return None
-    return _lite_llm()
-
-
-def _lite_llm() -> Any:
-    """便宜档模型：配了 ``LLM_LITE`` 就用它，否则复用快档（同模型关 reasoning）。"""
-    from app.agent.llm import get_lite_llm
-
-    return get_lite_llm()
+# 这里曾有 ``tier_model(tier)`` / ``_lite_llm()``：把档位解析成一个**模型对象**塞进
+# ``context["model_override"]``。迁到 AgentScope 后没有任何生产代码读那个键（适配器要的是
+# ``ChatModelBase``，塞 LangChain 对象的症状是「'ChatOpenAI' object is not callable」），
+# 两个函数随之整体失去引用，已删。档位→模型的解析现在只有一处：适配器读 ``model_tier``
+# 交给 ``llm.get_tier_llm``。**本模块只管「降到哪一档」，不管「那档是哪个模型」。**
 
 
 # minimal 档注入的简洁 hint。用 ``[预算提醒]`` 前缀复用 ``session_hooks`` 已有的内部文案标记——
