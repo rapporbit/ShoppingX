@@ -505,6 +505,24 @@ async def item_picker(
         normalize_terms(_merge_terms(deprioritize_keywords, mem.penalty))
     )
     must, must_specs = _split_specs(normalize_terms(_merge_terms(must_have, mem.must)))
+    # 打分用的 ``must`` 含 ``mem.must``，而后者是 ``assemble`` 用 ``pt.like_terms()`` 装进来的
+    # ——那是**软偏好**（``polarity="like"``、不分 blocking，见 SessionPrefState.like_terms 的
+    # docstring），拿来加分完全合理。但它**不能进 rerank query**：``_category_relevance`` 的契约
+    # 第①条写着「绝不拼 prefer 偏好词，拼了实测排序反转」，而软偏好正是 prefer 性质的东西。
+    #
+    # 实测后果（2026-09-09，orchab 三遍同一条 query）：偏好词由 planner 每轮现生成、每轮都不同
+    # （["durable","niche brand","小众","canvas","nylon"] vs ["niche brand","durable","canvas",
+    # "waterproof"]），拼进 query 后同一个候选的 rerank 分数在两遍之间是 0.783 vs 0.254，
+    # 品类门（_RERANK_FLOOR）判定随之翻转（oncat 17/26 vs 1/30），一遍出 8 件、一遍触发补搜回退
+    # 只出 3 件。**执法机制的判据必须可复现**，而 LLM 每轮的自由发挥不是。
+    #
+    # 顺带：``rerank_query`` 还是增量缓存的 key（见 _category_relevance ③），每轮变 = 缓存全
+    # miss = 补搜轮把所有候选重新打一遍分，白付 reranker 往返。
+    #
+    # 所以 rerank 那一路只吃**模型显式传的 must_have**（它是模型从用户原话里提的硬约束）。
+    # 用户没给硬约束时 query 退化成纯品类词，那是正确的失效方向——M22 那 +3.10pt 的收益来自
+    # ESCI 里用户自己写的规格词（"16 inch laptop bag"），本就不该由 LLM 现编的偏好来兑现。
+    hard_must, _ = _split_specs(normalize_terms(_merge_terms(must_have)))
     prefer, prefer_specs = _split_specs(normalize_terms(_merge_terms(prefer_keywords)))
     # 行为亲和：单独一路弱加分，**与本轮显式词去重**——一个词既是用户本轮说的软偏好、又出现在他的
     # 收藏里时，只按显式的那档算分。不去重就成了「同一个理由加两次分」（1.0 + 0.5），命中它的商品会
@@ -580,9 +598,11 @@ async def item_picker(
     # 品类一致性相关性门：cross-encoder 对「干净品类 query」打分。召回是向量近邻，标题蹭词的
     # 跨品类垃圾（water bottle **stickers**）向量分和真品拉不开（实测 0.60 vs 0.67），字面匹配
     # 更拦不住（标题真含关键词）——只有 cross-encoder 拉得开（实测 0.97 vs 0.006）。
-    # must 已是 _split_specs 剥掉数值规格、normalize_terms 归一成英文的普通词，正是要拼进
+    # 传 ``hard_must`` 而不是 ``must``：后者含 ``mem.must``（= P_t 的软偏好），拼进 query 会让
+    # 判据随 planner 每轮的自由发挥而变，执法结果跟着翻转——理由与实测数据见 hard_must 的定义处。
+    # hard_must 已是 _split_specs 剥掉数值规格、normalize_terms 归一成英文的普通词，正是要拼进
     # rerank query 的那部分（prefer 不能拼，见 _category_relevance 的硬约束①）。
-    rerank_scores, rerank_on, anchor_conflict = await _category_relevance(survivors, must)
+    rerank_scores, rerank_on, anchor_conflict = await _category_relevance(survivors, hard_must)
     # 池内品类计数（补搜闸的污染信号，见 ItemPickerOutput 字段说明）。没拿到分的候选按品类
     # 相符算——判不了不定罪，与「rr < FLOOR 才沉底」的失效方向一致。
     oncat_count: int | None = None
