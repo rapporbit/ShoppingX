@@ -18,22 +18,21 @@ from typing import Any
 
 from app.harness.budgets import MAX_TERMINAL_NUDGE_RETRIES, TERMINAL_TOOLS
 from app.harness.middleware import harness_hook
-from app.harness.msgs import has_tool_result_from
 from app.harness.sentinels import TERMINAL_TOOL_NUDGE
 from app.harness.state import GuardState
 
 logger = logging.getLogger("shoppingx.harness.terminal")
 
 
-def _has_terminal_tool_call(messages: Any) -> bool:
-    """本轮消息历史里是否已经真实**执行**过终结工具（两套运行时同一判据，见 harness/msgs）。"""
-    return has_tool_result_from(messages, TERMINAL_TOOLS)
-
-
 @harness_hook("post_reflect", name="terminal_enforcer", priority=60, main_only=True)
 async def enforce_terminal(context: dict[str, Any]) -> dict[str, Any] | None:
-    """模型没调工具就想收尾、且本轮从未调过终结工具 → 请适配器重发一次模型。"""
+    """模型没调工具就想收尾、且**本轮**从未调过终结工具 → 请适配器重发一次模型。
 
+    「本轮调过哪些工具」只认 ``called_tools``（``HarnessSession`` 每轮新建，工具真执行成功
+    才记——被闸拒绝的、返回 ERROR 的都不算）。此前这里是自己去扫 ``messages`` 找 tool_result
+    （审查报告 P1-4：同一事实四个来源），**那个来源在续聊轮是错的**：messages 含恢复回来的
+    历史，上一轮调过 shopping_summary，这一轮模型空口收尾也会被判成「调过了」而放行。
+    """
     guard = context.get("_guard")
     if not isinstance(guard, GuardState):
         return None
@@ -44,8 +43,9 @@ async def enforce_terminal(context: dict[str, Any]) -> dict[str, Any] | None:
         return None  # 它还在调工具，loop 会继续，不需要催
     if context.get("response_ai_message") is None:
         return None
-    if _has_terminal_tool_call(context.get("messages")):
-        return None  # 之前已调过终结工具，这是它之后的自然收尾文字，正常放行
+    called: set[str] = context.get("called_tools", set())
+    if called & TERMINAL_TOOLS:
+        return None  # 本轮已调过终结工具，这是它之后的自然收尾文字，正常放行
 
     guard.terminal_nudge_retries += 1
     context["retry_nudge"] = TERMINAL_TOOL_NUDGE

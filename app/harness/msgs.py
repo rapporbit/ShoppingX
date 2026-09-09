@@ -76,28 +76,7 @@ def iter_tool_results(messages: Any, name: str) -> Iterator[str]:
                 yield "".join(block_text(b) for b in output)
 
 
-def has_tool_result_from(messages: Any, names: frozenset[str] | set[str]) -> bool:
-    """消息历史里是否出现过 ``names`` 中某个工具的**执行结果**。
-
-    一整轮的 tool_call / tool_result 都在同一条 assistant ``Msg`` 的 content 里，所以要下钻到
-    block 看 ``type == "tool_result"``。判据是「结果回来了」而不是「模型说要调」——模型说了没做
-    不算数（终结纪律靠这一点区分「真收尾」与「嘴上收尾」）。
-    """
-    if not messages:
-        return False
-    for msg in messages:
-        content = getattr(msg, "content", None)
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            block_type = getattr(block, "type", None) or (
-                block.get("type") if isinstance(block, dict) else None
-            )
-            if block_type != "tool_result":
-                continue
-            block_name = getattr(block, "name", None) or (
-                block.get("name") if isinstance(block, dict) else None
-            )
-            if block_name in names:
-                return True
-    return False
+# 这里曾有 ``has_tool_result_from(messages, names)``：扫消息历史判「这些工具里有没有哪个真执行
+# 过」。唯一的消费者是 ``terminal_enforce``，而它问的其实是「**本轮**调过没有」——扫 messages
+# 答不了这个问题，因为续聊时 messages 里还有恢复回来的上一轮历史。改由 ``called_tools`` 回答
+# （每轮新建、只记真执行成功的工具）后本函数无人使用，已删（审查报告 B4）。
