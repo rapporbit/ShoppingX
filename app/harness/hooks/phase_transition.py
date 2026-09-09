@@ -17,7 +17,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from app.agent.fork_guard import current_fork_depth
 from app.agent.retrieval_budget import budget_relax_due
 from app.api.context import get_retrieval_mode, get_session_tasks, set_retrieval_mode
 from app.harness.budgets import REUSE_RETRIEVAL_BUDGET
@@ -46,14 +45,12 @@ def _reset_drift_counters(context: dict[str, Any]) -> None:
     state.consecutive_severe = 0
 
 
-@harness_hook("post_reflect", name="phase_transition", priority=40)
+@harness_hook("post_reflect", name="phase_transition", priority=40, main_only=True)
 async def try_phase_transition(context: dict[str, Any]) -> dict[str, Any] | None:
     """根据当前执行状态判断是否触发阶段转移。仅 depth 0 生效。
 
     priority=40 排在 drift_detector（20）之后：本轮漂移判定基于「转移前」的计数器，判完再重置。
     """
-    if current_fork_depth() >= 1:
-        return None
 
     machine = get_phase_machine()
     if machine is None:
@@ -168,7 +165,7 @@ def _budget_relax_notice_due(
     )
 
 
-@harness_hook("post_reflect", name="refine_backfill", priority=39)
+@harness_hook("post_reflect", name="refine_backfill", priority=39, main_only=True)
 async def check_refine_backfill(context: dict[str, Any]) -> dict[str, Any] | None:
     """复用轮（reuse）精挑后候选太少 → 补搜一次。**治复用带来的召回损失。**
 
@@ -197,8 +194,6 @@ async def check_refine_backfill(context: dict[str, Any]) -> dict[str, Any] | Non
     就死了（单测直调钩子暴露不了）。先判补搜、后判转移：补搜火了阶段退回 SEARCHING，40 的
     COMPARING 分支自然不再触发。
     """
-    if current_fork_depth() >= 1:
-        return None
 
     machine = get_phase_machine()
     if machine is None or machine.phase != Phase.COMPARING:
@@ -256,7 +251,7 @@ async def check_refine_backfill(context: dict[str, Any]) -> dict[str, Any] | Non
     return context
 
 
-@harness_hook("post_reflect", name="phase_rollback", priority=41)
+@harness_hook("post_reflect", name="phase_rollback", priority=41, main_only=True)
 async def check_phase_rollback(context: dict[str, Any]) -> dict[str, Any] | None:
     """COMPARING 里 item_picker 精挑不出东西时回退到 SEARCHING：扩大搜索范围。
 
@@ -265,8 +260,6 @@ async def check_phase_rollback(context: dict[str, Any]) -> dict[str, Any] | None
     向用户澄清都是正常路径，那时回退纯属误伤（实测会打断正常链路，把阶段推回 SEARCHING）。
     真正在 COMPARING 里卡死不动的情形由 TGM 的迭代上限兜底。
     """
-    if current_fork_depth() >= 1:
-        return None
 
     machine = get_phase_machine()
     if machine is None or machine.phase != Phase.COMPARING:
@@ -323,7 +316,7 @@ def _price_tasks_hint() -> str:
     return ""
 
 
-@harness_hook("post_tool_call", name="transition_notice", priority=19)
+@harness_hook("post_tool_call", name="transition_notice", priority=19, main_only=True)
 async def append_transition_notice(context: dict[str, Any]) -> dict[str, Any] | None:
     """把「阶段收线」通告当场缀在触发它的工具结果尾部。仅主 loop（depth 0）。
 
@@ -337,8 +330,6 @@ async def append_transition_notice(context: dict[str, Any]) -> dict[str, Any] | 
       must_have 池内 0 命中）时改发「请重新检索」——refine_backfill 马上要把阶段退回
       SEARCHING，让模型提前拿到指路。
     """
-    if current_fork_depth() >= 1:
-        return None
     machine = get_phase_machine()
     guard = context.get("_guard")
     if machine is None or not isinstance(guard, GuardState):

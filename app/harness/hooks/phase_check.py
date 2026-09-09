@@ -34,7 +34,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from app.agent.fork_guard import current_fork_depth
 from app.harness.middleware import HookRejectSignal, harness_hook
 from app.harness.phase_machine import Phase, get_phase_machine
 from app.harness.signals import candidate_count
@@ -42,11 +41,9 @@ from app.harness.signals import candidate_count
 logger = logging.getLogger("shoppingx.harness.phase_check")
 
 
-@harness_hook("pre_tool_call", name="phase_check", priority=20)
+@harness_hook("pre_tool_call", name="phase_check", priority=20, main_only=True)
 async def check_phase_permission(context: dict[str, Any]) -> dict[str, Any] | None:
     """shopping_summary 收尾资格底线。仅 depth 0 生效，其余工具一律放行。"""
-    if current_fork_depth() >= 1:
-        return None
 
     machine = get_phase_machine()
     if machine is None:
