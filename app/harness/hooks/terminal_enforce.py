@@ -17,9 +17,9 @@ import logging
 from typing import Any
 
 from app.agent.fork_guard import current_fork_depth
-from app.harness._msgcompat import has_tool_result_from
 from app.harness.budgets import MAX_TERMINAL_NUDGE_RETRIES, TERMINAL_TOOLS
 from app.harness.middleware import harness_hook
+from app.harness.msgs import has_tool_result_from
 from app.harness.sentinels import TERMINAL_TOOL_NUDGE
 from app.harness.state import GuardState
 
@@ -27,7 +27,7 @@ logger = logging.getLogger("shoppingx.harness.terminal")
 
 
 def _has_terminal_tool_call(messages: Any) -> bool:
-    """本轮消息历史里是否已经真实**执行**过终结工具（两套运行时同一判据，见 _msgcompat）。"""
+    """本轮消息历史里是否已经真实**执行**过终结工具（两套运行时同一判据，见 harness/msgs）。"""
     return has_tool_result_from(messages, TERMINAL_TOOLS)
 
 

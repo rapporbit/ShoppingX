@@ -25,8 +25,8 @@ import time
 from typing import Any
 
 from app.agent.fork_guard import current_fork_depth
-from app.harness._msgcompat import system_message
 from app.harness.middleware import harness_hook
+from app.harness.msgs import system_message
 from app.harness.signals import candidate_count
 from app.harness.state import GuardState
 from app.utils.env import env_int

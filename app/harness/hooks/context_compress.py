@@ -30,8 +30,8 @@ from app.compress.blocks import (
     DEFAULT_MAX_TOOL_TOKENS,
     post_step_compress,
 )
-from app.harness._msgcompat import system_message
 from app.harness.middleware import harness_hook
+from app.harness.msgs import system_message
 from app.harness.state import GuardState
 from app.observability import metrics
 from app.utils.env import env_bool, env_int

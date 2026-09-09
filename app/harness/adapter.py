@@ -60,6 +60,7 @@ from app.harness._tool_signals import (
 from app.harness.hooks.context_compress import _compress_opts
 from app.harness.hooks.drift_detector import DriftState
 from app.harness.middleware import harness
+from app.harness.msgs import block_text, iter_tool_results, text_of
 from app.harness.phase_machine import get_phase_machine
 from app.harness.state import GuardState
 from app.tools._diagnostics import consume_diagnostics
@@ -224,15 +225,10 @@ def _first_round_tier(ctx: dict[str, Any]) -> str | None:
     return None if tier == main_loop_tier_base() else tier
 
 
-def _block_text(block: Any) -> str:
-    """content block → 文本（非文本块给空串）。"""
-    return getattr(block, "text", "") or ""
-
-
-def _text_of(msg: Msg | None) -> str:
-    if msg is None:
-        return ""
-    return "".join(_block_text(b) for b in msg.content if getattr(b, "type", None) == "text")
+# ``_text_of`` / ``_block_text`` 的实现在 ``harness.msgs``（消息形态的知识只住那一个文件）。
+# 这里保留本名的别名：调用点密集，改名收益不抵 diff 噪声。
+_block_text = block_text
+_text_of = text_of
 
 
 def _has_tool_calls(msg: Msg | None) -> bool:
@@ -670,25 +666,18 @@ def _terminal_summary(messages: list[Msg]) -> str:
     从 ``ToolResultBlock`` 的 output 取而不是从截断后的文本取：截断 Hook 只改模型视野里的
     副本，这里要的是完整原文。chat_fallback 不走此路——闲聊收尾本就该由模型口吻说。
 
-    倒着找、且解析不出就继续往前找：同一轮里 ``shopping_summary`` 常被调好几次，前几次撞
-    阶段闸拿回的是哨兵文案（不是 JSON）。取到那次就等于把一段哨兵直出给用户。
+    「倒着找 + 解析不出继续往前」的遍历由 ``iter_tool_results`` 负责（那个坑的说明也在那里），
+    本函数只管解析：撞阶段闸那几次拿回的是哨兵文案，不是 JSON，跳过即可。
     """
     import json
 
-    for msg in reversed(messages):
-        for block in reversed(list(getattr(msg, "content", []) or [])):
-            if getattr(block, "type", None) != "tool_result":
-                continue
-            if getattr(block, "name", None) != "shopping_summary":
-                continue
-            output = getattr(block, "output", "")
-            text = output if isinstance(output, str) else "".join(_block_text(b) for b in output)
-            try:
-                summary = json.loads(text).get("summary")
-            except (json.JSONDecodeError, ValueError, AttributeError):
-                continue
-            if isinstance(summary, str) and summary:
-                return summary
+    for text in iter_tool_results(messages, "shopping_summary"):
+        try:
+            summary = json.loads(text).get("summary")
+        except (json.JSONDecodeError, ValueError, AttributeError):
+            continue
+        if isinstance(summary, str) and summary:
+            return summary
     return ""
 
 

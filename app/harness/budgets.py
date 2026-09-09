@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 
+from app.agent.constants import TERMINAL_TOOLS as _TERMINAL_TOOLS
 from app.harness.sentinels import FORK_EXHAUSTED
 from app.utils.env import env_int
 
@@ -59,9 +60,11 @@ FORK_TOOLS = frozenset({"task_dispatch"})
 # 让任务能「花得起地」结束，而非硬停丢掉已收敛的候选。
 COST_AMPLIFIER_TOOLS = FORK_TOOLS | RETRIEVAL_TOOLS | frozenset({"category_insight"})
 
-# 主 loop 专属的终结工具集：与 tool_registry.TERMINAL_TOOLS 一致的字面量，本地重复定义是为了避免
-# 循环导入（tool_registry → dispatch_tool → harness）。
-TERMINAL_TOOLS = frozenset({"shopping_summary", "chat_fallback"})
+# 终结工具集从 ``app.agent.constants`` 读（无依赖模块，正是为打破 tool_registry → dispatch_tool
+# → harness 这个环而设）。这里曾是一份**只有 2 个**的复制品：复制时说好「与 tool_registry 一致」，
+# 之后那边加了 create_order / cancel_order，这边没跟——交易轮的收尾判定因此走的是另一套。
+# 复制常量的成本从来不在复制那一刻，在此后每一次只改了一处的修改。
+TERMINAL_TOOLS = _TERMINAL_TOOLS
 
 # 主 loop 没调终结工具就打算用纯文字收尾时，最多提醒一次——避免模型持续不听指令时无限重试。
 MAX_TERMINAL_NUDGE_RETRIES = 1

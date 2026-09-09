@@ -25,6 +25,7 @@ from agentscope.tool import ToolChoice
 from pydantic import BaseModel
 
 from app.agent.token_budget import charge_usage
+from app.harness.msgs import text_of
 
 logger = logging.getLogger("shoppingx.invoke")
 
@@ -55,20 +56,9 @@ def to_msgs(prompt: Prompt) -> list[Msg]:
     return msgs
 
 
-def _text_of(response: Any) -> str:
-    """从 ``ChatResponse`` 取纯文本：拼所有 text block，丢 thinking / tool_use / 多媒体块。"""
-    content = getattr(response, "content", None)
-    if isinstance(content, str):
-        return content
-    parts: list[str] = []
-    for block in content or []:
-        btype = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
-        if btype != "text":
-            continue
-        text = block.get("text") if isinstance(block, dict) else getattr(block, "text", None)
-        if isinstance(text, str):
-            parts.append(text)
-    return "".join(parts)
+# 从 ``ChatResponse`` 取纯文本（拼 text block，丢 thinking / tool_use / 多媒体块）。实现在
+# ``harness.msgs.text_of``——它同时吃 Msg 与 ChatResponse，两者在这件事上形状一致。
+_text_of = text_of
 
 
 async def call_text(model: Any, prompt: Prompt) -> str:

@@ -59,6 +59,7 @@ from app.api.context import (
 from app.db.quota import remaining_usd
 from app.harness.budgets import fork_budget_scope, fork_concurrency_scope
 from app.harness.middleware import harness
+from app.harness.msgs import iter_tool_results
 from app.harness.phase_machine import reset_phase_machine
 from app.harness.setup import setup_harness
 from app.memory.curator import curate_turn
@@ -134,28 +135,15 @@ def _extract_summary(messages: Sequence[Msg]) -> ShoppingSummaryOutput | None:
     ``app/tools/_as_tools.py`` 的 ``_to_text``）。所以这里按**工具名 + 能否验成
     ShoppingSummaryOutput** 双条件认。
 
-    **两处方向都必须是倒着来**（消息倒着、消息内的 block 也倒着），且解析失败要**接着往前
-    找**而不是就此认输：AgentScope 把一整轮的 tool_call / tool_result 全塞进同一条 assistant
-    消息的 content 里，而 ``shopping_summary`` 在一轮里被调好几次是常态——前几次撞上 harness
-    的阶段闸（「还没精挑就想出清单」）拿回哨兵文案，最后一次才真出清单。正着找第一个、解析
-    失败就 return None，等于永远只看得到被拒绝的那次，items 恒为空。
+    「倒着找 + 解析失败接着往前」的遍历由 ``harness.msgs.iter_tool_results`` 负责，那个坑的
+    完整说明也在那里——它此前在这里和 ``adapter._terminal_summary`` 各写一遍，连坑注释都各抄
+    一份。同一件事的两份实现，一处修 bug 另一处必漏。
     """
-    for msg in reversed(list(messages)):
-        for block in reversed(list(getattr(msg, "content", []) or [])):
-            if getattr(block, "type", None) != "tool_result":
-                continue
-            if getattr(block, "name", None) != "shopping_summary":
-                continue
-            output = getattr(block, "output", "")
-            text = (
-                output
-                if isinstance(output, str)
-                else "".join(getattr(b, "text", "") or "" for b in output)
-            )
-            try:
-                return ShoppingSummaryOutput.model_validate_json(text)
-            except Exception:
-                continue  # 哨兵文案 / 报错文本：不是清单，继续往前找真正出货的那次
+    for text in iter_tool_results(messages, "shopping_summary"):
+        try:
+            return ShoppingSummaryOutput.model_validate_json(text)
+        except Exception:
+            continue  # 哨兵文案 / 报错文本：不是清单，继续往前找真正出货的那次
     return None
 
 
