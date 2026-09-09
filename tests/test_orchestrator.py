@@ -499,10 +499,18 @@ async def test_assembly_binds_one_session_per_loop(monkeypatch: pytest.MonkeyPat
     from app.agent import agents as ag
     from app.harness.adapter import HarnessToolAdapter
 
-    monkeypatch.setattr(ag, "get_llm", _fake_model)
-    monkeypatch.setattr(ag, "get_fast_llm", _fake_model)
+    tiers: list[str] = []
+
+    def _tiered(tier: str) -> Any:
+        tiers.append(tier)
+        return _fake_model()
+
+    monkeypatch.setattr(ag, "get_tier_llm", _tiered)
 
     agent, session = await ag.build_main_agent(original_query="买个包")
+    # 装配期拿的是**基座档**（默认 fast，关思考）。这条端到端钉住 P0-1 的另一半：档位表说
+    # 一套、装配拿另一套时，上面那批单测（只验档位表本身）是不会红的。
+    assert tiers == ["fast"]
     names = ["planner", "item_search", "task_dispatch", "shopping_summary"]
     tools = [await agent.toolkit.get_tool(n) for n in names]
     assert all(t is not None for t in tools)
@@ -535,10 +543,11 @@ async def test_assembled_agent_runs_with_terminal_discipline(
 
     setup_harness()
     monkeypatch.setattr(ag, "MAIN_MAX_ITERS", 2)
-    monkeypatch.setattr(ag, "get_llm", _fake_model)
-    # 第一轮 reasoning_boost 会换档：适配器按**档位名**去 app.agent.llm 现取模型（见
-    # adapter._resolve_model_tier），所以这里也得把那一处顶掉，否则冒烟测试会真打网络。
+    monkeypatch.setattr(ag, "get_tier_llm", lambda _tier: _fake_model())
+    # 第一轮加档也会换模型：适配器按**档位名**去 app.agent.llm 现取（见 _first_round_tier
+    # → _resolve_model_tier），所以那条路也得顶掉，否则冒烟测试会真打网络。
     monkeypatch.setattr("app.agent.llm.get_llm", _fake_model)
+    monkeypatch.setattr("app.agent.llm.get_fast_llm", _fake_model)
     agent, session = await ag.build_main_agent(original_query="你好")
     msg = Msg(name="user", role="user", content=[TextBlock(type="text", text="你好")])
     out = await agent.reply(msg)

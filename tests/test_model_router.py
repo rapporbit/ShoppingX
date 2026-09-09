@@ -314,14 +314,13 @@ class TestAdapterWiring:
         from agentscope.message import TextBlock
         from agentscope.model import ChatResponse
 
-        import app.harness.hooks.reasoning_boost as rb
         from app.harness.setup import setup_harness
 
         setup_harness()
         monkeypatch.setattr(mr, "current_tier", lambda: Tier.MAIN)
-        # 关掉「主 loop 第一轮开 reasoning」——它同样经 model_tier 落地，会盖住本例要断言的
-        # 「预算 MAIN 档不碰模型」。两者的优先级协作另有专测（tests/test_reasoning_boost.py）。
-        monkeypatch.setattr(rb, "BOOST_ENABLED", False)
+        # 关掉「主 loop 第一轮加档」——它同样经 model_tier 落地，会盖住本例要断言的
+        # 「预算 MAIN 档不碰模型」。两者的优先级协作另有专测（tests/test_model_tiers.py）。
+        monkeypatch.setenv("MAIN_LOOP_TIER_FIRST", "same")
 
         seen: list[Any] = []
 

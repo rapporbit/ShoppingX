@@ -1685,7 +1685,7 @@ async def test_planner_intent_grounding_passthrough(monkeypatch: Any) -> None:
     payload = PlanOutput(
         category="解压小物", tasks=["recommend"], intent_grounding="web", keywords=["fidget"]
     )
-    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_planner_llm", lambda: _FakeLLM(structured_payload=payload))
     out = await mod.planner.ainvoke({"intent": "送女朋友一个今年最流行的那种解压小玩意"})
     assert out.intent_grounding == "web"
 
@@ -1704,7 +1704,7 @@ async def test_planner_returns_structured(monkeypatch: Any) -> None:
         prefer_keywords=["小众"],
         keywords=["travel", "pouch"],
     )
-    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_planner_llm", lambda: _FakeLLM(structured_payload=payload))
     out = await mod.planner.ainvoke(
         {"intent": "想买便宜抗造的旅行三件套，预算300，不要塑料，喜欢小众"}
     )
@@ -1733,7 +1733,7 @@ async def test_planner_raises_on_empty_structured_output(monkeypatch: Any) -> No
     from app.agent.invoke import EmptyStructuredOutput
 
     model = _FakeLLM(structured_payload={"tasks": ["recommend"]})
-    monkeypatch.setattr(mod, "get_fast_llm", lambda: model)
+    monkeypatch.setattr(mod, "get_planner_llm", lambda: model)
     with pytest.raises(EmptyStructuredOutput):
         await mod.planner.ainvoke({"intent": "推荐几个旅行收纳袋"})
 
@@ -1749,7 +1749,7 @@ async def test_planner_auto_adds_landed_cost(monkeypatch: Any) -> None:
 
     # 模型只判了 recommend（它的纪律仍是「只填用户明确表达的」，不许自作主张加 tasks）。
     payload = PlanOutput(category="旅行收纳", tasks=["recommend"], keywords=["packing", "cubes"])
-    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_planner_llm", lambda: _FakeLLM(structured_payload=payload))
     out = await mod.planner.ainvoke({"intent": "推荐几个旅行收纳袋，寄到日本"})
 
     assert out.dest_country == "JP"
@@ -1763,7 +1763,7 @@ async def test_planner_skips_landed_cost_for_non_recommend(monkeypatch: Any) -> 
     from app.tools.planner import PlanOutput
 
     payload = PlanOutput(category="旅行收纳", tasks=["category_intel"])
-    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_planner_llm", lambda: _FakeLLM(structured_payload=payload))
     out = await mod.planner.ainvoke({"intent": "旅行收纳袋现在什么价位，我在日本"})
 
     assert out.dest_country == "JP"
@@ -1803,7 +1803,7 @@ async def test_planner_writes_session_pt_same_turn(monkeypatch: Any) -> None:
         soft_dislikes=["花哨"],
         prefer_keywords=["帆布", "小众"],
     )
-    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    monkeypatch.setattr(mod, "get_planner_llm", lambda: _FakeLLM(structured_payload=payload))
 
     session_dir = Path(tempfile.mkdtemp())
     with thread_scope("t-pt", session_dir, user_id="u-pt"):
@@ -1845,7 +1845,7 @@ async def test_planner_pt_reaches_item_picker_same_turn(monkeypatch: Any) -> Non
 
     monkeypatch.setattr(
         pmod,
-        "get_fast_llm",
+        "get_planner_llm",
         lambda: _FakeLLM(
             structured_payload=PlanOutput(
                 exclude_terms=[ExcludeTerm(word="塑料", evidence="不要塑料")]
@@ -1878,7 +1878,7 @@ async def test_planner_soft_dislike_penalizes_not_excludes(monkeypatch: Any) -> 
     monkeypatch.setattr(imod, "_W_ATTEN_SEM", 0.0)
     monkeypatch.setattr(
         pmod,
-        "get_fast_llm",
+        "get_planner_llm",
         lambda: _FakeLLM(structured_payload=PlanOutput(soft_dislikes=["floral"])),
     )
     cands = [
@@ -1945,7 +1945,7 @@ async def test_chat_fallback_replies(monkeypatch: Any) -> None:
     import app.tools.chat_fallback as mod
 
     fake = _FakeLLM(content="你好！我可以帮你跨平台找商品。")
-    monkeypatch.setattr(mod, "get_llm", lambda: fake)
+    monkeypatch.setattr(mod, "get_fast_llm", lambda: fake)
     out = await mod.chat_fallback.ainvoke({"message": "你好"})
     assert "你好" in out.reply
 

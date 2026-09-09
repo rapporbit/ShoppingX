@@ -15,10 +15,14 @@
 的概率判错，但它**转述用户原话**是稳的。所以 ``exclude_terms`` 的每个词都必须附 evidence（原话
 片段），档位交给 :func:`_is_weak` 扫原话里的弱表达标记确定性地判。见 :class:`ExcludeTerm`。
 
-用 LLM 做意图理解（``with_structured_output`` 强约束成 Pydantic）。走 ``get_fast_llm``
-（同模型关 reasoning）：结构化抽取不吃思维链——实测主档 12~17s（reasoning 占 70%）vs 快档
-~3s，tasks / 排除词 / 预算解析产出一致（对照见 latency-audit round2），与 summary / curator /
-parser 同档。模块级引用便于测试 monkeypatch 成假模型，从而离线可测。
+用 LLM 做意图理解（结构化输出强约束成 Pydantic）。走 ``get_planner_llm``：结构化抽取不吃思维
+链——实测主档 12~17s（reasoning 占 70%）vs 快档 ~3s，tasks / 排除词 / 预算解析产出一致
+（对照见 latency-audit round2）。
+
+**这一档可以单独换模型**（``LLM_PLANNER``，不配即快档）：planner 是链路外的一次性调用，有自己
+的 prompt 前缀，换模型名不打断主 loop 的前缀缓存——主 loop 内换名会，所以那里只能切 thinking。
+选型实测见 `docs/plans/baseline-artifacts/planner_model_eval.json`（dev92 + planner_reward）。
+模块级引用便于测试 monkeypatch 成假模型，从而离线可测。
 """
 
 from __future__ import annotations
@@ -32,7 +36,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.agent.fork_guard import current_fork_depth
 from app.agent.invoke import call_structured
-from app.agent.llm import get_fast_llm
+from app.agent.llm import get_planner_llm
 from app.agent.prompts import get_planner_prompt
 from app.api import monitor
 from app.api.context import (
@@ -713,7 +717,7 @@ async def planner(intent: str) -> PlanOutput:
         # AgentScope 的 generate_structured_output 自带策略梯（forced→auto→no_think→none），
         # 这个坑结构上不存在，也没有 method 可钉（L0/S2 实测）。用量由 call_structured 入账。
         plan = await call_structured(
-            get_fast_llm(),
+            get_planner_llm(),
             [("system", get_planner_prompt()), ("user", prior + intent if prior else intent)],
             PlanOutput,
             # 空表闸：这三个字段一个都没出现 = 模型只回了存根（PlanOutput 全字段带默认值，

@@ -1,8 +1,9 @@
-"""把 Harness 的六个 hook_point 接到 AgentScope 的中间件面（批 0 / L4）。
+"""把 Harness 的六个 hook_point 接到 AgentScope 的中间件面。
 
-对照 :mod:`app.harness.agent_middleware`（LangChain 版）逐条重建，**注册表、hook 名称、
-priority、顺序契约一个都不动**——控制面的语义是整仓最易碎的部分（``tool_gates.py`` 头注释
-里那串顺序契约尤其），迁移只换「钩子挂在哪」，不换「钩子做什么」。
+本模块是照着当年那份 LangChain 中间件（``agent_middleware``，随迁移完成已删）逐条重建的，
+**注册表、hook 名称、priority、顺序契约一个都没动**——控制面的语义是整仓最易碎的部分
+（``tool_gates.py`` 头注释里那串顺序契约尤其），迁移只换「钩子挂在哪」，不换「钩子做什么」。
+下面提到「LangChain 版如何如何」的地方，记的都是这条对照线索，代码本身早已不依赖它。
 
 落点选择（探针实测钉死，见 scratchpad probe_hooks）：
 
@@ -182,21 +183,45 @@ def _tool_blocks(call_id: str, name: str, args: dict[str, Any], result: str) -> 
 
 
 def _resolve_model_tier(tier: Any) -> Any | None:
-    """档位名 → 本运行时的模型对象。认不出的档位不换模型（失效方向是「照常跑」）。
+    """档位名 → 本运行时的模型对象。空档位 = 不换模型（用装配期那个基座）。
 
     延迟导入 ``llm``：本模块在 Agent 装配前就被 import，模块级拉模型工厂会把 ``.env`` 的读取
     时机提前到 import 期，测试里 monkeypatch 环境变量就来不及了。
     """
     if not tier:
         return None
-    from app.agent.llm import get_lite_llm, get_llm
+    from app.agent.llm import get_tier_llm
 
-    if tier == "reasoning":
-        return get_llm()
-    if tier == "lite":
-        return get_lite_llm()
-    logger.warning("未知模型档位 %r，本轮不换模型", tier)
-    return None
+    return get_tier_llm(str(tier))
+
+
+def _first_round_tier(ctx: dict[str, Any]) -> str | None:
+    """主 loop 第一轮该不该加档 —— 返回档位名，不加返回 ``None``。
+
+    原为独立 Hook（``hooks/reasoning_boost``）。收进适配器是因为它与**装配期选的基座**是同一
+    条口径的两半：拆成两处的那段时间里，基座被改成 reasoning 而 Hook 还在按「基座是快档」顶
+    reasoning，override 成同一个实例，什么都没发生，也没有任何测试会红（审查报告 P0-1）。
+
+    三条豁免各对应一个真会犯的错：
+    - **worker 不加档**：子 Agent 也有自己的 round_number=1，但它只按 demands 搜一个平台，
+      没有编排可言（能力边界靠 Toolkit 发放范围保证，不靠模型强弱）。
+    - **复用轮不加档**：planner 判 ``retrieval=reuse`` 时 plan 已写死「不检索，直接在上一轮
+      候选里精挑」，第一轮值得开思考的那几个分支一个都不在。预置降级时读到默认 search →
+      照常加档，落在安全侧。
+    - **预算降档优先**：调用方只在 ``model_tier`` 仍为空时才问本函数，所以 budget_router 写过
+      lite 就是 lite —— 钱不够的时候，「想清楚」让位于「跑完」。
+    """
+    from app.agent.fork_guard import current_fork_depth
+    from app.agent.llm import main_loop_tier_base, main_loop_tier_first
+    from app.api.context import get_retrieval_mode
+
+    tier = main_loop_tier_first()
+    if tier == "same" or ctx.get("round_number") != 1 or current_fork_depth() >= 1:
+        return None
+    if get_retrieval_mode() == "reuse":
+        logger.debug("复用轮：第一轮不加档（编排已由 plan 定死）")
+        return None
+    return None if tier == main_loop_tier_base() else tier
 
 
 def _block_text(block: Any) -> str:
@@ -341,10 +366,12 @@ class HarnessAgentAdapter(MiddlewareBase):
 
         input_kwargs["messages"] = ctx["messages"]
         _persist_injections(agent, ctx.get("persist_messages"))
-        # 换档（第一轮开 reasoning / 预算降 lite）：Hook 只给**档位名**，模型对象在这里解析。
+        # 换档（预算降 lite / 第一轮加档）：Hook 只给**档位名**，模型对象在这里解析。
         # 刻意不读 ``model_override``——那个键装的是 LangChain 模型对象，塞进 current_model
         # 会在调用时炸「'ChatOpenAI' object is not callable」（L3 的冒烟测试抓到过）。
-        model = _resolve_model_tier(ctx.get("model_tier"))
+        # 顺序即优先级：Hook（budget_router）写过档就照它的来，没写才轮到第一轮加档。
+        tier = ctx.get("model_tier") or _first_round_tier(ctx)
+        model = _resolve_model_tier(tier)
         if model is not None:
             input_kwargs["current_model"] = model
 

@@ -26,7 +26,6 @@ def setup_harness() -> None:
     import app.harness.hooks.phase_check  # noqa: F401  阶段权限拦截
     import app.harness.hooks.phase_transition  # noqa: F401  阶段转移 + 回退 + 信号追踪
     import app.harness.hooks.preference_inject  # noqa: F401  planner 后注入域内长期偏好
-    import app.harness.hooks.reasoning_boost  # noqa: F401  fast 档：只给主 loop 第一轮开 reasoning
     import app.harness.hooks.result_guard  # noqa: F401  截断 + 循环检测 + 分级提示 + 终结标记
     import app.harness.hooks.security  # noqa: F401  安全护栏 L1 白名单 / L3 过滤 / L4 脱敏
     import app.harness.hooks.session_hooks  # noqa: F401  阶段复位 + 输出审核

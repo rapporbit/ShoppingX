@@ -1,6 +1,6 @@
 """L4 harness 适配层：六个 hook_point 在 AgentScope 侧接得对不对。
 
-**测的是接线，不是 hook 的业务**——36 个真实 hook 的行为归 test_harness.py 的 119 个用例管，
+**测的是接线，不是 hook 的业务**——真实 hook 的行为归 test_harness.py 的那批用例管，
 这里把全局注册表换成一张只有探针的空表，专测「适配器有没有在正确的位置、带着正确的 context
 调用 Pipeline，以及 Pipeline 的产出有没有真正生效」。
 """
@@ -23,6 +23,14 @@ from app.harness.middleware import HarnessMiddleware, HookRejectSignal
 from app.utils.thread_ctx import thread_scope
 
 EXEC_LOG: list[str] = []
+
+
+@pytest.fixture(autouse=True)
+def _no_tier_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """关掉「第一轮加档」——本文件的 Agent 装的是假模型，一换档就会去 ``app.agent.llm``
+    真取一个模型对象、真打网络。换档本身另有专测（tests/test_model_tiers.py）。
+    """
+    monkeypatch.setenv("MAIN_LOOP_TIER_FIRST", "same")
 
 
 async def probe_tool(q: str) -> ToolChunk:
