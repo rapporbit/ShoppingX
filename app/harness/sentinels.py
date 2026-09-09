@@ -94,19 +94,10 @@ FORK_EXHAUSTED = (
     "item_picker 精挑），并**以调用 shopping_summary 结束**。"
 )
 
-# 深度闸哨兵：子 Agent（depth≥1）调聚合/终结工具时回这条——它没有跨平台/跨商品全局视图。
-SUB_AGGREGATION_DENIED = (
-    "[子任务无权收尾] 你是被派发的独立子任务（单平台检索或单个商品调查），没有跨平台 / 跨商品"
-    "合流后的全局视图，price_compare / shipping_calc / item_picker / shopping_summary 需要"
-    "主流程合流所有子任务结果后统一做。请直接把你收敛到的结果 JSON 返回给主流程，由它收尾。"
-)
-
-# 上下文闸哨兵：子调 planner/category_insight 时回这条——平台无关、主流程已做、结果在 demands。
-SUB_CONTEXT_DENIED = (
-    "[子任务无需此工具] planner（意图拆解）与 category_insight（品类常识）是平台无关的，"
-    "主流程已跑过一次、结果就写在你收到的 demands 里。请直接据 demands 的预算/关键词/硬约束/"
-    "软偏好/品类常识做 item_search，不要重复拆解意图或查品类。"
-)
+# 这里曾有 SUB_AGGREGATION_DENIED / SUB_CONTEXT_DENIED 两条深度闸哨兵（子 Agent 调聚合工具 /
+# 调 planner 时的拒绝文案）。读写切分后 worker 的 Toolkit 里压根没有那些工具，两条文案
+# 301 会话一次都没发出去过；depth_gate 2026-09-10 降为告警后它们彻底没了消费者，已删。
+# 要找「worker 越界了怎么办」的答案：看 tool_registry 的发放范围，不是看这里的文案。
 
 # web_search 拦截哨兵：购物流程中已有候选时拦截（不是「找更好」的渠道）。
 WEBSEARCH_DENIED = (
@@ -153,13 +144,9 @@ TERMINAL_TOOL_NUDGE = (
 # 那一档不只提醒，还换模型 + 收工具（见 hooks/context_compress.py 的 budget_router）。不留兼容层。
 
 
-# L1 工具白名单哨兵（refdocs 16-6 §2.1）：模型调了一个根本不存在的工具名。文案刻意不列出可用
-# 工具清单——那等于把工具表塞进一条错误消息里，既浪费 token，也让「诱导模型枚举内部工具」变得
-# 廉价。工具表本就在每轮请求的 tools 参数里，模型看得见。
-TOOL_NOT_ALLOWED = (
-    "[工具不存在] `{tool}` 不是本系统的工具，未执行。请从你可用的工具列表里选一个，"
-    "或基于现有信息继续。"
-)
+# 这里曾有 TOOL_NOT_ALLOWED（refdocs 16-6 §2.1 的 L1 白名单拒绝文案）。工具名不在 Toolkit 里
+# 时框架自己就不会执行，这条文案 301 会话一次都没发出去过；tool_whitelist 2026-09-10 降为
+# 告警后没了消费者，已删。
 
 
 # 工具级熔断哨兵：某个工具连续失败到阈值 → 断路器 OPEN，后续调用快速失败不再真执行。

@@ -1,8 +1,10 @@
-"""三类单步断言：Schema / Sequencing / Semantic。
+"""单步断言：Schema / Sequencing。**两类都是确定性的、微秒级的、零 LLM 的。**
 
 - Schema Assertion（post_tool_call, <1ms）：工具返回是否能解析为合法 JSON、关键字段是否缺失。
 - Sequencing Assertion（pre_tool_call, <1ms）：工具调用顺序是否满足前置条件。
-- Semantic Assertion（post_tool_call, ~50ms）：工具返回内容与用户 query 的语义对齐度（轻量 LLM）。
+
+refdocs 17-3 §2 还有第三类 Semantic Assertion（拿模型判语义对齐），本仓实现过又删了——
+理由写在文件末尾，别照着 refdocs 加回来。
 
 断言失败不中断 Agent——记录到 ``context["assertions_failed"]``，由下游的
 ``assertion_handler`` Hook 汇总后注入纠正提示，让模型自行修正。
@@ -18,7 +20,6 @@ from pydantic import ValidationError
 
 from app.harness.middleware import harness_hook
 from app.harness.signals import candidate_count
-from app.utils.env import env_bool
 
 logger = logging.getLogger("shoppingx.harness.step_validator")
 
@@ -175,57 +176,16 @@ async def check_sequencing(context: dict[str, Any]) -> dict[str, Any] | None:
     return context
 
 
-# ---------- Semantic Assertion ----------
-
-SEMANTIC_CHECK_TOOLS = frozenset({"item_search", "category_insight"})
-
-_SEMANTIC_PROMPT = """判断以下工具返回是否和用户需求相关。
-用户需求：{query}
-工具返回摘要（前 200 字）：{preview}
-只回答"相关"或"不相关"，不要解释。"""
-
-SEMANTIC_ENABLED = env_bool("HARNESS_SEMANTIC_ASSERTION", False)
-
-
-@harness_hook("post_tool_call", name="semantic_assertion", priority=45)
-async def check_semantic_alignment(context: dict[str, Any]) -> dict[str, Any] | None:
-    """轻量语义对齐检查（只对高价值工具执行，默认关闭，可经 env 开启）。"""
-    if not SEMANTIC_ENABLED:
-        return None
-
-    tool_name = context.get("tool_name", "")
-    if tool_name not in SEMANTIC_CHECK_TOOLS:
-        return None
-
-    query = context.get("original_query", "")
-    result = context.get("tool_result", "")
-    if not query or not result:
-        return None
-
-    preview = str(result)[:200]
-
-    try:
-        # fast 档而非 judge 强模型：refdocs 17-3 §2 把 Semantic Assertion 的延迟预算定在 ~50ms，
-        # 它只需回一个「相关 / 不相关」的标签，用强模型是把在线延迟花在不需要的地方。
-        from app.agent.invoke import call_text
-        from app.agent.llm import get_fast_llm
-
-        verdict = (
-            await call_text(
-                get_fast_llm(), _SEMANTIC_PROMPT.format(query=query, preview=preview)
-            )
-        ).strip()
-    except Exception:
-        logger.debug("Semantic assertion LLM 调用失败，跳过", exc_info=True)
-        return None
-
-    if "不相关" in verdict:
-        context.setdefault("assertions_failed", []).append(
-            {
-                "type": "semantic",
-                "tool": tool_name,
-                "reason": f"工具返回与用户需求「{query[:50]}」语义不相关",
-            }
-        )
-        logger.info("Semantic assertion: %s result misaligned with query", tool_name)
-    return context
+# ---------- Semantic Assertion（已删，2026-09-10）----------
+#
+# refdocs 17-3 §2 的第三类断言：拿快档模型判一句「这个工具返回跟用户需求相不相关」。
+# 本仓实现过（``HARNESS_SEMANTIC_ASSERTION`` 默认关），**301 个会话零触发**，删除理由有三条：
+#
+# 1. 它要付的是**在线延迟**：每次 item_search / category_insight 返回后多一次 LLM 往返，
+#    换回来的只是一个「相关 / 不相关」标签，而后续只是往 assertions_failed 里记一笔。
+# 2. 同一件事已经有确定性实现且在真实跑：品类门（``item_picker`` 的 rerank 软降权）用
+#    cross-encoder 分数判「跑没跑题」，判据可复现、零 LLM；语义断言是它的模糊版本。
+# 3. 默认关 = 从未被验证过。留着一段没人跑过的 LLM 调用，比没有它更危险。
+#
+# 要重新引入的话，先答一个问题：判出「不相关」之后**做什么**？当年的答案是「记一笔」——
+# 那就不值一次 LLM 往返。

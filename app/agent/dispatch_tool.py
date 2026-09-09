@@ -33,11 +33,10 @@ from app.tools._bundle import detect_slot, ensure_dispatch_slot, slot_scope
 from app.utils.clean import PLATFORMS
 from app.utils.thread_ctx import thread_scope
 
-# 子 Agent 防失控参数。
+# 子 Agent 防失控参数之①（超时）。迭代上限那一半在 ``agents.WORKER_MAX_ITERS`` /
+# ``TRADE_MAX_ITERS``——那里才是真正被 ``ReActConfig`` 读走的地方。本文件曾另存一份
+# ``SUB_AGENT_MAX_ITERATIONS = 6`` 的字面量，零引用却让人以为「改这里就生效」，已删。
 SUB_AGENT_TIMEOUT_SEC = 90
-# 单平台检索子任务：category_insight 校准 + 几次自我纠偏 item_search 就够收敛，6 轮留足余量。
-# 比早先的 12 紧一半——越界子（跑完整购物流程的）会更早撞上限被掐，也压住内部刷检索。
-SUB_AGENT_MAX_ITERATIONS = 6
 
 
 def _detect_platform(demand: str) -> str | None:

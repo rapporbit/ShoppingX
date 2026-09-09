@@ -92,22 +92,9 @@ class TestTierBoundaries:
             tb.reset_tree()
 
 
-# ============================================================
-# tier_model：换哪个模型
-# ============================================================
-
-
-class TestTierModel:
-    def test_main_and_fallback_have_no_override(self) -> None:
-        """MAIN=不覆盖（用原模型）；FALLBACK=根本不调 LLM。两者都返回 None。"""
-        assert mr.tier_model(Tier.MAIN) is None
-        assert mr.tier_model(Tier.FALLBACK) is None
-
-    def test_lite_and_minimal_use_cheap_model(self, monkeypatch: Any) -> None:
-        sentinel = object()
-        monkeypatch.setattr(mr, "_lite_llm", lambda: sentinel)
-        assert mr.tier_model(Tier.LITE) is sentinel
-        assert mr.tier_model(Tier.MINIMAL) is sentinel
+# ``TestTierModel`` 已随 ``tier_model`` / ``_lite_llm`` 一并删除：那两个函数唯一的下游是
+# ``context["model_override"]``，而该键在 AgentScope 侧无人读。测试把死行为钉住，是它当年
+# 没被发现的原因之一——现在断的是活通道 ``model_tier``（见下面 ``TestRouteByBudget``）。
 
 
 # ============================================================
@@ -163,25 +150,21 @@ class TestBudgetRouterHook:
         assert await route_by_budget({"_guard": GuardState(), "messages": []}) is None
 
     @pytest.mark.asyncio
-    async def test_lite_tier_sets_model_override_without_hint(self, monkeypatch: Any) -> None:
-        sentinel = object()
+    async def test_lite_tier_sets_model_tier_without_hint(self, monkeypatch: Any) -> None:
         monkeypatch.setattr(mr, "current_tier", lambda: Tier.LITE)
-        monkeypatch.setattr(mr, "tier_model", lambda t: sentinel)
         ctx: dict[str, Any] = {"_guard": GuardState(), "messages": []}
         out = await route_by_budget(ctx)
         assert out is not None
-        assert out["model_override"] is sentinel
+        assert out["model_tier"] == "lite"
         assert out["messages"] == []  # lite 档不注入 hint，只是悄悄换个便宜模型
 
     @pytest.mark.asyncio
     async def test_minimal_tier_injects_hint_and_switches_model(self, monkeypatch: Any) -> None:
-        sentinel = object()
         monkeypatch.setattr(mr, "current_tier", lambda: Tier.MINIMAL)
-        monkeypatch.setattr(mr, "tier_model", lambda t: sentinel)
         ctx: dict[str, Any] = {"_guard": GuardState(), "messages": []}
         out = await route_by_budget(ctx)
         assert out is not None
-        assert out["model_override"] is sentinel
+        assert out["model_tier"] == "lite"
         assert len(out["messages"]) == 1
         assert "预算提醒" in out["messages"][0].get_text_content()
         # hint 须同步登记 persist_messages（随 ModelResponse 落 state，不然只活一轮还斩缓存链）
@@ -190,9 +173,7 @@ class TestBudgetRouterHook:
     @pytest.mark.asyncio
     async def test_minimal_hint_injected_once_per_entry(self, monkeypatch: Any) -> None:
         """hint 落 state 后长驻历史——留在 minimal 档的后续轮次不再重复注入。"""
-        sentinel = object()
         monkeypatch.setattr(mr, "current_tier", lambda: Tier.MINIMAL)
-        monkeypatch.setattr(mr, "tier_model", lambda t: sentinel)
         guard = GuardState()
         first: dict[str, Any] = {"_guard": guard, "messages": []}
         await route_by_budget(first)
@@ -200,7 +181,7 @@ class TestBudgetRouterHook:
         second: dict[str, Any] = {"_guard": guard, "messages": []}
         out = await route_by_budget(second)
         assert out is not None
-        assert out["model_override"] is sentinel  # 换模型每轮都要（override 不落 state）
+        assert out["model_tier"] == "lite"  # 换档每轮都要报（档位不落 state）
         assert second["messages"] == []  # hint 不重复
 
     @pytest.mark.asyncio
@@ -211,14 +192,13 @@ class TestBudgetRouterHook:
         out = await route_by_budget(ctx)
         assert out is not None
         assert out["fallback_answer"] == "兜底:买包"
-        assert "model_override" not in out  # 根本不调 LLM，谈何换模型
+        assert "model_tier" not in out  # 根本不调 LLM，谈何换档
 
     @pytest.mark.asyncio
     async def test_tier_change_reported_once_per_tier(self, monkeypatch: Any) -> None:
         """一个 20 轮的任务不去重会把 minimal 记 15 次，降级率统计直接失真。"""
         recorded: list[str] = []
         monkeypatch.setattr(mr, "current_tier", lambda: Tier.LITE)
-        monkeypatch.setattr(mr, "tier_model", lambda t: object())
         monkeypatch.setattr(
             "app.harness.hooks.context_compress.metrics.record_tier_change", recorded.append
         )

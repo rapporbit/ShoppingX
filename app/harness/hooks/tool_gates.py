@@ -53,8 +53,6 @@ from app.harness.sentinels import (
     BUDGET_HARD_DENIED,
     CANCEL_WITHOUT_QUERY,
     MAIN_POSTFORK_SEARCH_DENIED,
-    SUB_AGGREGATION_DENIED,
-    SUB_CONTEXT_DENIED,
     SUB_SEARCH_EXHAUSTED,
     TERMINAL_REACHED_DENIED,
     WEBSEARCH_DENIED,
@@ -64,6 +62,7 @@ from app.harness.sentinels import (
 )
 from app.harness.signals import candidate_count
 from app.harness.state import GuardState
+from app.observability import metrics
 from app.tools._bundle import resolve_slot
 
 logger = logging.getLogger("shoppingx.harness.gates")
@@ -110,25 +109,30 @@ async def check_trade_sequence(context: dict[str, Any]) -> dict[str, Any] | None
 
 @harness_hook("pre_tool_call", name="depth_gate", priority=10)
 async def check_depth_permission(context: dict[str, Any]) -> dict[str, Any] | None:
-    """深度闸（权限闸）：仅 depth==0（主 loop）可调的工具，子 Agent（depth≥1）调即拦。
+    """深度**断言**：worker（depth≥1）碰了主 loop 专属工具就报警——但不再拦。
 
-    两类受限工具口径不同，拒绝理由必须真实：
-    - 聚合/终结（``DEPTH0_ONLY_TOOLS``）：子无跨平台全局视图 → ``SUB_AGGREGATION_DENIED``。
-    - 平台无关上下文（``MAIN_ONLY_CONTEXT_TOOLS``）：主流程已做、结果在 demands →
-      ``SUB_CONTEXT_DENIED``。
+    **这不是闸，是发放范围的看门狗。** 真正的边界在 ``tool_registry._SEARCH_TOOLS`` /
+    ``_TRADE_TOOLS``：读写切分后 worker 的 Toolkit 里根本没有这些工具对象，模型连 schema
+    都看不到，本函数在 split 模式下**结构性不可达**（301 会话 0 触发）。它唯一的价值是
+    「将来有人往 worker 的发放范围里加错工具时，日志里有一条 error」——那是断言的职责。
 
-    **批 1 起本闸退居二线**：读写切分后 worker 的 Toolkit 里根本没有这些工具对象（见
-    ``tool_registry._SEARCH_TOOLS``，它与本闸的名单**取过交集**），模型连 schema 都看不到。
-    闸留着是二道保险，只在两种情况下还会真的触发：``WORKER_MODE=clone`` 的对照实验（那时
-    worker 拿的是全集），以及将来有人往 worker 的发放范围里加错工具。
+    2026-09-10 由 ``raise`` 降为 ``logger.error + metrics``，两点后果如实记在这：
+
+    - 一条从未被走过的异常路径消失了。留着它，等于让「边界靠什么保证」有两个答案。
+    - ``WORKER_MODE=clone`` 对照实验里 worker 拿的是全集，此前被本闸拦住；现在放行。
+      这反而让 clone 更忠实于它要复现的历史形态（M2/M9 的同质 fork 本来就没有这道闸）。
     """
     if current_fork_depth() < 1:
         return None
     tool_name = context.get("tool_name", "")
-    if tool_name in DEPTH0_ONLY_TOOLS:
-        raise HookRejectSignal(SUB_AGGREGATION_DENIED, raw=True)
-    if tool_name in MAIN_ONLY_CONTEXT_TOOLS:
-        raise HookRejectSignal(SUB_CONTEXT_DENIED, raw=True)
+    if tool_name in DEPTH0_ONLY_TOOLS or tool_name in MAIN_ONLY_CONTEXT_TOOLS:
+        metrics.record_security_event("worker_tool_scope_violation")
+        logger.error(
+            "发放范围异常：worker（depth=%d）拿到了主 loop 专属工具 %r——"
+            "检查 tool_registry 的 _SEARCH_TOOLS / _TRADE_TOOLS 是否加错了工具",
+            current_fork_depth(),
+            tool_name,
+        )
     return None
 
 

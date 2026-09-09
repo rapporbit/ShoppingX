@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from app.harness.hooks.security import (
@@ -13,7 +15,6 @@ from app.harness.hooks.security import (
     check_tool_whitelist,
     filter_tool_output,
 )
-from app.harness.middleware import HookRejectSignal
 from app.security.content_filter import FILTERED_PLACEHOLDER, sanitize_tool_output
 from app.security.log_sanitizer import hash_id, mask_text, sanitize_for_log
 from app.security.output_guard import REDACTED, audit_output
@@ -52,11 +53,22 @@ class TestToolWhitelist:
         assert all(n == SKILL_VIEWER_TOOL_NAME or n.startswith("mcp__") for n in extra), extra
 
     @pytest.mark.asyncio
-    async def test_hook_rejects_unknown_tool(self) -> None:
-        with pytest.raises(HookRejectSignal) as exc:
-            await check_tool_whitelist({"tool_name": "rm_database"})
-        assert "rm_database" in exc.value.reason
-        assert exc.value.raw is True
+    async def test_hook_warns_on_unknown_tool_without_rejecting(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A4 起本 hook 只报警不拒绝——拒绝由框架做（Toolkit 里没有的名字它不会执行）。
+
+        断言落在「异常被看见」这一面：一个 metric + 一条 error 日志。断的不是 raise，
+        因为那条异常路径 301 会话零触发，且与「边界靠发放范围保证」的口径重复。
+        """
+        events: list[str] = []
+        monkeypatch.setattr(
+            "app.harness.hooks.security.metrics.record_security_event", events.append
+        )
+        with caplog.at_level(logging.ERROR, logger="shoppingx.harness.security"):
+            assert await check_tool_whitelist({"tool_name": "rm_database"}) is None
+        assert events == ["tool_not_allowed"]
+        assert "rm_database" in caplog.text
 
     @pytest.mark.asyncio
     async def test_hook_passes_known_tool(self) -> None:
