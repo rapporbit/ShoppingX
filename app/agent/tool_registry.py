@@ -10,6 +10,7 @@
 
 from agentscope.tool import FunctionTool, Toolkit, ToolMiddlewareBase
 
+from app.agent.constants import TERMINAL_TOOLS as _TERMINAL_TOOLS
 from app.agent.dispatch_tool import task_dispatch
 from app.agent.mcp_registry import mcp_clients
 from app.agent.skills import skill_loaders
@@ -30,9 +31,10 @@ from app.tools.shipping_calc import shipping_calc
 from app.tools.shopping_summary import shopping_summary
 from app.tools.web_search import web_search
 
-# 调用即终结主 loop 的工具。``query_order`` **不在**其中：用户问完订单往往接着要取消或再买
-# 一件，查完就结束等于逼他再说一遍。
-TERMINAL_TOOLS = {"shopping_summary", "chat_fallback", "create_order", "cancel_order"}
+# 调用即终结主 loop 的工具。定义在 ``app.agent.constants``（无依赖模块，harness 侧也从那里读，
+# 见该文件里「为什么是 4 个」与两份字面量分叉的旧账）；这里 re-export 只为让「工具的事在
+# 工具注册表里查得到」。
+TERMINAL_TOOLS = _TERMINAL_TOOLS
 
 # 业务工具（每文件一个，模块名 = 工具名）：九大主工具 + ask_user 澄清 + forget_preference。
 # 注意:**没有** remember_preference——偏好的识别 / 沉淀已剥离给会话结束后独立运行的记忆管家

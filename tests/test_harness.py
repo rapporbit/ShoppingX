@@ -984,6 +984,52 @@ class TestTerminalDirectClose:
         assert resp.content[0].text == "ok"
 
 
+class TestTradeTurnIsTerminal:
+    """交易轮的终结口径（审查报告 B1）：create_order / cancel_order 也是终结工具。
+
+    这两条锁的是那次常量分叉的**后果**，不是常量本身——``harness/budgets.py`` 曾另存一份只有
+    2 个的 ``TERMINAL_TOOLS``，于是同一轮里两处「是否终结」判定不一致：``strategy_feedback``
+    按 4 个算收尾成功，而 ``mark_terminal`` / ``terminal_enforcer`` 按 2 个算「还没收尾」。
+    合并成一份时全量测试是绿的——**没有任何测试覆盖那个差异**，所以补在这里。
+    """
+
+    @pytest.mark.asyncio
+    async def test_create_order_marks_terminal_reached(self, clean_phase) -> None:
+        """下单确认卡出完，本轮就该结束等用户表态——terminal_reached 置位，后续工具被硬停闸拦。"""
+        from app.harness.hooks.result_guard import mark_terminal
+
+        mw = _mw()
+        assert mw.guard.terminal_reached is False
+        await mark_terminal({"_guard": mw.guard, "tool_name": "create_order"})
+        assert mw.guard.terminal_reached is True
+
+    @pytest.mark.asyncio
+    async def test_cancel_order_turn_gets_no_terminal_nudge(self, clean_phase) -> None:
+        """取消完直接写文案收尾，不该再被催「你没调终结工具」——那是白多一轮往返。"""
+        from agentscope.message import Msg
+
+        from app.harness.hooks.terminal_enforce import enforce_terminal
+
+        mw = _mw()
+        msgs = [
+            Msg(
+                name="shoppingx",
+                role="assistant",
+                content=_tool_result_blocks("cancel_order", '{"status":"CANCELLED"}'),
+            )
+        ]
+        out = await enforce_terminal(
+            {
+                "_guard": mw.guard,
+                "messages": msgs,
+                "response_has_tool_calls": False,
+                "response_ai_message": object(),
+            }
+        )
+        assert out is None
+        assert mw.guard.terminal_nudge_retries == 0
+
+
 class TestAssertionWiring:
     """三类断言 → post_reflect 的 assertion_handler → inject_messages 的完整链路。"""
 
