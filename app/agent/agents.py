@@ -22,6 +22,7 @@ from agentscope.agent import Agent, ContextConfig, ReActConfig
 from agentscope.middleware import MiddlewareBase
 from agentscope.state import AgentState
 
+from app.agent.limits import MAIN_MAX_ITERS, TRADE_MAX_ITERS, WORKER_MAX_ITERS
 from app.agent.llm import get_model_config, get_tier_llm, main_loop_tier_base, worker_tier
 from app.agent.permissions import allow_tools
 from app.agent.prompts import get_system_prompt, get_worker_system_prompt
@@ -30,16 +31,9 @@ from app.agent.tracing import tracing_middlewares
 from app.harness.adapter import HarnessAgentAdapter, HarnessSession, HarnessToolAdapter
 from app.harness.middleware import harness
 from app.harness.setup import setup_harness
-from app.utils.env import env_int
 
-# 主 loop 的迭代上限（防失控之②）。这是**真·迭代数**（一轮 Think→Act 算一次），
-# 不是某些框架里按「超步」计数的那种口径。
-MAIN_MAX_ITERS = env_int("MAIN_AGENT_MAX_ITERATIONS", 30)
-# worker 的迭代上限，**按 kind 分档**：检索子任务要留出「召回跑题换一次词重搜」的余量；
-# 交易子任务是查→改两跳的确定性动作（query_order → cancel_order），4 轮还收不住说明它在
-# 里面乱试，早掐比让它继续试更安全（写工具的每一次试都在改真实状态）。
-WORKER_MAX_ITERS = env_int("SUB_AGENT_MAX_ITERATIONS", 6)
-TRADE_MAX_ITERS = env_int("TRADE_AGENT_MAX_ITERATIONS", 4)
+# 三个迭代上限的定义与理由在 ``app.agent.limits``（防失控的上限全在那一页）。这里按本名引入，
+# 消费点仍是本模块的名字——``monkeypatch.setattr(agents, "MAIN_MAX_ITERS", 2)`` 照旧有效。
 
 # ``split`` = 读写切分（批 1 起的默认）；``clone`` = worker 是主 Agent 的完整克隆（批 0 的
 # 过渡形态）。开关留着不是为了「以后可能要用」，而是为了能在**同一运行时、同一批 query**

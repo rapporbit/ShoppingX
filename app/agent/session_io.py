@@ -22,13 +22,11 @@ from app.db.quota import add_usage
 from app.memory.injector import HISTORY_EMPTY
 from app.memory.session_state import SessionPrefState
 from app.tools.shopping_summary import ShoppingSummaryOutput
-from app.utils.env import env_int
 
 logger = logging.getLogger("shoppingx.session_io")
 
-# 一轮任务的总时限（防失控之③，报错收场）。看门狗在远早于它的位置先给用户提示，见
-# harness/hooks/watchdog.py。可经 env 覆盖以适配不同模型时延。
-MAIN_AGENT_TIMEOUT_SEC = env_int("MAIN_AGENT_TIMEOUT_SEC", 300)
+# 一轮任务的总时限（防失控之③）曾定义在这里，现已随其余三条上限搬到 app.agent.limits，
+# 消费方（orchestrator）直接从那里取——中转一道只会让「这个数字的家在哪」多一个答案。
 
 
 def render_platform_block(enabled: tuple[str, ...]) -> str:
@@ -60,7 +58,7 @@ def render_platform_block(enabled: tuple[str, ...]) -> str:
     return (
         f"<enabled_platforms>\n本次启用 {len(enabled)} 个平台：{names}。\n"
         f"- 跨平台泛搜按 <tool_policy>：**同一轮发出 {len(enabled)} 个 task_dispatch**"
-        f"（subagent_type=\"search\"、一平台一条、只列这些平台），框架会并发执行；"
+        f'（subagent_type="search"、一平台一条、只列这些平台），框架会并发执行；'
         f"不要派未启用的平台，也不要一条条串行发。\n"
         "</enabled_platforms>"
     )

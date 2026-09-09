@@ -28,10 +28,10 @@ from agentscope.state import AgentState
 from app.agent.ab import assign as assign_prompt_version
 from app.agent.agents import build_main_agent
 from app.agent.events import pump_events
+from app.agent.limits import MAIN_AGENT_TIMEOUT_SEC
 from app.agent.platform_scope import platform_scope
 from app.agent.retrieval_budget import reset_tree as reset_retrieval_tree
 from app.agent.session_io import (
-    MAIN_AGENT_TIMEOUT_SEC,
     charge_quota,
     inject_runtime_context,
     write_session_artifacts,
