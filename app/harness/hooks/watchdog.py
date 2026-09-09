@@ -24,7 +24,6 @@ import logging
 import time
 from typing import Any
 
-from app.agent.fork_guard import current_fork_depth
 from app.harness.middleware import harness_hook
 from app.harness.msgs import system_message
 from app.harness.signals import candidate_count
@@ -61,11 +60,9 @@ def _partial_answer() -> str:
     )
 
 
-@harness_hook("pre_think", name="liveness_watchdog", priority=5)
+@harness_hook("pre_think", name="liveness_watchdog", priority=5, main_only=True)
 async def check_liveness(context: dict[str, Any]) -> dict[str, Any] | None:
     """每次唤起模型前查一次停滞时长。仅主 loop（depth 0）。"""
-    if current_fork_depth() >= 1:
-        return None
     guard = context.get("_guard")
     if not isinstance(guard, GuardState):
         return None

@@ -428,18 +428,35 @@ class TestPhaseHooks:
 
     @pytest.mark.asyncio
     async def test_phase_check_skips_sub_agents(self) -> None:
-        from app.agent.fork_guard import _fork_depth
-        from app.harness.hooks.phase_check import check_phase_permission
+        """worker 里整个 hook 不跑。
 
-        token = _fork_depth.set(1)
-        m = PhaseStateMachine()
-        set_phase_machine(m)
+        **必须走 harness.run 而不是直调函数**：跳过的判定自 B3 起由注册表统一做
+        （``main_only=True``），直调等于绕开被测的那段逻辑。而且必须**先证明同一份 context
+        在主 loop 里真的会被拒**——否则「worker 里没被拒」可能只是因为压根没构造出拒绝条件，
+        测试恒绿（写这条时就先踩了一次：摘掉 main_only 它照样绿）。
+        """
+        from app.agent.fork_guard import _fork_depth
+        from app.harness.setup import setup_harness
+
+        setup_harness()  # 注册表里得真有这个 hook，否则 run() 是空转
+        set_phase_machine(PhaseStateMachine())
         try:
-            ctx: dict = {"tool_name": "shopping_summary"}
-            result = await check_phase_permission(ctx)
-            assert result is None  # 子 Agent 由深度闸管权限，本闸不管
+            # 候选池为空 + 阶段 PLANNING：主 loop 里 phase_check 必拒
+            token = _fork_depth.set(0)
+            try:
+                main_ctx = await harness.run("pre_tool_call", {"tool_name": "shopping_summary"})
+            finally:
+                _fork_depth.reset(token)
+            assert main_ctx.get("_rejected"), "对照组失效：主 loop 都没拒，下面那半句证明不了什么"
+            assert main_ctx.get("_rejected_by") == "phase_check"
+
+            token = _fork_depth.set(1)
+            try:
+                sub_ctx = await harness.run("pre_tool_call", {"tool_name": "shopping_summary"})
+            finally:
+                _fork_depth.reset(token)
+            assert not sub_ctx.get("_rejected")  # 子 Agent 的权限由发放范围管，本闸不管
         finally:
-            _fork_depth.reset(token)
             reset_phase_machine()
 
     @pytest.mark.asyncio
@@ -2075,19 +2092,38 @@ class TestWatchdog:
 
     @pytest.mark.asyncio
     async def test_skips_sub_agents(self) -> None:
+        """worker 里看门狗整个不跑。
+
+        走 harness.run（跳过由注册表裁决，B3），并先跑一遍主 loop 的对照——同一份停滞状态在
+        depth=0 下必须真的武装看门狗，否则「worker 里没动静」证明不了任何事。
+        """
         import time
 
         from app.agent.fork_guard import _fork_depth
-        from app.harness.hooks.watchdog import check_liveness
+        from app.harness.setup import setup_harness
         from app.harness.state import GuardState
 
-        token = _fork_depth.set(1)
-        guard = GuardState()
-        guard.last_progress_at = time.monotonic() - 999
+        setup_harness()
+        stalled = time.monotonic() - 999
+
+        token = _fork_depth.set(0)
         try:
-            assert await check_liveness(self._ctx(guard)) is None
+            main_guard = GuardState()
+            main_guard.last_progress_at = stalled
+            await harness.run("pre_think", self._ctx(main_guard))
         finally:
             _fork_depth.reset(token)
+        assert main_guard.watchdog_nudged_at != 0.0, "对照组失效：主 loop 里看门狗都没武装"
+
+        token = _fork_depth.set(1)
+        try:
+            sub_guard = GuardState()
+            sub_guard.last_progress_at = stalled
+            ctx = await harness.run("pre_think", self._ctx(sub_guard))
+        finally:
+            _fork_depth.reset(token)
+        assert "fallback_answer" not in ctx
+        assert sub_guard.watchdog_nudged_at == 0.0
 
 
 # ============================================================

@@ -16,7 +16,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from app.agent.fork_guard import current_fork_depth
 from app.harness.budgets import MAX_TERMINAL_NUDGE_RETRIES, TERMINAL_TOOLS
 from app.harness.middleware import harness_hook
 from app.harness.msgs import has_tool_result_from
@@ -31,11 +30,9 @@ def _has_terminal_tool_call(messages: Any) -> bool:
     return has_tool_result_from(messages, TERMINAL_TOOLS)
 
 
-@harness_hook("post_reflect", name="terminal_enforcer", priority=60)
+@harness_hook("post_reflect", name="terminal_enforcer", priority=60, main_only=True)
 async def enforce_terminal(context: dict[str, Any]) -> dict[str, Any] | None:
     """模型没调工具就想收尾、且本轮从未调过终结工具 → 请适配器重发一次模型。"""
-    if current_fork_depth() >= 1:
-        return None
 
     guard = context.get("_guard")
     if not isinstance(guard, GuardState):

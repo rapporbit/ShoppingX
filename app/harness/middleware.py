@@ -23,6 +23,7 @@ from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from app.agent.fork_guard import current_fork_depth
 from app.observability import metrics
 
 logger = logging.getLogger("shoppingx.harness")
@@ -82,19 +83,36 @@ class HarnessMiddleware:
     """
 
     def __init__(self) -> None:
-        self._hooks: dict[str, list[tuple[str, HookFn, int]]] = defaultdict(list)
+        # (name, fn, priority, main_only)
+        self._hooks: dict[str, list[tuple[str, HookFn, int, bool]]] = defaultdict(list)
 
-    def register(self, hook_point: str, name: str, fn: HookFn, *, priority: int = 100) -> None:
+    def register(
+        self,
+        hook_point: str,
+        name: str,
+        fn: HookFn,
+        *,
+        priority: int = 100,
+        main_only: bool = False,
+    ) -> None:
+        """``main_only=True`` = 这个 Hook 只在主 loop 跑，worker（fork_depth≥1）里整个跳过。
+
+        由注册表统一裁决，而不是每个 Hook 自己在函数第一行写 ``if current_fork_depth() >= 1:
+        return None``——那句话此前散在十几处（审查报告 P1-3）。散着写的问题不是重复本身，是
+        **它变成了一句要靠人记得抄的话**：新加的 Hook 忘了抄，就会在 worker 里悄悄跑起来，
+        没有任何东西会红。声明式的好处是漏写时它至少显式地默认为 False（跟着跑），而不是
+        看起来像特意为之。
+        """
         if hook_point not in HOOK_POINTS:
             raise ValueError(f"未知 Hook 点: {hook_point}，可选: {HOOK_POINTS}")
-        self._hooks[hook_point].append((name, fn, priority))
+        self._hooks[hook_point].append((name, fn, priority, main_only))
         self._hooks[hook_point].sort(key=lambda t: t[2])
 
     def list_hooks(self, hook_point: str | None = None) -> list[tuple[str, str, int]]:
         """列出已注册 Hook，返回 ``[(hook_point, name, priority), ...]``。"""
         if hook_point is not None:
-            return [(hook_point, n, p) for n, _, p in self._hooks.get(hook_point, [])]
-        return [(hp, n, p) for hp, hooks in self._hooks.items() for n, _, p in hooks]
+            return [(hook_point, n, p) for n, _, p, _m in self._hooks.get(hook_point, [])]
+        return [(hp, n, p) for hp, hooks in self._hooks.items() for n, _, p, _m in hooks]
 
     async def run(self, hook_point: str, context: dict[str, Any]) -> dict[str, Any]:
         """依次执行 ``hook_point`` 上注册的所有 Hook，返回最终 context。
@@ -110,7 +128,10 @@ class HarnessMiddleware:
         fail-closed（catch 后主动 raise ``HookRejectSignal``），不能指望 Pipeline 兜。
         """
         hooks = self._hooks.get(hook_point, [])
-        for name, fn, _priority in hooks:
+        in_worker = current_fork_depth() >= 1
+        for name, fn, _priority, main_only in hooks:
+            if main_only and in_worker:
+                continue
             t0 = time.monotonic()
             try:
                 result = await fn(context)
@@ -186,11 +207,13 @@ def _try_escape(gate: str, sig: HookRejectSignal, context: dict[str, Any]) -> bo
 harness = HarnessMiddleware()
 
 
-def harness_hook(hook_point: str, *, name: str, priority: int = 100) -> Callable[[HookFn], HookFn]:
-    """装饰器：自动注册 Hook 到全局 ``harness`` 单例。"""
+def harness_hook(
+    hook_point: str, *, name: str, priority: int = 100, main_only: bool = False
+) -> Callable[[HookFn], HookFn]:
+    """装饰器：自动注册 Hook 到全局 ``harness`` 单例。``main_only`` 见 :meth:`Harness.register`。"""
 
     def decorator(fn: HookFn) -> HookFn:
-        harness.register(hook_point, name, fn, priority=priority)
+        harness.register(hook_point, name, fn, priority=priority, main_only=main_only)
         return fn
 
     return decorator
