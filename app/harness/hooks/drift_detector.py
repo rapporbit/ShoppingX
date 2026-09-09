@@ -72,7 +72,6 @@ class DriftState:
         self.consecutive_empty_results: int = 0
         self.blacklist_violations: int = 0
         self.violated_terms: list[str] = []
-        self.recent_tool_names: list[str] = []
         self.token_history: list[int] = []
         # 目标词桥：planner 每轮写完 P_t 后从中刷新（约束词双语 + 品类）。「目标遗忘」信号拿
         # 用户 query 关键词去匹行为摘要，但摘要里可匹的是英文检索词——中文 bigram 裸匹恒 0，
@@ -85,7 +84,6 @@ class DriftState:
         self.consecutive_empty_results = 0
         self.blacklist_violations = 0
         self.violated_terms.clear()
-        self.recent_tool_names.clear()
         self.token_history.clear()
         self.goal_terms.clear()
 
@@ -417,7 +415,6 @@ async def track_result_signals(context: dict[str, Any]) -> dict[str, Any] | None
 
     # 信号 2: 探索发散——检索类工具连续返回空
     if tool_name in _SEARCH_TOOLS:
-        state.recent_tool_names.append(tool_name)
         if _is_empty_result(tool_result):
             state.consecutive_empty_results += 1
         else:

@@ -1022,29 +1022,27 @@ class TestTradeTurnIsTerminal:
 
     @pytest.mark.asyncio
     async def test_cancel_order_turn_gets_no_terminal_nudge(self, clean_phase) -> None:
-        """取消完直接写文案收尾，不该再被催「你没调终结工具」——那是白多一轮往返。"""
-        from agentscope.message import Msg
+        """取消完直接写文案收尾，不该再被催「你没调终结工具」——那是白多一轮往返。
 
+        判据是 ``called_tools``（B4 起的唯一来源），不是扫 messages：后者在续聊轮会把上一轮
+        的终结工具也算进来。这里连带把那个对照也断上——同样的 context 换成非终结工具，必须催。
+        """
         from app.harness.hooks.terminal_enforce import enforce_terminal
 
-        mw = _mw()
-        msgs = [
-            Msg(
-                name="shoppingx",
-                role="assistant",
-                content=_tool_result_blocks("cancel_order", '{"status":"CANCELLED"}'),
-            )
-        ]
-        out = await enforce_terminal(
-            {
-                "_guard": mw.guard,
-                "messages": msgs,
+        def ctx(*called: str) -> dict:
+            return {
+                "_guard": _mw().guard,
+                "called_tools": set(called),
                 "response_has_tool_calls": False,
                 "response_ai_message": object(),
             }
-        )
-        assert out is None
-        assert mw.guard.terminal_nudge_retries == 0
+
+        assert await enforce_terminal(ctx("query_order", "cancel_order")) is None
+
+        # 对照：本轮只查了单就想空口收尾 → 照催（否则上面那句 None 可能只是别的条件挡住了）
+        nudged = ctx("query_order")
+        out = await enforce_terminal(nudged)
+        assert out is not None and out.get("retry_nudge")
 
 
 class TestAssertionWiring:
