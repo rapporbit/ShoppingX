@@ -55,7 +55,7 @@ class _PrintingWS:
 
 
 async def _run_once(query: str, user_id: str, label: str) -> None:
-    from app.agent.main_agent import run_agent
+    from app.agent.orchestrator import run_agent
 
     thread_id = f"demo-{uuid4().hex[:8]}"
     ws = _PrintingWS()
