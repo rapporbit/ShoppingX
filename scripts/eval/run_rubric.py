@@ -15,6 +15,11 @@
     uv run python scripts/eval/run_rubric.py --gate          # 有 P0 红线失败则退出码 1（回归门禁）
 
 注意：真实 LLM 单条耗时可观（见延迟治理记录），全集串行很慢，默认并发 3；按配额调 --concurrency。
+
+跑前环境自检见 ``_preflight``：**跑不对的环境一律拒跑，不打警告了事**。历史上这两条都是靠
+「每个 wrapper 各 export 一遍」修的（``scripts/train/run_ab_rubric.sh`` 等三处），那是 O(调用点)
+的修法——本文件作为最常用的直接入口反而漏了，照着上面的用法敲就会踩。现在改成由被保护对象
+自己保证，新入口天生受保护。
 """
 
 from __future__ import annotations
@@ -93,6 +98,43 @@ def _assert_turn_cache_off() -> None:
         return
     if (data.get("turn_cache") or {}).get("enabled"):
         raise SystemExit(f"拒跑：{url} 显示后端整轮缓存开着，评测会拿到缓存结果。")
+
+
+#: 评测要求的 LLM 单请求超时下限（秒）。一条 case 要跑 5~9 轮 LLM，默认 60s 会把慢的那几条
+#: **判死**——表现是那几条固定失败、分数虚低，而日志只有一行超时，很容易被读成「Agent 有 bug」。
+EVAL_MIN_LLM_TIMEOUT_SEC = 300.0
+
+
+def _assert_llm_timeout_enough() -> None:
+    """LLM 单请求超时太短就拒跑（同 ``_assert_turn_cache_off`` 的口径：拒跑，不警告）。
+
+    读的是 ``app.agent.llm`` 的**真实生效值**而不是 ``os.environ``：该模块在 import 时就把 env
+    读成模块级常量，且 ``reload_llm_config`` 会改它——只看 env 会在热更新后给出假值。
+    """
+    from app.agent import llm as llm_mod
+
+    timeout = float(getattr(llm_mod, "LLM_REQUEST_TIMEOUT", 60.0))
+    if timeout < EVAL_MIN_LLM_TIMEOUT_SEC:
+        raise SystemExit(
+            f"拒跑：LLM_REQUEST_TIMEOUT={timeout:g}s < {EVAL_MIN_LLM_TIMEOUT_SEC:g}s。"
+            "一条 case 要跑 5~9 轮 LLM，超时太短会把慢的那几条判死、分数虚低且不报错。"
+            f"请 LLM_REQUEST_TIMEOUT={EVAL_MIN_LLM_TIMEOUT_SEC:g} 再跑。"
+        )
+
+
+def _preflight() -> None:
+    """跑前环境自检 + 输出无缓冲。所有入口共用这一处，别再往调用方 export。
+
+    ``reconfigure(line_buffering=True)`` 顶掉 ``python -u``：长跑时进度按行吐出，不必依赖每个人
+    记得加那个开关（忘了的表现是「跑了十几分钟屏幕上什么都没有」，容易被误判成挂死）。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)  # type: ignore[union-attr]
+        except (AttributeError, OSError):  # 被重定向到非 TTY 的特殊流时不强求
+            pass
+    _assert_turn_cache_off()
+    _assert_llm_timeout_enough()
 
 
 def _load_queries(only: set[str] | None, limit: int | None) -> list[dict]:
@@ -246,7 +288,7 @@ async def main(
     gate: bool,
     use_cache: bool,
 ) -> int:
-    _assert_turn_cache_off()
+    _preflight()
     queries = _load_queries(only, limit)
     cache_note = "复用缓存细则" if use_cache else "刷新细则缓存"
     print(f"开跑 Rubric 评测：{len(queries)} 条 query，并发 {concurrency}，{cache_note}\n")
