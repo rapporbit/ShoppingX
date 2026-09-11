@@ -1,13 +1,24 @@
 """M1 示例共用的玩具工具与教学版 system prompt。
 
-被 01_min_loop.py / 02_stream.py 共用，避免重复。工具按主线规范写：
-async + Pydantic 输出 + 给模型看的 docstring；实现是假数据，重点演示循环，真实版见 M11+。
+被 01_min_loop.py / 02_stream.py / 03_dispatch.py / 06_compress.py 共用，避免重复。工具按主线
+规范写：async + Pydantic 输出 + 给模型看的 docstring + 走 ``app.tools._shell`` 的 ``@tool``
+外壳；实现是假数据，重点演示循环，真实版见 app/tools/。
+
+用主线那副外壳而不是自己写一份，是为了让示例里的工具与 app/tools/ 下的真工具**形态完全一致**
+——``@tool`` 生成 schema、``to_function_tool`` 包成 AgentScope 运行时真正调的 ``FunctionTool``，
+错误语义、入参强转、``ToolChunk`` 形态一次对齐，示例不会教出一套跑不到生产的写法。
 """
 
 import asyncio
+import sys
+from pathlib import Path
 
-from langchain_core.tools import tool
-from pydantic import BaseModel
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from agentscope.tool import Toolkit  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
+
+from app.tools._shell import ToolShell, to_function_tool, tool  # noqa: E402
 
 
 class PlannerOutput(BaseModel):
@@ -94,3 +105,18 @@ SYSTEM_PROMPT = """<role>
 最重要：信息足够（已搜到商品并比好价）就立刻用自然语言给出推荐并结束，不要再调任何工具，
 不要反复搜同一关键词。
 </termination>"""
+
+
+TOY_TOOLS: list[ToolShell] = [planner, item_search, price_compare]
+
+
+async def toy_toolkit(shells: list[ToolShell] | None = None) -> Toolkit:
+    """把玩具工具装成一份 AgentScope ``Toolkit``（示例里 Agent 要的就是它）。
+
+    三个工具全部 ``is_read_only=True``——它们只查不改。真实项目里这个标记是权限边界的依据
+    （SearchAgent 靠它做结构性拦截），示例里标对它是为了不教坏习惯。
+    """
+    toolkit = Toolkit()
+    for shell in shells or TOY_TOOLS:
+        await toolkit.add_tool(to_function_tool(shell, is_read_only=True))
+    return toolkit
