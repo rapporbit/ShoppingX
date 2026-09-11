@@ -281,6 +281,10 @@ def _tool_call_args(chunk: object) -> str:
     return ""
 
 
+class _EmptyDraft(RuntimeError):
+    """流式草稿拿回了一张存根（没有 reasons）——由 :func:`_generate_draft` 接住并降级重调。"""
+
+
 async def _stream_draft(
     messages: list[tuple[str, str]],
     id_map: Mapping[str, str],
@@ -302,7 +306,14 @@ async def _stream_draft(
         stream = await model(
             to_msgs(messages),
             tools=[_draft_tool_schema()],
-            tool_choice=ToolChoice(mode=_SummaryDraft.__name__),
+            # **auto 而不是 forced 单工具**。forced 在现役快档上只回存根：同一个模型、同一份
+            # schema、同样流式，forced 臂 reasons **0/9**、auto 臂 **9/9**（off_intent 同样
+            # 0/3 → 3/3），而且 auto 还**快 5.9s**（14.2s → 8.3s 中位）。探针
+            # docs/plans/baseline-artifacts/summary_toolchoice_ab.py。
+            # 同族坑与同样的修法见 app/agent/invoke.call_structured 的「第四个坑」——那条路
+            # 2026-09-08 就改成 auto 优先了，这条自建流式路径当时漏掉，于是 reasons /
+            # off_intent 两项能力**从上线起就没生效过**，且全程零报错。
+            tool_choice=ToolChoice(mode="auto"),
         )
         async for chunk in stream:
             last = chunk
@@ -313,7 +324,16 @@ async def _stream_draft(
                 await monitor.report_summary_delta(strip_item_ids(text, id_map))
     finally:
         charge_usage(getattr(model, "model", ""), getattr(last, "usage", None))
-    return _SummaryDraft.model_validate(json.loads(buf))
+    draft = _SummaryDraft.model_validate(json.loads(buf))
+    if not draft.reasons:
+        # **空表闸**：``call_structured`` 的 ``required_any`` 管不到这条自建流式路径，这里补一个
+        # 等价物。本函数只在 picks 非空时被调用（调用点逐件列了 top_ids），所以「一条 reason
+        # 都没有」= 这次采样是存根，不是合法产出 → 抛出去让上层降级重调一次。
+        # 它平时不触发（auto 下实测 9/9 非空），价值全在**防复发**：谁把 tool_choice 改回
+        # forced、或换了个会吐存根的模型，会当场表现为一次降级 + 一条 warning，而不是像
+        # 2026-09-08 之前那样「安静地少写理由」，测试全绿、线上全空。
+        raise _EmptyDraft("收尾草稿一条 reason 都没有（疑似存根采样）")
+    return draft
 
 
 async def _generate_draft(
@@ -327,7 +347,15 @@ async def _generate_draft(
         # 入过账）——记 warning 让它可见，若某供应商长期走不了流式，该在配置层关掉而不是
         # 每轮白烧一遍。
         logger.warning("收尾文案流式生成失败，降级为阻塞结构化调用", exc_info=True)
-        return await call_structured(get_fast_llm(), messages, _SummaryDraft)
+        draft = await call_structured(get_fast_llm(), messages, _SummaryDraft)
+        if not draft.reasons:
+            # 两条路都没拿到理由：**照常返回**，卡片理由退回 ``_card_reason`` 确定性兜底
+            # （见 ``_SummaryDraft`` 的 docstring）。这里刻意不抛、也不给上面那次
+            # ``call_structured`` 传 ``required_any``——理由是锦上添花，清单才是交付物，
+            # 为了理由把整轮收尾打挂是拿用户拿得到的东西去赌拿不到的东西。留一条 warning
+            # 让它在日志里可见就够了。
+            logger.warning("收尾草稿两条路都没有 reasons，卡片理由走确定性兜底")
+        return draft
 
 
 def _landed_note(picks: list[ItemCandidate]) -> str:

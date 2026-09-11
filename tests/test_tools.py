@@ -2244,6 +2244,10 @@ class _FakeStreamingLLM:
         return _stream()
 
 
+async def _noop_delta(_text: str) -> None:
+    """吞掉 summary 流式增量（这几条测试不关心推送内容，只是不能真去连 WebSocket）。"""
+
+
 def test_strip_item_ids_replaces_with_names_not_holes() -> None:
     """文案里的商品 ID 一律换成商品名——**换名不是删字**，删了会把句子撕烂。
 
@@ -2287,7 +2291,10 @@ async def test_stream_draft_emits_prefix_deltas(monkeypatch: Any) -> None:
 
     pieces = [
         '{"summary": "这批候选主打耐用',
-        '与低调，都在预算内，可放心选。"}',
+        '与低调，都在预算内，可放心选。",',
+        # 带上 reasons：真实产出本来就有（auto 下实测 9/9），而空 reasons 现在会被空表闸
+        # 判成存根、触发降级——那是另一条测试的事（见 test_stream_draft_empty_reasons_*）。
+        ' "reasons": [{"item_id": "B098QCGR94", "reason": "耐磨且轻"}]}',
     ]
     monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeStreamingLLM(pieces))
     sent: list[str] = []
@@ -2301,6 +2308,71 @@ async def test_stream_draft_emits_prefix_deltas(monkeypatch: Any) -> None:
     assert sent, "至少推送一条流式增量"
     for s in sent:
         assert draft.summary.startswith(s)  # 每条都是定稿的前缀
+
+
+async def test_stream_draft_asks_auto_not_forced_tool_choice(monkeypatch: Any) -> None:
+    """收尾必须用 ``tool_choice=auto``，不许回到 forced 单工具。
+
+    这不是风格偏好，是实测的能力开关：同一个模型 forced 臂 ``reasons`` 0/9、auto 臂 9/9，
+    forced 还慢 5.9s（探针 docs/plans/baseline-artifacts/summary_toolchoice_ab.py）。
+    forced 拿回的是存根，而 schema 全字段带默认值 → 校验照过、全程零报错，上线起
+    ``reasons`` / ``off_intent`` 两项就没生效过。**改回 forced 这条测试必须红。**
+    """
+    import app.tools.shopping_summary as mod
+
+    seen: dict[str, Any] = {}
+
+    class _RecordingLLM(_FakeStreamingLLM):
+        async def __call__(self, messages: Any, **kw: Any) -> Any:
+            seen.update(kw)
+            return await super().__call__(messages, **kw)
+
+    pieces = ['{"summary": "文案", "reasons": [{"item_id": "B1", "reason": "耐用"}]}']
+    monkeypatch.setattr(mod, "get_fast_llm", lambda: _RecordingLLM(pieces))
+    monkeypatch.setattr(mod.monitor, "report_summary_delta", _noop_delta)
+
+    await mod._generate_draft([("system", "s"), ("user", "u")], {})
+    assert seen["tool_choice"].mode == "auto"
+
+
+async def test_stream_draft_empty_reasons_falls_back(monkeypatch: Any) -> None:
+    """流式拿回没有 reasons 的存根 → 空表闸拦下 → 降级重调一次（而不是静默用空表）。"""
+    import app.tools.shopping_summary as mod
+    from app.tools.shopping_summary import SummaryReason, _SummaryDraft
+
+    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeStreamingLLM(['{"summary": "存根"}']))
+    monkeypatch.setattr(mod.monitor, "report_summary_delta", _noop_delta)
+    rescued = _SummaryDraft(
+        summary="重调拿到的文案", reasons=[SummaryReason(item_id="B1", reason="轻")]
+    )
+
+    async def _fake_structured(*_a: Any, **_kw: Any) -> _SummaryDraft:
+        return rescued
+
+    monkeypatch.setattr(mod, "call_structured", _fake_structured)
+    draft = await mod._generate_draft([("system", "s"), ("user", "u")], {})
+    assert draft.summary == "重调拿到的文案"
+    assert [r.item_id for r in draft.reasons] == ["B1"]
+
+
+async def test_generate_draft_returns_draft_when_both_paths_lack_reasons(monkeypatch: Any) -> None:
+    """两条路都没 reasons：**照常返回清单文案**，理由退回确定性兜底。
+
+    刻意不抛：理由是锦上添花、清单才是交付物，为了理由把整轮收尾打挂是本末倒置。
+    """
+    import app.tools.shopping_summary as mod
+    from app.tools.shopping_summary import _SummaryDraft
+
+    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeStreamingLLM(['{"summary": "存根"}']))
+    monkeypatch.setattr(mod.monitor, "report_summary_delta", _noop_delta)
+
+    async def _fake_structured(*_a: Any, **_kw: Any) -> _SummaryDraft:
+        return _SummaryDraft(summary="没有理由的文案")
+
+    monkeypatch.setattr(mod, "call_structured", _fake_structured)
+    draft = await mod._generate_draft([("system", "s"), ("user", "u")], {})
+    assert draft.summary == "没有理由的文案"
+    assert draft.reasons == []
 
 
 async def test_generate_draft_falls_back_without_streaming(monkeypatch: Any) -> None:
