@@ -51,7 +51,7 @@ logger = logging.getLogger("shoppingx.history")
 # 取最近 N 轮足够接住上下文。≤0 视为不回喂历史（等价关闭续聊）。可经 env 覆盖。
 HISTORY_MAX_TURNS = env_int("HISTORY_MAX_TURNS", 10)
 
-# turns.json 里合法 role 的白名单——回喂时直接当 LangChain 消息元组的 role 用。
+# turns.json 里合法 role 的白名单——回喂时直接当 ``(role, content)`` 二元组的 role 用。
 _VALID_ROLES = {"user", "assistant"}
 
 
@@ -201,7 +201,7 @@ async def read_turns(thread_id: str, session_dir: Path | None = None) -> list[di
 async def load_prior_turns(
     thread_id: str, session_dir: Path | None = None
 ) -> list[tuple[str, str]]:
-    """为「续聊」取出本段会话此前的历史轮次，转成 LangChain 消息元组 ``(role, content)``。
+    """为「续聊」取出本段会话此前的历史轮次，转成 ``(role, content)`` 二元组列表。
 
     只取最近 ``HISTORY_MAX_TURNS`` 轮（截尾保留最新），回喂进新一轮 ``run_agent`` 的开局
     messages，让模型接住上下文。``HISTORY_MAX_TURNS<=0`` 时返回空（等价关闭续聊）。

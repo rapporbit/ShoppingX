@@ -30,8 +30,9 @@ from app.utils.env import env_int
 WEB_SEARCH_TASK_QUOTA = env_int("WEB_SEARCH_TASK_QUOTA", 2)
 _TASKS_WANT_WEB = frozenset({"evaluate", "category_intel"})
 
-# 隔离检索作用域标记：串行 dispatch_tool（独立子任务，如定点商品调查）打开，
-# parallel_dispatch_tool（跨平台泛搜，共享收敛信号）不开、维持全树共享语义。
+# 隔离检索作用域标记：由 ``task_dispatch`` 按 demands 里**有没有点名平台**自动判定
+# （``_detect_platform(demands) is None`` → 开隔离）。点了名的是跨平台泛搜，共享全树收敛信号；
+# 没点名的是独立子任务（如定点商品调查），给它自己一份局部信号，免得被别人的搜索计数拖累。
 # 见 :func:`isolated_retrieval_scope`。
 _isolated_var: ContextVar[bool] = ContextVar("shoppingx_retrieval_isolated", default=False)
 

@@ -1,18 +1,15 @@
-"""AgentScope 侧的 Cache Breakpoint：断点与压缩都下沉到 **block 粒度**。
+"""Cache Breakpoint：断点与压缩都落在 **block 粒度**。
 
-**为什么不能复用 :mod:`app.compress.breakpoint` 的消息级断点。** 两个运行时的历史形态根本不同：
+**为什么断点必须落进消息内部（而不是消息下标）。** AgentScope 里**一次 reply（一整轮用户交互）
+= 一条 assistant ``Msg``**，轮内所有 thinking / tool_call / tool_result 全部 ``content.extend``
+进这同一条消息（见 ``AgentState.append_context``）——一条 15 步的购物链就是一条 30+ block 的消息。
+消息级断点在这种形态下只有两种结果：要么整轮都算「最近区」（一个字都压不掉、token 照样线性
+爆炸），要么整轮都算「较旧区」（把模型刚拿到的工具结果也截了）。
 
-- LangChain：一次 Observe = 一条独立的 ``ToolMessage``，整条 loop 是几十条消息，断点是消息下标。
-- AgentScope：**一次 reply（一整轮用户交互）= 一条 assistant ``Msg``**，轮内所有
-  thinking / tool_call / tool_result 全部 ``content.extend`` 进这同一条消息
-  （见 ``AgentState.append_context``）。一条 15 步的购物链就是一条 30+ block 的消息。
-
-所以在 AgentScope 下，消息级断点只有两种结果：要么整轮都算「最近区」（一个字都压不掉、token 照
-样线性爆炸），要么整轮都算「较旧区」（把模型刚拿到的工具结果也截了）。断点必须落进消息内部。
-
-断点语义与 LangChain 版逐字对齐（见 ``breakpoint.py`` 顶部对 refdocs/05 的更正）：
-``[:bp]`` 是较旧区（压缩、可当缓存前缀），``[bp:]`` 是最近 ``keep_recent`` 个工具结果构成的
-工作集（留全文）。只是坐标从 ``int`` 变成了 ``(msg_idx, block_idx)`` 二元组。
+断点语义（**对 refdocs/05 的一处更正**：教学把 `keep_recent` 按「消息条数」算，本仓按「工具结果
+个数」算——前者在一条 Msg 装满整轮的形态下恒等于 0 或全部）：``[:bp]`` 是较旧区（压缩、可当
+缓存前缀），``[bp:]`` 是最近 ``keep_recent`` 个工具结果构成的工作集（留全文）。坐标是
+``(msg_idx, block_idx)`` 二元组。
 
 cache_control 标记**不在这一层打**：AgentScope 的 content block 是 pydantic 强类型
 （``TextBlock`` 不收未知字段），塞不进 ``cache_control``。标记落在
@@ -173,8 +170,8 @@ def compress_blocks_before(
     block 走 ``model_copy``，其宿主 Msg 也 ``model_copy`` 换一份新的 content 列表；没命中的
     消息**原对象返回**（省拷贝，也让「视图未变」在 ``is`` 层面就看得出来）。
 
-    压缩策略与 LangChain 版共用一套：先试 JSON 字段抽取（``_smart_compress_json``），失败再
-    尾部截断；已带截断提示的不再压（幂等护栏，防 token 估算微漂移造成二次截断、破坏前缀稳定）。
+    压缩策略：先试 JSON 字段抽取（``_smart_compress_json``），失败再尾部截断；已带截断提示的
+    不再压（幂等护栏，防 token 估算微漂移造成二次截断、破坏前缀稳定）。
     """
     out: list[Msg] = []
     for i, msg in enumerate(messages):
@@ -210,9 +207,9 @@ def post_step_compress(
     keep_recent: int = DEFAULT_KEEP_RECENT,
     max_tool_tokens: int = DEFAULT_MAX_TOOL_TOKENS,
 ) -> list[Msg]:
-    """AgentScope 侧的 ``post_step_compress``：定位断点 → 压缩较旧区。纯函数、幂等。
+    """一次 post-step 压缩：定位断点 → 压缩较旧区。纯函数、幂等。
 
-    比 LangChain 版少一步「打 cache_control」——那件事挪到了 formatter（见模块 docstring）。
+    这里**不打** cache_control——那件事在 formatter（见模块 docstring 末段）。
     """
     return compress_blocks_before(
         messages,

@@ -2,9 +2,10 @@
 
 System prompt 用 XML 分块，且**纯静态**——不含任何运行时注入位。
 长期偏好 / 近期行为历史 / 会话级 P_t 这些**每轮必变**的运行时上下文一律**不进 system prompt**，
-改由 ``main_agent._inject_runtime_context`` 拼进当轮 human message（见该函数的 prompt cache 说明）：
-system prompt 逐字稳定才能成为跨轮 / 跨会话都命中的缓存前缀。主 / 子 AgentLoop 共用同一份 system
-prompt（同质 fork 的硬约束）——静态化后主与子的 system 段字节相同，子 Agent 也能命中主 Agent 的缓存。
+改由 ``session_io.inject_runtime_context`` 拼进当轮 human message（见该函数的 prompt cache 说明）：
+system prompt 逐字稳定才能成为跨轮 / 跨会话都命中的缓存前缀。主 Agent 与两个 worker 各读自己的
+段（``main_agent`` / ``sub_agents.search`` / ``sub_agents.trade``），但每段自身逐字稳定，
+同角色跨轮跨会话都命中同一份前缀。
 """
 
 from functools import lru_cache
@@ -179,7 +180,7 @@ def get_system_prompt(version: str | None = None) -> str:
 
     **长期偏好 / 近期行为历史 / 会话级 P_t 一律不在此注入**：三者每轮必变（偏好按本轮 query 语义
     裁剪、历史每轮收尾覆盖、P_t 每轮 curator 更新），混进 system prompt 会打断本该跨轮稳定的
-    prompt cache 前缀。它们改由 ``main_agent._inject_runtime_context`` 拼进当轮 human message——
+    prompt cache 前缀。它们改由 ``session_io.inject_runtime_context`` 拼进当轮 human message——
     那是缓存断点之后、永不缓存的部分，把「每轮必变」彻底隔离在缓存区外（对齐 refdocs/05 §4.4
     「按易变性分层，越易变越靠后」）。
 

@@ -6,7 +6,7 @@ OpenTelemetry、把多 fork 归并成一棵树，见 ``app/agent/tracing.py``）
 这些是 Langfuse 的单条 trace 答不了、却是定位延迟回归（如之前的 295s）最需要的。
 
 **打点位置。**
-- 工具耗时 / 调用数：``HarnessAgentMiddleware.awrap_tool_call`` 包住工具执行处（一处覆盖全部工具）。
+- 工具耗时 / 调用数：``HarnessToolAdapter.on_tool_call`` 包住工具执行处（一处覆盖全部工具）。
 - fork 数：``monitor.report_fork``。
 - 运行时 gauge（活跃任务 / 任务槽 / 断路器状态）：在 ``/metrics`` 被 scrape 时即时刷新——
   这些是「当前值」，scrape 那一刻读最准，不必实时维护。
