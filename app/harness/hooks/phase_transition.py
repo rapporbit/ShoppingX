@@ -1,6 +1,6 @@
 """阶段转移（post_reflect）+ 收线通告（post_tool_call）：推进 / 回退对话阶段并当场告知模型。
 
-转移信号由 HarnessAgentMiddleware 从可靠数据源（工具名 + 候选登记表）填入 context：
+转移信号由 HarnessAgentAdapter 从可靠数据源（工具名 + 候选登记表）填入 context：
 - planner_output_ready (bool)：planner 已执行 → PLANNING → SEARCHING
 - total_candidates (int)：候选登记表条数 > 0 → SEARCHING → COMPARING
 - picks_count (int)：item_picker 已执行 → COMPARING → CONCLUDING
@@ -298,7 +298,9 @@ async def check_phase_rollback(context: dict[str, Any]) -> dict[str, Any] | None
 # 已经又解码了一轮、下一步早定了。perf-audit-r3 实测：通告晚一轮到场，模型照样连发 item_search
 # 撞哨兵，白耗两轮。缀在工具结果尾部则是模型下一次解码的必读内容，零时差。
 
-_SEARCH_NOTICE_TOOLS = frozenset({"item_search", "dispatch_tool", "parallel_dispatch_tool"})
+# 只有直搜：本条件还要求 ``call_candidates > 0``，而派发路径数不出新候选
+# （见 _tool_signals._SEARCH_TOOLS），加上 task_dispatch 也恒为假。
+_SEARCH_NOTICE_TOOLS = frozenset({"item_search"})
 
 
 def _price_tasks_hint() -> str:
@@ -363,7 +365,7 @@ async def append_transition_notice(context: dict[str, Any]) -> dict[str, Any] | 
         # 通告只点 item_search 时，模型转头连发 4 个 web_search「求证」，白耗一轮撞闸。
         notice = (
             "\n\n[阶段推进] 候选已入池，检索阶段就此收线：不要再调用 item_search / "
-            "dispatch_tool / web_search——继续检索只会消耗全树检索预算并很快被机制拒绝。"
+            "task_dispatch / web_search——继续检索只会消耗全树检索预算并很快被机制拒绝。"
             "请基于已入池候选继续（price_compare / shipping_calc / item_picker → "
             "shopping_summary）。"
         ) + _price_tasks_hint()

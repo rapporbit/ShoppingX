@@ -1,7 +1,7 @@
 """GuardState：一个 Agent 实例独享的控制面状态。
 
 Hook 是**模块级函数**、全局注册，天然无处安放「这个 Agent 实例搜了几次」这类状态。所以状态集中
-放这里，由 :class:`HarnessAgentMiddleware` 每实例新建一个，经 ``context["_guard"]`` 传给 Hook。
+放这里，由 :class:`HarnessAgentAdapter` 每实例新建一个，经 ``context["_guard"]`` 传给 Hook。
 
 **绝不跨 Agent 实例复用**——否则会话之间计数串台（LoopDetector 窗口、检索计数、终结标记都是
 per-loop 语义）。跨 fork 树共享的量（fork 轮数 / 全树检索总量 / token 成本）另有 ContextVar +
@@ -46,7 +46,7 @@ class GuardState:
     #: 主 loop 本轮是否已调过终结工具（终结硬停闸用）
     terminal_reached: bool = False
     #: 本次模型调用内已因「纯文字收尾」重发过几次（上限 MAX_TERMINAL_NUDGE_RETRIES）。
-    #: 由适配器在每次 ``awrap_model_call`` 开头清零——配额是 per-call，不是 per-loop。
+    #: 由适配器在每次 ``on_model_call`` 开头清零——配额是 per-call，不是 per-loop。
     terminal_nudge_retries: int = 0
     #: Think 计步：每次请求模型即一次 Think，供前端「思考中（第 N 步）」展示
     think_step: int = 0

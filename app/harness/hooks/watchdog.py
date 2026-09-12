@@ -12,7 +12,7 @@ harness 重构第一段（对应 2026-07-14 线上死锁复盘的原则）：**�
 1. 停滞 ≥ ``WATCHDOG_STALL_SEC``：往本次模型调用注入收敛指令，指路终结工具
    （与 terminal_enforcer 的纪律一致，不会被「没调终结工具」的纠正回路顶回来）。
 2. 指令后宽限 ``WATCHDOG_GRACE_SEC`` 仍无进展：置 ``fallback_answer`` 走预算耗尽同款
-   硬停通路（awrap_model_call 直接合成收尾消息、置 terminal_reached，不再唤模型）。
+   硬停通路（适配器在 on_model_call 直接合成收尾消息、置 terminal_reached，不再唤模型）。
 
 与 ``MAIN_AGENT_TIMEOUT_SEC``（300s，报错收场）的关系：看门狗在远早于它的位置给用户一个
 **体面的**部分结果；外层超时降级为最后的保险丝，正常情况下永远不该被摸到。

@@ -25,12 +25,10 @@ RETRIEVAL_TOOLS = frozenset({"item_search", "web_search"})
 # 一棵 fork 树（一次 run_agent）的商品检索总量上限。
 TREE_RETRIEVAL_BUDGET = env_int("RETRIEVAL_BUDGET", 8)
 
-# 复用轮（planner 判 retrieval=reuse）的全树检索小预算。阶段白名单禁令已撤（重构第三段），
-# reuse 轮「不重新检索」从硬禁令降为经济约束：给一笔小预算而不是锁死——planner 的 reuse 判定
-# 是**假设不是承诺**（2026-07-14 线上死锁即换品类被误判 reuse），模型确认旧候选不适用时应能
-# 立即补搜，而不是攒 2 次被拒换一次逃生。``max(1, ...)`` 钉死「永不为 0」：配 0 等于把预算制
-# 又改回禁令制，死锁风险回归。refine_backfill / phase_rollback 把 mode 改写为 augment 后自动
-# 恢复全树预算（见 tool_gates.charge_retrieval）。
+# 复用轮（planner 判 retrieval=reuse）的全树检索小预算：「不重新检索」是经济约束而非硬禁令，
+# 理由见 docs/decisions/0001-阶段白名单降级为遥测.md。``max(1, ...)`` 钉死「永不为 0」——
+# 配 0 等于把预算制改回禁令制，死锁风险立刻回归。refine_backfill / phase_rollback 把 mode
+# 改写为 augment 后自动恢复全树预算（见 tool_gates.charge_retrieval）。
 REUSE_RETRIEVAL_BUDGET = max(1, env_int("REUSE_RETRIEVAL_BUDGET", 1))
 
 # 无 session 作用域（单测 / 无树）时的 per-instance 回退上限。
@@ -69,9 +67,8 @@ TERMINAL_TOOLS = _TERMINAL_TOOLS
 # 主 loop 没调终结工具就打算用纯文字收尾时，最多提醒一次——避免模型持续不听指令时无限重试。
 MAX_TERMINAL_NUDGE_RETRIES = 1
 
-# 一棵树允许的派发**总次数**。旧口径是「1 轮并行（一次派一批）+ 4 次串行」，那是
-# parallel_dispatch_tool 时代的形状：一次调用派一批平台。改成 task_dispatch 之后，一条 demand
-# 就是一次调用（同轮多条由框架并发跑），所以额度只能按调用数给：6 ≈ 一次铺满 5 个启用平台
+# 一棵树允许的派发**总次数**。一条 demand 就是一次 task_dispatch 调用（同轮多条由框架并发
+# 跑），所以额度按调用数给：6 ≈ 一次铺满 5 个启用平台
 # + 1 条补派。给得偏松是有意的——派发额度是**动机闸**（挡「再找找更好的」），不该在正常的
 # 跨平台铺开时就咬人；真正的资源背压在并发信号量那边（见 fork_concurrency_scope）。
 DEFAULT_MAX_DISPATCH = env_int("MAX_DISPATCH_CALLS", 6)

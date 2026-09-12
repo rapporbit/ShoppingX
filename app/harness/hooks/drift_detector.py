@@ -60,9 +60,9 @@ Agent 最近 {n} 轮行为摘要：{recent_actions}
 
 
 class DriftState:
-    """单会话的漂移检测状态（与 HarnessAgentMiddleware 同生命周期）。
+    """单会话的漂移检测状态（与 HarnessAgentAdapter 同生命周期）。
 
-    ``token_history`` 由 :class:`HarnessAgentMiddleware` 在每次模型调用后按 tree_snapshot 的
+    ``token_history`` 由 :class:`HarnessAgentAdapter` 在每次模型调用后按 tree_snapshot 的
     增量追加；``blacklist_violations`` 由 ``track_result_signals`` 在工具返回后累加。
     """
 
@@ -206,7 +206,7 @@ def _computational_precheck(
 def _force_conclude_phase() -> None:
     """把主 loop 的阶段机推到 CONCLUDING，为强制收尾**授权**。
 
-    阶段白名单禁令已撤，但 ``phase_check`` 仍留一道底线：阶段还在 PLANNING 时拒绝
+    ``phase_check`` 留了一道底线：阶段还在 PLANNING 时拒绝
     shopping_summary（本轮未规划/精挑不许交卷）。强制收尾是漂移恶化下的兜底通路，必须
     压过这道底线——否则注入「立即调 shopping_summary」的同时又拦下它，模型被一边逼着
     收尾、一边不许收尾。推进 CONCLUDING 同时也让遥测如实反映「已进入收尾」。

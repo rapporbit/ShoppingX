@@ -1,9 +1,4 @@
-"""把 Harness 的六个 hook_point 接到 AgentScope 的中间件面。
-
-本模块是照着当年那份 LangChain 中间件（``agent_middleware``，随迁移完成已删）逐条重建的，
-**注册表、hook 名称、priority、顺序契约一个都没动**——控制面的语义是整仓最易碎的部分
-（``tool_gates.py`` 头注释里那串顺序契约尤其），迁移只换「钩子挂在哪」，不换「钩子做什么」。
-下面提到「LangChain 版如何如何」的地方，记的都是这条对照线索，代码本身早已不依赖它。
+"""把 Harness 的 hook_point 接到 AgentScope 的中间件面。
 
 落点选择（探针实测钉死，见 scratchpad probe_hooks）：
 
@@ -18,10 +13,9 @@
 | ``post_tool_call`` | 同上，next_handler 之后 | 对聚合后的结果文本跑 |
 | ``on_session_end`` | ``on_reply`` 结束前 | 一次 reply 的收尾 |
 
-**retry_nudge 的落地方式变了，语义没变**：LangChain 版是在同一次 ``awrap_model_call`` 里手动
-再发一次模型；AgentScope 原生支持「吞掉 ``ReplyEndEvent`` 即强制再来一轮」，所以改成在
-``on_reply`` 里把提示追加进 ``agent.state.context`` 后吞掉结束事件。省掉一次手工重发，且这轮
-纠正会跟着 state 走（下一轮模型仍看得见自己被纠正过什么）。
+**retry_nudge 走「吞事件」而不是手工重发**：AgentScope 原生支持「吞掉 ``ReplyEndEvent`` 即强制
+再来一轮」，所以在 ``on_reply`` 里把提示追加进 ``agent.state.context`` 后吞掉结束事件。省掉一次
+手工重发，且这轮纠正会跟着 state 走（下一轮模型仍看得见自己被纠正过什么）。
 """
 
 from __future__ import annotations
@@ -76,10 +70,9 @@ logger = logging.getLogger("shoppingx.harness.adapter")
 class HarnessSession:
     """一次 AgentLoop 的控制面状态，被 Agent 适配器与 Tool 适配器**共享**。
 
-    LangChain 版把这些字段挂在中间件实例上，因为那边模型钩子与工具钩子同属一个类。AgentScope
-    把两者拆成了 ``MiddlewareBase`` 与 ``ToolMiddlewareBase``，于是状态必须外提——否则
-    pre_tool_call 攒的断言就流不到 post_reflect 的 ``assertion_handler`` 手里（LangChain 版
-    docstring 里的「三条接力通道」在这里一条都不能少）。
+    AgentScope 把模型钩子与工具钩子拆成了 ``MiddlewareBase`` 与 ``ToolMiddlewareBase`` 两个类，
+    于是状态必须外提到这里——否则 pre_tool_call 攒的断言就流不到 post_reflect 的
+    ``assertion_handler`` 手里，三条接力通道（inject / assertions / retry_nudge）一条都不能少。
     """
 
     def __init__(
@@ -255,7 +248,7 @@ def _persist_injections(agent: Agent, injected: list[Msg] | None) -> None:
        那会给 ``get_awaiting_tool_calls`` / 落盘恢复埋下同 id 的坑）。
 
     调用点在**构造本轮视图之前**（见 ``on_model_call``），所以本轮与下一轮看到的是同一份字节，
-    连「注入当轮断一次」都不会发生——比 LangChain 侧 M6.1 的口径（注入只断一轮）再进一步。
+    连「注入当轮断一次」都不会发生——比「注入只断一轮」的旧口径再进一步。
     唯一的例外是 pre_think 的 hook 自己往 ``messages`` 里 append 的那种（预算 MINIMAL hint），
     它这一轮是 system 消息、下一轮是 hint，会断一次；档位只降不升，一个 loop 至多一次。
     """
@@ -385,8 +378,8 @@ class HarnessAgentAdapter(MiddlewareBase):
 
         **只认最后一个 chunk 的 usage**：chunk 是累积快照（基类把增量攒好再吐），逐个入账
         会把同一次调用重复计上十几遍。放 finally 是因为半路取消时 token 也已真实花掉——
-        少算的账会让预算闸和用户 credit 配额一起失真（LangChain 侧由 ``charge_tree_usage``
-        在中间件里做同一件事，AgentScope 侧没有对应的钩子，只能在这里接）。
+        少算的账会让预算闸和用户 credit 配额一起失真。AgentScope 没有「一次模型调用结束」的
+        钩子，入账只能接在这里。
         """
         last: ChatResponse | None = None
         try:
@@ -749,8 +742,8 @@ class HarnessToolAdapter(ToolMiddlewareBase):
         result_text = "".join(
             _block_text(b) for c in chunks for b in c.content if getattr(b, "type", None) == "text"
         )
-        # 工具内部报错走 state=ERROR（见 app/tools/_as_tools.py），语义等同 LangChain 版的
-        # status="error"：工具没真跑过，不记 called_tools、不推阶段信号、不给看门狗续命、
+        # 工具内部报错走 state=ERROR（见 app/tools/_as_tools.py）：
+        # 工具没真跑过，不记 called_tools、不推阶段信号、不给看门狗续命、
         # 不跑 post_tool_call。只喂 LoopDetector——硬撞同一个错误正是打转。
         if last is not None and last.state == ToolResultState.ERROR:
             _observe_tool(tool_name, time.monotonic() - start, "error")
@@ -801,7 +794,7 @@ class HarnessToolAdapter(ToolMiddlewareBase):
 
 
 def _collect_call_signals(s: HarnessSession, tool_name: str, result_text: str) -> dict[str, Any]:
-    """从工具的**真实返回**里数阶段信号（不从全局状态反推，口径与 LangChain 版逐字相同）。"""
+    """从工具的**真实返回**里数阶段信号（不从全局状态反推——见 ``_tool_signals`` 的两条原则）。"""
     call_candidates = 0
     call_picks = 0
     call_must_hits: int | None = None
