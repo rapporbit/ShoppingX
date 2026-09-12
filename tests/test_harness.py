@@ -413,7 +413,11 @@ class TestPhaseHooks:
 
     @pytest.mark.asyncio
     async def test_phase_check_no_whitelist_ban(self) -> None:
-        """阶段白名单禁令已撤（重构第三段）：任何阶段调检索/比价类工具都不再被阶段闸拒绝。"""
+        """任何阶段调检索/比价类工具都不再被阶段闸拒绝。
+
+        白名单禁令为什么撤见 docs/decisions/0001-阶段白名单降级为遥测.md——这条测试就是
+        那个决定的执法者，它变红意味着白名单被人加回来了。
+        """
         from app.agent.fork_guard import _fork_depth
         from app.harness.hooks.phase_check import check_phase_permission
 
@@ -814,7 +818,7 @@ class TestInjectPersistence:
 # 接线测试：Hook 之间、Hook 与中间件之间的数据是否真的流通
 #
 # 上面的测试都是「手搓一个 context dict 喂给单个 Hook」——Hook 自身逻辑对，不代表它在真实
-# Agent 生命周期里拿得到数据。以下测试驱动 HarnessAgentMiddleware 本身，覆盖四条曾经断掉的链路。
+# Agent 生命周期里拿得到数据。以下测试驱动 HarnessAgentAdapter 本身，覆盖四条曾经断掉的链路。
 # ============================================================
 
 
@@ -910,7 +914,8 @@ async def _run_model(mw, *, with_tool_results: bool = True, agent=None):
     """驱动一次「模型调用 + 推理收尾」：pre_think 在前、post_reflect 在后。
 
     AgentScope 把这两件事拆在两个钩子上（``on_model_call`` / ``on_reasoning``），
-    LangChain 版则同在一次 ``awrap_model_call`` 里——所以这里连着驱动两个，语义才对得上。
+    而 pre_think / post_reflect 是一次「想 + 说」的前后两端——所以这里必须连着驱动两个钩子，
+    只驱动一个则那一轮只跑了半边，断言会测到一个不存在的中间态。
     返回 ``(响应, agent)``：注入是否落进 ``state.context`` 得看 agent。
     """
     from agentscope.message import TextBlock

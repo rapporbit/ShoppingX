@@ -302,7 +302,7 @@ async def test_build_block_anonymous_returns_placeholder() -> None:
 async def test_preferences_not_in_system_prompt() -> None:
     """偏好**不进 system prompt**：它每轮都变，混进去会打断跨轮稳定的 prompt cache 前缀。
 
-    它走当轮 human message（见 main_agent._inject_runtime_context）。这里守的是「system prompt
+    它走当轮 human message（见 session_io.inject_runtime_context）。这里守的是「system prompt
     保持纯静态」这个前提——它一旦被破坏，缓存命中率会静默垮掉，而没人会立刻发现。
     """
     assert "不接受皮革材质" not in get_system_prompt()

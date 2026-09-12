@@ -69,8 +69,8 @@ def _load_high_score_traces(report_path: Path) -> list[dict]:
         if not r.get("ok") or not r["result"].get("is_high_score"):
             continue
         qid = r["id"]
-        # ``load_history`` 两套运行时的落盘格式都吃（见 app/eval/trace.py）：LangChain 那条是
-        # ``messages_to_dict`` 的 ``{"type","data"}``，AgentScope 那条是 ``Msg.model_dump()``。
+        # ``load_history`` 两种落盘格式都吃（见 app/eval/trace.py）：当前是 ``Msg.model_dump()``，
+        # 迁移前的旧会话是 ``messages_to_dict`` 的 ``{"type","data"}``。
         msgs = load_history(Path(f"output/eval_{qid}/history.json"))
         tools = [c["name"] for c in extract_tool_calls(msgs)]
         final = last_assistant_text(msgs)

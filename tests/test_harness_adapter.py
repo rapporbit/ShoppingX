@@ -112,7 +112,7 @@ def _user(text: str) -> Msg:
 async def test_all_six_hook_points_fire_with_expected_context(
     isolated_harness: HarnessMiddleware,
 ) -> None:
-    """一轮「调工具 → 收尾」应触发全部五个 loop 内 hook_point，且顺序与 LangChain 版一致。"""
+    """一轮「调工具 → 收尾」应触发全部五个 loop 内 hook_point，且顺序符合下面钉住的契约。"""
     seen: list[tuple[str, dict]] = []
 
     def recorder(point: str):  # type: ignore[no-untyped-def]
@@ -135,7 +135,7 @@ async def test_all_six_hook_points_fire_with_expected_context(
     assert points.count("post_tool_call") == 1
     assert points.count("post_reflect") == 2
     assert points.count("on_session_end") == 1
-    # 顺序契约（与 LangChain 版逐字相同，别想当然）：post_reflect 是「模型刚回复完」的反思点，
+    # 顺序契约（别想当然）：post_reflect 是「模型刚回复完」的反思点，
     # 跑在工具执行**之前**——本轮要不要收尾、这轮回复合不合规，判断的是模型的输出而不是工具的产出。
     assert points[:4] == ["pre_think", "post_reflect", "pre_tool_call", "post_tool_call"]
     assert points[-1] == "on_session_end"
@@ -476,8 +476,8 @@ async def test_model_usage_charged_to_tree(
 ) -> None:
     """主 loop 的模型调用要计进全树——不计的话预算闸与用户 credit 配额一起失真。
 
-    LangChain 侧这件事由 ``agent_middleware`` 的 ``charge_tree_usage`` 做；AgentScope 侧没有
-    对应钩子，只能挂在 ``on_model_call`` 的返回上（见 ``HarnessAgentAdapter._charge_stream``）。
+    AgentScope 没有「一次模型调用结束」的钩子，入账只能挂在 ``on_model_call`` 的返回流上
+    （见 ``HarnessAgentAdapter._charge_stream``）。
     """
     session = HarnessSession(original_query="q")
     resp = _text("好的")
