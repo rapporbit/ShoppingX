@@ -1,18 +1,19 @@
-"""评测 / 训练侧的**运行时中立**轨迹解析（批 0 / L6）。
+"""评测 / 训练侧的**落盘形态中立**轨迹解析。
 
 评测与蒸馏脚本要回答的问题只有三个——「这轮按顺序调了哪些工具」「最后一句回复是什么」
-「怎么从落盘的 ``history.json`` 把前两者读出来」。这三件事本身与底下跑的是 LangChain 还是
-AgentScope 无关，可两套运行时的消息形态差得很远：
+「怎么从落盘的 ``history.json`` 把前两者读出来」。麻烦在于 ``output/`` 下的历史文件**同时存在
+两种形态**，都得能读：
 
-- **LangChain**：一条 ``AIMessage`` 顶层挂 ``tool_calls``（``{name, args}``），一次工具结果
-  单独一条 ``ToolMessage``；落盘走 ``messages_to_dict``，元素形如 ``{"type": "ai", "data": {…}}``。
-- **AgentScope**：**一次 reply = 一条 assistant ``Msg``**，本轮所有 ``tool_call`` / ``tool_result``
-  block 全 ``extend`` 进它的 ``content`` 里（L5 起还会混进 ``HintBlock`` 注入）；落盘走
+- **当前形态**：一次 reply = 一条 assistant ``Msg``，本轮所有 ``tool_call`` / ``tool_result``
+  block 全 ``extend`` 进它的 ``content`` 里（还会混进 ``HintBlock`` 注入）；落盘走
   ``Msg.model_dump()``，元素形如 ``{"role": "assistant", "content": [blocks], …}``。
+- **迁移前的旧形态**（磁盘上仍有几百个会话是这样）：一条 AI 消息顶层挂 ``tool_calls``
+  （``{name, args}``），一次工具结果单独一条消息；落盘走 ``messages_to_dict``，元素形如
+  ``{"type": "ai", "data": {…}}``。**这个分支不是死代码**，删了旧会话就读不出来了。
 
 与其让 ``rubric`` / ``distill_fewshot`` 各写一遍 if-else，不如把差异收进本模块，**先归一成中立
-dict 再解析**。L8 摘掉 LangChain 时删的是这里的一个分支，上层一行不动（同 ``harness/_msgcompat``
-的思路，但那个服务控制面、这个服务评测面，两边的输入根本不是同一批对象，不合并）。
+dict 再解析**（同 ``harness/msgs`` 的思路，但那个服务控制面、这个服务评测面，两边的输入根本不
+是同一批对象，不合并）。
 
 刻意**不 import 任何一方的消息类**：解析全走鸭子判断，于是本模块在两个运行时下都可导入，
 离线脚本（训练机上依赖装得很薄）也能用。

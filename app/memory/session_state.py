@@ -199,7 +199,7 @@ class SessionPrefState(BaseModel):
         """渲染成拼进当轮 human message 尾部的一段文本（供主 loop 把已累积约束折进本轮处理）。
 
         **不注入 system prompt**：P_t 每轮必变，混进 system prompt 会打断 prompt cache 前缀（见
-        ``app.agent.main_agent._inject_runtime_context``）。空状态返回占位，让模型明确「本会话
+        ``app.agent.session_io.inject_runtime_context``）。空状态返回占位，让模型明确「本会话
         尚无累积约束」。**不展示约束 id**——id 是 planner 撤回通道的引用键（见 planner 侧的
         带 id 渲染），主 loop 的可读性渲染混进 c1/c2 只会诱导模型把内部主键说给用户听。
         """

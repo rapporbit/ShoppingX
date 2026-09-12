@@ -34,7 +34,7 @@ from pydantic import BaseModel, create_model
 class InjectedToolArg:
     """标记「这个参数由程序注入，不给模型看」。用法：``Annotated[T, InjectedToolArg]``。
 
-    只作哨兵用，不实例化（与 LangChain 同名标记的用法一致，迁移时工具签名一个字没改）。
+    只作哨兵用，不实例化。注入侧见 ``app/tools/_as_tools.py``（按注解剔除，不进模型看到的 schema）。
     """
 
 

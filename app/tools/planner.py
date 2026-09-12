@@ -711,11 +711,11 @@ async def planner(intent: str) -> PlanOutput:
     await monitor.report_tool_start("planner", intent=intent)
     prior = _render_prior_context()
     try:
-        # 曾经这里要显式钉 ``method="function_calling"``：LangChain 按模型能力画像推断默认
+        # 曾经这里要显式钉 ``method="function_calling"``——旧运行时按模型能力画像推断默认
         # method，qwen 系被判成不支持 tools → 回退 response_format=json_object，而 DashScope
         # 要求该模式下 messages 里必须出现 "json" 字样（本 prompt 没有）→ 400 直接打挂拆解。
         # AgentScope 的 generate_structured_output 自带策略梯（forced→auto→no_think→none），
-        # 这个坑结构上不存在，也没有 method 可钉（L0/S2 实测）。用量由 call_structured 入账。
+        # 这个坑结构上不存在，也没有 method 可钉（实测）。用量由 call_structured 入账。
         plan = await call_structured(
             get_planner_llm(),
             [("system", get_planner_prompt()), ("user", prior + intent if prior else intent)],

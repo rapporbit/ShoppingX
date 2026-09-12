@@ -7,10 +7,10 @@
 
 落地口径（与 memory / P_t 同一套路）：
 - **不进 system prompt**：启用平台随用户设置而变，混进 system prompt 会打断本该跨轮/跨会话稳定的
-  prompt cache 前缀（见 prompts.py 的说明）。它由 ``main_agent._inject_runtime_context`` 拼进当轮
+  prompt cache 前缀（见 prompts.py 的说明）。它由 ``session_io.inject_runtime_context`` 拼进当轮
   human message（缓存断点之后），并由本模块的 ContextVar 供工具层机制性执行。
 - **prompt 只打动机、机制才是硬保证**（见 fork-guardrails-mechanism-not-prompt）：模型少列 / 多列
-  平台都拦不住，故 ``dispatch_tool`` 补齐+丢弃、``item_search`` 的 Qdrant filter 一律以本模块的
+  平台都拦不住，故 ``task_dispatch`` 补齐+丢弃、``item_search`` 的 Qdrant filter 一律以本模块的
   启用集合为准。
 - fork 子 Agent 通过 asyncio Task 的 ContextVar 快照自动继承，无需显式传参。
 """

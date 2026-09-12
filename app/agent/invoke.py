@@ -1,8 +1,7 @@
 """对 AgentScope 模型做**一次性调用**的薄助手（批 0 / L6 起）。
 
 不是所有 LLM 调用都跑在 Agent loop 里：评测判官、离线标注投票、记忆管家、偏好解析……这些是
-「给一段 prompt、要一段回答」的单次调用。LangChain 侧有 ``llm.ainvoke(prompt)`` 这种一行写法，
-AgentScope 侧则要自己处理三件事：
+「给一段 prompt、要一段回答」的单次调用。AgentScope 的模型层没有这种一行写法，要自己处理三件事：
 
 1. 入参得包成 ``list[Msg]``（模型层不吃裸字符串）；
 2. 本仓的模型一律 ``stream=True``（主 loop 要流式），于是 ``__call__`` 返回的是异步生成器——
@@ -31,8 +30,8 @@ logger = logging.getLogger("shoppingx.invoke")
 
 T = TypeVar("T", bound=BaseModel)
 
-# 入参可以是一段纯 prompt、``[("system", ...), ("user", ...)]`` 这种 LangChain 老写法，
-# 或已经造好的 ``Msg``。老写法保留是为了让迁移时调用点只换函数名、不重排 prompt 拼装。
+# 入参可以是一段纯 prompt、``[("system", ...), ("user", ...)]`` 二元组序列，或已经造好的
+# ``Msg``。二元组形态保留是因为调用点大多就这么拼 prompt，不值得为它多写一层 Msg 构造。
 Prompt = str | Sequence[tuple[str, str]] | Sequence[Msg]
 
 
@@ -151,7 +150,6 @@ async def call_structured(
 ) -> T:
     """给模型一段 prompt，拿回一个**已验证**的 ``schema`` 实例。
 
-    取代 LangChain 的 ``llm.with_structured_output(S, method="function_calling").ainvoke(...)``。
     AgentScope 的 ``generate_structured_output`` 自带策略梯（forced → auto → no_think → none），
     所以记忆 structured-output-method-must-be-pinned 里「默认 method 随模型浮动、qwen 系走
     json_object 打挂 planner」的坑在这条路上结构性不存在，**不用也没法再钉 method**（L0/S2 实测）。
@@ -159,7 +157,7 @@ async def call_structured(
     三处踩过的坑钉在这里：① 结果在 ``StructuredResponse.content``（dict），**不是**
     ``.metadata``——读错字段配上「全字段有默认值」的 schema，``model_validate({})`` 会给出假绿；
     ② 部分供应商把入参多包一层壳，见 :func:`_unwrap_structured`；③ 用量在 ``.usage`` 上，
-    顺手入账（LangChain 侧要挂 ``UsageMetadataCallbackHandler`` 才有账）。
+    顺手入账（否则这批单次调用的 token 完全不进账本）。
 
     **第四个坑（2026-09-08 挖出，比前三个都大）：forced tool_choice 拿到的是存根。** DashScope 上的
     ``deepseek-v4-flash`` 被 ``tool_choice`` 强制指定函数时，只回 ``{"tasks": ["recommend"]}`` 这种

@@ -170,14 +170,13 @@ def charge_tool_llm_usage(usage_by_model: Mapping[str, Any]) -> None:
 
 
 def charge_usage(model: str, usage: Any) -> None:
-    """AgentScope 侧的同一件事：把一次 ``ChatUsage`` 计进全树（批 0 / L7）。
+    """把一次 ``ChatUsage`` 计进全树账本。
 
-    LangChain 靠回调收 usage（``UsageMetadataCallbackHandler``），AgentScope 把它直接挂在
-    ``ChatResponse.usage`` / ``StructuredResponse.usage`` 上——拿得到就不必再挂回调。字段名
-    对不上（``cache_input_tokens`` vs ``input_token_details['cache_read']``），在这里翻译成
-    :func:`charge_tool_llm_usage` 的入参口径，**计费公式与去重语义只有一份**。
+    usage 直接挂在 ``ChatResponse.usage`` / ``StructuredResponse.usage`` 上，字段名与账本口径
+    不同（``cache_input_tokens`` 之类），在这里翻译成 :func:`charge_tool_llm_usage` 的入参，
+    **计费公式与去重语义只有一份**。
 
-    与 LangChain 版一样绝不反噬调用方：无 usage / 无作用域静默跳过，异常吞掉记日志。
+    **绝不反噬调用方**：无 usage / 无作用域静默跳过，异常吞掉记日志——记账失败不该让一轮对话挂掉。
     """
     if usage is None:
         return

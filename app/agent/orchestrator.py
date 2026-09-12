@@ -130,10 +130,9 @@ def _save_state(session_dir: Path, state: AgentState) -> None:
 def _extract_summary(messages: Sequence[Msg]) -> ShoppingSummaryOutput | None:
     """从消息流里取最后一次 ``shopping_summary`` 的结构化产物。
 
-    LangChain 版认的是 ``ToolMessage.artifact`` 的**类型**；AgentScope 的工具结果里没有
-    artifact 这条侧信道，结构化结果就是 ``ToolResultBlock`` 里那段 JSON 文本（见
-    ``app/tools/_as_tools.py`` 的 ``_to_text``）。所以这里按**工具名 + 能否验成
-    ShoppingSummaryOutput** 双条件认。
+    AgentScope 的工具结果里没有 artifact 这类侧信道，结构化结果就是 ``ToolResultBlock`` 里那段
+    JSON 文本（见 ``app/tools/_as_tools.py`` 的 ``_to_text``）。所以这里按**工具名 + 能否验成
+    ShoppingSummaryOutput** 双条件认，而不是认类型。
 
     「倒着找 + 解析失败接着往前」的遍历由 ``harness.msgs.iter_tool_results`` 负责，那个坑的
     完整说明也在那里——它此前在这里和 ``adapter._terminal_summary`` 各写一遍，连坑注释都各抄
@@ -166,8 +165,8 @@ def _replay_msgs(prior_turns: Sequence[tuple[str, str]]) -> list[Msg]:
 def _save_trace(session_dir: Path, messages: Sequence[Msg]) -> None:
     """完整消息轨迹落 history.json（覆盖式，供审计 / 排障）。
 
-    与 ``memory.history.save_full_trace`` 同一个文件、同一个用途，只是序列化换成
-    ``Msg.model_dump()``——那边吃的是 LangChain 消息，两个运行时的轨迹格式本就不同。
+    与 ``memory.history.save_full_trace`` 同一个文件、同一个用途，只是这里按
+    ``Msg.model_dump()`` 序列化。读取侧对两种落盘形态都兼容，见 ``app/eval/trace.py``。
     """
     try:
         data = [m.model_dump() for m in messages]
@@ -308,7 +307,7 @@ async def run_agent(
     platforms: Sequence[str] | None = None,
     image_paths: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    """主 AgentLoop 的入口（AgentScope 运行时）。参数与返回值同 ``main_agent.run_agent``。
+    """主 AgentLoop 的入口：一轮任务从这里进、从这里出。
 
     返回 ``{thread_id, trace_id, final_text, messages, items, learned_preferences}``。
     异常都先上报（task_cancelled / error）再向上抛，让 API 层决定怎么响应。
@@ -322,7 +321,7 @@ async def run_agent(
         thread_scope(thread_id, session_dir, user_id=user_id),
         platform_scope(platforms) as enabled_platforms,
         # 一轮 = 一条 trace 的根 span。主 loop 与 worker 的 span 靠 OTEL 上下文自动挂进来
-        # （不像 LangChain 侧要手工传 trace_id），多轮再靠 session_id=thread_id 聚成 Session。
+        # （不必手工传 trace_id），多轮再靠 session_id=thread_id 聚成 Session。
         # 未启用观测时它是个空壳。
         turn_span(
             session_id=thread_id,
@@ -429,8 +428,7 @@ async def run_agent(
             raise
         finally:
             # 成本归集 + 全部按 session_dir / thread_id 聚合的模块级状态清理。放 finally：
-            # 取消 / 超时也照样记账 + 清理，绝不漏账或泄漏模块级 dict。逐条的理由见
-            # main_agent.run_agent 的同名段落（这里刻意保持逐条一致，别在迁移里悄悄改语义）。
+            # 取消 / 超时也照样记账 + 清理，绝不漏账或泄漏模块级 dict。
             snap = tree_snapshot()
             if snap is not None:
                 status = budget_status()

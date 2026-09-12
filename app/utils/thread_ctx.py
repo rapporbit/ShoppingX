@@ -1,14 +1,14 @@
 """``thread_scope``：把 ContextVar 的 set/reset 封装成作用域，离开自动还原。
 
-请求入口与 ``dispatch_tool`` fork 时都要写 thread_id / session_dir，手动 set+reset
+请求入口与 ``task_dispatch`` 派 worker 时都要写 thread_id / session_dir，手动 set+reset
 重复且易漏 reset。用上下文管理器统一处理：
 
     async def run_agent(query: str, thread_id: str):
         session_dir = ensure_session_dir(thread_id)
         with thread_scope(thread_id, session_dir):
-            await main_agent.ainvoke({"messages": [("user", query)]})
+            await agent(Msg("user", query, "user"))
 
-fork 子 Agent 时同样用它覆盖子 thread_id、但传入父 session_dir（产物归同一会话目录）。
+派 worker 时同样用它覆盖子 thread_id、但传入父 session_dir（产物归同一会话目录）。
 """
 
 from collections.abc import Iterator

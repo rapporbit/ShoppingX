@@ -80,14 +80,9 @@ def _slot_digest(slot: str) -> str | None:
 def _platform_guard(demands: str) -> str | None:
     """单条 demand 的平台收口：指名了**未启用**平台就拒派，返回拒绝文案。
 
-    被取代的 ``parallel_dispatch_tool``（入参是一批 demands）在这里还做了另一半——**补齐**
-    模型漏派的启用平台（一次拿到整批，才知道少了谁）。拆成一条一次派发后，那个批次视角没有了：
-    本函数只保得住
-    「不派用户没勾的平台」（单条可判），保不住「模型少派了一个平台」。
-    这是 L3 的一处**能力回退**，不藏着：
-    - 影响面小——线上默认单平台（amazon），语料 99.75% 也在 amazon，补齐几乎不触发；
-    - 动机侧仍在——``<enabled_platforms>`` 块每轮列出该派哪些平台（见 orchestrator）；
-    - 机制侧的补法留给批 1：post_reflect 里数「启用 n 个平台、本轮只派了 k 条」，不足就催一轮。
+    只保得住「不派用户没勾的平台」（单条可判），保不住「模型少派了一个平台」——后者需要批次
+    视角，随「一次一批」改「一条一次」一起丢了。这是一处**已知的能力回退**，代价、理由与未补
+    的待办见 docs/decisions/0002-派发从批量改单条的能力回退.md。
     """
     target = _detect_platform(demands)
     if target is None or target in get_enabled_platforms():

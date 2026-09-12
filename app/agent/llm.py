@@ -8,9 +8,7 @@
 模型、endpoint、温度全部走 ``.env``（见 ``.env.example``），代码里不写死。
 判官模型 :func:`get_judge_llm` 给 Rubric 评测用，默认更强、temperature=0 保证评分稳定。
 
-工厂只有一套：``get_*`` 一律返回 AgentScope 的 ``ThrottledChatModel``。迁移期曾经并排放过
-两套（另一套返回 LangChain 的 ``BaseChatModel``、供旧运行时用），LangChain 摘干净后
-``get_as_*`` 那批别名连同旧工厂一起删了——现在看到 ``get_llm()`` 就是唯一那份。
+工厂只有一套：``get_*`` 一律返回 ``ThrottledChatModel``（AgentScope ``ChatModelBase`` 的限流封装）。
 
 「哪一轮用哪一档」不在这里的任何一个 ``get_*`` 里判，而是由文件后半的**档位策略表**
 （:func:`get_tier_llm`）单点决定，装配与换档读同一份取值。理由见那段注释。
@@ -78,8 +76,8 @@ def _load_params() -> None:
     LLM_REQUEST_TIMEOUT = _env_float("LLM_REQUEST_TIMEOUT", 60.0)
     LLM_MAX_RETRIES = _env_int("LLM_MAX_RETRIES", 2)
     # 每加一个 ``@lru_cache`` 工厂就要加进这张表，否则热更新对那一档静默失效。
-    # （这里曾有一半是重复项——双工厂时代两批别名各列一遍，摘掉 LangChain 后重名了。
-    #   cache_clear 幂等所以没人发现，但重复会掩盖「漏登记」，比如 get_planner_llm。）
+    # 这张表曾有一半是重复项：cache_clear 幂等所以没人发现，但重复会掩盖「漏登记」
+    # （get_planner_llm 就漏过一次）——**宁可短，不要有重复项**。
     for factory in (
         get_llm,
         get_fast_llm,
@@ -257,7 +255,7 @@ def get_planner_llm() -> ThrottledChatModel:
 
 @lru_cache(maxsize=1)
 def get_lite_llm() -> ThrottledChatModel:
-    """便宜档（AgentScope 侧），对应 LangChain 的 ``model_router._lite_llm``。
+    """便宜档：预算降到 minimal 时用。
 
     预算降档时由 ``HarnessAgentAdapter`` 换上。默认就是快档（同模型关思考）；配了 ``LLM_LITE``
     才真换一个更便宜的模型名——**换模型名会打断前缀缓存**，所以默认不换，只关思考。

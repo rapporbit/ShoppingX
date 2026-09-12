@@ -477,7 +477,7 @@ async def evaluate(
 ) -> RubricResult:
     """端到端评测一条 query：生成细则 → 渲染回答 → 打分 → 聚合。
 
-    ``run_result`` 为 :func:`app.agent.main_agent.run_agent` 的返回
+    ``run_result`` 为 :func:`app.agent.orchestrator.run_agent` 的返回
     （含 final_text / messages / items / trace_id）。``intent`` 透传给细则生成（闲聊类换导向）。
     ``use_cache`` 控制细则是否复用缓存（回归对照固定尺子用 True，刷新尺子用 False）。
     ``prior_context`` 是本条 case 的跨轮 / 跨会话事实，生成细则与打分两处都会看到（见

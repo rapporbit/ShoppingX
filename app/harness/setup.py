@@ -1,6 +1,7 @@
 """Harness Hook 注册入口：导入各 Hook 模块即触发 @harness_hook 装饰器注册。
 
-只需 import 一次（进程级）。由 ``build_agent_middleware`` 在首次调用时触发。
+只需 import 一次（进程级）。由 ``orchestrator.run_agent`` 与 ``agents._assemble`` 各调一次
+``setup_harness()``（幂等，后者兜离线脚本 / 单测直接装配 Agent 的路径）。
 """
 
 from __future__ import annotations
