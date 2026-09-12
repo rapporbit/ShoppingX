@@ -85,7 +85,7 @@ _LEGACY_DUMP: list[dict] = [
 def test_agentscope_blocks_yield_ordered_calls() -> None:
     calls = extract_tool_calls(_as_turn())
     assert [c["name"] for c in calls] == ["planner", "item_search"]
-    # 入参从 block 的 ``input`` 取（不是 LangChain 的 ``args``），取错会让轨迹渲染成空括号
+    # 入参从 block 的 ``input`` 取（旧落盘格式里叫 ``args``），取错会让轨迹渲染成空括号
     assert calls[1]["args"]["query"] == "旅行包"
 
 

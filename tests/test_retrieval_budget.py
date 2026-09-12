@@ -1,8 +1,8 @@
 """检索预算的隔离检索作用域测试（isolated_retrieval_scope）。
 
-覆盖：串行 dispatch_tool（定点商品调查等独立子任务）场景下，web_search 门控应只看
+覆盖：隔离场景（demands 未点名平台 = 定点商品调查等独立子任务）下，web_search 门控应只看
 「本子任务自己的召回结果」，不受全树其它子任务（兄弟平台 / 兄弟商品）是否已找到候选影响；
-非隔离场景（parallel_dispatch_tool 跨平台泛搜、主 loop 直调）维持现状的全树共享语义不变。
+非隔离场景（demands 点了平台名 = 跨平台泛搜、以及主 loop 直调）维持全树共享语义不变。
 """
 
 from __future__ import annotations

@@ -271,7 +271,8 @@ QUERIES: list[dict] = [
     },
     {
         # 2026-07-14 相机 bad case 回归（threads c39e36f8/475717e0）：旧 harness 首搜召回全是
-        # 配件、重试被阶段白名单拦死 → 四轮空手；预算制放行重试后才捞到真机身。同轮还暴露
+        # 配件、重试被当时的阶段闸拦死 → 四轮空手（见 docs/decisions/0001）；预算制放行重试
+        # 后才捞到真机身。同轮还暴露
         # curator 瞎换汇（10000 CNY 拍成 $1000 覆盖 planner 的 $1400，已删其产出权）。
         "id": "q20_camera_accessory_flood",
         "bucket": "配件淹没品类",

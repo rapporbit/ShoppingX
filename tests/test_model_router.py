@@ -217,9 +217,9 @@ class TestBudgetRouterHook:
 class TestAdapterWiring:
     """Hook 决策 → 适配器执行的接线（Hook 逻辑对，不代表它在真实 Agent 生命周期里生效过）。
 
-    换档在 AgentScope 侧分两步：Hook 只产**档位名**（``model_tier``），适配器把它解析成本运行时
-    的模型对象塞进 ``current_model``。这条分工是踩出来的——Hook 直接产模型对象时，那对象是
-    LangChain 的 ``ChatOpenAI``，塞进去要到真正调用时才炸「object is not callable」。
+    换档分两步：Hook 只产**档位名**（``model_tier``），适配器把它解析成模型对象塞进
+    ``current_model``。这条分工是踩出来的——Hook 直接产模型对象时，类型对不上不会当场报错，
+    要到真正调用时才炸「object is not callable」。
     """
 
     @staticmethod

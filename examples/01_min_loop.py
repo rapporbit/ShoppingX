@@ -36,8 +36,8 @@ def _field(block: Any, key: str) -> Any:
 def print_trajectory(context: list[Msg]) -> int:
     """打印消息轨迹，返回「工具调用轮数」（= tool_call block 总数）。
 
-    AgentScope 与 LangChain 的消息形态差别就在这里：一轮的 tool_call 与 tool_result 都装在
-    **同一条 Msg 的 content blocks 列表**里，而不是 AIMessage / ToolMessage 两条消息。
+    AgentScope 的消息形态要点就在这里：一轮的 tool_call 与 tool_result 都装在**同一条 Msg 的
+    content blocks 列表**里，而不是每次工具调用各占一条消息。所以「轮数」要数 block，不是数消息。
     """
     rounds = 0
     for msg in context:

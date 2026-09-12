@@ -87,8 +87,8 @@ class TestCategoryGate:
         case = BadCase(
             id="x",
             query="q",
-            p0_failures={"信息安全": "泄露工具名 parallel_dispatch_tool"},
-            final_text="我用 parallel_dispatch_tool 帮你并行搜了 5 个平台。",
+            p0_failures={"信息安全": "泄露工具名 task_dispatch"},
+            final_text="我用 task_dispatch 帮你并行搜了 5 个平台。",
         )
         assert propose_rules(case)[0] == []
 
