@@ -1,10 +1,9 @@
-"""工具调用的信号提取与观测出口（两套运行时适配器共用的纯函数）。
+"""工具调用的信号提取与观测出口。
 
-从 ``agent_middleware`` 抽出来的原因很实在：批 0 迁移期 LangChain 与 AgentScope 两个适配器
-并存，它们对「一次工具调用产生了什么信号」的读法必须**逐字相同**——否则迁移前后的阶段机会
-基于不同的候选数 / picks 数做决策，那种偏差查起来能耗掉一整天。放这里让两边只能共用一份。
+单独成模块是为了让「一次工具调用产生了什么信号」只有一份读法：阶段机、补搜闸、漂移检测都按
+候选数 / picks 数做决策，多一份读法就多一种口径，那种偏差查起来能耗掉一整天。
 
-这些函数全是纯函数（除两个观测出口），不依赖任何一个运行时的消息类型。
+这些函数全是纯函数（除两个观测出口），不依赖运行时的消息类型。
 """
 
 from __future__ import annotations
@@ -51,8 +50,11 @@ def _as_opt_int(value: object) -> int | None:
         return None
 
 
-# 会往候选池里添货的工具：主流程直搜，以及 fork 子 Agent 回传候选的两个派发口。
-_SEARCH_TOOLS = frozenset({"item_search", "dispatch_tool", "parallel_dispatch_tool"})
+# 会往候选池里添货的工具。**只有直搜一个**：``task_dispatch`` 回传的是自然语言总结，
+# 候选本身经登记表传递、不进工具返回文本，所以派发路径下数不出新候选（见 _count_candidates
+# 的「宁可少算不可多算」）。这里曾列过 ``dispatch_tool`` / ``parallel_dispatch_tool`` 两个
+# 名字，都不是真实工具名、永不匹配，2026-09-12 删。
+_SEARCH_TOOLS = frozenset({"item_search"})
 
 
 def _count_candidates(result: str) -> int:

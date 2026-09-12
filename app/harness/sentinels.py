@@ -188,9 +188,9 @@ INTERNAL_MARKERS: tuple[str, ...] = (
     "[检索阶段已结束]",
     "[工具不存在]",
     "[工具暂时不可用]",
-    "[dispatch_tool 拒绝]",
-    "[dispatch_tool 超时]",
-    "[dispatch_tool 错误]",
+    "[task_dispatch 拒绝]",
+    "[task_dispatch 超时]",
+    "[task_dispatch 错误]",
     "[…工具结果过长已截断",
 )
 

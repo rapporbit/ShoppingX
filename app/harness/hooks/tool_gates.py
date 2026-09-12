@@ -260,8 +260,8 @@ async def charge_retrieval(context: dict[str, Any]) -> dict[str, Any] | None:
     - 再越线：硬挡，工具不执行。
 
     复用轮（planner 判 reuse）：全树 cap 收紧到 ``REUSE_RETRIEVAL_BUDGET``（≥1），预算内执行 +
-    缀软线文案（``context["converge_note"]``），越线硬挡。这是阶段白名单禁令的替代品：reuse 从
-    「禁止检索」降为「小预算检索」，planner 误判换品类时模型第一次补搜就能执行。
+    缀软线文案（``context["converge_note"]``），越线硬挡。reuse 从「禁止检索」降为「小预算
+    检索」的理由见 docs/decisions/0001-阶段白名单降级为遥测.md。
     """
     tool_name = context.get("tool_name", "")
     if tool_name not in RETRIEVAL_TOOLS:
@@ -284,8 +284,8 @@ async def charge_retrieval(context: dict[str, Any]) -> dict[str, Any] | None:
     else:
         count, cap = tree, guard.tree_retrieval_cap
 
-    # 复用轮小预算（重构第三段，替代阶段白名单禁令）：planner 判 reuse 后本轮检索不再被阶段闸
-    # 锁死，而是收紧到 REUSE_RETRIEVAL_BUDGET（≥1，永不为 0）——reuse 是假设不是承诺，模型确认
+    # 复用轮小预算：planner 判 reuse 后本轮检索不被锁死，而是收紧到
+    # REUSE_RETRIEVAL_BUDGET（≥1，永不为 0）——reuse 是假设不是承诺，模型确认
     # 旧候选不适用（如换品类）时第一次补搜就直接放行执行，不用攒拒绝换逃生。预算内执行并在结果
     # 尾部缀「搜完即收敛」的软线文案；越线硬挡。refine_backfill / phase_rollback 授权补搜时会把
     # mode 改写为 augment，本分支即不再命中、自动恢复全树预算。

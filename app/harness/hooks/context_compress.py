@@ -85,9 +85,8 @@ async def route_by_budget(context: dict[str, Any]) -> dict[str, Any] | None:
         return context
 
     # Hook 只产**档位名**，由适配器解析成本运行时的模型——「Hook 决策、适配器落地」的分工。
-    # 这里曾并存一个 ``model_override`` 键（装 LangChain 的模型**对象**），迁到 AgentScope 后
-    # 生产代码零处读（``adapter.py`` 明确「刻意不读」），只剩每次降档白构造一个模型对象、
-    # 外加给读者「这里在换模型」的假象，已删。
+    # 这里曾并存一个 ``model_override`` 键（装模型**对象**），生产代码零处读、只剩每次降档白
+    # 构造一个对象外加「这里在换模型」的假象，已删（批 A2）。
     context["model_tier"] = "lite"
 
     if tier is Tier.MINIMAL and entered_new_tier:

@@ -1,7 +1,7 @@
 """post_tool_call：planner 跑完之后，把**本轮域内**的长期偏好注入给模型。
 
-**为什么非得等 planner。** 偏好块原先拼在当轮 human message 的最前面（``main_agent.
-_inject_runtime_context``），可那一刻 planner 还没跑、``session_domains`` 还是空的，而
+**为什么非得等 planner。** 偏好块原先随运行时上下文拼在当轮 human message 的最前面，
+可那一刻 planner 还没跑、``session_domains`` 还是空的，而
 ``injector._in_scope`` 对空域一律放行——于是模型看到的偏好块**必然是跨域全量**的。「买跑鞋时
 不要皮革」（域=footwear）就这么出现在买旅行包的这一轮，模型很自觉地把 leather 转述进
 ``item_picker(exclude_keywords=...)``，硬淘汰绕过域闸生效。买旅行包时没出事纯属侥幸（召回里

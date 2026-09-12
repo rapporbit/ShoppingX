@@ -67,7 +67,6 @@ class CacheAwareOpenAIFormatter(OpenAIChatFormatter):
 
     system 段是全天不变、跨轮跨会话都字节稳定的最长缓存层（本仓 system prompt 纯静态、无运行时
     注入，见 ``agents._assemble``），标记钉死在它上面：位置不动、形态不动，前缀就还是那份前缀。
-    与 LangChain 侧的 ``mark_system_cache`` 同一口径（那边 system 是独立字段，不在 messages 里）。
 
     ``keep_recent`` 仍然收下，但只用来解释「压缩断点在哪」——formatter 不再依赖它做落点决策。
     """
