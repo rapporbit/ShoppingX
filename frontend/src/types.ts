@@ -108,6 +108,9 @@ export type OrderCardPayload = {
   preview?: OrderPreviewLine[];
   total_display?: string;
   address?: string;
+  // 确认卡失效时刻（UTC ISO，仅 kind=preview）。过期后「确认下单」按钮灰掉；后端同样会拒掉
+  // 过期确认并重新出卡（app/tools/_order_guard.py PREVIEW_TTL_SECONDS），前端只是把这件事提前告诉用户。
+  expires_at?: string;
 };
 
 // 本轮全树（主 + 各 fork 子 Agent）token 用量。随 task_result 事件下发、随 turns.json 落盘回看。
@@ -190,6 +193,11 @@ export type SessionSnapshot = {
   epoch: number;
   budget_usd: number | null;
   category: string;
+  // 「本次选购摘要」：planner 累积的一句话意图与已确定的槽位（如 收货国 / 尺码），偏好面板
+  // 「本次会话」区展示，让用户看得见 Agent 当前以为的需求是什么。旧快照可能缺这几个字段。
+  current_intent?: string;
+  slots?: Record<string, string>;
+  turn?: number;
   constraints: SessionConstraint[];
 };
 

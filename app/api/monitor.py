@@ -395,6 +395,9 @@ async def report_session_constraints(pt: Any, thread_id: str | None = None) -> N
             "epoch": pt.epoch,
             "budget_usd": pt.budget_usd,
             "category": pt.category,
+            "current_intent": pt.current_intent,
+            "slots": dict(pt.slots),
+            "turn": pt.turn,
             "constraints": [
                 {
                     "id": c.id,

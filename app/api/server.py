@@ -1227,6 +1227,9 @@ async def get_session_constraints(
         "epoch": pt.epoch,
         "budget_usd": pt.budget_usd,
         "category": pt.category,
+        "current_intent": pt.current_intent,
+        "slots": dict(pt.slots),
+        "turn": pt.turn,
         "constraints": [
             {
                 "id": c.id,
