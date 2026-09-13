@@ -11,6 +11,7 @@ session_dir 聚合兜底，不在这里。
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from app.harness.budgets import DEFAULT_RETRIEVAL_CAP, TREE_RETRIEVAL_BUDGET
 from app.harness.loop_detector import LoopDetector
@@ -80,3 +81,9 @@ class GuardState:
 
     def __post_init__(self) -> None:
         self.detector = LoopDetector(window=self.loop_window, threshold=self.loop_threshold)
+
+
+def guard_of(context: dict[str, Any]) -> GuardState | None:
+    """从 Hook 的 context 里取本 loop 的 GuardState；没有（单测裸跑 Hook）返回 None。"""
+    guard = context.get("_guard")
+    return guard if isinstance(guard, GuardState) else None
