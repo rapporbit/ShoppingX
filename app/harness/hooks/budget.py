@@ -51,16 +51,11 @@ from app.harness.sentinels import (
     reuse_retrieval_exhausted,
 )
 from app.harness.signals import candidate_count
-from app.harness.state import GuardState
+from app.harness.state import GuardState, guard_of
 from app.observability import metrics
 from app.tools._bundle import resolve_slot
 
 logger = logging.getLogger("shoppingx.harness.budget")
-
-
-def _state(context: dict[str, Any]) -> GuardState | None:
-    guard = context.get("_guard")
-    return guard if isinstance(guard, GuardState) else None
 
 
 @harness_hook("pre_tool_call", name="websearch_gate", priority=15)
@@ -93,7 +88,7 @@ async def check_search_authority(context: dict[str, Any]) -> dict[str, Any] | No
     """
     if context.get("tool_name") != "item_search":
         return None
-    guard = _state(context)
+    guard = guard_of(context)
     if guard is None:
         return None
 
@@ -193,7 +188,7 @@ async def charge_retrieval(context: dict[str, Any]) -> dict[str, Any] | None:
     tool_name = context.get("tool_name", "")
     if tool_name not in RETRIEVAL_TOOLS:
         return None
-    guard = _state(context)
+    guard = guard_of(context)
     if guard is None:
         return None
 

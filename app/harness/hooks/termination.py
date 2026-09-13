@@ -28,15 +28,10 @@ from app.harness.sentinels import (
     TERMINAL_TOOL_NUDGE,
 )
 from app.harness.signals import candidate_count
-from app.harness.state import GuardState
+from app.harness.state import GuardState, guard_of
 from app.utils.env import env_int
 
 logger = logging.getLogger("shoppingx.harness.termination")
-
-
-def _state(context: dict[str, Any]) -> GuardState | None:
-    guard = context.get("_guard")
-    return guard if isinstance(guard, GuardState) else None
 
 
 @harness_hook("pre_tool_call", name="terminal_reached_gate", priority=5)
@@ -46,7 +41,7 @@ async def check_terminal_reached(context: dict[str, Any]) -> dict[str, Any] | No
     断掉「调完 shopping_summary 又 item_search / 再 picker」的打转尾巴，逼模型直接输出收尾文案。
     只对主 loop（depth==0）：子 Agent 的终结是直接吐文字、本就不调终结工具。
     """
-    guard = _state(context)
+    guard = guard_of(context)
     if guard is None or current_fork_depth() != 0:
         return None
     if guard.terminal_reached:
@@ -60,7 +55,7 @@ async def mark_terminal(context: dict[str, Any]) -> dict[str, Any] | None:
 
     只在工具真执行（过了各闸）后调，故被深度闸/预算闸拦掉的终结调用不会误置位。
     """
-    guard = _state(context)
+    guard = guard_of(context)
     if guard is None:
         return None
     if current_fork_depth() == 0 and context.get("tool_name") in TERMINAL_TOOLS:

@@ -28,7 +28,7 @@ from app.harness.middleware import harness_hook
 from app.harness.sentinels import (
     INTERNAL_MARKERS,
 )
-from app.harness.state import GuardState
+from app.harness.state import guard_of
 from app.harness.truncation import truncate_tool_result
 from app.observability import metrics
 from app.security.content_filter import EXTERNAL_SOURCE_TOOLS, sanitize_tool_output
@@ -128,18 +128,13 @@ async def check_depth_permission(context: dict[str, Any]) -> dict[str, Any] | No
     return None
 
 
-def _state(context: dict[str, Any]) -> GuardState | None:
-    guard = context.get("_guard")
-    return guard if isinstance(guard, GuardState) else None
-
-
 @harness_hook("post_tool_call", name="truncate_result", priority=10)
 async def truncate_result(context: dict[str, Any]) -> dict[str, Any] | None:
     """工具返回过长时按 token 预算截断并留提示。
 
     必须排在 ``result_nudges`` 之前：先截断、再追加系统提示，否则刚贴上的提示会被截掉。
     """
-    guard = _state(context)
+    guard = guard_of(context)
     result = context.get("tool_result")
     if guard is None or not isinstance(result, str):
         return None

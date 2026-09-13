@@ -31,17 +31,12 @@ from app.harness.sentinels import (
     sub_search_budget_note,
     tool_breaker_open,
 )
-from app.harness.state import GuardState
+from app.harness.state import GuardState, guard_of
 from app.utils import shared_breaker
 from app.utils.circuit_breaker import CircuitBreaker
 from app.utils.env import env_bool, env_int
 
 logger = logging.getLogger("shoppingx.harness.repetition")
-
-
-def _state(context: dict[str, Any]) -> GuardState | None:
-    guard = context.get("_guard")
-    return guard if isinstance(guard, GuardState) else None
 
 
 def _budget_note(guard: GuardState, tool_name: str) -> str | None:
@@ -86,7 +81,7 @@ def _filtered_out_note(context: dict[str, Any], tool_name: str) -> str | None:
 @harness_hook("post_tool_call", name="result_nudges", priority=20)
 async def append_nudges(context: dict[str, Any]) -> dict[str, Any] | None:
     """循环检测 + 按优先级追加**至多一条**系统提示。"""
-    guard = _state(context)
+    guard = guard_of(context)
     if guard is None:
         return None
 
@@ -143,11 +138,6 @@ def _memo_key(tool_name: str, args: Any) -> str | None:
         return None
 
 
-def _guard(context: dict[str, Any]) -> GuardState | None:
-    guard = context.get("_guard")
-    return guard if isinstance(guard, GuardState) else None
-
-
 @harness_hook("pre_tool_call", name="tool_memo_replay", priority=27)
 async def replay_duplicate_call(context: dict[str, Any]) -> dict[str, Any] | None:
     """同参数重复调用 → 回放缓存结果，不真执行。
@@ -155,7 +145,7 @@ async def replay_duplicate_call(context: dict[str, Any]) -> dict[str, Any] | Non
     priority=27：在阶段门（20）/ 顺序断言（25）之后——治理优先于省钱，越权调用照旧吃阶段
     哨兵；在检索计数（30/45）与熔断（48）之前——回放不占预算、不碰熔断窗。
     """
-    guard = _guard(context)
+    guard = guard_of(context)
     tool_name = context.get("tool_name", "")
     if guard is None or tool_name not in _MEMO_TOOLS:
         return None
@@ -190,7 +180,7 @@ async def record_tool_result(context: dict[str, Any]) -> dict[str, Any] | None:
     大结果又灌回上下文；在分级提示（20）之前——收敛 / 打转 nudge 是针对「当时那次调用」的
     附言，不该跟着结果一起被回放。
     """
-    guard = _guard(context)
+    guard = guard_of(context)
     tool_name = context.get("tool_name", "")
     if guard is None or tool_name not in _MEMO_TOOLS:
         return None
