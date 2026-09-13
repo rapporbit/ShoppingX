@@ -249,7 +249,7 @@ import pytest  # noqa: E402
 async def test_slot_backfill_grant_passes_once_per_slot(monkeypatch) -> None:
     from types import SimpleNamespace
 
-    import app.harness.hooks.tool_gates as tg
+    import app.harness.hooks.budget as tg
     from app.harness.middleware import HarnessMiddleware
     from app.harness.state import GuardState
 
@@ -282,7 +282,7 @@ async def test_slot_backfill_grant_resolves_drifted_refs(monkeypatch) -> None:
     照样解析到已登记槽放行；额度按稳定 id 记账，同一槽换个写法不给第二次。"""
     from types import SimpleNamespace
 
-    import app.harness.hooks.tool_gates as tg
+    import app.harness.hooks.budget as tg
     from app.harness.middleware import HarnessMiddleware
     from app.harness.state import GuardState
 
@@ -309,7 +309,7 @@ async def test_slot_backfill_grant_resolves_drifted_refs(monkeypatch) -> None:
 async def test_escape_door_is_batch_atomic(monkeypatch) -> None:
     """同一 think_step（同一条 AI 消息的并行调用）里连撞 4 次效率闸：全拦，且只记 1 次连拒——
     不再出现「前 2 个被拒攒计数、后 2 个触发逃生放行」的到达顺序竞态。"""
-    import app.harness.hooks.tool_gates as tg
+    import app.harness.hooks.budget as tg
     from app.harness.middleware import HarnessMiddleware
     from app.harness.state import GuardState
 

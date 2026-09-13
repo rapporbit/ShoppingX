@@ -13,10 +13,11 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from typing import Any
 
-from agentscope.message import Msg, TextBlock
+from agentscope.message import Msg, TextBlock, ToolCallBlock, ToolResultBlock
 
 
 def system_message(text: str, context: dict[str, Any] | None = None) -> Msg:
@@ -80,3 +81,25 @@ def iter_tool_results(messages: Any, name: str) -> Iterator[str]:
 # 过」。唯一的消费者是 ``terminal_enforce``，而它问的其实是「**本轮**调过没有」——扫 messages
 # 答不了这个问题，因为续聊时 messages 里还有恢复回来的上一轮历史。改由 ``called_tools`` 回答
 # （每轮新建、只记真执行成功的工具）后本函数无人使用，已删（审查报告 B4）。
+
+
+def tool_blocks(call_id: str, name: str, args: dict[str, Any], result: str) -> list[Any]:
+    """造一对「调用 + 结果」的 block（形状与框架自己产生的逐字同构）。
+
+    ``ToolCallBlock.input`` 是 **JSON 字符串**不是 dict（流式解析时一段段拼出来的），当 dict
+    用不会报错，只会让轨迹渲染成 ``planner()``、评测侧看不到入参。
+    """
+    return [
+        ToolCallBlock(
+            type="tool_call",
+            id=call_id,
+            name=name,
+            input=json.dumps(args, ensure_ascii=False),
+        ),
+        ToolResultBlock(
+            type="tool_result",
+            id=call_id,
+            name=name,
+            output=result,
+        ),
+    ]

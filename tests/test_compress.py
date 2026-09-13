@@ -239,7 +239,7 @@ async def test_formatter_skips_when_prefix_too_short() -> None:
 @pytest.mark.asyncio
 async def test_hook_dispatches_to_block_compression() -> None:
     """pre_think Hook 走的是 block 级压缩（消息级在这里一个字都压不掉）。"""
-    from app.harness.hooks.context_compress import compress_context
+    from app.harness.hooks.context_shaping import compress_context
 
     msgs = _turn(4, _payload(3000))
     ctx = {"messages": msgs}
@@ -410,7 +410,7 @@ def test_compress_prefers_json_extraction_over_truncation() -> None:
 @pytest.mark.asyncio
 async def test_compress_hook_reads_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     """三个压缩参数都能被 .env 覆盖（线上调参不必改代码）。"""
-    from app.harness.hooks.context_compress import _compress_opts
+    from app.harness.hooks.context_shaping import _compress_opts
 
     monkeypatch.setenv("COMPRESS_KEEP_RECENT", "2")
     monkeypatch.setenv("COMPRESS_MAX_TOOL_TOKENS", "500")
@@ -420,7 +420,7 @@ async def test_compress_hook_reads_env_overrides(monkeypatch: pytest.MonkeyPatch
 
 @pytest.mark.asyncio
 async def test_compress_hook_noop_on_empty_messages() -> None:
-    from app.harness.hooks.context_compress import compress_context
+    from app.harness.hooks.context_shaping import compress_context
 
     assert await compress_context({"messages": []}) is None
 

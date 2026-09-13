@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.harness.hooks.drift_detector import DriftState, _extract_keywords
+from app.harness.hooks.drift import DriftState, _extract_keywords
 from app.harness.middleware import (
     HOOK_POINTS,
     HarnessMiddleware,
@@ -238,7 +238,7 @@ class TestStepValidator:
 
     @pytest.mark.asyncio
     async def test_sequencing_warns_missing_prereq(self) -> None:
-        from app.harness.hooks.step_validator import check_sequencing
+        from app.harness.hooks.sequencing import check_sequencing
 
         ctx = {"tool_name": "shopping_summary", "called_tools": {"item_search"}}
         result = await check_sequencing(ctx)
@@ -248,7 +248,7 @@ class TestStepValidator:
 
     @pytest.mark.asyncio
     async def test_sequencing_passes_when_prereqs_met(self) -> None:
-        from app.harness.hooks.step_validator import check_sequencing
+        from app.harness.hooks.sequencing import check_sequencing
 
         ctx = {"tool_name": "shopping_summary", "called_tools": {"item_picker", "item_search"}}
         result = await check_sequencing(ctx)
@@ -258,14 +258,14 @@ class TestStepValidator:
 
     @pytest.mark.asyncio
     async def test_sequencing_skips_unknown_tool(self) -> None:
-        from app.harness.hooks.step_validator import check_sequencing
+        from app.harness.hooks.sequencing import check_sequencing
 
         result = await check_sequencing({"tool_name": "web_search", "called_tools": set()})
         assert result is None
 
     @pytest.mark.asyncio
     async def test_schema_assertion_catches_invalid_json(self) -> None:
-        from app.harness.hooks.step_validator import check_schema
+        from app.harness.hooks.validation import check_schema
 
         ctx = {"tool_name": "item_search", "tool_result": '{"invalid json'}
         result = await check_schema(ctx)
@@ -276,7 +276,7 @@ class TestStepValidator:
     async def test_schema_assertion_valid_result(self) -> None:
         import json
 
-        from app.harness.hooks.step_validator import check_schema
+        from app.harness.hooks.validation import check_schema
 
         good = json.dumps(
             {
@@ -317,7 +317,7 @@ class TestStepValidator:
     @pytest.mark.asyncio
     async def test_schema_assertion_accepts_single_platform_render(self) -> None:
         """渲染契约省略候选级 platform 不是格式错误——曾每次单平台检索必假阳性（eval q05）。"""
-        from app.harness.hooks.step_validator import check_schema
+        from app.harness.hooks.validation import check_schema
 
         ctx = {"tool_name": "item_search", "tool_result": self._single_platform_render()}
         result = await check_schema(ctx)
@@ -326,7 +326,7 @@ class TestStepValidator:
     @pytest.mark.asyncio
     async def test_schema_assertion_survives_appended_notice(self) -> None:
         """先跑的 Hook 在结果尾部贴通告（[阶段推进] 等）后断言仍在岗——曾因 Extra data 静默跳过。"""
-        from app.harness.hooks.step_validator import check_schema
+        from app.harness.hooks.validation import check_schema
 
         bogus = '{"bogus": 1}\n\n[阶段推进] 候选已入池，检索阶段就此收线。'
         ctx = {"tool_name": "item_search", "tool_result": bogus}
@@ -336,7 +336,7 @@ class TestStepValidator:
     @pytest.mark.asyncio
     async def test_schema_assertion_still_requires_platform_when_merged(self) -> None:
         """platform="all" 合流时候选必须逐条带 platform——缺了是真错，不回填。"""
-        from app.harness.hooks.step_validator import check_schema
+        from app.harness.hooks.validation import check_schema
 
         ctx = {"tool_name": "item_search", "tool_result": self._single_platform_render("all")}
         result = await check_schema(ctx)
@@ -381,7 +381,7 @@ class TestDriftDetector:
 
     @pytest.mark.asyncio
     async def test_drift_skips_when_disabled(self) -> None:
-        from app.harness.hooks import drift_detector
+        from app.harness.hooks import drift as drift_detector
 
         original = drift_detector.DRIFT_ENABLED
         try:
@@ -393,7 +393,7 @@ class TestDriftDetector:
 
     @pytest.mark.asyncio
     async def test_drift_skips_non_check_round(self) -> None:
-        from app.harness.hooks.drift_detector import detect_drift
+        from app.harness.hooks.drift import detect_drift
 
         state = DriftState()
         state.round_counter = 0  # will become 1 after increment, 1 % 3 != 0
@@ -419,7 +419,7 @@ class TestPhaseHooks:
         那个决定的执法者，它变红意味着白名单被人加回来了。
         """
         from app.agent.fork_guard import _fork_depth
-        from app.harness.hooks.phase_check import check_phase_permission
+        from app.harness.hooks.progress import check_phase_permission
 
         token = _fork_depth.set(0)
         set_phase_machine(PhaseStateMachine())  # PLANNING
@@ -474,7 +474,7 @@ class TestPhaseHooks:
 
         from app.agent.retrieval_budget import reset_tree
         from app.api.context import set_retrieval_mode
-        from app.harness.hooks.tool_gates import charge_retrieval
+        from app.harness.hooks.budget import charge_retrieval
         from app.harness.state import GuardState
         from app.utils.thread_ctx import thread_scope
 
@@ -496,7 +496,7 @@ class TestPhaseHooks:
 
         from app.agent.retrieval_budget import reset_tree
         from app.api.context import set_retrieval_mode
-        from app.harness.hooks.tool_gates import charge_retrieval
+        from app.harness.hooks.budget import charge_retrieval
         from app.harness.state import GuardState
         from app.utils.thread_ctx import thread_scope
 
@@ -633,7 +633,7 @@ class TestPhaseHooks:
     @pytest.mark.asyncio
     async def test_phase_transition_on_planner(self) -> None:
         from app.agent.fork_guard import _fork_depth
-        from app.harness.hooks.phase_transition import try_phase_transition
+        from app.harness.hooks.progress import try_phase_transition
 
         token = _fork_depth.set(0)
         m = PhaseStateMachine()
@@ -652,7 +652,7 @@ class TestPhaseHooks:
         通告前就已决定再搜）。「检索收线」通告改由 transition_notice 缀在工具结果尾部
         （见 test_tool_memo.py 的 TestTransitionNotices），这里只验证状态机推进。"""
         from app.agent.fork_guard import _fork_depth
-        from app.harness.hooks.phase_transition import try_phase_transition
+        from app.harness.hooks.progress import try_phase_transition
 
         token = _fork_depth.set(0)
         m = PhaseStateMachine()
@@ -670,7 +670,7 @@ class TestPhaseHooks:
     @pytest.mark.asyncio
     async def test_phase_rollback(self) -> None:
         from app.agent.fork_guard import _fork_depth
-        from app.harness.hooks.phase_transition import check_phase_rollback
+        from app.harness.hooks.progress import check_phase_rollback
 
         token = _fork_depth.set(0)
         m = PhaseStateMachine()
@@ -1018,7 +1018,7 @@ class TestTradeTurnIsTerminal:
     @pytest.mark.asyncio
     async def test_create_order_marks_terminal_reached(self, clean_phase) -> None:
         """下单确认卡出完，本轮就该结束等用户表态——terminal_reached 置位，后续工具被硬停闸拦。"""
-        from app.harness.hooks.result_guard import mark_terminal
+        from app.harness.hooks.termination import mark_terminal
 
         mw = _mw()
         assert mw.guard.terminal_reached is False
@@ -1032,7 +1032,7 @@ class TestTradeTurnIsTerminal:
         判据是 ``called_tools``（B4 起的唯一来源），不是扫 messages：后者在续聊轮会把上一轮
         的终结工具也算进来。这里连带把那个对照也断上——同样的 context 换成非终结工具，必须催。
         """
-        from app.harness.hooks.terminal_enforce import enforce_terminal
+        from app.harness.hooks.termination import enforce_terminal
 
         def ctx(*called: str) -> dict:
             return {
@@ -1125,7 +1125,7 @@ class TestDriftWiring:
     @pytest.mark.asyncio
     async def test_blacklist_hit_triggers_preference_loss(self, clean_phase, monkeypatch) -> None:
         """信号 3：推荐面出现硬 dislike 属性 → 严重偏离 + 定向纠正。"""
-        from app.harness.hooks import drift_detector as dd
+        from app.harness.hooks import drift as dd
 
         monkeypatch.setattr(dd, "blacklist_hits", lambda text: ["塑料"] if "塑料" in text else [])
         set_phase_machine(PhaseStateMachine(Phase.COMPARING))
@@ -1147,7 +1147,7 @@ class TestDriftWiring:
 
         旧预检逐条 if + 首个命中即 return，「目标遗忘」排在最前，会永久遮蔽后面三类信号。
         """
-        from app.harness.hooks import drift_detector as dd
+        from app.harness.hooks import drift as dd
 
         monkeypatch.setattr(dd, "blacklist_hits", lambda text: ["塑料"] if "塑料" in text else [])
         set_phase_machine(PhaseStateMachine(Phase.COMPARING))
@@ -1166,7 +1166,7 @@ class TestDriftWiring:
     @pytest.mark.asyncio
     async def test_search_result_not_checked_for_blacklist(self, clean_phase, monkeypatch) -> None:
         """召回阶段捞到黑名单商品是正常的（后续会淘汰），不应记违规。"""
-        from app.harness.hooks import drift_detector as dd
+        from app.harness.hooks import drift as dd
 
         monkeypatch.setattr(dd, "blacklist_hits", lambda text: ["塑料"] if "塑料" in text else [])
         set_phase_machine(PhaseStateMachine(Phase.SEARCHING))
@@ -1203,7 +1203,7 @@ class TestPhaseGateTerminalExemption:
         拒绝不是死锁：逃生动作唯一且永远可行（候选非空由底线 1 保证），文案必须点名
         item_picker——模型照着走一步就能通过。
         """
-        from app.harness.hooks import phase_check as pc
+        from app.harness.hooks import progress as pc
 
         monkeypatch.setattr(pc, "candidate_count", lambda: 5)
         set_phase_machine(PhaseStateMachine(Phase.SEARCHING))
@@ -1215,7 +1215,7 @@ class TestPhaseGateTerminalExemption:
     @pytest.mark.asyncio
     async def test_summary_allowed_after_picker_ran(self, clean_phase, monkeypatch) -> None:
         """本轮 item_picker 跑过（哪怕定稿为空）→ 收尾放行：诚实空清单是合法结论。"""
-        from app.harness.hooks import phase_check as pc
+        from app.harness.hooks import progress as pc
 
         monkeypatch.setattr(pc, "candidate_count", lambda: 5)
         set_phase_machine(PhaseStateMachine(Phase.SEARCHING))
@@ -1227,7 +1227,7 @@ class TestPhaseGateTerminalExemption:
     @pytest.mark.asyncio
     async def test_summary_rejected_when_no_candidates(self, clean_phase, monkeypatch) -> None:
         """真的没候选时仍拒绝收尾，并引导 chat_fallback（防过早收尾）。"""
-        from app.harness.hooks import phase_check as pc
+        from app.harness.hooks import progress as pc
 
         monkeypatch.setattr(pc, "candidate_count", lambda: 0)
         set_phase_machine(PhaseStateMachine(Phase.SEARCHING))
@@ -1238,7 +1238,7 @@ class TestPhaseGateTerminalExemption:
 
     @pytest.mark.asyncio
     async def test_chat_fallback_always_allowed(self, clean_phase, monkeypatch) -> None:
-        from app.harness.hooks import phase_check as pc
+        from app.harness.hooks import progress as pc
 
         monkeypatch.setattr(pc, "candidate_count", lambda: 0)
         set_phase_machine(PhaseStateMachine(Phase.COMPARING))
@@ -1249,7 +1249,7 @@ class TestPhaseGateTerminalExemption:
     @pytest.mark.asyncio
     async def test_force_conclude_authorizes_concluding_phase(self, clean_phase) -> None:
         """连续严重漂移强制收尾时，阶段机必须被推到 CONCLUDING，否则自家 gate 会拦住自家指令。"""
-        from app.harness.hooks.drift_detector import _apply_correction
+        from app.harness.hooks.drift import _apply_correction
 
         set_phase_machine(PhaseStateMachine(Phase.SEARCHING))
         state = DriftState()
@@ -1315,7 +1315,7 @@ class TestToolErrorNotProgress:
         self, clean_phase, monkeypatch
     ) -> None:
         """闭环：picker 只有失败调用时，底线 3 必须仍拦收尾（判据回归「真实执行成功」）。"""
-        from app.harness.hooks import phase_check as pc
+        from app.harness.hooks import progress as pc
 
         monkeypatch.setattr(pc, "candidate_count", lambda: 5)
         set_phase_machine(PhaseStateMachine(Phase.COMPARING))
@@ -1331,7 +1331,7 @@ class TestPhaseTransitionResetsDrift:
 
     @pytest.mark.asyncio
     async def test_transition_resets_consecutive_counters(self, clean_phase) -> None:
-        from app.harness.hooks.phase_transition import try_phase_transition
+        from app.harness.hooks.progress import try_phase_transition
 
         set_phase_machine(PhaseStateMachine(Phase.SEARCHING))
         state = DriftState()
@@ -1351,7 +1351,7 @@ class TestPhaseTransitionResetsDrift:
     @pytest.mark.asyncio
     async def test_no_transition_keeps_counters(self, clean_phase) -> None:
         """没转移就不该重置——否则漂移计数永远攒不起来。"""
-        from app.harness.hooks.phase_transition import try_phase_transition
+        from app.harness.hooks.progress import try_phase_transition
 
         set_phase_machine(PhaseStateMachine(Phase.SEARCHING))
         state = DriftState()
@@ -1368,14 +1368,14 @@ class TestPicksSignalIsReal:
     """picks_count 必须来自 item_picker 的真实返回，不能是「调过就算数」。"""
 
     def test_count_picks_parses_json(self) -> None:
-        from app.harness._tool_signals import _count_picks
+        from app.harness.signals import _count_picks
 
         assert _count_picks('{"picks": [{"a": 1}, {"b": 2}], "excluded": []}') == 2
         assert _count_picks('{"picks": [], "excluded": ["x"], "over_budget": ["y"]}') == 0
 
     def test_count_picks_survives_truncation(self) -> None:
         """按 token 预算截断长结果 → JSON 解析失败，但长结果必然意味着 picks 非空。"""
-        from app.harness._tool_signals import _count_picks
+        from app.harness.signals import _count_picks
 
         truncated = '{"picks": [{"item_id": "A1", "pick_reason": "耐磨"' + "x" * 50
         assert _count_picks(truncated) >= 1
@@ -1478,7 +1478,7 @@ class TestRollbackRequiresPickerAttempt:
     @pytest.mark.asyncio
     async def test_no_rollback_before_picker_runs(self, clean_phase) -> None:
         """COMPARING 里先 price_compare / 澄清是正常路径，不该被判无进展回退。"""
-        from app.harness.hooks.phase_transition import check_phase_rollback
+        from app.harness.hooks.progress import check_phase_rollback
 
         set_phase_machine(PhaseStateMachine(Phase.COMPARING))
         for _ in range(3):
@@ -1488,7 +1488,7 @@ class TestRollbackRequiresPickerAttempt:
 
     @pytest.mark.asyncio
     async def test_rollback_after_picker_returns_empty_twice(self, clean_phase) -> None:
-        from app.harness.hooks.phase_transition import check_phase_rollback
+        from app.harness.hooks.progress import check_phase_rollback
 
         set_phase_machine(PhaseStateMachine(Phase.COMPARING))
         ctx = {"picks_count": 0, "picker_attempted": True}
@@ -1504,7 +1504,7 @@ class TestSequencingAnyOf:
     @pytest.mark.asyncio
     async def test_fork_retrieval_satisfies_item_picker_prereq(self) -> None:
         """候选由 task_dispatch 的子 Agent 检索而来 → 不该报顺序错误。"""
-        from app.harness.hooks.step_validator import check_sequencing
+        from app.harness.hooks.sequencing import check_sequencing
 
         ctx = {"tool_name": "item_picker", "called_tools": {"task_dispatch"}}
         result = await check_sequencing(ctx)
@@ -1513,7 +1513,7 @@ class TestSequencingAnyOf:
     @pytest.mark.asyncio
     async def test_candidates_in_registry_satisfy_prereq(self, monkeypatch) -> None:
         """登记表里有候选（如续聊沿用上轮候选）→ 前置已满足。"""
-        from app.harness.hooks import step_validator as sv
+        from app.harness.hooks import sequencing as sv
 
         monkeypatch.setattr(sv, "candidate_count", lambda: 12)
         ctx = {"tool_name": "item_picker", "called_tools": set()}
@@ -1522,7 +1522,7 @@ class TestSequencingAnyOf:
 
     @pytest.mark.asyncio
     async def test_no_retrieval_at_all_still_warns(self, monkeypatch) -> None:
-        from app.harness.hooks import step_validator as sv
+        from app.harness.hooks import sequencing as sv
 
         monkeypatch.setattr(sv, "candidate_count", lambda: 0)
         ctx = {"tool_name": "item_picker", "called_tools": {"planner"}}
@@ -1543,7 +1543,7 @@ class TestToolBreakerHook:
 
     @pytest.fixture(autouse=True)
     def _clean(self):
-        from app.harness.hooks.tool_breaker import reset_tool_breakers
+        from app.harness.hooks.repetition import reset_tool_breakers
         from app.harness.setup import setup_harness
 
         setup_harness()
@@ -1553,7 +1553,7 @@ class TestToolBreakerHook:
 
     @pytest.mark.asyncio
     async def test_repeated_failures_open_the_breaker(self, clean_phase) -> None:
-        from app.harness.hooks.tool_breaker import _FAILURE_THRESHOLD, get_tool_breaker
+        from app.harness.hooks.repetition import _FAILURE_THRESHOLD, get_tool_breaker
 
         mw = _mw()
 
@@ -1581,7 +1581,7 @@ class TestToolBreakerHook:
 
     @pytest.mark.asyncio
     async def test_success_resets_failure_count(self, clean_phase) -> None:
-        from app.harness.hooks.tool_breaker import get_tool_breaker
+        from app.harness.hooks.repetition import get_tool_breaker
 
         mw = _mw()
 
@@ -1597,7 +1597,7 @@ class TestToolBreakerHook:
     @pytest.mark.asyncio
     async def test_empty_result_is_not_a_failure(self, clean_phase) -> None:
         """空结果是业务信号（没搜到货），不是工具故障——不该熔断，交给漂移检测的探索发散信号。"""
-        from app.harness.hooks.tool_breaker import get_tool_breaker
+        from app.harness.hooks.repetition import get_tool_breaker
 
         mw = _mw()
         for _ in range(5):
@@ -1610,7 +1610,7 @@ class TestOutputGuardHook:
 
     @pytest.mark.asyncio
     async def test_strips_internal_sentinel_lines(self) -> None:
-        from app.harness.hooks.session_hooks import audit_final_output
+        from app.harness.hooks.safety import audit_final_output
 
         final = (
             "这是给你的清单：\n"
@@ -1624,14 +1624,14 @@ class TestOutputGuardHook:
 
     @pytest.mark.asyncio
     async def test_clean_answer_untouched(self) -> None:
-        from app.harness.hooks.session_hooks import audit_final_output
+        from app.harness.hooks.safety import audit_final_output
 
         assert await audit_final_output({"final_answer": "干净的清单"}) is None
 
     @pytest.mark.asyncio
     async def test_never_returns_empty_answer(self) -> None:
         """全是内部文案时宁可回原文，也不给用户一片空白。"""
-        from app.harness.hooks.session_hooks import audit_final_output
+        from app.harness.hooks.safety import audit_final_output
 
         ctx = await audit_final_output({"final_answer": "[强制收尾] 立即调用 shopping_summary"})
         assert ctx is not None
@@ -1677,7 +1677,7 @@ class TestOutputGuardOrdering:
         assert final_text < report, "task_result 用的不是审核后的文本 → 用户前端看到的是原文"
 
         # 顺带确认审核本身有效
-        from app.harness.hooks.session_hooks import audit_final_output
+        from app.harness.hooks.safety import audit_final_output
 
         ctx = await audit_final_output({"final_answer": dirty})
         assert ctx is not None
@@ -1721,7 +1721,7 @@ class TestGateOrderingContracts:
         cap 次就塌成 cap-1 次，本测试当场红。"""
         from app.agent.fork_guard import enter_fork
         from app.harness.budgets import SUB_ITEM_SEARCH_CAP
-        from app.harness.hooks import tool_gates
+        from app.harness.hooks import budget as tool_gates
         from app.harness.state import GuardState
 
         guard = GuardState()
@@ -1759,7 +1759,7 @@ async def _run_inject_hook(tool_name: str, *domains: str) -> str:
     from uuid import uuid4
 
     from app.api.context import set_session_domains
-    from app.harness.hooks.preference_inject import inject_domain_preferences
+    from app.harness.hooks.context_shaping import inject_domain_preferences
     from app.memory.store import PreferenceEntry, get_store
     from app.utils.thread_ctx import thread_scope
 
@@ -1823,7 +1823,7 @@ class TestPostforkGateRelease:
     async def test_empty_pool_releases_gate(self) -> None:
         """整轮 fork 失败/全空时候选池为空——「候选已汇集」不成立，直搜是仅剩的补救通路。"""
         from app.harness.budgets import fork_budget_scope
-        from app.harness.hooks.tool_gates import check_search_authority
+        from app.harness.hooks.budget import check_search_authority
 
         with fork_budget_scope() as budget:
             budget.charge("task_dispatch")
@@ -1832,7 +1832,7 @@ class TestPostforkGateRelease:
     async def test_nonempty_pool_still_denied(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """正常情形（fork 后候选在池）维持原语义：直搜拦下，逼模型走比价/精挑/收尾。"""
         from app.harness.budgets import fork_budget_scope
-        from app.harness.hooks import tool_gates
+        from app.harness.hooks import budget as tool_gates
 
         monkeypatch.setattr(tool_gates, "candidate_count", lambda: 5)
         with fork_budget_scope() as budget:
@@ -1844,7 +1844,7 @@ class TestPostforkGateRelease:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from app.harness.budgets import fork_budget_scope
-        from app.harness.hooks import tool_gates
+        from app.harness.hooks import budget as tool_gates
         from app.harness.state import GuardState
 
         monkeypatch.setattr(tool_gates, "candidate_count", lambda: 5)
@@ -1859,7 +1859,7 @@ class TestPostforkGateRelease:
     async def test_phase_rollback_issues_grant(self) -> None:
         """回退到 SEARCHING 的同时必须发补搜授权——否则初搜走过并行 fork 时，注入的
         「调整搜索条件重新检索」会撞 postfork 哨兵，回退腿在集成链路里是死的。"""
-        from app.harness.hooks.phase_transition import check_phase_rollback
+        from app.harness.hooks.progress import check_phase_rollback
         from app.harness.state import GuardState
 
         machine = PhaseStateMachine(initial=Phase.COMPARING)
@@ -1902,7 +1902,7 @@ class TestBreakerParamErrorExemption:
         计入会让一个会话的畸形参数把工具对全部会话熔断。真基建异常照常计数。"""
         from pydantic import BaseModel, ValidationError
 
-        from app.harness.hooks.tool_breaker import get_tool_breaker, reset_tool_breakers
+        from app.harness.hooks.repetition import get_tool_breaker, reset_tool_breakers
 
         class _Args(BaseModel):
             x: int
@@ -1932,7 +1932,7 @@ class TestBreakerParamErrorExemption:
         **全部副本**熔断，比进程内那次严重得多。判据仍只有 adapter 里那一条 if。"""
         from pydantic import BaseModel, ValidationError
 
-        from app.harness.hooks.tool_breaker import reset_tool_breakers
+        from app.harness.hooks.repetition import reset_tool_breakers
         from app.utils import shared_breaker
         from tests.test_shared_breaker import FakeRedis
 
@@ -1990,7 +1990,7 @@ class TestInternalMarkersCoverage:
     @pytest.mark.asyncio
     async def test_output_guard_strips_transition_notice(self) -> None:
         """[阶段推进] 是每条正常链路必然出现的通告，最容易被鹦鹉学舌。"""
-        from app.harness.hooks.session_hooks import audit_final_output
+        from app.harness.hooks.safety import audit_final_output
 
         final = "为你精选如下\n[阶段推进] 候选已入池，检索阶段就此收线\n1. 商品A"
         ctx = await audit_final_output({"final_answer": final})
@@ -2014,7 +2014,7 @@ class TestWatchdog:
         import time
 
         from app.agent.fork_guard import _fork_depth
-        from app.harness.hooks.watchdog import check_liveness
+        from app.harness.hooks.termination import check_liveness
         from app.harness.state import GuardState
 
         token = _fork_depth.set(0)
@@ -2031,7 +2031,7 @@ class TestWatchdog:
         import time
 
         from app.agent.fork_guard import _fork_depth
-        from app.harness.hooks.watchdog import WATCHDOG_STALL_SEC, check_liveness
+        from app.harness.hooks.termination import WATCHDOG_STALL_SEC, check_liveness
         from app.harness.state import GuardState
 
         token = _fork_depth.set(0)
@@ -2053,7 +2053,7 @@ class TestWatchdog:
         import time
 
         from app.agent.fork_guard import _fork_depth
-        from app.harness.hooks.watchdog import (
+        from app.harness.hooks.termination import (
             WATCHDOG_GRACE_SEC,
             WATCHDOG_STALL_SEC,
             check_liveness,
@@ -2078,7 +2078,7 @@ class TestWatchdog:
         import time
 
         from app.agent.fork_guard import _fork_depth
-        from app.harness.hooks.watchdog import check_liveness
+        from app.harness.hooks.termination import check_liveness
         from app.harness.state import GuardState
 
         token = _fork_depth.set(0)
@@ -2139,7 +2139,7 @@ class TestUnifiedGateEscape:
 
     @pytest.mark.asyncio
     async def test_websearch_gate_escape(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import app.harness.hooks.tool_gates as tg
+        import app.harness.hooks.budget as tg
         from app.harness.state import GuardState
 
         monkeypatch.setattr(tg, "web_search_allowed", lambda: False)
@@ -2160,7 +2160,7 @@ class TestUnifiedGateEscape:
     async def test_postfork_search_gate_escape(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from types import SimpleNamespace
 
-        import app.harness.hooks.tool_gates as tg
+        import app.harness.hooks.budget as tg
         from app.harness.state import GuardState
 
         monkeypatch.setattr(tg, "get_fork_budget", lambda: SimpleNamespace(dispatched=True))
@@ -2183,7 +2183,7 @@ class TestUnifiedGateEscape:
     @pytest.mark.asyncio
     async def test_sub_search_cap_is_not_escapable(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """子 Agent 搜索上限是安全闸（fork 安全层），模型再坚持也不放行。"""
-        import app.harness.hooks.tool_gates as tg
+        import app.harness.hooks.budget as tg
         from app.agent.fork_guard import _fork_depth
         from app.harness.budgets import SUB_ITEM_SEARCH_CAP
         from app.harness.state import GuardState
@@ -2205,7 +2205,7 @@ class TestUnifiedGateEscape:
     @pytest.mark.asyncio
     async def test_gate_events_metric(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """拒绝与逃生都进 shoppingx_gate_events_total（gate/outcome 维度）。"""
-        import app.harness.hooks.tool_gates as tg
+        import app.harness.hooks.budget as tg
         from app.harness.state import GuardState
         from app.observability.metrics import GATE_EVENTS
 
@@ -2239,7 +2239,7 @@ class TestDetectionLayerLanguageBridge:
         assert signals.blacklist_hits("Plastic-Free Bamboo Lunch Box") == []
 
     def test_goal_forgetting_bridges_chinese_query_to_english_actions(self) -> None:
-        from app.harness.hooks.drift_detector import _computational_precheck
+        from app.harness.hooks.drift import _computational_precheck
 
         ctx = {
             "original_query": "想买防水的旅行收纳袋",
@@ -2250,7 +2250,7 @@ class TestDetectionLayerLanguageBridge:
         assert "目标遗忘" not in hit
 
     def test_goal_terms_from_pt_rescue_unmapped_category_words(self) -> None:
-        from app.harness.hooks.drift_detector import _computational_precheck
+        from app.harness.hooks.drift import _computational_precheck
 
         ctx = {
             "original_query": "旅行收纳袋",  # 品类词不在 ZH_EN 词表，归一补不出英文
@@ -2264,7 +2264,7 @@ class TestDetectionLayerLanguageBridge:
         assert "目标遗忘" not in hit
 
     def test_empty_result_is_judged_structurally(self) -> None:
-        from app.harness.hooks.drift_detector import _is_empty_result
+        from app.harness.hooks.drift import _is_empty_result
 
         assert _is_empty_result('{"platform": "amazon", "total_recall": 0, "candidates": []}')
         # 追问轮复用：fresh 折叠进 already_in_pool ≠ 空结果（旧版字符串匹配数成连续空）

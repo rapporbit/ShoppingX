@@ -184,7 +184,7 @@ async def test_budget_relax_due_needs_price_only_and_zero_hits(tmp_path: Path) -
 
 async def test_nudge_tells_model_not_to_claim_nothing_found(tmp_path: Path) -> None:
     """探测有结论时，提示必须缀到 item_search 结果尾部——模型下一次解码就能读到。"""
-    from app.harness.hooks.result_guard import append_nudges
+    from app.harness.hooks.repetition import append_nudges
     from app.harness.state import GuardState
 
     with thread_scope("t-nudge", tmp_path):
@@ -207,7 +207,7 @@ async def test_nudge_tells_model_not_to_claim_nothing_found(tmp_path: Path) -> N
 
 async def test_nudge_absent_when_nothing_blocked(tmp_path: Path) -> None:
     """没被挡住任何货时不加提示（空 filtered_out 不许变成噪声）。"""
-    from app.harness.hooks.result_guard import append_nudges
+    from app.harness.hooks.repetition import append_nudges
     from app.harness.state import GuardState
 
     with thread_scope("t-nudge-none", tmp_path):
@@ -225,7 +225,7 @@ async def test_nudge_absent_when_nothing_blocked(tmp_path: Path) -> None:
 async def test_backfill_gate_suggests_relaxing_instead_of_empty_research(tmp_path: Path) -> None:
     """探测已证明「预算内没货」→ 补搜闸不再回退重搜（那一轮必然空手），改口指路问用户。"""
     from app.api.context import get_retrieval_mode, set_retrieval_mode
-    from app.harness.hooks.phase_transition import append_transition_notice, check_refine_backfill
+    from app.harness.hooks.progress import append_transition_notice, check_refine_backfill
     from app.harness.phase_machine import Phase, PhaseStateMachine, set_phase_machine
     from app.harness.state import GuardState
 

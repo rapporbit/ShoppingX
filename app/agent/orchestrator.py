@@ -273,7 +273,7 @@ def _experiment_summary(ab_assign: Any, messages: Sequence[Msg]) -> dict[str, An
     MCP 工具**不在这里**：它们只发给 SearchAgent，调用发生在 worker 的消息里，主 loop 看不到，
     且同样不过 harness（见 mcp_registry 的诚实标注）——要看去 Langfuse 的 acting span。
     """
-    from app.harness.hooks.strategy_inject import injected_strategy_keys
+    from app.harness.hooks.context_shaping import injected_strategy_keys
 
     return {
         "prompt_version": ab_assign.version,

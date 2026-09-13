@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 
 from app.api.context import set_retrieval_mode, set_session_tasks
-from app.harness.hooks.phase_transition import append_transition_notice
-from app.harness.hooks.tool_memo import record_tool_result, replay_duplicate_call
+from app.harness.hooks.progress import append_transition_notice
+from app.harness.hooks.repetition import record_tool_result, replay_duplicate_call
 from app.harness.middleware import HookRejectSignal
 from app.harness.phase_machine import (
     Phase,

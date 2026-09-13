@@ -210,7 +210,7 @@ async def test_hook_is_noop_for_workers_and_for_unmatched_query() -> None:
 async def test_injected_list_is_rewritten_every_turn() -> None:
     """每轮必写注入清单，哪怕是空——否则第二轮会拿上一轮的清单去结账，账记到错的策略头上。"""
     from app.agent.agents import _run_system_prompt_hooks
-    from app.harness.hooks.strategy_inject import injected_strategy_keys
+    from app.harness.hooks.context_shaping import injected_strategy_keys
 
     await get_strategy_store().upsert(_s("cheap_first", keywords=["预算"]))
     await _run_system_prompt_hooks("BASE", role="main", query="预算 300")
@@ -222,7 +222,7 @@ async def test_injected_list_is_rewritten_every_turn() -> None:
 @pytest.mark.anyio
 async def test_session_end_settles_by_terminal_tool_and_final_text() -> None:
     from app.agent.agents import _run_system_prompt_hooks
-    from app.harness.hooks.strategy_inject import settle_strategies
+    from app.harness.hooks.context_shaping import settle_strategies
 
     store = get_strategy_store()
     s = _s("cheap_first", keywords=["预算"])
@@ -245,7 +245,7 @@ async def test_session_end_settles_by_terminal_tool_and_final_text() -> None:
 @pytest.mark.anyio
 async def test_session_end_is_noop_without_injection() -> None:
     """没注入过就没有账可结——别把一轮成败记到「刚好在库里」的策略头上。"""
-    from app.harness.hooks.strategy_inject import settle_strategies
+    from app.harness.hooks.context_shaping import settle_strategies
 
     store = get_strategy_store()
     s = _s("untouched", keywords=["预算"])
