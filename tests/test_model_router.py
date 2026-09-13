@@ -15,8 +15,7 @@ import pytest
 from app.agent import model_router as mr
 from app.agent import token_budget as tb
 from app.agent.model_router import Tier
-from app.harness.hooks.context_compress import route_by_budget
-from app.harness.hooks.tool_gates import check_token_budget
+from app.harness.hooks.budget import check_token_budget, route_by_budget
 from app.harness.middleware import HookRejectSignal
 from app.harness.state import GuardState
 from app.tools.schemas import ItemCandidate
@@ -133,7 +132,7 @@ class TestFallbackAnswer:
 
     def test_minimal_hint_is_strippable_by_output_guard(self) -> None:
         """MINIMAL_HINT 可能被模型抄进最终回答——它的前缀必须在内部文案标记表里。"""
-        from app.harness.hooks.session_hooks import _INTERNAL_MARKERS
+        from app.harness.hooks.safety import _INTERNAL_MARKERS
 
         assert any(mr.MINIMAL_HINT.startswith(marker) for marker in _INTERNAL_MARKERS)
 
@@ -200,7 +199,7 @@ class TestBudgetRouterHook:
         recorded: list[str] = []
         monkeypatch.setattr(mr, "current_tier", lambda: Tier.LITE)
         monkeypatch.setattr(
-            "app.harness.hooks.context_compress.metrics.record_tier_change", recorded.append
+            "app.harness.hooks.budget.metrics.record_tier_change", recorded.append
         )
         guard = GuardState()
         for _ in range(3):
@@ -316,25 +315,25 @@ class TestAdapterWiring:
 class TestTokenBudgetGate:
     @pytest.mark.asyncio
     async def test_main_tier_allows_expensive_tools(self, monkeypatch: Any) -> None:
-        monkeypatch.setattr("app.harness.hooks.tool_gates.current_tier", lambda: Tier.MAIN)
+        monkeypatch.setattr("app.harness.hooks.budget.current_tier", lambda: Tier.MAIN)
         assert await check_token_budget({"tool_name": "item_search"}) is None
 
     @pytest.mark.asyncio
     async def test_lite_tier_still_allows_expensive_tools(self, monkeypatch: Any) -> None:
         """lite 只是换个便宜模型，不该影响任务能力——收权从 minimal 才开始。"""
-        monkeypatch.setattr("app.harness.hooks.tool_gates.current_tier", lambda: Tier.LITE)
+        monkeypatch.setattr("app.harness.hooks.budget.current_tier", lambda: Tier.LITE)
         assert await check_token_budget({"tool_name": "item_search"}) is None
 
     @pytest.mark.asyncio
     async def test_minimal_tier_blocks_cost_amplifiers(self, monkeypatch: Any) -> None:
         """从 minimal 就拦，而不是等撞线——撞线时连收尾用的 shopping_summary 都付不起了。"""
-        monkeypatch.setattr("app.harness.hooks.tool_gates.current_tier", lambda: Tier.MINIMAL)
+        monkeypatch.setattr("app.harness.hooks.budget.current_tier", lambda: Tier.MINIMAL)
         with pytest.raises(HookRejectSignal):
             await check_token_budget({"tool_name": "item_search"})
 
     @pytest.mark.asyncio
     async def test_minimal_tier_keeps_terminal_tools(self, monkeypatch: Any) -> None:
         """收尾链必须留着，否则任务硬停、已收敛的候选全丢。"""
-        monkeypatch.setattr("app.harness.hooks.tool_gates.current_tier", lambda: Tier.MINIMAL)
+        monkeypatch.setattr("app.harness.hooks.budget.current_tier", lambda: Tier.MINIMAL)
         assert await check_token_budget({"tool_name": "shopping_summary"}) is None
         assert await check_token_budget({"tool_name": "item_picker"}) is None

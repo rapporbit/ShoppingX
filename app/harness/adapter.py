@@ -20,7 +20,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from collections.abc import AsyncGenerator, Callable, Sequence
@@ -30,20 +29,24 @@ from agentscope.message import (
     HintBlock,
     Msg,
     TextBlock,
-    ToolCallBlock,
-    ToolResultBlock,
 )
 from agentscope.middleware import MiddlewareBase
 from agentscope.model import ChatResponse
 from agentscope.tool import ToolMiddlewareBase
 from agentscope.tool._response import ToolChunk, ToolResultState
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from app.agent.fork_guard import current_fork_depth
 from app.agent.token_budget import charge_usage, tree_snapshot
 from app.api import monitor
 from app.compress.blocks import post_step_compress
-from app.harness._tool_signals import (
+from app.harness.hooks.context_shaping import _compress_opts
+from app.harness.hooks.drift import DriftState
+from app.harness.middleware import harness
+from app.harness.msgs import block_text, iter_tool_results, text_of
+from app.harness.phase_machine import get_phase_machine
+from app.harness.prefill import prefill
+from app.harness.signals import (
     _SEARCH_TOOLS,
     _as_opt_int,
     _count_candidates,
@@ -51,11 +54,6 @@ from app.harness._tool_signals import (
     _observe_tool,
     _summarize_call,
 )
-from app.harness.hooks.context_compress import _compress_opts
-from app.harness.hooks.drift_detector import DriftState
-from app.harness.middleware import harness
-from app.harness.msgs import block_text, iter_tool_results, text_of
-from app.harness.phase_machine import get_phase_machine
 from app.harness.state import GuardState
 from app.tools._diagnostics import consume_diagnostics
 from app.utils.tokens import count_tokens
@@ -152,28 +150,6 @@ class HarnessSession:
         self.last_total_tokens = total
         if delta > 0:
             self.drift_state.token_history.append(delta)
-
-
-def _tool_blocks(call_id: str, name: str, args: dict[str, Any], result: str) -> list[Any]:
-    """造一对「调用 + 结果」的 block（形状与框架自己产生的逐字同构）。
-
-    ``ToolCallBlock.input`` 是 **JSON 字符串**不是 dict（流式解析时一段段拼出来的），当 dict
-    用不会报错，只会让轨迹渲染成 ``planner()``、评测侧看不到入参。
-    """
-    return [
-        ToolCallBlock(
-            type="tool_call",
-            id=call_id,
-            name=name,
-            input=json.dumps(args, ensure_ascii=False),
-        ),
-        ToolResultBlock(
-            type="tool_result",
-            id=call_id,
-            name=name,
-            output=result,
-        ),
-    ]
 
 
 def _resolve_model_tier(tier: Any) -> Any | None:
@@ -501,123 +477,9 @@ class HarnessAgentAdapter(MiddlewareBase):
                 event = await self._finalize(event)
             yield event
 
-    # ── 开局预置：planner（与参考图）在第 1 次模型调用之前就跑掉 ──
-
-    # 一次任务最多看几张图：每张都是一次 VL 往返 + 一段上下文，传一堆图既烧预算又稀释意图。
-    MAX_PREFILL_IMAGES = 3
-
     async def _prefill(self, agent: Agent) -> None:
-        """把 planner（有图时连同 image_understand）预先跑掉，结果写进 ``state.context``。
-
-        **省掉的是一次纯仪式性的模型往返**：第 1 轮模型面对的问题本来是「我该调什么工具」，而
-        这个答案不需要模型给——planner 判 ``retrieval``（reuse / augment / search）靠的是系统
-        确定性注入的会话状态 + 候选登记表，它**不消费主 loop 模型的任何输出**，入参只有用户原话。
-        预置之后模型第 1 轮面对的是「plan 已在手，我该怎么检索」，那才是真需要推理的一步。
-
-        **为什么在 loop 内（中间件）而不是在 orchestrator 里手工预跑**：域内长期偏好注入
-        （``hooks/preference_inject``）与阶段机 PLANNING→SEARCHING（``hooks/phase_transition``
-        读 ``planner_output_ready``）都挂在「planner 在 loop 内被调过」这个事实上。走这里、照常
-        跑 ``post_tool_call`` 与阶段信号，它们一行都不用复刻。
-
-        **有图时看图必须先于 planner**：planner 是拿用户原话拆结构化字段的，若图的结论晚于它
-        产出，「只发一张图 + 想买这个」这类 query 会让 planner 拆出一片空白，后面全链路空转。
-
-        **跳过 pre_tool_call 是有意的**：那一层的闸（白名单 / 阶段门 / 熔断 / 循环检测 / 检索
-        预算）管的是模型的自由发挥，而这次调用是机制自己决定的——让它去过一道为约束模型而设的
-        闸，只会平添「机制被自己的护栏拦下」这种荒诞失败。
-
-        降级：worker 不预置（它的活是按 demands 检索，demands 里已带主流程拆好的字段）；planner
-        抛错则回到老路（模型自己决定调 planner，prompt 里那条规则仍在）。预置是快路径不是唯一路径。
-        """
-        s = self._s
-        if s.prefilled or current_fork_depth() >= 1 or not s.original_query:
-            return
-        s.prefilled = True
-
-        blocks: list[Any] = []
-        intent = s.original_query
-        if s.image_paths:
-            vision_blocks, hint = await self._prefill_vision()
-            blocks.extend(vision_blocks)
-            if hint:
-                intent = f"{intent}\n\n[用户上传的参考图，已识别] {hint}"
-
-        from app.tools.planner import planner as planner_tool  # 懒 import：防注册期导入环
-
-        args = {"intent": intent}
-        call_id = "prefill_planner"
-        try:
-            out = await planner_tool.ainvoke(args)
-        except Exception:
-            logger.warning("planner 预置失败，回退为模型自行调用（老路径）", exc_info=True)
-            self._append_prefilled(agent, blocks)  # 图的结论已经拿到了，别连它一起丢
-            return
-        text = out.model_dump_json() if isinstance(out, BaseModel) else str(out)
-
-        # 阶段信号与行为摘要：与工具适配器里真调一次 planner 记的东西完全一致——第 1 轮
-        # post_reflect 据 planner_output_ready 把阶段从 PLANNING 推到 SEARCHING。
-        s.planner_done = True
-        s.called_tools.add("planner")
-        s.recent_actions.append(_summarize_call("planner", args))
-
-        ctx = s.base_context()
-        ctx["tool_name"] = "planner"
-        ctx["tool_args"] = args
-        ctx["tool_result"] = text
-        ctx = await harness.run("post_tool_call", ctx)
-        # 偏好注入落 pending_inject，由下一次 on_model_call 开头消费——那正是第 1 轮。
-        s.collect(ctx)
-        guarded = ctx.get("tool_result")
-        if isinstance(guarded, str) and guarded:
-            text = guarded
-
-        blocks.extend(_tool_blocks(call_id, "planner", args, text))
-        self._append_prefilled(agent, blocks)
-
-    async def _prefill_vision(self) -> tuple[list[Any], str]:
-        """开局把参考图逐张看掉，返回（要写进上下文的 blocks, 给 planner 的一句话线索）。
-
-        block 形状与真调一次工具逐字同构（tool_call + tool_result），主 loop 因此能像读任何
-        工具结果一样读到图的结论；AGUI 事件由 image_understand 内部照常上报，前端看得见「正在
-        看图」这一步。看图失败（未配 LLM_VISION / 图读不到 / 模型抽风）不阻断——工具自身已降级
-        返回 note，主 loop 照常按文字意图往下走。
-        """
-        from app.tools.image_understand import image_understand  # 懒 import：防注册期导入环
-
-        s = self._s
-        blocks: list[Any] = []
-        hints: list[str] = []
-        for idx, name in enumerate(s.image_paths[: self.MAX_PREFILL_IMAGES]):
-            args = {"filename": name}
-            try:
-                out = await image_understand.ainvoke(args)
-            except Exception:
-                logger.warning("参考图预读失败：%s", name, exc_info=True)
-                continue
-            blocks.extend(
-                _tool_blocks(
-                    f"prefill_vision_{idx}",
-                    "image_understand",
-                    args,
-                    out.model_dump_json(exclude_none=True),
-                )
-            )
-            s.called_tools.add("image_understand")
-            s.recent_actions.append(_summarize_call("image_understand", args))
-            if not out.degraded and out.search_query:
-                hints.append(f"{out.subject or out.category}（检索词：{out.search_query}）")
-        return blocks, "；".join(hints)
-
-    @staticmethod
-    def _append_prefilled(agent: Agent, blocks: list[Any]) -> None:
-        """预置产物写进 ``state.context``——**不落 state 就等于没发生**。
-
-        每轮的 messages 都从 ``state.context`` 重建（见 L5 那条注入蒸发的坑），只塞进本次请求
-        的 kwargs 里，下一轮就没了：模型会发现自己「调过 planner 却看不到结果」。
-        一整轮的 tool_call / tool_result 同住一条 assistant 消息，这里照这个形状拼。
-        """
-        if blocks:
-            agent.state.context.append(Msg(name=agent.name, role="assistant", content=blocks))
+        """开局预置（planner / 参考图），实现见 :mod:`app.harness.prefill`。"""
+        await prefill(self._s, agent)
 
     @staticmethod
     def _force_another_round(agent: Agent, nudge: str) -> bool:
@@ -730,7 +592,7 @@ class HarnessToolAdapter(ToolMiddlewareBase):
             # 基础设施故障。断路器是进程级共享的，计入会让一个会话连发 3 次畸形参数就把该工具对
             # 全进程所有会话熔断 60s。不记也不会卡死断路器：HALF_OPEN 下一次调用照常放行探测。
             if ctx.get("_breaker_armed") == tool_name and not isinstance(exc, ValidationError):
-                from app.harness.hooks.tool_breaker import get_tool_breaker
+                from app.harness.hooks.repetition import get_tool_breaker
                 from app.utils import shared_breaker
 
                 # 这条 if 就是「谁算失败」的唯一判据（含 ValidationError 豁免）；shared_breaker
@@ -794,7 +656,7 @@ class HarnessToolAdapter(ToolMiddlewareBase):
 
 
 def _collect_call_signals(s: HarnessSession, tool_name: str, result_text: str) -> dict[str, Any]:
-    """从工具的**真实返回**里数阶段信号（不从全局状态反推——见 ``_tool_signals`` 的两条原则）。"""
+    """从工具的**真实返回**里数阶段信号（不从全局状态反推——见 ``signals`` 的两条原则）。"""
     call_candidates = 0
     call_picks = 0
     call_must_hits: int | None = None

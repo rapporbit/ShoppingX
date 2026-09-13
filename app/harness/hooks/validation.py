@@ -1,13 +1,12 @@
-"""单步断言：Schema / Sequencing。**两类都是确定性的、微秒级的、零 LLM 的。**
+"""单步断言：Schema（post_tool_call）+ 失败汇总（post_reflect）。确定性、微秒级、零 LLM。
 
-- Schema Assertion（post_tool_call, <1ms）：工具返回是否能解析为合法 JSON、关键字段是否缺失。
-- Sequencing Assertion（pre_tool_call, <1ms）：工具调用顺序是否满足前置条件。
+    post_tool_call  40  schema_assertion    工具返回能否按 Pydantic *Output 解析
+                                            （raw_decode 容忍尾部通告）
+    post_reflect    15  assertion_handler   汇总本轮 schema / sequencing 失败，注入一条纠正提示
 
-refdocs 17-3 §2 还有第三类 Semantic Assertion（拿模型判语义对齐），本仓实现过又删了——
-理由写在文件末尾，别照着 refdocs 加回来。
-
-断言失败不中断 Agent——记录到 ``context["assertions_failed"]``，由下游的
-``assertion_handler`` Hook 汇总后注入纠正提示，让模型自行修正。
+顺序断言本体在 ``sequencing.py``（它挂在 pre_tool_call），失败同样记入 ``assertions_failed``
+由这里汇总。
+Semantic Assertion 已删，理由见文件末尾。
 """
 
 from __future__ import annotations
@@ -19,9 +18,9 @@ from typing import Any
 from pydantic import ValidationError
 
 from app.harness.middleware import harness_hook
-from app.harness.signals import candidate_count
 
-logger = logging.getLogger("shoppingx.harness.step_validator")
+logger = logging.getLogger("shoppingx.harness.validation")
+
 
 # ---------- Schema Assertion ----------
 
@@ -120,59 +119,38 @@ async def check_schema(context: dict[str, Any]) -> dict[str, Any] | None:
     return context
 
 
-# ---------- Sequencing Assertion ----------
-
-# 工具名 → 前置工具候选列表，**满足其一即可**（不是全部都要）。
-#
-# 检索的前置必须把 fork 通路算进去：本项目跨平台检索的主路径是 dispatch_tool /
-# parallel_dispatch_tool 派子 Agent 去 item_search，主 loop 自己从头到尾可能一次 item_search
-# 都没调过。只认 item_search 会让「fork 检索 → item_picker」这条正常链路每次都被误报顺序错误。
-PREREQUISITES: dict[str, list[str]] = {
-    "shopping_summary": ["item_picker"],
-    # 派发工具名 L8 已统一成 task_dispatch。这里曾留着 dispatch_tool / parallel_dispatch_tool
-    # 两个死名字——工具名对不上等于那条路径永不满足，「派发过所以有候选」的前置白写。
-    "price_compare": ["item_search", "task_dispatch"],
-    "shipping_calc": ["price_compare"],
-    "item_picker": ["item_search", "task_dispatch"],
-    # 取消前先查单。这里是**软**断言（注入一条警告），硬闸在 tool_gates.trade_sequence_gate：
-    # 写操作的代价不对称，光警告拦不住一个已经打算取消的模型。
-    "cancel_order": ["query_order"],
-}
-
-# 这些工具的真实前置是「登记表里有候选」，工具名只是达成它的若干条路径之一。
-# 有候选即视为前置已满足——结构化信号比工具名可靠（候选也可能来自续聊的历史轮次）。
-_CANDIDATE_CONSUMERS = frozenset({"item_picker", "price_compare"})
-
-
-@harness_hook("pre_tool_call", name="sequencing_assertion", priority=25)
-async def check_sequencing(context: dict[str, Any]) -> dict[str, Any] | None:
-    """验证工具调用顺序是否满足前置条件（满足任一前置即通过）。
-
-    不硬拒绝——有些场景确实需要跳步（如用户直接给了候选列表）。
-    只注入警告让模型自己判断是否继续。
-    """
-    tool_name = context.get("tool_name", "")
-    prerequisites = PREREQUISITES.get(tool_name)
-    if not prerequisites:
+@harness_hook("post_reflect", name="assertion_handler", priority=15)
+async def handle_failed_assertions(context: dict[str, Any]) -> dict[str, Any] | None:
+    """汇总本轮所有 assertion 失败，注入纠正提示让模型自行修正。"""
+    failures: list[dict] = context.pop("assertions_failed", [])
+    if not failures:
         return None
 
-    called: set[str] = context.get("called_tools", set())
-    if any(p in called for p in prerequisites):
-        return None
+    schema_fails = [f for f in failures if f["type"] == "schema"]
+    seq_fails = [f for f in failures if f["type"] == "sequencing"]
+    semantic_fails = [f for f in failures if f["type"] == "semantic"]
 
-    if tool_name in _CANDIDATE_CONSUMERS and candidate_count() > 0:
-        return None
+    messages: list[str] = []
+    if schema_fails:
+        f = schema_fails[0]
+        messages.append(
+            f"[格式问题] {f['tool']} 的返回格式不符合预期：{f['reason'][:120]}。"
+            "请检查工具参数是否正确。"
+        )
+    if seq_fails:
+        f = seq_fails[0]
+        messages.append(f"[顺序问题] {f['reason']}")
+    if semantic_fails:
+        f = semantic_fails[0]
+        messages.append(
+            f"[相关性问题] {f['tool']} 的返回和用户需求不太对齐。考虑调整搜索词或换一个检索方向。"
+        )
 
-    context.setdefault("assertions_failed", []).append(
-        {
-            "type": "sequencing",
-            "tool": tool_name,
-            "reason": (
-                f"{tool_name} 通常在 {' 或 '.join(prerequisites)} 之后调用，但它们都还没执行过"
-            ),
-        }
-    )
-    logger.info("Sequencing warning: %s called before any of %s", tool_name, prerequisites)
+    if messages:
+        context.setdefault("inject_messages", []).extend(
+            {"role": "system", "content": m} for m in messages
+        )
+        logger.info("Assertion handler: injected %d correction(s)", len(messages))
     return context
 
 

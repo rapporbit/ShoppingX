@@ -20,23 +20,16 @@ def setup_harness() -> None:
         return
     _initialized = True
 
-    # 按模块导入——装饰器在 import 时自动注册到全局 harness 单例
-    import app.harness.hooks.assertion_handler  # noqa: F401  assertion 失败汇总
-    import app.harness.hooks.context_compress  # noqa: F401  pre_think: 预算 hint + 上下文压缩
-    import app.harness.hooks.drift_detector  # noqa: F401  Silent Drift + 结果信号追踪
-    import app.harness.hooks.phase_check  # noqa: F401  阶段权限拦截
-    import app.harness.hooks.phase_transition  # noqa: F401  阶段转移 + 回退 + 信号追踪
-    import app.harness.hooks.preference_inject  # noqa: F401  planner 后注入域内长期偏好
-    import app.harness.hooks.result_guard  # noqa: F401  截断 + 循环检测 + 分级提示 + 终结标记
-    import app.harness.hooks.security  # noqa: F401  安全护栏 L1 白名单 / L3 过滤 / L4 脱敏
-    import app.harness.hooks.session_hooks  # noqa: F401  阶段复位 + 输出审核
-    import app.harness.hooks.step_validator  # noqa: F401  Schema/Sequencing/Semantic
-    import app.harness.hooks.strategy_inject  # noqa: F401  成功策略：system prompt 注入 + 结账
-    import app.harness.hooks.terminal_enforce  # noqa: F401  终结纪律（当场重发模型）
-    import app.harness.hooks.tool_breaker  # noqa: F401  工具级熔断（闸 + 计数）
-    import app.harness.hooks.tool_gates  # noqa: F401  终结硬停/深度/检索/fork/预算 各硬闸
-    import app.harness.hooks.tool_memo  # noqa: F401  同参数重复调用回放（幂等工具不重复执行）
-    import app.harness.hooks.watchdog  # noqa: F401  liveness 看门狗（停滞→收敛指令→硬停交部分结果）
+    # 按关切分文件（每文件 = 一个关切，内含它在各 hook 点上的全部钩子）。装饰器在 import 时注册。
+    import app.harness.hooks.budget  # noqa: F401  检索 / fork / token 预算闸 + 预算档位路由
+    import app.harness.hooks.context_shaping  # noqa: F401  上下文压缩 + 偏好注入 + 成功策略注入/结账
+    import app.harness.hooks.drift  # noqa: F401  Silent Drift 漂移检测 + 结果信号追踪
+    import app.harness.hooks.progress  # noqa: F401  阶段机：复位 / 转移 / 回退 / 补搜 / 收线通告 / 收尾资格
+    import app.harness.hooks.repetition  # noqa: F401  循环检测提示 + 同参数回放 + 工具熔断
+    import app.harness.hooks.safety  # noqa: F401  白名单 / 深度断言 / 内容过滤 / 截断 / 输出审核与脱敏
+    import app.harness.hooks.sequencing  # noqa: F401  工具前置条件：软断言 + 取消前必先查单硬拒
+    import app.harness.hooks.termination  # noqa: F401  终结硬停 / 终结置位 / 终结纪律 / liveness 看门狗
+    import app.harness.hooks.validation  # noqa: F401  Schema 断言 + 断言失败汇总纠正
     from app.harness.middleware import harness
 
     hooks = harness.list_hooks()

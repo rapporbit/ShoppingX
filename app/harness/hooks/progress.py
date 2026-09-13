@@ -1,15 +1,19 @@
-"""阶段转移（post_reflect）+ 收线通告（post_tool_call）：推进 / 回退对话阶段并当场告知模型。
+"""检索进度机：PLANNING → SEARCHING → COMPARING → CONCLUDING。**它是进度机，不是权限机**——
+写工具的保护在权限引擎 / 确认卡 / 幂等键 / 顺序断言四道防线（见 ``app/agent/permissions.py``），
+这里唯一的硬拒是 shopping_summary 的收尾资格。
 
-转移信号由 HarnessAgentAdapter 从可靠数据源（工具名 + 候选登记表）填入 context：
-- planner_output_ready (bool)：planner 已执行 → PLANNING → SEARCHING
-- total_candidates (int)：候选登记表条数 > 0 → SEARCHING → COMPARING
-- picks_count (int)：item_picker 已执行 → COMPARING → CONCLUDING
+    on_session_start 10  phase_init          复位到 PLANNING
+                                             （续聊复用 thread 时上一轮可能停在 CONCLUDING）
+    pre_tool_call    20  phase_check         收尾资格底线：无候选 / 本轮没精挑 → 不许出清单
+    post_tool_call   19  transition_notice   收线通告缀在触发转移的工具结果尾部
+                                             （post_reflect 注入晚一轮）
+    post_reflect     39  refine_backfill     薄复用 / 污染 / 硬淘汰杀池 → 授权补搜
+    post_reflect     40  phase_transition    按候选登记表 / picks 数推进阶段
+    post_reflect     41  phase_rollback      COMPARING 连续 2 轮无进展 → 回 SEARCHING
+                                             并发一次补搜授权
 
-特殊回退：COMPARING 连续 2 轮无进展 → 回退 SEARCHING；薄复用（<3 件）→ 补搜。
-
-**状态与通告分离**：转移本体在 post_reflect（``try_phase_transition``），对模型的「收线」
-通告在 post_tool_call（``append_transition_notice``，缀在触发转移的工具结果尾部）——
-post_reflect 的 inject 通道要到再下一轮才被模型看见，晚一轮（perf-audit-r3 实测撞哨兵）。
+转移信号由适配器从可靠数据源（工具名 + 候选登记表，见 ``signals.py``）填入 context，不 grep 文本。
+阶段推进会重置漂移的「连续」类计数器（``_reset_drift_counters``），``blacklist_violations`` 不重置。
 """
 
 from __future__ import annotations
@@ -17,14 +21,37 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from app.agent.retrieval_budget import budget_relax_due
+from app.agent.retrieval_budget import (
+    budget_relax_due,
+)
 from app.api.context import get_retrieval_mode, get_session_tasks, set_retrieval_mode
-from app.harness.budgets import REUSE_RETRIEVAL_BUDGET
-from app.harness.middleware import harness_hook
-from app.harness.phase_machine import Phase, get_phase_machine
+from app.harness.budgets import (
+    REUSE_RETRIEVAL_BUDGET,
+)
+from app.harness.middleware import HookRejectSignal, harness_hook
+from app.harness.phase_machine import Phase, get_phase_machine, set_phase_machine
+from app.harness.phase_machine import PhaseStateMachine as _PSM
+from app.harness.signals import candidate_count
 from app.harness.state import GuardState
 
-logger = logging.getLogger("shoppingx.harness.phase_transition")
+logger = logging.getLogger("shoppingx.harness.progress")
+
+
+@harness_hook("on_session_start", name="phase_init", priority=10)
+async def init_phase_machine(context: dict[str, Any]) -> dict[str, Any] | None:
+    """会话开始：把阶段机复位到 PLANNING。
+
+    续聊复用同一 thread 时，ContextVar 里可能还留着上一轮跑到 CONCLUDING 的阶段机——不复位的话
+    新一轮开局就只剩 shopping_summary 可用。
+    """
+    machine = get_phase_machine()
+    if machine is None:
+        set_phase_machine(_PSM())
+    elif machine.phase is not Phase.PLANNING:
+        machine.reset()
+        logger.info("会话开始：阶段机复位到 planning")
+    return None
+
 
 _ROLLBACK_THRESHOLD = 2
 
@@ -299,7 +326,7 @@ async def check_phase_rollback(context: dict[str, Any]) -> dict[str, Any] | None
 # 撞哨兵，白耗两轮。缀在工具结果尾部则是模型下一次解码的必读内容，零时差。
 
 # 只有直搜：本条件还要求 ``call_candidates > 0``，而派发路径数不出新候选
-# （见 _tool_signals._SEARCH_TOOLS），加上 task_dispatch 也恒为假。
+# （见 signals._SEARCH_TOOLS），加上 task_dispatch 也恒为假。
 _SEARCH_NOTICE_TOOLS = frozenset({"item_search"})
 
 
@@ -454,3 +481,33 @@ async def append_transition_notice(context: dict[str, Any]) -> dict[str, Any] | 
         return None
     context["tool_result"] = result + notice
     return context
+
+
+@harness_hook("pre_tool_call", name="phase_check", priority=20, main_only=True)
+async def check_phase_permission(context: dict[str, Any]) -> dict[str, Any] | None:
+    """shopping_summary 收尾资格底线。仅 depth 0 生效，其余工具一律放行。"""
+
+    machine = get_phase_machine()
+    if machine is None:
+        return None
+
+    if context.get("tool_name", "") != "shopping_summary":
+        return None
+
+    if not candidate_count():
+        raise HookRejectSignal(
+            "当前还没有任何候选商品，无法生成购物清单。"
+            "请先检索到候选再调 shopping_summary；若本轮并非购物意图，请改调 chat_fallback。"
+        )
+    if machine.phase is Phase.PLANNING:
+        raise HookRejectSignal(
+            "还没有为本轮做过精挑，不能直接出清单。手上的候选是上一轮按上一轮条件搜的，"
+            "请先调 planner 判断本轮意图，再用 item_picker 按本轮条件精挑，然后收尾。"
+        )
+    if "item_picker" not in context.get("called_tools", set()):
+        raise HookRejectSignal(
+            "本轮还没精挑过，不能直接出清单——收尾清单只认本轮 item_picker 的定稿，"
+            "跳过精挑会产出与候选自相矛盾的空清单。请先调 item_picker（对已入池候选"
+            "就地打分过滤，开销很小），再调 shopping_summary 收尾。"
+        )
+    return None

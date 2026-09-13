@@ -1,32 +1,20 @@
-"""pre_tool_call 硬闸：工具执行**之前**的全部拦截逻辑（Feedforward / Computational）。
+"""预算：把「再找找更好的」这个动机用额度兜死，prompt 只当辅助。
 
-弱模型的职责边界与「再找找更好的」这类死循环动机，必须用机制兜死，prompt 只当辅助。每道闸命中
-即 ``raise HookRejectSignal(哨兵文案, raw=True)``——Pipeline 立即停止后续 Hook，适配器把哨兵原文
-当作 ToolMessage 回给模型，工具**不执行**。
+    pre_think       20  budget_router         按全树成本定档：换模型 / 注入 hint / FALLBACK 不调 LLM
+    pre_tool_call   15  websearch_gate        有候选就不该拿 web_search 找更好（效率闸，带逃生门）
+    pre_tool_call   30  search_authority_gate 子搜够 / 主 loop fork 后直搜 → 拦（**读自增前计数**）
+    pre_tool_call   33  token_budget_gate     minimal 档收走成本放大器（**必须早于 35**）
+    pre_tool_call   35  fork_budget_gate      task_dispatch 次数上限，charge 即扣槽
+    pre_tool_call   45  retrieval_charge_gate 检索计数自增（**必须晚于 30**）；越线软收敛 / 硬挡
 
-priority 就是闸的执行顺序（低先执行）：
+**顺序契约（易碎，勿动）**：``search_authority``(30) 读的是 ``item_search_calls`` 的自增前值，自增在
+``retrieval_charge``(45)；谁把自增挪到 30 之前，子 Agent 的「恰好放行一次」就塌成「放行 0 次」。
+``token_budget``(33) 必须早于 ``fork_budget``(35)：fork 闸 charge 即扣槽，反过来 minimal 档下
+一次被拒的
+fork 会先烧掉唯一的并行额度。
 
-    5   terminal_reached  本轮已收尾 → 拦下一切后续工具
-    10  depth_gate        子 Agent 无权调聚合/终结/上下文工具
-    15  websearch_gate    购物流程中已有候选 → web_search 不是「找更好」的渠道
-    20  phase_check       shopping_summary 收尾资格底线（空候选/未精挑，见 phase_check.py）
-    25  sequencing        顺序断言（只警告不拒绝，见 step_validator.py）
-    30  search_authority  item_search 次数上限（读**自增前**计数）
-    33  token_budget      预算档位到 minimal → 拦成本放大器（**必须早于 35**，见该闸 docstring）
-    35  fork_budget       fork 轮数上限（charge 即扣槽，之后不该再有会拒绝 fork 的闸）
-    45  retrieval_charge  检索计数自增（**必须晚于 30**），越预算则软收敛 / 硬挡；
-                          复用轮（reuse）收紧到小预算 REUSE_RETRIEVAL_BUDGET（≥1，永不为 0）
-    48  tool_breaker      工具级熔断（见 tool_breaker.py，**必须是最后一道**：allow() 有副作用）
-
-**顺序契约（易碎，勿动）**：``search_authority``(30) 读的是 ``item_search_calls`` 的**自增前**值
-（＝之前已完成的搜索数），据此判「之前是否已搜满」；自增发生在 ``retrieval_charge``(45)。谁把
-自增挪到 30 之前，子 Agent 的「恰好放行一次」就会塌成「放行 0 次」。
-
-**效率闸 vs 安全闸**（统一逃生门，见 ``middleware._try_escape``）：依据上游**推定**的效率闸
-（websearch 动机闸、postfork 直搜闸）raise 时声明 ``escape_key``，模型连拒 2 次后放行——
-推定可能是错的，墙必须带门。依据精确**事实**的安全闸（终结/深度/子搜上限/token/fork/
-检索预算）永远硬拒：它们逃生等于预算失守，死锁风险由 liveness 看门狗兜底。复用轮的检索
-约束不再是「墙」而是小预算（永不为 0），故无需逃生门——第一次补搜天然放行。
+**效率闸 vs 安全闸**（逃生门见 ``middleware._try_escape``）：依据推定的（websearch、postfork 直搜）
+声明 ``escape_key``，连拒 2 次放行；依据事实的（子搜上限 / token / fork / 检索预算）永远硬拒。
 """
 
 from __future__ import annotations
@@ -34,27 +22,29 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from app.agent import model_router
 from app.agent.fork_guard import current_fork_depth
 from app.agent.model_router import Tier, current_tier
-from app.agent.retrieval_budget import charge_tree_retrieval, note_web_search, web_search_allowed
+from app.agent.retrieval_budget import (
+    charge_tree_retrieval,
+    note_web_search,
+    web_search_allowed,
+)
 from app.api.context import get_retrieval_mode
 from app.harness.budgets import (
     COST_AMPLIFIER_TOOLS,
-    DEPTH0_ONLY_TOOLS,
     FORK_TOOLS,
-    MAIN_ONLY_CONTEXT_TOOLS,
     RETRIEVAL_TOOLS,
     REUSE_RETRIEVAL_BUDGET,
     SUB_ITEM_SEARCH_CAP,
     get_fork_budget,
 )
 from app.harness.middleware import HookRejectSignal, harness_hook
+from app.harness.msgs import system_message
 from app.harness.sentinels import (
     BUDGET_HARD_DENIED,
-    CANCEL_WITHOUT_QUERY,
     MAIN_POSTFORK_SEARCH_DENIED,
     SUB_SEARCH_EXHAUSTED,
-    TERMINAL_REACHED_DENIED,
     WEBSEARCH_DENIED,
     retrieval_exhausted,
     reuse_backfill_note,
@@ -65,75 +55,12 @@ from app.harness.state import GuardState
 from app.observability import metrics
 from app.tools._bundle import resolve_slot
 
-logger = logging.getLogger("shoppingx.harness.gates")
+logger = logging.getLogger("shoppingx.harness.budget")
 
 
 def _state(context: dict[str, Any]) -> GuardState | None:
     guard = context.get("_guard")
     return guard if isinstance(guard, GuardState) else None
-
-
-@harness_hook("pre_tool_call", name="terminal_reached_gate", priority=5)
-async def check_terminal_reached(context: dict[str, Any]) -> dict[str, Any] | None:
-    """终结硬停（over-loop 治理）：主 loop 本轮已调过终结工具收尾 → 之后任何工具一律拦下。
-
-    断掉「调完 shopping_summary 又 item_search / 再 picker」的打转尾巴，逼模型直接输出收尾文案。
-    只对主 loop（depth==0）：子 Agent 的终结是直接吐文字、本就不调终结工具。
-    """
-    guard = _state(context)
-    if guard is None or current_fork_depth() != 0:
-        return None
-    if guard.terminal_reached:
-        raise HookRejectSignal(TERMINAL_REACHED_DENIED, raw=True)
-    return None
-
-
-@harness_hook("pre_tool_call", name="trade_sequence_gate", priority=12)
-async def check_trade_sequence(context: dict[str, Any]) -> dict[str, Any] | None:
-    """取消订单前必须先查单——**硬拒**，不是警告。
-
-    与 `step_validator` 的 sequencing 软断言是一对：那条给的是「通常应该先…」的提醒，对读操作
-    够用；取消不是读操作。模型最典型的错法是从用户一句「把上次那单取消了」里直接编一个订单号
-    调 cancel_order——编出来的号大概率不存在（那还好，会失败），但也可能**恰好命中另一张真单**。
-
-    判据是本轮轨迹里有没有 query_order，不是「查到了什么」：查了发现不存在也算查过，那时模型
-    收到的是查询工具的如实结果，它该做的是告诉用户查不到，而不是继续取消。
-    """
-    if context.get("tool_name") != "cancel_order":
-        return None
-    called: set[str] = context.get("called_tools", set())
-    if "query_order" in called:
-        return None
-    raise HookRejectSignal(CANCEL_WITHOUT_QUERY, raw=True)
-
-
-@harness_hook("pre_tool_call", name="depth_gate", priority=10)
-async def check_depth_permission(context: dict[str, Any]) -> dict[str, Any] | None:
-    """深度**断言**：worker（depth≥1）碰了主 loop 专属工具就报警——但不再拦。
-
-    **这不是闸，是发放范围的看门狗。** 真正的边界在 ``tool_registry._SEARCH_TOOLS`` /
-    ``_TRADE_TOOLS``：读写切分后 worker 的 Toolkit 里根本没有这些工具对象，模型连 schema
-    都看不到，本函数在 split 模式下**结构性不可达**（301 会话 0 触发）。它唯一的价值是
-    「将来有人往 worker 的发放范围里加错工具时，日志里有一条 error」——那是断言的职责。
-
-    2026-09-10 由 ``raise`` 降为 ``logger.error + metrics``，两点后果如实记在这：
-
-    - 一条从未被走过的异常路径消失了。留着它，等于让「边界靠什么保证」有两个答案。
-    - ``WORKER_MODE=clone`` 对照实验里 worker 拿的是全集，此前被本闸拦住；现在放行。
-      这反而让 clone 更忠实于它要复现的历史形态（M2/M9 的同质 fork 本来就没有这道闸）。
-    """
-    if current_fork_depth() < 1:
-        return None
-    tool_name = context.get("tool_name", "")
-    if tool_name in DEPTH0_ONLY_TOOLS or tool_name in MAIN_ONLY_CONTEXT_TOOLS:
-        metrics.record_security_event("worker_tool_scope_violation")
-        logger.error(
-            "发放范围异常：worker（depth=%d）拿到了主 loop 专属工具 %r——"
-            "检查 tool_registry 的 _SEARCH_TOOLS / _TRADE_TOOLS 是否加错了工具",
-            current_fork_depth(),
-            tool_name,
-        )
-    return None
 
 
 @harness_hook("pre_tool_call", name="websearch_gate", priority=15)
@@ -207,21 +134,6 @@ async def check_search_authority(context: dict[str, Any]) -> dict[str, Any] | No
     return None
 
 
-@harness_hook("pre_tool_call", name="fork_budget_gate", priority=35)
-async def check_fork_budget(context: dict[str, Any]) -> dict[str, Any] | None:
-    """对 fork 元工具计入树级 fork 预算；耗尽即硬挡。无树作用域则放行。"""
-    tool_name = context.get("tool_name", "")
-    if tool_name not in FORK_TOOLS:
-        return None
-    budget = get_fork_budget()
-    if budget is None:
-        return None
-    denied = budget.charge(tool_name)
-    if denied is not None:
-        raise HookRejectSignal(denied, raw=True)
-    return None
-
-
 @harness_hook("pre_tool_call", name="token_budget_gate", priority=33)
 async def check_token_budget(context: dict[str, Any]) -> dict[str, Any] | None:
     """预算档位到 minimal 即收走成本放大器工具，只留收尾链。
@@ -243,6 +155,21 @@ async def check_token_budget(context: dict[str, Any]) -> dict[str, Any] | None:
     tool_name = context.get("tool_name", "")
     if tool_name in COST_AMPLIFIER_TOOLS and current_tier() >= Tier.MINIMAL:
         raise HookRejectSignal(BUDGET_HARD_DENIED, raw=True)
+    return None
+
+
+@harness_hook("pre_tool_call", name="fork_budget_gate", priority=35)
+async def check_fork_budget(context: dict[str, Any]) -> dict[str, Any] | None:
+    """对 fork 元工具计入树级 fork 预算；耗尽即硬挡。无树作用域则放行。"""
+    tool_name = context.get("tool_name", "")
+    if tool_name not in FORK_TOOLS:
+        return None
+    budget = get_fork_budget()
+    if budget is None:
+        return None
+    denied = budget.charge(tool_name)
+    if denied is not None:
+        raise HookRejectSignal(denied, raw=True)
     return None
 
 
@@ -303,3 +230,57 @@ async def charge_retrieval(context: dict[str, Any]) -> dict[str, Any] | None:
         logger.info("检索预算软越线（%d/%d），追加强制收敛指令", count, cap)
         return context
     raise HookRejectSignal(retrieval_exhausted(count), raw=True)
+
+
+@harness_hook("pre_think", name="budget_router", priority=20)
+async def route_by_budget(context: dict[str, Any]) -> dict[str, Any] | None:
+    """按剩余预算定档，把决策写进 context 交给适配器执行（Hook 决策、适配器落地）。
+
+    三个出口，都不在这里直接操作模型——Hook 拿不到 ``ModelRequest``：
+
+    - ``model_tier``：适配器按档位名解析出本运行时的模型（lite / minimal 档换便宜模型）
+    - ``messages`` 追加 hint：minimal 档让模型自己也知道该收了
+    - ``fallback_answer``：适配器**跳过模型调用**，直接把这段文本当 AIMessage 返回，loop 自然终止
+
+    档位只降不升（成本单调增），所以每档只上报一次 metric——用 ``GuardState.last_tier`` 去重，
+    否则一个 20 轮的任务会把 minimal 档记 15 次，降级率统计直接失真。
+
+    全程走 ``model_router.xxx`` 而不是 ``from ... import xxx``：档位依赖全树成本，每次模型调用后都在
+    变，必须现算；模块级引用也让单测能 monkeypatch 掉整条链（import 绑定的名字打不中）。
+    """
+    guard = context.get("_guard")
+    tier = model_router.current_tier()
+
+    entered_new_tier = not isinstance(guard, GuardState) or tier.label != guard.last_tier
+    if isinstance(guard, GuardState) and entered_new_tier:
+        if tier > Tier.MAIN:  # 只记降级，不记「留在 main」
+            metrics.record_tier_change(tier.label)
+            logger.info("预算降档：%s → %s", guard.last_tier, tier.label)
+        guard.last_tier = tier.label
+
+    if tier is Tier.MAIN:
+        return None
+
+    if tier is Tier.FALLBACK:
+        # 连一次 LLM 调用都付不起了：用已有候选拼一个诚实的回答，不再进模型。
+        context["fallback_answer"] = model_router.build_fallback_answer(
+            context.get("original_query", "")
+        )
+        logger.warning("预算耗尽，走 fallback 规则兜底（不调 LLM）")
+        return context
+
+    # Hook 只产**档位名**，由适配器解析成本运行时的模型——「Hook 决策、适配器落地」的分工。
+    # 这里曾并存一个 ``model_override`` 键（装模型**对象**），生产代码零处读、只剩每次降档白
+    # 构造一个对象外加「这里在换模型」的假象，已删（批 A2）。
+    context["model_tier"] = "lite"
+
+    if tier is Tier.MINIMAL and entered_new_tier:
+        # 只在**进入** minimal 那一轮注入：hint 经 persist_messages 落 state 后长驻历史，
+        # 每轮重复注入只会攒出一摞相同提醒（且每次都斩断一次缓存前缀）。档位只降不升，
+        # 「进入过」等价于「此后每轮都看得到」。
+        messages = context.get("messages")
+        if isinstance(messages, list):
+            hint = system_message(model_router.MINIMAL_HINT, context)
+            messages.append(hint)
+            context.setdefault("persist_messages", []).append(hint)
+    return context

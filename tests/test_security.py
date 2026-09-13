@@ -10,7 +10,7 @@ import logging
 
 import pytest
 
-from app.harness.hooks.security import (
+from app.harness.hooks.safety import (
     audit_final_answer,
     check_tool_whitelist,
     filter_tool_output,
@@ -63,7 +63,7 @@ class TestToolWhitelist:
         """
         events: list[str] = []
         monkeypatch.setattr(
-            "app.harness.hooks.security.metrics.record_security_event", events.append
+            "app.harness.hooks.safety.metrics.record_security_event", events.append
         )
         with caplog.at_level(logging.ERROR, logger="shoppingx.harness.security"):
             assert await check_tool_whitelist({"tool_name": "rm_database"}) is None

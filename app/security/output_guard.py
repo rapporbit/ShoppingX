@@ -13,7 +13,7 @@
 （``dispatch_tool`` 这个名字对攻击者毫无价值，模型偶尔提到它也不构成泄露）；``item_id`` / 商品编号
 不脱（同 ``session_hooks`` 里既有的取向：宁可漏放也不误杀）。
 
-与 :mod:`app.harness.hooks.session_hooks` 的 ``output_guard`` Hook 的分工：那个洗的是 **Harness
+与 :mod:`app.harness.hooks.safety` 的 ``output_guard`` Hook 的分工：那个洗的是 **Harness
 自己的控制文案**被模型鹦鹉学舌抄进回答（``[强制收尾] …``），是「内部噪声」问题；这里洗的是
 **敏感信息泄露**，是安全问题。两者都挂在 ``on_session_end``，前者先跑（priority 10）后者后跑
 （priority 20）——先去噪再脱敏，顺序无关紧要但这样日志更好读。

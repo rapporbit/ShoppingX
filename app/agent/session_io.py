@@ -83,7 +83,7 @@ def inject_runtime_context(
     还没跑、``session_domains`` 还是空的——``injector._in_scope`` 对空域一律放行，于是模型看到的
     偏好块**必然是跨域全量**的：「买跑鞋时不要皮革」会出现在买旅行包的这一轮，模型很自觉地把
     leather 转述进 ``item_picker(exclude_keywords=...)``，硬淘汰就这么绕过域闸生效了。
-    改由 ``harness.hooks.preference_inject`` 在 planner **之后**注入域内偏好——那时域才存在。
+    改由 ``harness.hooks.context_shaping`` 在 planner **之后**注入域内偏好——那时域才存在。
     """
     parts: list[str] = []
     # 启用平台随用户设置而变（默认单平台 amazon），同属「每轮可变」——与历史/P_t 一样走

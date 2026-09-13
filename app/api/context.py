@@ -69,7 +69,7 @@ _RETRIEVAL_MODE: dict[str, str] = {}
 
 # planner 本轮判定的任务清单（recommend / price_compare / landed_cost / ...）——「用户要不要比价」
 # 同样是意图判断，只有 planner 有依据。阶段机的转移通告读它来定向（无比价诉求时提示模型跳过
-# price_compare / shipping_calc，见 harness.hooks.phase_transition）。聚合方式同 _RETRIEVAL_MODE。
+# price_compare / shipping_calc，见 harness.hooks.progress）。聚合方式同 _RETRIEVAL_MODE。
 _SESSION_TASKS: dict[str, list[str]] = {}
 
 # planner 本轮判定的收货国（ISO 码）——决定关税免征额（US $0 vs CN $7 vs AU $660，差两个数量级）。

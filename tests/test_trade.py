@@ -348,7 +348,7 @@ def _pool_hydrate(ids):  # type: ignore[no-untyped-def]
 
 async def test_cancel_without_query_is_hard_rejected() -> None:
     """顺序闸是**硬拒**：没查就取消，工具压根不执行。"""
-    from app.harness.hooks.tool_gates import check_trade_sequence
+    from app.harness.hooks.sequencing import check_trade_sequence
     from app.harness.middleware import HookRejectSignal
 
     with pytest.raises(HookRejectSignal):

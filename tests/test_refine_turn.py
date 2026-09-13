@@ -14,10 +14,9 @@ from types import SimpleNamespace
 import pytest
 
 from app.api.context import get_retrieval_mode, reset_retrieval_mode, set_retrieval_mode
-from app.harness._tool_signals import _count_candidates
-from app.harness.hooks.phase_transition import check_refine_backfill, try_phase_transition
+from app.harness.hooks.progress import check_refine_backfill, try_phase_transition
 from app.harness.phase_machine import Phase, PhaseStateMachine, set_phase_machine
-from app.harness.signals import candidate_count
+from app.harness.signals import _count_candidates, candidate_count
 from app.tools._candidates import (
     load_candidates,
     persist_candidates,
@@ -322,7 +321,7 @@ async def test_sparse_pool_without_cull_no_backfill(tmp_path: Path) -> None:
 async def test_hard_cull_notice_points_to_price_filter(tmp_path: Path) -> None:
     """杀池通告必须指到实处：超预算为主 → 带 price_usd_max 重搜（召回期过滤），
     照原样重搜只会拿回同一批超预算的货。判据与闸共用 _hard_cull_backfill_due。"""
-    from app.harness.hooks.phase_transition import append_transition_notice
+    from app.harness.hooks.progress import append_transition_notice
     from app.harness.state import GuardState
 
     with thread_scope("t-cull-notice", tmp_path):

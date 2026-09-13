@@ -1,0 +1,160 @@
+"""终结：让循环在该停的时候停下（refdocs 14 <termination> 是 P0——Agent 最常见的失败是不收尾）。
+
+    pre_think        5  liveness_watchdog     停滞 → 收敛指令 → 硬停交部分结果（主 loop）
+    pre_tool_call    5  terminal_reached_gate 本轮已调过终结工具 → 拦下一切后续工具（主 loop）
+    post_tool_call  30  mark_terminal         终结工具真实执行后置位，令上面那道闸生效
+    post_reflect    60  terminal_enforcer     纯文字收尾、没调终结工具 → 当场重发模型
+                                              （配额 per-call）
+
+四个钩子是一条链：mark_terminal 置位 → terminal_reached_gate 拦；terminal_enforcer 催软的，
+看门狗兜硬的。硬停通路本身在适配器 ``on_model_call``（直接合成收尾消息、置 terminal_reached）。
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from typing import Any
+
+from app.agent.fork_guard import current_fork_depth
+from app.harness.budgets import (
+    MAX_TERMINAL_NUDGE_RETRIES,
+    TERMINAL_TOOLS,
+)
+from app.harness.middleware import HookRejectSignal, harness_hook
+from app.harness.msgs import system_message
+from app.harness.sentinels import (
+    TERMINAL_REACHED_DENIED,
+    TERMINAL_TOOL_NUDGE,
+)
+from app.harness.signals import candidate_count
+from app.harness.state import GuardState
+from app.utils.env import env_int
+
+logger = logging.getLogger("shoppingx.harness.termination")
+
+
+def _state(context: dict[str, Any]) -> GuardState | None:
+    guard = context.get("_guard")
+    return guard if isinstance(guard, GuardState) else None
+
+
+@harness_hook("pre_tool_call", name="terminal_reached_gate", priority=5)
+async def check_terminal_reached(context: dict[str, Any]) -> dict[str, Any] | None:
+    """终结硬停（over-loop 治理）：主 loop 本轮已调过终结工具收尾 → 之后任何工具一律拦下。
+
+    断掉「调完 shopping_summary 又 item_search / 再 picker」的打转尾巴，逼模型直接输出收尾文案。
+    只对主 loop（depth==0）：子 Agent 的终结是直接吐文字、本就不调终结工具。
+    """
+    guard = _state(context)
+    if guard is None or current_fork_depth() != 0:
+        return None
+    if guard.terminal_reached:
+        raise HookRejectSignal(TERMINAL_REACHED_DENIED, raw=True)
+    return None
+
+
+@harness_hook("post_tool_call", name="mark_terminal", priority=30)
+async def mark_terminal(context: dict[str, Any]) -> dict[str, Any] | None:
+    """本次是主 loop 真实执行的终结工具 → 置位，令后续工具被终结硬停闸拦下。
+
+    只在工具真执行（过了各闸）后调，故被深度闸/预算闸拦掉的终结调用不会误置位。
+    """
+    guard = _state(context)
+    if guard is None:
+        return None
+    if current_fork_depth() == 0 and context.get("tool_name") in TERMINAL_TOOLS:
+        guard.terminal_reached = True
+    return None
+
+
+@harness_hook("post_reflect", name="terminal_enforcer", priority=60, main_only=True)
+async def enforce_terminal(context: dict[str, Any]) -> dict[str, Any] | None:
+    """模型没调工具就想收尾、且**本轮**从未调过终结工具 → 请适配器重发一次模型。
+
+    「本轮调过哪些工具」只认 ``called_tools``（``HarnessSession`` 每轮新建，工具真执行成功
+    才记——被闸拒绝的、返回 ERROR 的都不算）。此前这里是自己去扫 ``messages`` 找 tool_result
+    （审查报告 P1-4：同一事实四个来源），**那个来源在续聊轮是错的**：messages 含恢复回来的
+    历史，上一轮调过 shopping_summary，这一轮模型空口收尾也会被判成「调过了」而放行。
+    """
+    guard = context.get("_guard")
+    if not isinstance(guard, GuardState):
+        return None
+    if guard.terminal_nudge_retries >= MAX_TERMINAL_NUDGE_RETRIES:
+        return None  # 模型持续不听指令时不无限重试
+
+    if context.get("response_has_tool_calls"):
+        return None  # 它还在调工具，loop 会继续，不需要催
+    if context.get("response_ai_message") is None:
+        return None
+    called: set[str] = context.get("called_tools", set())
+    if called & TERMINAL_TOOLS:
+        return None  # 本轮已调过终结工具，这是它之后的自然收尾文字，正常放行
+
+    guard.terminal_nudge_retries += 1
+    context["retry_nudge"] = TERMINAL_TOOL_NUDGE
+    logger.info("模型未调终结工具就想收尾，追加提示重发一次")
+    return context
+
+
+WATCHDOG_STALL_SEC = env_int("WATCHDOG_STALL_SEC", 45)
+WATCHDOG_GRACE_SEC = env_int("WATCHDOG_GRACE_SEC", 30)
+
+_CONVERGE_NOTICE = (
+    "[系统看门狗] 任务已较长时间没有实质进展。请立即停止当前方向的重试，"
+    "就用手头已有的信息收尾：\n"
+    "- 已有候选 → 立刻调 shopping_summary 给出清单，如实说明未完成的部分与原因；\n"
+    "- 没有候选或非购物请求 → 立刻调 chat_fallback 如实说明目前做不到、建议用户怎么调整。\n"
+    "除这两个终结工具外，不要再调用其他工具。"
+)
+
+
+def _partial_answer() -> str:
+    """硬停时交给用户的部分结果——如实报告进展到哪、建议怎么重试。"""
+    n = candidate_count()
+    if n > 0:
+        return (
+            "抱歉，这个请求处理了很久仍未收敛，为免让你干等，我先停在这里。\n\n"
+            f"目前进展：已检索到 {n} 件候选商品，但还没完成按你条件的精挑与最终清单。\n"
+            "你可以把需求说得更具体一点（明确品类、预算、必须满足的条件），"
+            "或者拆成几个小问题再发给我，我会重新处理。"
+        )
+    return (
+        "抱歉，这个请求处理了很久仍未取得实质进展，为免让你干等，我先停在这里。\n"
+        "换个说法或把需求拆小一点再试一次，我会重新处理。"
+    )
+
+
+@harness_hook("pre_think", name="liveness_watchdog", priority=5, main_only=True)
+async def check_liveness(context: dict[str, Any]) -> dict[str, Any] | None:
+    """每次唤起模型前查一次停滞时长。仅主 loop（depth 0）。"""
+    guard = context.get("_guard")
+    if not isinstance(guard, GuardState):
+        return None
+
+    now = time.monotonic()
+    if guard.last_progress_at <= 0:
+        guard.last_progress_at = now  # 开表：从第一次 Think 起算
+        return None
+
+    stall = now - guard.last_progress_at
+    if stall < WATCHDOG_STALL_SEC:
+        guard.watchdog_nudged_at = 0.0  # 有过进展即解除武装（与 awrap_tool_call 的复位互为冗余）
+        return None
+
+    if guard.watchdog_nudged_at <= 0:
+        guard.watchdog_nudged_at = now
+        logger.warning("看门狗：%d 秒无实质进展，注入强制收敛指令", int(stall))
+        context["messages"] = [*context["messages"], system_message(_CONVERGE_NOTICE, context)]
+        return context
+
+    if now - guard.watchdog_nudged_at < WATCHDOG_GRACE_SEC:
+        return None
+
+    logger.error(
+        "看门狗：收敛指令后 %d 秒仍无进展，硬停交部分结果（停滞共 %d 秒）",
+        int(now - guard.watchdog_nudged_at),
+        int(stall),
+    )
+    context["fallback_answer"] = _partial_answer()
+    return context

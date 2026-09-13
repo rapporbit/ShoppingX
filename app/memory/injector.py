@@ -56,7 +56,7 @@ def _in_scope(entry: PreferenceEntry, domains: list[str]) -> bool:
     这里曾是 fail-open（空域一律放行），而那正是「买旅行包时差点被『买跑鞋不要皮革』误杀」那条
     bug 的最后一块拼图：偏好块拼进当轮 human 时 planner 还没跑，域必然是空的，于是域闸整个短路，
     模型看到跨域偏好、把它转述进 item_picker 拿到了硬淘汰权。注入挪到 planner 之后
-    （``harness.hooks.preference_inject``）后，空域只剩一种含义——**planner 真的判不出品类**——
+    （``harness.hooks.context_shaping``）后，空域只剩一种含义——**planner 真的判不出品类**——
     这时正确的失效方向是保守：宁可让偏好本轮不生效（用户再说一遍即可），也不能让它在一个我们
     根本不知道是什么品类的轮次里静默杀商品（用户归因不了，只会觉得「这破 Agent 老搜不出东西」）。
     与 :data:`DOMAIN_OTHER` 落保守档是同一条哲学（见 ``memory.domains`` 的模块 docstring）。
