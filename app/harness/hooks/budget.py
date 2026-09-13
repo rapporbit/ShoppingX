@@ -15,6 +15,13 @@ fork 会先烧掉唯一的并行额度。
 
 **效率闸 vs 安全闸**（逃生门见 ``middleware._try_escape``）：依据推定的（websearch、postfork 直搜）
 声明 ``escape_key``，连拒 2 次放行；依据事实的（子搜上限 / token / fork / 检索预算）永远硬拒。
+**预算的定义住在哪（消费在本文件，定义分两个包，改额度先找对地方）**：
+- 检索：全树计数与 web_search 任务配额在 ``app/agent/retrieval_budget.py``；上限 / 复用轮小预算 /
+  子搜上限 / 工具集合在 ``app/harness/budgets.py``。
+- fork：派发次数 ``ForkBudget`` 与并发信号量在 ``app/harness/budgets.py``；深度上限在
+  ``app/agent/fork_guard.py``（读 ``app/agent/limits.py``）。
+- token / 成本：全树成本与四档 ``Tier`` 在 ``app/agent/token_budget.py`` / ``model_router.py``。
+- 一次失控最多烧多少（超时 / max_iters / 深度 / 派发数）：``app/agent/limits.py`` 一页看全。
 """
 
 from __future__ import annotations
