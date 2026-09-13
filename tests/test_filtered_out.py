@@ -270,14 +270,14 @@ async def test_diagnostics_side_channel_reaches_adapter(tiny_search: Any, tmp_pa
     """
     from types import SimpleNamespace
 
-    from app.harness.adapter import _collect_call_signals
+    from app.harness.session import collect_call_signals
 
     mod = await tiny_search()
     with thread_scope("t-probe-signal", tmp_path):
         out = await mod.item_search.ainvoke(
             {"query": "canvas travel bag", "platform": "amazon", "price_usd_max": 5.0}
         )
-        signals = _collect_call_signals(
+        signals = collect_call_signals(
             SimpleNamespace(fresh_candidates=0),  # type: ignore[arg-type]
             "item_search",
             str(out),

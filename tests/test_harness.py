@@ -1177,11 +1177,11 @@ class TestDriftWiring:
     @pytest.mark.asyncio
     async def test_token_history_is_populated(self, clean_phase, monkeypatch) -> None:
         """信号 4：token_history 必须真的有人写——旧实现从无写入点，成本失控是死代码。"""
-        import app.harness.adapter as adapter_mod
+        import app.harness.session as session_mod
 
         totals = iter([100, 250, 500])
         monkeypatch.setattr(
-            adapter_mod, "tree_snapshot", lambda: {"input_tokens": next(totals), "output_tokens": 0}
+            session_mod, "tree_snapshot", lambda: {"input_tokens": next(totals), "output_tokens": 0}
         )
         set_phase_machine(PhaseStateMachine(Phase.SEARCHING))
         mw = _mw()

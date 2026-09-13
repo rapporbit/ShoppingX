@@ -20,7 +20,7 @@ from app.harness.signals import _summarize_call
 if TYPE_CHECKING:
     from agentscope.agent import Agent
 
-    from app.harness.adapter import HarnessSession
+    from app.harness.session import HarnessSession
 
 logger = logging.getLogger("shoppingx.harness.prefill")
 
