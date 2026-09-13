@@ -18,6 +18,9 @@ import { PreferenceDrawer } from "./components/PreferenceDrawer";
 import { OrderCard } from "./components/OrderCard";
 import { OrdersDrawer } from "./components/OrdersDrawer";
 import { ProductCards } from "./components/ProductCards";
+import { ProductDetail } from "./components/ProductDetail";
+import { ProductComparison } from "./components/ProductComparison";
+import { OrderIntentForm } from "./components/OrderIntentForm";
 import { QueryImages } from "./components/QueryImages";
 import { SimilarDrawer } from "./components/SimilarDrawer";
 import { SettingsDrawer } from "./components/SettingsDrawer";
@@ -185,6 +188,25 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
   const [ordersOpen, setOrdersOpen] = useState(false);
   // 「搜同款」抽屉：存的是**源商品**（点了哪张卡），非 null 即打开——相似结果由抽屉自己现拉。
   const [similarOf, setSimilarOf] = useState<ProductItem | null>(null);
+
+  // 商品详情 / 对比 / 下单意向：都是针对「眼前这几件」的动作，状态只活在本页，不落盘。
+  const [detailOf, setDetailOf] = useState<ProductItem | null>(null);
+  const [orderIntentOf, setOrderIntentOf] = useState<ProductItem | null>(null);
+  const [compareList, setCompareList] = useState<ProductItem[]>([]);
+  const [compareOpen, setCompareOpen] = useState(false);
+  const compareIds = useMemo(() => new Set(compareList.map((c) => c.item_id)), [compareList]);
+  const COMPARE_MAX = 4;
+  const toggleCompare = (item: ProductItem) => {
+    setCompareList((cur) =>
+      cur.some((c) => c.item_id === item.item_id)
+        ? cur.filter((c) => c.item_id !== item.item_id)
+        : cur.length >= COMPARE_MAX
+          ? cur
+          : [...cur, item],
+    );
+  };
+  // 详情 / 对比 / 表单要「说一句话」时都走这条：跟输入框发消息完全同一条路。
+  const say = (text: string) => startTask(text, userId);
 
   // 收藏（♡）：用户级、跨会话、以回看为主 —— 不进 prompt、不进长期偏好库，但会经 app.memory.affinity
   // 聚合成弱信号，在 item_picker 精挑里给同类属性小幅加分（只上浮不淘汰）。开局拉一次就够（抽屉打开时自己会再刷）。
@@ -398,12 +420,23 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
                               favorited={favoriteIds}
                               onFavorite={handleFavorite}
                               onSimilar={setSimilarOf}
+                              compared={compareIds}
+                              onDetail={setDetailOf}
+                              onCompare={toggleCompare}
                             />
                           )}
 
                           {/* 订单卡（交易域）：确认卡 / 下单成功 / 已取消。放在商品卡之后——
                               先看到买的是什么，再看到这单的状态。 */}
-                          {turn.orderCard && <OrderCard payload={turn.orderCard} />}
+                          {/* 按钮只挂最后一轮：历史轮的确认卡早已被后面的对话覆盖，点它没有意义。 */}
+                          {turn.orderCard && (
+                            <OrderCard
+                              payload={turn.orderCard}
+                              busy={running || waiting || !isLast}
+                              onConfirm={isLast ? () => say("确认下单") : undefined}
+                              onDecline={isLast ? () => say("这张确认卡先不下单了，取消它。") : undefined}
+                            />
+                          )}
 
                           {/* 本轮结束后在右下角用小字标注用时 + token 消耗（后端权威口径，实时与回看一致）。
                               token 总量主显，hover 看输入/输出/成本拆分（全树记账，含 fork 子 Agent）。 */}
@@ -438,6 +471,20 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
             )}
           </div>
         </main>
+
+        {compareList.length > 0 && (
+          <div className="compare-bar">
+            <span>
+              已选 <strong>{compareList.length}</strong> / {COMPARE_MAX} 件对比
+            </span>
+            <button className="btn-ghost" onClick={() => setCompareList([])}>
+              清空
+            </button>
+            <button className="btn-primary" onClick={() => setCompareOpen(true)}>
+              对比
+            </button>
+          </div>
+        )}
 
         <InputBar
           running={running}
@@ -480,6 +527,36 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
       <OrdersDrawer open={ordersOpen} onClose={() => setOrdersOpen(false)} />
 
       <SimilarDrawer source={similarOf} onClose={() => setSimilarOf(null)} />
+
+      <ProductDetail
+        item={detailOf}
+        favorited={detailOf ? favoriteIds.has(detailOf.item_id) : false}
+        compared={detailOf ? compareIds.has(detailOf.item_id) : false}
+        busy={running || waiting}
+        onClose={() => setDetailOf(null)}
+        onFavorite={(it, undo) => void handleFavorite(it, undo)}
+        onSimilar={(it) => {
+          setDetailOf(null);
+          setSimilarOf(it);
+        }}
+        onCompare={toggleCompare}
+        onOrder={(it) => {
+          setDetailOf(null);
+          setOrderIntentOf(it);
+        }}
+      />
+
+      <ProductComparison
+        open={compareOpen}
+        items={compareList}
+        busy={running || waiting}
+        onClose={() => setCompareOpen(false)}
+        onRemove={toggleCompare}
+        onClear={() => setCompareList([])}
+        onAsk={say}
+      />
+
+      <OrderIntentForm item={orderIntentOf} onClose={() => setOrderIntentOf(null)} onSubmit={say} />
 
       <AdminDrawer open={adminOpen} onClose={() => setAdminOpen(false)} />
 

@@ -180,11 +180,43 @@ export function PreferenceDrawer({
 
         <ProfileForm userId={userId} prefs={prefs} onSaved={setPrefs} />
 
-        {threadId && session && session.constraints.length > 0 && (
+        {threadId &&
+          session &&
+          (session.constraints.length > 0 || session.current_intent || session.category) && (
           <section className="pref-section">
             <div className="pref-section-title">
               本次会话 <span className="pref-count">{session.constraints.length}</span>
             </div>
+            {/* 选购摘要：Agent 当前以为你要什么（意图 / 品类 / 预算 / 已定槽位）。它理解偏了，
+                在对话里纠正一句即可；这里只负责让偏差看得见。 */}
+            {(session.current_intent || session.category || session.budget_usd != null) && (
+              <dl className="session-summary">
+                {session.current_intent && (
+                  <div>
+                    <dt>当前需求</dt>
+                    <dd>{session.current_intent}</dd>
+                  </div>
+                )}
+                {session.category && (
+                  <div>
+                    <dt>品类</dt>
+                    <dd>{session.category}</dd>
+                  </div>
+                )}
+                {session.budget_usd != null && (
+                  <div>
+                    <dt>预算</dt>
+                    <dd>${session.budget_usd.toFixed(0)}</dd>
+                  </div>
+                )}
+                {Object.entries(session.slots ?? {}).map(([k, v]) => (
+                  <div key={k}>
+                    <dt>{k}</dt>
+                    <dd>{v}</dd>
+                  </div>
+                ))}
+              </dl>
+            )}
             <div className="pref-section-hint">
               这次聊天里记下的临时约束（会话结束自动清）。记错了点 × 删掉，立刻不再生效。
             </div>

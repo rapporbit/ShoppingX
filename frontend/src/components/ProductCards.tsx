@@ -1,25 +1,13 @@
 import { useMemo, useState } from "react";
 import type { ProductItem } from "../types";
 import { CheckIcon, ExternalLinkIcon, GlobeIcon, SearchIcon } from "./icons";
+import { platformName, shownPrice, splitReasons } from "./productText";
 
 // 商品结果区（复刻 Accio）：平台筛选胶囊 + 商品卡网格。卡片把 shopping_summary 随 task_result
 // 下发的结构化精选商品（平台 / 到手价 / 选购理由 / 商品图）呈现成「看得见」的卡。
 //
 // 图区优先显示数据集里的真实商品图（image_url）；URL 缺失或加载失败时，才回退到「按 item_id
 // 派生的稳定柔和渐变 + 平台名」占位——不伪造图片，也不让裂图破坏版式。
-
-// 与后端 app/utils/clean.py 的 PLATFORMS 对齐（eBay 在清洗阶段整体剔除，库里没有它的商品）。
-const PLATFORM_LABEL: Record<string, string> = {
-  amazon: "Amazon",
-  lazada: "Lazada",
-  shein: "SHEIN",
-  shopee: "Shopee",
-  walmart: "Walmart",
-};
-
-function platformName(p: string): string {
-  return PLATFORM_LABEL[p.toLowerCase()] ?? p;
-}
 
 // 由 item_id 派生稳定色相，给图区一个不抖动的柔和渐变（同一商品每次渲染一致）。
 function hueFrom(seed: string): number {
@@ -59,18 +47,21 @@ function Thumb({ item }: { item: ProductItem }) {
 function Card({
   item,
   favorited,
+  compared,
   onFavorite,
   onSimilar,
+  onDetail,
+  onCompare,
 }: {
   item: ProductItem;
   favorited: boolean;
+  compared: boolean;
   onFavorite: (item: ProductItem, undo: boolean) => void;
   onSimilar: (item: ProductItem) => void;
+  onDetail: (item: ProductItem) => void;
+  onCompare: (item: ProductItem) => void;
 }) {
-  const reasons = (item.reason ?? "")
-    .split(/[；;\n]+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const reasons = splitReasons(item.reason);
 
   // 有商品页 URL 才让整卡可点：渲染成新标签页打开的链接（外站，带 noreferrer）。无 URL 退化为
   // 普通 article（不可点）——离线数据偶有缺链，宁可不可点也不给死链。
@@ -85,6 +76,12 @@ function Card({
     e.preventDefault();
     e.stopPropagation();
     onFavorite(item, favorited);
+  };
+
+  const stop = (fn: () => void) => (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    fn();
   };
 
   const openSimilar = (e: React.MouseEvent) => {
@@ -150,21 +147,28 @@ function Card({
           </div>
         )}
 
-        {/* 搜同款：一次纯向量近邻检索（不过 Agent、不烧 LLM），结果在右侧抽屉里给。 */}
-        <button className="card-similar" onClick={openSimilar} title="按商品向量找相似商品">
-          <SearchIcon width={13} height={13} />
-          搜同款
-        </button>
+        {/* 卡内动作：详情 / 对比 / 搜同款。整卡是 <a>，三个按钮都得自己吃掉点击。
+            搜同款是一次纯向量近邻检索（不过 Agent、不烧 LLM），结果在右侧抽屉里给。 */}
+        <div className="card-actions">
+          <button className="card-similar" onClick={stop(() => onDetail(item))} title="看大图与全部理由">
+            详情
+          </button>
+          <button
+            className={`card-similar ${compared ? "on" : ""}`}
+            aria-pressed={compared}
+            onClick={stop(() => onCompare(item))}
+            title={compared ? "移出对比" : "加入对比（最多 4 件）"}
+          >
+            {compared ? "✓ 对比中" : "对比"}
+          </button>
+          <button className="card-similar" onClick={openSimilar} title="按商品向量找相似商品">
+            <SearchIcon width={13} height={13} />
+            搜同款
+          </button>
+        </div>
       </div>
     </Wrapper>
   );
-}
-
-// 一件商品的展示价：优先到手价（含税运），没算过就用货价——只取数字，口径由卡片自己标注。
-function shownPrice(it: ProductItem): number | null {
-  if (typeof it.landed_usd === "number") return it.landed_usd;
-  if (typeof it.price_usd === "number") return it.price_usd;
-  return null;
 }
 
 // 槽位轮的分组视图：按槽位（床品 / 台灯 / …）分节渲染，组头带槽名与该槽花费。平台胶囊在
@@ -176,13 +180,19 @@ function shownPrice(it: ProductItem): number | null {
 function BundleGroups({
   items,
   favorited,
+  compared,
   onFavorite,
   onSimilar,
+  onDetail,
+  onCompare,
 }: {
   items: ProductItem[];
   favorited: Set<string>;
+  compared: Set<string>;
   onFavorite: (item: ProductItem, undo: boolean) => void;
   onSimilar: (item: ProductItem) => void;
+  onDetail: (item: ProductItem) => void;
+  onCompare: (item: ProductItem) => void;
 }) {
   // 保序分组：槽的顺序 = 后端组合优选给出的顺序（essential 在前），不重排。
   const groups: { slot: string; items: ProductItem[] }[] = [];
@@ -216,8 +226,11 @@ function BundleGroups({
               <Card
                 item={g.items[0]}
                 favorited={favorited.has(g.items[0].item_id)}
+                compared={compared.has(g.items[0].item_id)}
                 onFavorite={onFavorite}
                 onSimilar={onSimilar}
+                onDetail={onDetail}
+                onCompare={onCompare}
               />
             </div>
           ))}
@@ -247,8 +260,11 @@ function BundleGroups({
                   key={`${it.platform}-${it.item_id}`}
                   item={it}
                   favorited={favorited.has(it.item_id)}
+                compared={compared.has(it.item_id)}
                   onFavorite={onFavorite}
                   onSimilar={onSimilar}
+                onDetail={onDetail}
+                onCompare={onCompare}
                 />
               ))}
             </div>
@@ -270,13 +286,19 @@ function BundleGroups({
 export function ProductCards({
   items,
   favorited,
+  compared,
   onFavorite,
   onSimilar,
+  onDetail,
+  onCompare,
 }: {
   items: ProductItem[];
   favorited: Set<string>;
+  compared: Set<string>;
   onFavorite: (item: ProductItem, undo: boolean) => void;
   onSimilar: (item: ProductItem) => void;
+  onDetail: (item: ProductItem) => void;
+  onCompare: (item: ProductItem) => void;
 }) {
   const [active, setActive] = useState<string>("all");
 
@@ -294,8 +316,11 @@ export function ProductCards({
       <BundleGroups
         items={items}
         favorited={favorited}
+        compared={compared}
         onFavorite={onFavorite}
         onSimilar={onSimilar}
+                onDetail={onDetail}
+                onCompare={onCompare}
       />
     );
   }
@@ -335,8 +360,11 @@ export function ProductCards({
             key={`${it.platform}-${it.item_id}`}
             item={it}
             favorited={favorited.has(it.item_id)}
+                compared={compared.has(it.item_id)}
             onFavorite={onFavorite}
             onSimilar={onSimilar}
+                onDetail={onDetail}
+                onCompare={onCompare}
           />
         ))}
       </div>

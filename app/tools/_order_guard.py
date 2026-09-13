@@ -15,10 +15,17 @@ TradeAgent 认得。
 
 from __future__ import annotations
 
+import time
+from datetime import UTC, datetime
+
 from app.api.context import get_session_dir
 
-# session_dir(str) -> 已出过确认卡的商品组指纹集合
-_CONFIRMED_PREVIEWS: dict[str, set[str]] = {}
+# 确认卡有效期：出卡后超过这个时长，「确认」不再直接落库，而是重新出一张卡（价格 / 候选可能
+# 已经变了，让用户再看一眼）。前端据 expires_at 画倒计时并在过期后灰掉按钮。
+PREVIEW_TTL_SECONDS = 30 * 60
+
+# session_dir(str) -> {商品组指纹: 出卡时刻（epoch 秒）}
+_CONFIRMED_PREVIEWS: dict[str, dict[str, float]] = {}
 
 
 def _key() -> str | None:
@@ -35,12 +42,26 @@ def preview_fingerprint(item_ids: list[str]) -> str:
     return ",".join(sorted(set(item_ids)))
 
 
-def mark_preview_shown(item_ids: list[str]) -> None:
-    """记下「这组商品出过确认卡」。"""
+def _iso(ts: float) -> str:
+    return datetime.fromtimestamp(ts, tz=UTC).isoformat()
+
+
+def mark_preview_shown(item_ids: list[str]) -> str:
+    """记下「这组商品出过确认卡」，返回这张卡的失效时刻（UTC ISO）。"""
+    shown_at = time.time()
+    key = _key()
+    if key is not None:
+        _CONFIRMED_PREVIEWS.setdefault(key, {})[preview_fingerprint(item_ids)] = shown_at
+    return _iso(shown_at + PREVIEW_TTL_SECONDS)
+
+
+def preview_expired(item_ids: list[str]) -> bool:
+    """这组商品出过确认卡、但卡已过了有效期。没出过卡返回 False（那是另一种情况）。"""
     key = _key()
     if key is None:
-        return
-    _CONFIRMED_PREVIEWS.setdefault(key, set()).add(preview_fingerprint(item_ids))
+        return False
+    shown_at = _CONFIRMED_PREVIEWS.get(key, {}).get(preview_fingerprint(item_ids))
+    return shown_at is not None and time.time() - shown_at > PREVIEW_TTL_SECONDS
 
 
 def preview_shown(item_ids: list[str]) -> bool:
@@ -52,7 +73,8 @@ def preview_shown(item_ids: list[str]) -> bool:
     key = _key()
     if key is None:
         return True
-    return preview_fingerprint(item_ids) in _CONFIRMED_PREVIEWS.get(key, set())
+    shown_at = _CONFIRMED_PREVIEWS.get(key, {}).get(preview_fingerprint(item_ids))
+    return shown_at is not None and time.time() - shown_at <= PREVIEW_TTL_SECONDS
 
 
 def reset_order_guard() -> None:
