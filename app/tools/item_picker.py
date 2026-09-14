@@ -203,7 +203,8 @@ def _load_params() -> None:
     # 20→8（2026-07 相机 bad case 的 token 审计）：一次吐 20 件 ×（长标题 + 理由句）≈2,700 tokens，
     # 是整条链最大的单条工具结果、且此后每步解码都要重读；而池子通常 10~30 件、最终清单只要 5~6 件。
     # 只收紧**渲染给模型的件数**——登记表仍是全量，收尾按 id hydrate 不受影响。
-    PICK_DISPLAY_CAP = env_int("PICK_DISPLAY_CAP", 8)
+    # 8→3（2026-09 响应速度）：清单只给 3 件，且每件都由收尾 LLM 写选购理由（见 shopping_summary）。
+    PICK_DISPLAY_CAP = env_int("PICK_DISPLAY_CAP", 3)
 
     # 展示相对门：cross-encoder 品类相关分显著低于池内头部的候选，判为「品类不够相符」，宁缺毋滥
     # **不凑数展示**（哪怕没填满 PICK_DISPLAY_CAP）——单平台池小时尤要紧：老的「按分填满」策略会把
@@ -467,8 +468,8 @@ async def item_picker(
       - deprioritize_keywords：**软性避讳词**，命中减分但**不淘汰**（Attenuator）。用于用户
         「不太喜欢 / 尽量避免」这类非绝对排斥（如 ["塑料感","太花哨"]），通常来自 planner 的
         soft_dislikes。绝对不要的走 exclude_keywords（硬淘汰），别混。
-      - top_k：最终保留件数上界，默认 = 展示上限 20。语义是「把所有合适候选都留下，
-        但最多 20 件」——不要传一个很小的数把合适的候选砍掉；机制会再封一道 20 的顶。
+      - top_k：最终保留件数上界，默认 = 展示上限 3。语义是「把合适候选留下，但最多 3 件」
+        ——机制会再封一道展示上限的顶，传更大的数也没用。
 
     注：用户的长期偏好与本轮会话约束（P_t）都会**确定性并入**，不依赖模型每轮自觉转述——装配与
     授权规则见 :func:`app.memory.assemble.assemble`（硬淘汰只给用户亲手勾的黑名单 + 本轮亲口说的
