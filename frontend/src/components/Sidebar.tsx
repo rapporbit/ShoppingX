@@ -1,19 +1,51 @@
-import { CloseIcon, ComposeIcon, HeartIcon } from "./icons";
+import { CloseIcon, ComposeIcon, HeartIcon, ListIcon, SparkleIcon } from "./icons";
 import type { SessionMeta } from "../types";
 
-// 左侧会话栏：顶部「新建对话」，中部历史对话列表（点条目切会话 / 悬停可删），底部「长期偏好」。
+// 左侧栏：品牌 → 「新建对话」 → 主导航（收藏 / 订单 / Skill / 长期偏好）→ 历史对话列表。
+// 主导航从顶栏搬下来：这四个都是「我的东西」，放侧栏才是导航，堆顶栏像调试面板。
 // 历史列表的会话索引由 useShoppingXTask 维护在 localStorage（后端只按 threadId 存逐轮对话，无会话清单层）。
+export type SidebarPanel = "favorites" | "orders" | "skills" | "preferences";
+
 type SidebarProps = {
   sessions: SessionMeta[];
   activeThreadId: string | null;
   onNewChat: () => void;
   onSelectConversation: (threadId: string) => void;
   onDeleteConversation: (threadId: string) => void;
-  onOpenPreferences: () => void;
-  prefsOpen: boolean;
+  // 打开某个面板（右侧抽屉）；activePanel 决定哪一项高亮，null = 都没开
+  onOpenPanel: (panel: SidebarPanel) => void;
+  activePanel: SidebarPanel | null;
+  favoriteCount: number;
   // 窄屏下侧栏是抽屉，open 决定它是否滑入；宽屏侧栏常驻，这个 class 不起作用。
   open: boolean;
 };
+
+const NAV: { id: SidebarPanel; label: string; icon: JSX.Element; title: string }[] = [
+  {
+    id: "favorites",
+    label: "收藏",
+    icon: <HeartIcon width={17} height={17} />,
+    title: "我收藏的商品（收藏多了会轻微影响精挑排序）",
+  },
+  {
+    id: "orders",
+    label: "订单",
+    icon: <ListIcon width={17} height={17} />,
+    title: "我的订单（模拟交易，无支付与物流）",
+  },
+  {
+    id: "skills",
+    label: "Skill",
+    icon: <span className="nav-glyph">/</span>,
+    title: "我的 Skill：自写选购方案，输入框敲 / 可选用",
+  },
+  {
+    id: "preferences",
+    label: "长期偏好",
+    icon: <SparkleIcon width={17} height={17} />,
+    title: "长期偏好：会注入提示词，显式改变推荐",
+  },
+];
 
 export function Sidebar({
   sessions,
@@ -21,8 +53,9 @@ export function Sidebar({
   onNewChat,
   onSelectConversation,
   onDeleteConversation,
-  onOpenPreferences,
-  prefsOpen,
+  onOpenPanel,
+  activePanel,
+  favoriteCount,
   open,
 }: SidebarProps) {
   return (
@@ -40,6 +73,23 @@ export function Sidebar({
         <ComposeIcon width={18} height={18} />
         新建对话
       </button>
+
+      <div className="sidebar-nav">
+        {NAV.map((item) => (
+          <button
+            key={item.id}
+            className={`sidebar-nav-item ${activePanel === item.id ? "active" : ""}`}
+            onClick={() => onOpenPanel(item.id)}
+            title={item.title}
+          >
+            {item.icon}
+            <span>{item.label}</span>
+            {item.id === "favorites" && favoriteCount > 0 && (
+              <span className="nav-count">{favoriteCount}</span>
+            )}
+          </button>
+        ))}
+      </div>
 
       <div className="history">
         <div className="history-label">历史对话</div>
@@ -72,14 +122,6 @@ export function Sidebar({
           </ul>
         )}
       </div>
-
-      <button
-        className={`sidebar-foot-btn ${prefsOpen ? "active" : ""}`}
-        onClick={onOpenPreferences}
-      >
-        <HeartIcon width={18} height={18} />
-        长期偏好
-      </button>
     </nav>
   );
 }
