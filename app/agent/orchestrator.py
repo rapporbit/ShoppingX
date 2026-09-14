@@ -38,6 +38,7 @@ from app.agent.session_io import (
     inject_runtime_context,
     write_session_artifacts,
 )
+from app.agent.skills import render_selected_skill, resolve_selected_skill
 from app.agent.token_budget import budget_status, set_task_cap, tree_snapshot
 from app.agent.token_budget import reset_tree as reset_token_tree
 from app.agent.tracing import current_trace_id, turn_span
@@ -275,8 +276,13 @@ async def run_agent(
     user_id: str | None = None,
     platforms: Sequence[str] | None = None,
     image_paths: Sequence[str] | None = None,
+    skill: str | None = None,
 ) -> dict[str, Any]:
     """主 AgentLoop 的入口：一轮任务从这里进、从这里出。
+
+    ``skill``：用户在输入框 ``/`` 显式选中的 skill 目录名。服务端在首次模型调用前校验归属并把
+    正文拼进本轮用户消息（``authority=reference_only``）；找不到就报错结束本轮，**不静默降级
+    成普通搜索**——用户点了方案却被无视，比明说「方案已失效」更糟。
 
     返回 ``{thread_id, trace_id, final_text, messages, items, learned_preferences}``。
     异常都先上报（task_cancelled / error）再向上抛，让 API 层决定怎么响应。
@@ -324,6 +330,13 @@ async def run_agent(
 
         begin_learned_prefs()
 
+        selected_skill: tuple[str, str] | None = None
+        if skill:
+            selected_skill = await resolve_selected_skill(skill)
+            if selected_skill is None:
+                await monitor.report_error("SkillNotFound", f"所选方案 {skill!r} 不存在或已删除")
+                raise LookupError(f"所选方案 {skill!r} 不存在或已删除，请刷新后重选")
+
         # 入口只读近期行为历史；长期偏好等 planner 判出品类域之后由 preference_inject 注入
         # （在这里读等于跨域全量注入，见 session_io.inject_runtime_context 的说明）。
         history_block = await build_history_block(user_id or "")
@@ -341,7 +354,8 @@ async def run_agent(
         cache_key = await _turn_cache_key(
             query,
             user_id,
-            first_turn=prior_state is None,
+            # 显式选了 skill 的轮次不参与整轮缓存：答案依赖方案正文，而正文不在 key 里。
+            first_turn=prior_state is None and selected_skill is None,
             prompt_version=ab_assign.version,
         )
         if cache_key is not None:
@@ -362,6 +376,8 @@ async def run_agent(
             enabled_platforms,
             image_paths=tuple(image_paths or ()),
         )
+        if selected_skill is not None:
+            turn_query = f"{turn_query}\n\n{render_selected_skill(*selected_skill)}"
         inputs: list[Msg] = [
             Msg(name="user", role="user", content=[TextBlock(type="text", text=turn_query)]),
         ]
