@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 from typing import TYPE_CHECKING, Any
 
 from agentscope.message import Msg
@@ -88,6 +90,10 @@ async def prefill(session: HarnessSession, agent: Agent) -> None:
     ctx["tool_name"] = "planner"
     ctx["tool_args"] = args
     ctx["tool_result"] = text
+    # round3 刀 4：planner 的 post_tool_call（域内长期偏好读取 + 注入，走 DB）与品类知识库预取
+    # （OpenSearch 两段式检索）互不依赖，并发跑；KB 预取的结果作为第二对 tool 块预置进上下文，
+    # 模型第 1 轮就拿着 plan + 品类行情直接检索（改前 9/9 遍第 1 轮都在调 category_insight）。
+    kb_task = asyncio.create_task(_prefetch_kb(s, out)) if _kb_prefetch_due(out) else None
     ctx = await harness.run("post_tool_call", ctx)
     # 偏好注入落 pending_inject，由下一次 on_model_call 开头消费——那正是第 1 轮。
     s.collect(ctx)
@@ -96,7 +102,34 @@ async def prefill(session: HarnessSession, agent: Agent) -> None:
         text = guarded
 
     blocks.extend(tool_blocks(call_id, "planner", args, text))
+    if kb_task is not None:
+        blocks.extend(await kb_task)
     append_prefilled(agent, blocks)
+
+
+def _kb_prefetch_due(plan: Any) -> bool:
+    """要不要预取品类知识库：开关开 + planner 判出品类 + 本轮有购物类任务（纯交易 / 闲聊不取）。"""
+    if os.getenv("KB_PREFETCH", "1").strip().lower() in {"0", "false", "off"}:
+        return False
+    category = str(getattr(plan, "category", "") or "").strip()
+    tasks = set(getattr(plan, "tasks", None) or [])
+    return bool(category) and bool(tasks & {"recommend", "evaluate", "category_intel"})
+
+
+async def _prefetch_kb(s: HarnessSession, plan: Any) -> list[Any]:
+    """按 planner 的品类预取 category_insight（quick），走与真实调用同一条成功后管线。失败即空。"""
+    from app.harness.adapter import after_tool_success
+    from app.tools._shell import _to_text
+    from app.tools.category_insight import category_insight
+
+    args = {"category": str(plan.category).strip(), "depth": "quick"}
+    try:
+        out = await category_insight.ainvoke(args)
+        text = await after_tool_success(s, "category_insight", args, _to_text(out))
+    except Exception:
+        logger.warning("品类知识库预取失败，交回模型自行决定是否调 category_insight", exc_info=True)
+        return []
+    return tool_blocks("prefill_category_insight", "category_insight", args, text)
 
 
 async def _prefill_vision(session: HarnessSession) -> tuple[list[Any], str]:
