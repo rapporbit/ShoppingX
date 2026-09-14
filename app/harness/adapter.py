@@ -39,6 +39,7 @@ from pydantic import ValidationError
 from app.agent.fork_guard import current_fork_depth
 from app.agent.token_budget import charge_usage
 from app.api import monitor
+from app.harness.autopick import maybe_autopick
 from app.harness.middleware import harness
 from app.harness.msgs import block_text, terminal_summary, text_of
 from app.harness.phase_machine import get_phase_machine
@@ -180,6 +181,10 @@ class HarnessAgentAdapter(MiddlewareBase):
         # 蒙混时照样得催。
         s.guard.terminal_nudge_retries = 0
         await monitor.report_assistant_call(step=str(s.guard.think_step))
+
+        # 检索合流后自动比价 + 精挑（round3 刀 2）：放在消费 inject 通道之前，它的结果与它触发的
+        # 收线通告 / 偏好注入一并随本轮 hint 落 state。
+        await maybe_autopick(s)
 
         # 注入**先落 state 再构造视图**：``messages`` 里的 Msg 与 ``state.context`` 是同一批
         # 对象，``append_context`` 原地把 hint 挂进末尾那条 assistant 消息，本轮视图因此自动
@@ -349,6 +354,50 @@ class HarnessAgentAdapter(MiddlewareBase):
         return msg.model_copy(update={"content": [TextBlock(type="text", text=final)]})
 
 
+async def after_tool_success(
+    s: HarnessSession,
+    tool_name: str,
+    tool_args: dict[str, Any],
+    result_text: str,
+    *,
+    pre_ctx: dict[str, Any] | None = None,
+) -> str:
+    """一次**成功**工具调用之后的全部控制面动作，返回模型最终看到的文本。
+
+    从 ``HarnessToolAdapter.on_tool_call`` 提出来成独立函数，是为了让自动比价精挑
+    （``harness.autopick``）走**同一条**管线：进展续命、called_tools、阶段信号、post_tool_call
+    的截断 / 收线通告 / schema 断言 / 偏好注入——自动跑出来的结果与模型亲手调的在控制面上
+    不可区分。``pre_ctx`` 是 pre_tool_call 的产出（熔断武装 / 收敛计数），自动路径没有就留空。
+    """
+    from app.harness.autopick import arm_on_tool
+
+    s.guard.last_progress_at = time.monotonic()
+    s.guard.watchdog_nudged_at = 0.0
+    s.called_tools.add(tool_name)
+    s.recent_actions.append(_summarize_call(tool_name, tool_args))
+    if len(s.recent_actions) > 30:
+        s.recent_actions = s.recent_actions[-20:]
+    arm_on_tool(s, tool_name, tool_args)
+
+    signals = collect_call_signals(s, tool_name, result_text)
+
+    # post_tool_call：截断 / 提示 / 终结标记 / 熔断计数 / 断言 / 漂移信号
+    pre = pre_ctx or {}
+    post_ctx = s.base_context()
+    post_ctx["tool_name"] = tool_name
+    post_ctx["tool_args"] = tool_args
+    post_ctx["tool_result"] = result_text
+    post_ctx.update(signals)
+    post_ctx["converge_count"] = pre.get("converge_count")
+    post_ctx["converge_note"] = pre.get("converge_note")
+    post_ctx["_breaker_armed"] = pre.get("_breaker_armed")
+    post_ctx = await harness.run("post_tool_call", post_ctx)
+    s.collect(post_ctx)
+
+    guarded = post_ctx.get("tool_result")
+    return guarded if isinstance(guarded, str) else result_text
+
+
 class HarnessToolAdapter(ToolMiddlewareBase):
     """工具侧的两个落点：pre_tool_call（含拒绝）与 post_tool_call（含结果改写）。
 
@@ -435,29 +484,8 @@ class HarnessToolAdapter(ToolMiddlewareBase):
             return
 
         _observe_tool(tool_name, time.monotonic() - start, "ok")
-        s.guard.last_progress_at = time.monotonic()
-        s.guard.watchdog_nudged_at = 0.0
-        s.called_tools.add(tool_name)
-        s.recent_actions.append(_summarize_call(tool_name, tool_args))
-        if len(s.recent_actions) > 30:
-            s.recent_actions = s.recent_actions[-20:]
-
-        signals = collect_call_signals(s, tool_name, result_text)
-
-        # 3. post_tool_call：截断 / 提示 / 终结标记 / 熔断计数 / 断言 / 漂移信号
-        post_ctx = s.base_context()
-        post_ctx["tool_name"] = tool_name
-        post_ctx["tool_args"] = tool_args
-        post_ctx["tool_result"] = result_text
-        post_ctx.update(signals)
-        post_ctx["converge_count"] = ctx.get("converge_count")
-        post_ctx["converge_note"] = ctx.get("converge_note")
-        post_ctx["_breaker_armed"] = ctx.get("_breaker_armed")
-        post_ctx = await harness.run("post_tool_call", post_ctx)
-        s.collect(post_ctx)
-
-        guarded = post_ctx.get("tool_result")
-        if isinstance(guarded, str) and guarded != result_text:
+        guarded = await after_tool_success(s, tool_name, tool_args, result_text, pre_ctx=ctx)
+        if guarded != result_text:
             yield ToolChunk(
                 content=[TextBlock(type="text", text=guarded)],
                 state=ToolResultState.SUCCESS,

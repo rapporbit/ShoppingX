@@ -64,6 +64,8 @@ class HarnessSession:
         self.last_excluded: int | None = None
         self.last_over_budget: int | None = None
         self.fresh_candidates = 0
+        # 检索类工具成功返回后武装；下一次 pre_think 自动比价精挑（harness.autopick）
+        self.autopick_armed = False
         # post_reflect 判定「该催收尾」后挂在这里，由 on_reply 在 ReplyEnd 时兑现
         self.retry_nudge: str | None = None
 
