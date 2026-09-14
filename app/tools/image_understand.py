@@ -152,14 +152,8 @@ def _degraded(filename: str, note: str) -> ImageUnderstanding:
 
 @tool
 async def image_understand(filename: str) -> ImageUnderstanding:
-    """看懂用户上传的参考图，产出品类 / 颜色 / 材质 / 风格 + 可直接检索的英文关键词。
-
-    何时调用：**常规情况下你不需要调它**——用户传的图已由系统在开局预读，结论就在上文的
-    image_understand 工具消息里，直接用它的 search_query / keywords 检索即可。只有在上文没有
-    任何图片识别结果、而用户又确实提到某张参考图时才调用（每调一次都要重新看一遍图，别白花）。
-    参数：
-      - filename：上传图的文件名（如 "ref.jpg"）。
-    注意：它给的是「同类相似品」的检索线索，不是同款复刻；找不到一模一样的属正常。
+    """识别参考图的品类/属性/英文检索词。系统已开局预读，仅上文无识别结果且用户提到图时才调。
+    参数 filename：上传图文件名。
     """
     await monitor.report_tool_start("image_understand", filename=filename)
 

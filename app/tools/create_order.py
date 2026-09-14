@@ -54,18 +54,9 @@ async def create_order(
     postal_code: str = "",
     phone: str = "",
 ) -> CreateOrderOutput:
-    """准备下单确认卡（**终结性**：调用后本轮结束）。**不会下单**——只生成一张由用户在页面上
-    点按钮决议的确认卡。
-
-    何时调用：用户明确表示要买清单里的某几件、且收件人 / 国家 / 城市 / 详细地址都齐了。
-    缺任何一项都不要调，先回一条消息让用户补（不要编造收货信息）。
-    调完后告诉用户「请核对页面上的确认卡并点击确认」；**不得声称已下单**。用户在对话里说
-    「确认」不能代替页面上的按钮——此时不要再调本工具，回一句请他点卡片即可。
-    参数：
-      - item_ids：要买的商品 id 列表（必须来自本会话已出现过的候选，不能自己编）。
-      - recipient_name / country / city / address_line：收件人、国家或地区、城市、详细地址（必填）。
-      - quantities：与 item_ids 一一对应的数量，缺省每件 1 个。
-      - state / postal_code / phone：省或州、邮编、电话（可选）。
+    """生成下单确认卡（终结性，不会真下单，用户在页面点按钮决议）。收件人/国家/城市/地址齐了才调。
+    参数 item_ids（本会话出现过的候选）、recipient_name / country / city / address_line 必填，
+    quantities / state / postal_code / phone 可选。
     """
     await monitor.report_tool_start("create_order", item_ids=item_ids)
     ids = list(item_ids or [])

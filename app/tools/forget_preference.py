@@ -35,18 +35,9 @@ async def forget_preference(
     key: str | None = None,
     polarity: Literal["like", "dislike"] | None = None,
 ) -> ForgetPreferenceOutput:
-    """撤回 / 忘掉一条已沉淀的长期偏好(跨会话生效,非终结性,忘完继续跑)。
-
-    何时调用:用户明确要求撤回某条长期偏好时(「别再记着我不要塑料了」「取消我喜欢小众的偏好」
-    「把 X 从偏好里删掉」)。
-    参数:
-      - description:要撤回的偏好描述或关键词,如「塑料」「小众设计」。与已存偏好的 content 或
-        keyword 互为子串即命中删除;匹配不上则不删(宁可漏删也不误删他条)。
-        如果已知精确 key 则优先用 key 参数。
-      - key:精确的偏好 dedup_key(可在 <user_long_term_preferences> 中查看已有条目的 [dedup_key])。
-        传了 key 则直接按 dedup_key 删除,不走模糊匹配。
-      - polarity:可选。限定只在 like(喜欢)或 dislike(排斥)一侧删;不传则两侧都查。
-        使用 key 直接删除时此参数无效。
+    """撤回一条已沉淀的长期偏好（非终结）。用户说「忘掉 X / 别再记着」时调。
+    参数：key（<user_long_term_preferences> 里的 dedup_key，优先）或 description 关键词模糊
+    匹配；polarity 可选限定 like/dislike 一侧。
     """
     await monitor.report_tool_start(
         "forget_preference", description=description, key=key, polarity=polarity

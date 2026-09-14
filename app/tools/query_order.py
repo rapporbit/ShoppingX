@@ -32,13 +32,7 @@ class QueryOrderOutput(BaseModel):
 
 @tool
 async def query_order(order_id: str = "", limit: int = 10) -> QueryOrderOutput:
-    """查订单（只读，非终结：查完可以继续做别的）。
-
-    何时调用：用户问「我的订单」「那单到哪了」「我买过什么」时；**以及取消订单之前**——必须
-    先查到那张单、确认它确实存在且状态可取消，再调 cancel_order。
-    参数：
-      - order_id：查某一张（形如 GBX-000123）。不传则列出该用户最近的几张。
-      - limit：不传 order_id 时最多列几张，默认 10。
+    """查订单（只读，非终结）；取消前必须先查到那张单。参数 order_id（不传列最近几张）、limit。
     """
     await monitor.report_tool_start("query_order", order_id=order_id)
     user_id = get_user_id() or ""
