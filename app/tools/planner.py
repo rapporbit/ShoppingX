@@ -593,11 +593,8 @@ def _render_prior_context() -> str:
 
 @tool
 async def planner(intent: str) -> PlanOutput:
-    """把用户的购物意图拆解成结构化字段（预算/品类/材质/风格/硬约束/软偏好 + 检索关键词）。
-
-    何时调用：面对复杂多约束的购物需求时，先调本工具拆解，再据此检索与精挑。
-    参数：
-      - intent：用户的原始购物意图（自然语言）。
+    """把购物意图拆成结构化字段（预算/品类/硬约束/软偏好/检索词）；系统已开局预跑，通常不必再调。
+    参数 intent：用户原话。
     """
     await monitor.report_tool_start("planner", intent=intent)
     prior = _render_prior_context()

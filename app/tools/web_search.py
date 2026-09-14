@@ -52,14 +52,7 @@ class WebSearchOutput(BaseModel):
 
 @tool
 async def web_search(query: str, max_results: int = 5) -> WebSearchOutput:
-    """检索公网外部事实（评测、博主推荐、价格趋势等商品库里没有的信息）。
-
-    何时调用：① plan 判 intent_grounding=web——意图含没把握的新说法 / 潮流词 / 时效诉求时，
-    检索前先用它把说法翻译成品类词 / 英文检索词（结果只用于改写检索词，不当商品候选）；
-    ② 需要商品检索之外的外部信息（口碑 / 评测 / 趋势）来佐证或补充时。
-    参数：
-      - query：搜索词。
-      - max_results：返回条数，默认 5。
+    """查公网外部事实（评测/口碑/趋势/新说法翻译成品类词）；不产候选。参数 query、max_results。
     """
     await monitor.report_tool_start("web_search", query=query)
     api_key = os.environ.get("TAVILY_API_KEY", "").strip()

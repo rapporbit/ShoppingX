@@ -440,40 +440,11 @@ async def item_search(
     expected_category: str | None = None,
     slot: str = "",
 ) -> ItemSearchOutput:
-    """在【单个】平台检索商品（dense 召回；用户长期偏好词已由系统自动并入检索词）。
-
-    何时调用：需要在某平台搜商品时。跨多个平台请同轮多派 task_dispatch（一个平台一条
-    demands）并行，不要自己串行多次调本工具。
-    用户的硬排除偏好（「绝不推荐」黑名单 + 本轮明说的「不要 X」）已由系统在召回阶段自动过滤
-    （返回的 memory_excluded 计数），不需要你转述进参数；total_recall 为 0 且 memory_excluded>0
-    时，如实告诉用户「符合的商品都被你的排除偏好筛掉了」，而不是「库里没有」。
-    返回里出现 filtered_out（库里有、但被本次预算 / 评分 / 排除偏好挡在池外的样本）时，同理不能
-    说「没找到」：如实说清被哪个条件挡的、最接近的价位，再问用户要不要放宽。这些不是候选，
-    绝不能进清单或商品卡。
-    参数：
-      - query：这次要搜什么（自然语言意图，走 dense 语义检索）。**用品类核心词**（如
-        men's wristwatch / laptop backpack），场景 / 人群 / 正式度词（formal、business、
-        men 这类）**不要堆进来**——它们会把同场景的其他品类一并召回、稀释目标品类（实测
-        formal dress watch men business 召回的大半是西装皮鞋）；这类词交给 item_picker
-        的 prefer_keywords 加分。
-      - platform：平台名（amazon/walmart/shein/lazada/shopee）；"all" 跨**本次启用的**平台
-        合流（启用集合见当轮 <enabled_platforms>，用户未勾选的平台一律不搜——传了也会被收口）。
-      - top_k：召回条数。**不用传**——服务端按固定上限收口，传更大的数不会拿到更多候选。
-      - price_usd_max：预算上限（USD），在 Qdrant 召回阶段直接过滤超预算商品。
-        planner 拆出 budget_usd 后传入，省得召回一堆超预算的浪费配额。
-      - min_rating：最低评分（如 4.0），在召回阶段过滤低分商品。
-      - brand_exclude：要排除的品牌列表（如 ["Nike", "Adidas"]），大小写不敏感。
-      - target_name：**定点商品调查时传**被点名的商品名/型号原文（如 "Sony WH-1000XM5"）。
-        传入后额外按型号过滤召回，语义相关但型号不符的候选不算命中（如搜索该型号时召回到
-        同品牌其它便宜型号），避免"库里没这型号却拿相似品硬凑"。跨平台泛搜
-        （task_dispatch 逐平台派发的场景）不传。
-      - expected_category：**定点商品调查时配合 target_name 一起传**目标商品所属品类
-        （如 planner 拆出的 "降噪耳机"）。用于过滤"型号 token 对得上但其实是配件/耗材"的
-        假阳性（如该型号的充电线、保护壳——标题必然带宿主型号，型号过滤拦不住，但配件在
-        数据里的品类跟本体不是一类）：候选自身 category 与此语义不符时不算命中。不传则
-        跳过这层过滤（沿用旧行为）。
-      - slot：**套装（一套齐）检索时传** demands 里「套装槽位：X」标注的槽名 X（照抄）。
-        系统按它给候选打标，供跨槽组合优选分组；非套装检索不传。
+    """在单个平台检索商品（dense 召回，长期偏好与硬排除已由系统并入）；跨平台用 task_dispatch 并行。
+    参数：query 用品类核心词（场景/人群词交给 item_picker 的 prefer）；platform 见
+    <enabled_platforms>；price_usd_max / min_rating / brand_exclude 召回期过滤；定点调查传
+    target_name + expected_category；top_k / slot 不用传。返回 filtered_out = 库里有但被条件
+    挡住（不是候选，如实说被哪个条件挡的）。
     """
     # 个性化：把用户**本轮域内**的 like 偏好原子词拼进检索词（见 memory.assemble.search_terms）。
     # 这条通路取代了原来的 user 塔向量画像——那条路把所有 like 加权平均成一个向量塞进召回，结果

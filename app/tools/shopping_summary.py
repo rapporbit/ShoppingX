@@ -480,18 +480,11 @@ async def shopping_summary(
     user_intent: str = "",
     picks: Annotated[list[ItemCandidate] | None, InjectedToolArg] = None,
 ) -> tuple[str, ShoppingSummaryOutput]:
-    """终结性工具：把 item_picker 精选的全部 picks 排成最终清单（商品卡由系统按 item_id 组装）。
-
-    何时调用：精挑结果已在手、要给用户最终答复时——调它即收尾。清单件数由 picker 定，你不选件。
-    参数（文案由你写，系统只排版）：
-      - summary：面向用户的收尾文案。把这批货整体与用户原话对上（硬约束满足了没、软偏好体现在
-        哪几件、有无需要他权衡的取舍），可点名一两件最值得看的。用商品名指代、绝不写 item_id；
-        不出现「候选 / 召回 / 检索」等系统词；只有 landed_usd 时才说「到手价（含运费关税，按寄往
-        X 国估算）」，只有售价时不能说成到手价。
-      - reasons：为 picks 里**每一件**各写一条选购理由 [{item_id, reason}]，把 pick_reason 里
-        的事实和用户原话缝成人话，一件都不漏；多类并列轮只写每类第一件。
-      - off_intent：picks 里与用户要买的东西明显不是一类的 item_id（配件 / 周边混入），拿不准不填。
-      - user_intent：用户本轮原话。
+    """终结性：把精挑结果排成最终清单，商品卡由系统按 item_id 组装，你只写文案。
+    参数：summary 面向用户的收尾文案（整批货对上用户原话；用商品名不写 id；不出现候选/召回/
+    检索等系统词；有 landed_usd 才说到手价并注明寄往哪国、只有售价不能说成到手价）；reasons
+    每件一条 [{item_id, reason}]（把 pick_reason 的事实缝进用户原话，一件不漏；多类并列只写
+    每类第一件）；off_intent 明显不是用户要买那类的 item_id（拿不准不填）；user_intent 用户原话。
     """
     # 候选来源两档：
     #   ① picks（InjectedToolArg，模型侧不可见）—— 直接调用 / 单测注入现成候选，绕开登记表；
