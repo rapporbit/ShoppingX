@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from app.tools.item_picker import _hits, _searchable, item_picker
@@ -110,8 +112,8 @@ def test_display_term_shows_chinese_for_english_hits() -> None:
 
 
 @pytest.mark.asyncio
-async def test_llm_rewrites_only_top_n_reasons(monkeypatch: pytest.MonkeyPatch) -> None:
-    """前 3 件用模型写的叙事句，第 4 件起用 item_picker 的确定性理由——解码量因此与件数无关。"""
+async def test_llm_writes_reason_for_every_pick(monkeypatch: pytest.MonkeyPatch) -> None:
+    """每件都用模型写的叙事句（件数已由上游封顶）；模型漏写的那件退回 item_picker 的确定性理由。"""
     import app.tools.shopping_summary as mod
     from tests.test_tools import _FakeLLM  # 复用现成的假模型
 
@@ -131,6 +133,7 @@ async def test_llm_rewrites_only_top_n_reasons(monkeypatch: pytest.MonkeyPatch) 
             mod.SummaryReason(item_id="I0", reason="帆布耐造，最便宜的一件，正合你说的抗造。"),
             mod.SummaryReason(item_id="I1", reason="同样帆布，评分更高一点。"),
             mod.SummaryReason(item_id="I2", reason="容量更大，适合长途。"),
+            mod.SummaryReason(item_id="I3", reason="颜色低调，通勤也不突兀。"),
         ],
     )
     monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
@@ -143,9 +146,96 @@ async def test_llm_rewrites_only_top_n_reasons(monkeypatch: pytest.MonkeyPatch) 
         }
     )
     reasons = [i.reason for i in msg.artifact.items]
-    assert reasons[0].startswith("帆布耐造")  # 前 3 件：模型叙事
+    assert reasons[0].startswith("帆布耐造")
     assert reasons[2] == "容量更大，适合长途。"
-    assert reasons[3] == "规则理由 3"  # 第 4 件：item_picker 的确定性理由
+    assert reasons[3] == "颜色低调，通勤也不突兀。"  # 第 4 件也是模型叙事，不再分两档
+
+
+@pytest.mark.asyncio
+async def test_missing_llm_reason_falls_back_per_item(monkeypatch: pytest.MonkeyPatch) -> None:
+    """模型漏写其中一件 → 只有那件退回 pick_reason，其余照用模型叙事。"""
+    import app.tools.shopping_summary as mod
+    from tests.test_tools import _FakeLLM
+
+    picks = [
+        ItemCandidate(
+            item_id=f"I{i}", platform="amazon", title=f"Bag {i}", pick_reason=f"规则理由 {i}"
+        )
+        for i in range(3)
+    ]
+    payload = mod._SummaryDraft(
+        summary="给你挑了 3 件。",
+        reasons=[
+            mod.SummaryReason(item_id="I0", reason="帆布耐造，正合你说的抗造。"),
+            mod.SummaryReason(item_id="I2", reason="容量更大，适合长途。"),
+        ],
+    )
+    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    msg = await mod.shopping_summary.ainvoke(
+        {
+            "name": "shopping_summary",
+            "args": {"picks": [c.model_dump() for c in picks], "user_intent": "抗造的包"},
+            "id": "c1",
+            "type": "tool_call",
+        }
+    )
+    reasons = [i.reason for i in msg.artifact.items]
+    assert reasons == ["帆布耐造，正合你说的抗造。", "规则理由 1", "容量更大，适合长途。"]
+
+
+@pytest.mark.asyncio
+async def test_parallel_mode_llm_reason_only_first_per_slot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """并列形态：每类只有第一件用模型叙事；第 2 件起用 pick_reason，模型多写的也不采纳。"""
+    import app.tools.shopping_summary as mod
+    from app.tools._bundle import (
+        SLOT_MODE_PARALLEL,
+        BundleSlot,
+        reset_session_bundle,
+        set_session_bundle,
+    )
+    from app.utils.thread_ctx import thread_scope
+    from tests.test_tools import _FakeLLM
+
+    picks = [
+        ItemCandidate(
+            item_id=f"{s}{i}",
+            platform="amazon",
+            title=f"{s} {i}",
+            slot=s,
+            pick_reason=f"规则理由第 {n} 件",
+        )
+        for n, (s, i) in enumerate([(s, i) for s in ("shoe", "earbud") for i in range(2)])
+    ]
+    # 理由文本里不写 item_id：收尾会把 ID 替换成标题（strip_item_ids），断言就对不上了。
+    payload = mod._SummaryDraft(
+        summary="两类各挑了两件。",
+        reasons=[
+            mod.SummaryReason(item_id=c.item_id, reason=f"模型叙事第 {n} 件，正合你意。")
+            for n, c in enumerate(picks)  # 模型逐件都写了——每类第 2 件的也不该被采纳
+        ],
+    )
+    monkeypatch.setattr(mod, "get_fast_llm", lambda: _FakeLLM(structured_payload=payload))
+    slots = [BundleSlot(name=n, essential=True) for n in ("shoe", "earbud")]
+    with thread_scope("t-parallel-reason", tmp_path):
+        set_session_bundle(slots, mode=SLOT_MODE_PARALLEL)
+        try:
+            msg = await mod.shopping_summary.ainvoke(
+                {
+                    "name": "shopping_summary",
+                    "args": {"picks": [c.model_dump() for c in picks], "user_intent": "跑鞋和耳机"},
+                    "id": "c1",
+                    "type": "tool_call",
+                }
+            )
+        finally:
+            reset_session_bundle(clear_file=True)
+    reasons = {i.item_id: i.reason for i in msg.artifact.items}
+    assert reasons["shoe0"] == "模型叙事第 0 件，正合你意。"
+    assert reasons["shoe1"] == "规则理由第 1 件"
+    assert reasons["earbud0"] == "模型叙事第 2 件，正合你意。"
+    assert reasons["earbud1"] == "规则理由第 3 件"
 
 
 @pytest.mark.asyncio
