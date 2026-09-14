@@ -85,3 +85,31 @@ async def test_autopick_skips_bundle_turn_and_when_disabled(monkeypatch: pytest.
         register(_cands())
         await maybe_autopick(s2)
         assert "item_picker" not in s2.called_tools
+
+
+@pytest.mark.asyncio
+async def test_rerank_capped_to_top_k_by_vector_score(monkeypatch: pytest.MonkeyPatch) -> None:
+    """round3 刀 3：每批只把向量分最高的 PICK_RERANK_K 件送 cross-encoder，额度外在门生效时出局。"""
+    import app.tools.item_picker as mod
+    from app.api.context import set_session_pt
+    from app.memory.session_state import SessionPrefState
+
+    seen: list[int] = []
+
+    class _Fake:
+        async def score_detailed(self, query: str, docs: list[str]) -> tuple[list[float], bool]:
+            seen.append(len(docs))
+            return [0.9] * len(docs), True
+
+    monkeypatch.setattr(mod, "get_reranker", lambda: _Fake())
+    monkeypatch.setattr(mod, "PICK_RERANK_K", 5)
+    cands = [
+        ItemCandidate(item_id=f"C{i}", platform="amazon", title=f"laptop backpack {i}",
+                      landed_usd=20 + i, rating=4.0, score=i / 40)
+        for i in range(40)
+    ]
+    with thread_scope("t-rerank-cap", Path(tempfile.mkdtemp())):
+        set_session_pt(SessionPrefState(category="backpack", domains=["bags"]))
+        out = await mod.item_picker.ainvoke({"candidates": [c.model_dump() for c in cands]})
+    assert seen == [5]  # 只送了 5 件
+    assert {c.item_id for c in out.picks} <= {f"C{i}" for i in range(35, 40)}  # 向量分最高的那截
