@@ -24,7 +24,7 @@ from collections.abc import Mapping
 from typing import Annotated
 
 from agentscope.tool import ToolChoice
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, Field, model_validator
 
 from app.agent.invoke import call_structured, to_msgs
 from app.agent.llm import get_fast_llm
@@ -32,7 +32,7 @@ from app.agent.prompts import get_shopping_summary_prompt
 from app.agent.token_budget import charge_usage
 from app.api import monitor
 from app.api.context import get_dest_country, is_dest_country_assumed
-from app.tools._args import drop_none_values
+from app.tools._args import StrListArg, coerce_stringified_list, drop_none_values
 from app.tools._bundle import (
     SLOT_MODE_PARALLEL,
     drop_pick_from_report,
@@ -159,6 +159,23 @@ class SummaryReason(BaseModel):
 
     item_id: str
     reason: str = ""
+
+
+def _coerce_reasons(v: object) -> object:
+    """模型侧的 reasons 容错：JSON 字符串 → list；``{item_id: reason}`` 映射 → 条目列表。"""
+    v = coerce_stringified_list(v)
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except ValueError:
+            return v
+    if isinstance(v, dict):
+        return [{"item_id": k, "reason": r} for k, r in v.items()]
+    return v
+
+
+# 模型可见的逐件理由参数：``[{item_id, reason}]``；字符串化 / 映射形态在校验期归一。
+ReasonListArg = Annotated[list[SummaryReason], BeforeValidator(_coerce_reasons)]
 
 
 class _SummaryDraft(BaseModel):
@@ -457,16 +474,24 @@ def _compact(picks: list[ItemCandidate]) -> str:
 
 @tool(response_format="content_and_artifact")
 async def shopping_summary(
+    summary: str = "",
+    reasons: ReasonListArg | None = None,
+    off_intent: StrListArg | None = None,
     user_intent: str = "",
     picks: Annotated[list[ItemCandidate] | None, InjectedToolArg] = None,
 ) -> tuple[str, ShoppingSummaryOutput]:
-    """终结性工具：基于精选候选生成最终购物清单 + 选购理由，并沉淀新偏好。
+    """终结性工具：把 item_picker 精选的全部 picks 排成最终清单（商品卡由系统按 item_id 组装）。
 
-    何时调用：信息已足够、拿到精挑后的候选、要给用户最终答复时——调它即收尾，不要再检索。
-    清单内容就是 item_picker 本轮精选的**全部** picks（已按推荐度排好序、已封顶件数），
-    你不需要也无法指定件数——筛选是 picker 的职责。
-    参数：
-      - user_intent：用户本轮的原始意图（帮模型把理由对齐到需求）。
+    何时调用：精挑结果已在手、要给用户最终答复时——调它即收尾。清单件数由 picker 定，你不选件。
+    参数（文案由你写，系统只排版）：
+      - summary：面向用户的收尾文案。把这批货整体与用户原话对上（硬约束满足了没、软偏好体现在
+        哪几件、有无需要他权衡的取舍），可点名一两件最值得看的。用商品名指代、绝不写 item_id；
+        不出现「候选 / 召回 / 检索」等系统词；只有 landed_usd 时才说「到手价（含运费关税，按寄往
+        X 国估算）」，只有售价时不能说成到手价。
+      - reasons：为 picks 里**每一件**各写一条选购理由 [{item_id, reason}]，把 pick_reason 里
+        的事实和用户原话缝成人话，一件都不漏；多类并列轮只写每类第一件。
+      - off_intent：picks 里与用户要买的东西明显不是一类的 item_id（配件 / 周边混入），拿不准不填。
+      - user_intent：用户本轮原话。
     """
     # 候选来源两档：
     #   ① picks（InjectedToolArg，模型侧不可见）—— 直接调用 / 单测注入现成候选，绕开登记表；
@@ -508,18 +533,28 @@ async def shopping_summary(
         slot_mode = SLOT_MODE_PARALLEL if mode == SLOT_MODE_PARALLEL else ""
         top_ids = _llm_reason_ids(picks, parallel=bool(slot_mode))
         id_map = {c.item_id: c.title for c in picks}
-        draft = await _generate_draft(
-            [
-                ("system", get_shopping_summary_prompt()),
-                (
-                    "user",
-                    f"用户意图：{user_intent}\n\n{_bundle_note(picks)}{_landed_note(picks)}"
-                    f"精选候选（JSON，已按推荐度排序）：\n{_compact(picks)}"
-                    f"\n\n**只为这 {len(top_ids)} 件逐件写 reason**：{', '.join(top_ids)}",
-                ),
-            ],
-            id_map,
-        )
+        # round3 刀 1：文案 / 逐件理由 / off_intent 由**主模型在入参里给**（它本就读过 picks，
+        # 再起一次内部 LLM 只是把同一份上下文重发一遍：实测 5.5s）。入参没给 summary 时才退回
+        # 内部快模型生成——保住旧 prompt / 降档模型 / 直接调用这些路径的行为。
+        if summary.strip():
+            draft = _SummaryDraft(
+                summary=summary, reasons=list(reasons or []), off_intent=list(off_intent or [])
+            )
+            await monitor.report_summary_delta(strip_item_ids(draft.summary, id_map))
+        else:
+            logger.info("shopping_summary 入参无 summary，退回内部 LLM 生成文案")
+            draft = await _generate_draft(
+                [
+                    ("system", get_shopping_summary_prompt()),
+                    (
+                        "user",
+                        f"用户意图：{user_intent}\n\n{_bundle_note(picks)}{_landed_note(picks)}"
+                        f"精选候选（JSON，已按推荐度排序）：\n{_compact(picks)}"
+                        f"\n\n**只为这 {len(top_ids)} 件逐件写 reason**：{', '.join(top_ids)}",
+                    ),
+                ],
+                id_map,
+            )
         # 文案与逐件理由都过一道 ID 剥离：prompt 禁了、模型仍会偶尔写（见 strip_item_ids）。
         draft.summary = strip_item_ids(draft.summary, id_map)
         reason_map = {r.item_id: strip_item_ids(r.reason, id_map) for r in draft.reasons}

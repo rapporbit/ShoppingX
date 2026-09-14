@@ -137,6 +137,32 @@ def _persist_injections(agent: Agent, injected: list[Msg] | None) -> None:
         agent.state.append_context(agent.name, blocks)
 
 
+async def _stream_summary_delta(chunk: ChatResponse, emitted: int) -> int:
+    """主模型流式吐 ``shopping_summary`` 入参时，把 summary 的累计文本推给前端（round3 刀 1）。
+
+    收尾文案改由主模型在工具入参里写之后，原来收尾工具内部那条 summary_delta 流没了；chunk 是
+    累积快照、``ToolCallBlock.input`` 在流式期间是累积的原始 JSON 串，从里面抠 summary 即可。
+    只在主 loop 发（worker 无前端连接）；解不出就跳过本 tick，最终产物不受影响。
+    """
+    if current_fork_depth() != 0:
+        return emitted
+    for block in getattr(chunk, "content", None) or []:
+        if getattr(block, "type", None) != "tool_call" or getattr(block, "name", "") != (
+            "shopping_summary"
+        ):
+            continue
+        raw = getattr(block, "input", None)
+        if not isinstance(raw, str):
+            continue
+        from app.tools.shopping_summary import _DELTA_MIN_CHARS, _partial_summary
+
+        text = _partial_summary(raw)
+        if len(text) >= emitted + _DELTA_MIN_CHARS:
+            await monitor.report_summary_delta(text)
+            return len(text)
+    return emitted
+
+
 def _last_assistant(agent: Agent) -> Msg | None:
     for msg in reversed(agent.state.context):
         if msg.role == "assistant":
@@ -238,9 +264,11 @@ class HarnessAgentAdapter(MiddlewareBase):
         钩子，入账只能接在这里。
         """
         last: ChatResponse | None = None
+        emitted = 0
         try:
             async for chunk in stream:
                 last = chunk
+                emitted = await _stream_summary_delta(chunk, emitted)
                 yield chunk
         finally:
             charge_usage(model_name, getattr(last, "usage", None))

@@ -60,7 +60,8 @@ def sub_search_budget_note(used: int, cap: int) -> str:
 # 提到的参数必须与真实签名保持同步，否则就是在复刻它自己治过的病。
 SUMMARY_NUDGE = (
     "[系统提示] 精选清单已就绪。你的下一个动作**必须是真的调用 shopping_summary 工具**——"
-    "只把用户原始意图传给 user_intent，清单即 item_picker 精选的全部商品（已按推荐度排好序）。"
+    "收尾文案写进 summary、每件一条理由写进 reasons、用户原话传 user_intent；清单即 item_picker "
+    "精选的全部商品（已按推荐度排好序），你不选件。"
     "**不要**输出「精挑完成，现在生成清单」这类纯文字就停下：说要收尾＝立刻调 shopping_summary，"
     "清单内容由它产出，不是你手敲。"
 )

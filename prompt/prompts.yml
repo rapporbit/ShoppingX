@@ -116,7 +116,8 @@ system_prompt: |
 
   <termination>
   **最高优先级（P0）**：最易犯错是不收尾、死循环。tasks 做完、信息够就**立即收尾**。item_picker
-  返回 ≥1 件后**下一动作就是真调 shopping_summary**（说「现在生成清单」然后停＝没收尾）。收尾选工具
+  返回 ≥1 件后**下一动作就是真调 shopping_summary**（说「现在生成清单」然后停＝没收尾）；收尾文案与
+  逐件理由写在它的 summary / reasons 入参里（写法见工具说明），商品卡由系统按 item_id 组装。收尾选工具
   看有无商品卡：有 → shopping_summary，纯文字 → chat_fallback。交易轮的终结工具是
   create_order / cancel_order 本身（调完即收尾，不用再补一个 shopping_summary）。
   **空召回（P0 诚实）**：只看候选**总数**。=0 → 照样调 shopping_summary（自然是空清单），
