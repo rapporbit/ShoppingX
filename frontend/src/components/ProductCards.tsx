@@ -44,6 +44,21 @@ function Thumb({ item }: { item: ProductItem }) {
   );
 }
 
+// 对比栏用的小缩略图：同一套「真图优先、失败回退渐变」的规则，只是尺寸缩到 28px。
+// 导出给 App 的对比栏用——缩略图长什么样该和卡片一致，不另写一份。
+export function MiniThumb({ item }: { item: ProductItem }) {
+  const [failed, setFailed] = useState(false);
+  const hue = hueFrom(item.item_id || item.title);
+  const bg = `linear-gradient(135deg, hsl(${hue} 55% 92%), hsl(${(hue + 40) % 360} 50% 86%))`;
+  return (
+    <span className="mini-thumb" style={{ background: bg }} title={item.title}>
+      {item.image_url && !failed && (
+        <img src={item.image_url} alt="" loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(true)} />
+      )}
+    </span>
+  );
+}
+
 // 入场错峰：前 6 张按序号各晚 55ms 出现，后面的一起出（CSS .product-card 的 card-in 动画读这个
 // 变量；prefers-reduced-motion 下动画整体关掉）。
 function staggerStyle(index: number): React.CSSProperties {
