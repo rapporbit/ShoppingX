@@ -27,7 +27,7 @@ import { QueryImages } from "./components/QueryImages";
 import { SimilarDrawer } from "./components/SimilarDrawer";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { AdminDrawer } from "./components/AdminDrawer";
-import { Sidebar } from "./components/Sidebar";
+import { Sidebar, type SidebarPanel } from "./components/Sidebar";
 import { InputBar } from "./components/InputBar";
 import { TopBar } from "./components/TopBar";
 import { SparkleIcon } from "./components/icons";
@@ -296,6 +296,16 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
   // 会话标题取第一轮 query（整段对话的「主题」），多轮续聊也不跳来跳去。
   const title = turns[0]?.query || "ShoppingX 跨境购物 Agent";
 
+  const activePanel: SidebarPanel | null = favsOpen
+    ? "favorites"
+    : ordersOpen
+      ? "orders"
+      : skillsOpen
+        ? "skills"
+        : prefsOpen
+          ? "preferences"
+          : null;
+
   return (
     <div className="app">
       <Sidebar
@@ -319,17 +329,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
           setPrefsOpen(panel === "preferences");
           setNavOpen(false);
         }}
-        activePanel={
-          favsOpen
-            ? "favorites"
-            : ordersOpen
-              ? "orders"
-              : skillsOpen
-                ? "skills"
-                : prefsOpen
-                  ? "preferences"
-                  : null
-        }
+        activePanel={activePanel}
         favoriteCount={favorites.length}
       />
       {/* 会话栏抽屉的遮罩：只在窄屏 + 抽屉展开时可点（CSS 里宽屏直接 display:none）。 */}
@@ -338,7 +338,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
         onClick={() => setNavOpen(false)}
       />
 
-      <div className="workspace">
+      <div className={`workspace ${activePanel ? "paged" : ""}`}>
         <TopBar
           title={title}
           status={status}
@@ -350,6 +350,44 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
           onLogout={onLogout}
           onOpenNav={() => setNavOpen(true)}
         />
+
+        {/* 「我的东西」四个面板：收藏 / 订单 / Skill / 长期偏好。它们不再是右侧 360px 抽屉，而是
+            占满对话区的整页视图——侧栏点项切页，关闭即回对话。对话 DOM 只是被 CSS 藏起来，
+            不卸载，切回来滚动位置和输入草稿都还在。 */}
+        <div className={`panel-host ${activePanel ? "page" : ""}`}>
+          <PreferenceDrawer
+            userId={userId}
+            open={prefsOpen}
+            refreshKey={prefRefresh}
+            onClose={() => setPrefsOpen(false)}
+            threadId={threadId}
+            session={sessionConstraints}
+            onSessionChange={setSessionConstraints}
+          />
+
+          <FavoritesDrawer
+            userId={userId}
+            open={favsOpen}
+            refreshKey={favorites.length}
+            onClose={() => setFavsOpen(false)}
+            onChanged={setFavorites}
+          />
+
+          <OrdersDrawer
+            open={ordersOpen}
+            canCancel={threadId !== null}
+            busy={confirmationBusy}
+            onClose={() => setOrdersOpen(false)}
+            onCancel={prepareCancel}
+          />
+
+          <SkillsDrawer
+            userId={userId}
+            open={skillsOpen}
+            onClose={() => setSkillsOpen(false)}
+            onChanged={() => setSkillRefresh((n) => n + 1)}
+          />
+        </div>
 
         <main className="conversation">
           <div className="conversation-inner">
@@ -542,39 +580,6 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
           onClarify={sendClarification}
         />
       </div>
-
-      <PreferenceDrawer
-        userId={userId}
-        open={prefsOpen}
-        refreshKey={prefRefresh}
-        onClose={() => setPrefsOpen(false)}
-        threadId={threadId}
-        session={sessionConstraints}
-        onSessionChange={setSessionConstraints}
-      />
-
-      <FavoritesDrawer
-        userId={userId}
-        open={favsOpen}
-        refreshKey={favorites.length}
-        onClose={() => setFavsOpen(false)}
-        onChanged={setFavorites}
-      />
-
-      <OrdersDrawer
-        open={ordersOpen}
-        canCancel={threadId !== null}
-        busy={confirmationBusy}
-        onClose={() => setOrdersOpen(false)}
-        onCancel={prepareCancel}
-      />
-
-      <SkillsDrawer
-        userId={userId}
-        open={skillsOpen}
-        onClose={() => setSkillsOpen(false)}
-        onChanged={() => setSkillRefresh((n) => n + 1)}
-      />
 
       <SimilarDrawer source={similarOf} onClose={() => setSimilarOf(null)} />
 
