@@ -36,15 +36,8 @@ class CancelOrderOutput(BaseModel):
 
 @tool
 async def cancel_order(order_id: str, reason: str) -> CancelOrderOutput:
-    """准备取消确认卡（**终结性**：调用后本轮结束）。**不会直接取消**——只生成一张由用户在
-    页面上点按钮决议的确认卡。
-
-    何时调用：用户明确要求取消某张订单、且说明了原因。**必须先用 query_order 查到那张单**、
-    确认它存在且状态是 CONFIRMED，再调本工具。调完后告诉用户核对页面上的取消确认卡并点击；
-    不得声称已取消。
-    参数：
-      - order_id：要取消的订单号（形如 GBX-000123），从 query_order 的结果里取，不要自己编。
-      - reason：用户说明的取消原因（必填；用户没说就先问一句，别替他编）。
+    """生成取消确认卡（终结性，不会直接取消）。须先 query_order 确认单存在且 CONFIRMED。
+    参数 order_id（取自 query_order 结果）、reason（用户说的原因，必填）。
     """
     await monitor.report_tool_start("cancel_order", order_id=order_id)
     thread_id = monitor.root_thread_id() or ""

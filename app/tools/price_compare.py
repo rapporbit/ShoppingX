@@ -77,13 +77,8 @@ async def price_compare(
     top_n: int = DEFAULT_TOP_N,
     candidates: Annotated[list[ItemCandidate] | None, InjectedToolArg] = None,
 ) -> PriceCompareOutput:
-    """把多平台候选商品的价格统一折算成 USD，并一步算出到手价（货价+运费+关税）排序。
-
-    何时调用：手里有跨平台候选、要按价格横向比较时（通常在合流 item_search 结果之后）。
-    返回的 ranked 已含 landed_usd 到手价——**调完本工具无需再调 shipping_calc**。
-    参数：
-      - item_ids：**通常不必传**——缺省即本轮全部候选（推荐做法）；只在确实只比其中几件时传 id。
-      - top_n：返回给你看的前 N 条（最便宜的），默认 12。**不影响谁被算到手价**——全部候选都会算。
+    """候选统一折 USD 并一步算到手价（货价+运费+关税）排序；检索合流后系统会自动跑，通常不必调。
+    参数 item_ids 缺省即全部候选；top_n 只决定回显条数。
     """
     # 基准币钉死 USD：price_usd / landed_usd 等字段、item_picker 的预算硬筛、前端展示全按
     # USD 语义消费。此前 base 暴露为模型参数，一旦传个 "EUR"，price_usd 里装的就是欧元值、

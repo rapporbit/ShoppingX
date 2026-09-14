@@ -38,14 +38,8 @@ class ChatFallbackOutput(BaseModel):
 
 @tool
 async def chat_fallback(message: str, item_ids: StrListArg | None = None) -> ChatFallbackOutput:
-    """非检索意图的一句话回复（终结性）。
-
-    何时调用：用户这句是打招呼 / 问能力 / 闲聊等非检索意图时；或交易流程里要回一条不需要
-    等答复的消息（缺收货信息、提醒去页面点确认卡）——调它给一句回应即收尾。
-    参数：
-      - message：用户的原话，或你要回的那句话的要点。
-      - item_ids：可选。要附在这条消息下面的商品卡（本会话出现过的候选 id）。缺收货信息时把
-        用户要买的那件带上，前端会在卡片上给「去下单」按钮。
+    """非检索意图的一句话回复（终结性）：闲聊/问能力，或交易流程里回一条不等答复的消息。
+    参数 message；item_ids 可选，把要附的商品卡 id 带上（缺收货信息时带用户要买的那件）。
     """
     await monitor.report_tool_start("chat_fallback", message=message)
     cards = [_preview_item(c) for c in hydrate(list(item_ids or []))]
