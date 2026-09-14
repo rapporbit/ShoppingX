@@ -537,6 +537,48 @@ class TestPhaseHooks:
         assert agent.state.context == []
 
     @pytest.mark.asyncio
+    async def test_prefill_prefetches_kb_alongside_planner_hooks(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """round3 刀 4：planner 判出品类 + 购物任务 → category_insight(quick) 预取并作为第二对
+        tool 块预置；控制面状态与模型亲手调一致（called_tools）。纯交易 / 无品类不预取。"""
+        import app.harness.prefill as prefill_mod
+        import app.tools.category_insight as ci_mod
+        import app.tools.planner as planner_mod
+        from app.harness.adapter import HarnessAgentAdapter
+        from app.tools.planner import PlanOutput
+
+        calls: list[dict] = []
+
+        async def fake_planner(args):
+            return PlanOutput(tasks=["recommend"], category="通勤背包")
+
+        async def fake_ci(args):
+            calls.append(args)
+            return {"category": args["category"], "components": []}  # _to_text 按 JSON 渲染
+
+        monkeypatch.setattr(planner_mod, "planner", SimpleNamespace(ainvoke=fake_planner))
+        monkeypatch.setattr(ci_mod, "category_insight", SimpleNamespace(ainvoke=fake_ci))
+
+        session = _mw("通勤背包")
+        agent = _StubAgent()
+        await HarnessAgentAdapter(session)._prefill(agent)
+        assert calls == [{"category": "通勤背包", "depth": "quick"}]
+        assert "category_insight" in session.called_tools
+        names = [b.name for b in agent.state.context[-1].content]
+        assert names == ["planner", "planner", "category_insight", "category_insight"]
+
+        # 纯交易任务不预取
+        async def trade_planner(args):
+            return PlanOutput(tasks=["query_order"], category="通勤背包")
+
+        monkeypatch.setattr(planner_mod, "planner", SimpleNamespace(ainvoke=trade_planner))
+        calls.clear()
+        await HarnessAgentAdapter(_mw("我的订单"))._prefill(_StubAgent())
+        assert calls == []
+        assert not prefill_mod._kb_prefetch_due(PlanOutput(tasks=["recommend"], category=""))
+
+    @pytest.mark.asyncio
     async def test_prefill_looks_at_images_before_planner(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
