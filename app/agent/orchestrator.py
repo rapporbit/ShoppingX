@@ -406,6 +406,9 @@ async def run_agent(
             *replay,
             Msg(name="user", role="user", content=[TextBlock(type="text", text=turn_query)]),
         ]
+        # 本轮消息的起点：恢复回来的 state 里还躺着前几轮的上下文，收尾产物（清单 / 商品卡）只能
+        # 从这个下标往后找，否则第二轮用 chat_fallback 收尾时会把上一轮的清单当成本轮产物。
+        turn_start = len(agent.state.context)
 
         try:
             # fork 预算（拦主 loop 多轮 re-dispatch）+ fork 并发闸（限同时在跑的 worker 数）。
@@ -480,7 +483,7 @@ async def run_agent(
         )
 
         # 终结产物三处复用：写回偏好 / 落产物文件 / task_result 带商品卡。
-        summary = _extract_summary(messages)
+        summary = _extract_summary(messages[turn_start:])
         items = [it.model_dump() for it in summary.items] if summary else []
         # 零候选时用 shopping_summary 自己那份干净文案覆盖：收尾那一轮不受机制约束，曾复现
         # 混入 category_insight 的品类数据给没找到的商品背书。
