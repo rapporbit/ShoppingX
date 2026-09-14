@@ -42,6 +42,7 @@ from pydantic import BaseModel
 
 from app.api import monitor
 from app.api.context import (
+    get_dest_country,
     get_original_query,
     get_session_domains,
     get_session_pt,
@@ -897,6 +898,10 @@ def _preview_item(c: ItemCandidate) -> dict[str, object]:
         # 套装轮非空：前端预览阶段就能按槽分组（与收尾 SummaryItem 同构）。内部盖章是槽 id，
         # 出前端这一步映射回展示名——前端与旧会话数据全程只见名字。
         "slot": slot_display(c.slot),
+        # 卡片附加行（与 SummaryItem 同构，理由见那边）：品牌 / 评分 / 到手价寄往哪。
+        "brand": c.brand,
+        "rating": c.rating,
+        "dest_country": get_dest_country().upper() if c.landed_usd is not None else "",
     }
 
 

@@ -66,6 +66,11 @@ export type ProductItem = {
   // 该槽花费），代替平台胶囊筛选。走结构化字段而非理由文案的【槽名】前缀（前缀会被收尾 LLM
   // 重写时丢掉）。
   slot?: string;
+  // 卡片附加行（后端 SummaryItem / _preview_item 同构下发）：品牌、评分（只有分、没有评价数——
+  // 数据集评价数恒为 0，不显示）、到手价寄往哪（只在 landed_usd 有值时非空）。
+  brand?: string;
+  rating?: number | null;
+  dest_country?: string;
   // 槽位形态："parallel" = 几类互不相干的东西分头推荐（跑鞋 + 耳机），此时**不显示合计**——
   // 把它们的价格加起来对用户没有任何意义。空 / 缺省 = 「一套齐」，照常显示这一套合计多少钱。
   slot_mode?: string;
@@ -108,6 +113,9 @@ export type OrderCardPayload = {
   preview?: OrderPreviewLine[];
   total_display?: string;
   address?: string;
+  // 确认卡失效时刻（UTC ISO，仅 kind=preview）。过期后「确认下单」按钮灰掉；后端同样会拒掉
+  // 过期确认并重新出卡（app/tools/_order_guard.py PREVIEW_TTL_SECONDS），前端只是把这件事提前告诉用户。
+  expires_at?: string;
 };
 
 // 本轮全树（主 + 各 fork 子 Agent）token 用量。随 task_result 事件下发、随 turns.json 落盘回看。
@@ -191,6 +199,11 @@ export type SessionSnapshot = {
   epoch: number;
   budget_usd: number | null;
   category: string;
+  // 「本次选购摘要」：planner 累积的一句话意图与已确定的槽位（如 收货国 / 尺码），偏好面板
+  // 「本次会话」区展示，让用户看得见 Agent 当前以为的需求是什么。旧快照可能缺这几个字段。
+  current_intent?: string;
+  slots?: Record<string, string>;
+  turn?: number;
   constraints: SessionConstraint[];
 };
 

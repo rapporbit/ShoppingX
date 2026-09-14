@@ -355,9 +355,7 @@ async def test_cancel_without_query_is_hard_rejected() -> None:
         await check_trade_sequence({"tool_name": "cancel_order", "called_tools": set()})
     # 查过了就放行——判据是「查过」，不是「查到了什么」
     assert (
-        await check_trade_sequence(
-            {"tool_name": "cancel_order", "called_tools": {"query_order"}}
-        )
+        await check_trade_sequence({"tool_name": "cancel_order", "called_tools": {"query_order"}})
         is None
     )
 
@@ -463,3 +461,29 @@ async def test_orders_api_cancel_twice_conflicts(_api_client) -> None:  # type: 
     assert first.status_code == 200 and first.json()["status"] == "CANCELLED"
     second = await _api_client.post(f"/api/orders/{order.order_id}/cancel", headers=headers)
     assert second.status_code == 409
+
+
+@pytest.mark.usefixtures("_candidates")
+async def test_create_order_preview_expires_and_reissues(monkeypatch: pytest.MonkeyPatch, tmp_path):  # type: ignore[no-untyped-def]
+    """确认卡带失效时刻；过了有效期再 confirmed=True 不落库，而是重新出卡并说明原因。"""
+    from app.tools import _order_guard as guard
+    from app.tools import create_order as mod
+    from app.utils.thread_ctx import thread_scope
+
+    monkeypatch.setattr("app.tools.create_order.hydrate", _pool_hydrate)
+    monkeypatch.setattr(
+        "app.tools.create_order.place_order",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("过期卡不该落库")),
+    )
+    args = {"item_ids": ["B01"], "recipient": "张三", "address_line": "上海市某路 1 号"}
+    with thread_scope("t-trade3", tmp_path):
+        guard.reset_order_guard()
+        first = await mod.create_order.ainvoke({**args, "confirmed": False})
+        assert first.expires_at and first.expires_at.endswith("+00:00")
+        # 把出卡时刻拨回 TTL 之前，模拟过期
+        key = str(tmp_path)
+        for fp in guard._CONFIRMED_PREVIEWS[key]:
+            guard._CONFIRMED_PREVIEWS[key][fp] -= guard.PREVIEW_TTL_SECONDS + 1
+        again = await mod.create_order.ainvoke({**args, "confirmed": True})
+    assert again.confirmed is False
+    assert "已过期" in again.note and again.expires_at
