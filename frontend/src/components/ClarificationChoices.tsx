@@ -1,14 +1,15 @@
 import { useMemo, useState } from "react";
 import { CheckIcon } from "./icons";
 
-// ask_user 带 options 时，在展示区内嵌的可点选卡片——用户点鼠标作答，不复用底部聊天框。
-// 回传给后端的仍是一段自然语言文本（契约不变），由这里据勾选拼出。
+// ask_user 的问题 = 一条普通 assistant 消息（与最终回复同一个 .final 容器），不是横幅、不是另一种
+// 卡片。带 options 时可点选项挂在气泡下方（单选点一项即作答，多选勾完点确认）；不带 options 时
+// 只有这条消息，用户在底部输入框打字回复。回传给后端的仍是一段自然语言文本（契约不变）。
 type Props = {
   question: string;
   options: string[];
   multiSelect: boolean;
   preselected?: string[] | null;
-  // 已提交则禁用（回放历史里那张已作答的卡片保持只读，不再能点）。
+  // 已提交则禁用（回放历史里那张已作答的保持只读，不再能点）。
   disabled?: boolean;
   onSubmit: (text: string) => void;
 };
@@ -27,13 +28,12 @@ export function ClarificationChoices({
   );
   const [checked, setChecked] = useState<Set<string>>(initial);
   const [extra, setExtra] = useState("");
+  const hasOptions = options.length > 0;
 
-  // 单选：点一项即作答（该项标签直接回传）。
   const pickSingle = (opt: string) => {
     if (disabled) return;
     onSubmit(opt);
   };
-
   const toggle = (opt: string) => {
     if (disabled) return;
     setChecked((prev) => {
@@ -43,7 +43,6 @@ export function ClarificationChoices({
       return next;
     });
   };
-
   // 多选确认：把勾选项 + 补充框拼成一句让 Agent 能读懂的自然语言。
   const confirmMulti = () => {
     if (disabled) return;
@@ -56,13 +55,9 @@ export function ClarificationChoices({
   };
 
   return (
-    <div className={`clarify-card ${disabled ? "is-done" : ""}`}>
-      <div className="clarify-card-head">
-        <span className="clarify-card-icon">?</span>
-        <span className="clarify-card-q">{question}</span>
-      </div>
-
-      {multiSelect ? (
+    <div className={`final clarify-msg ${disabled ? "is-done" : ""}`}>
+      <div className="final-body clarify-msg-q">{question}</div>
+      {hasOptions && multiSelect && (
         <>
           <div className="clarify-checklist">
             {options.map((opt) => {
@@ -93,17 +88,13 @@ export function ClarificationChoices({
             />
           )}
           <div className="clarify-actions">
-            <button
-              type="button"
-              className="clarify-confirm"
-              onClick={confirmMulti}
-              disabled={disabled}
-            >
+            <button type="button" className="clarify-confirm" onClick={confirmMulti} disabled={disabled}>
               {disabled ? "已确认" : "确认这套组成"}
             </button>
           </div>
         </>
-      ) : (
+      )}
+      {hasOptions && !multiSelect && (
         <div className="clarify-options">
           {options.map((opt) => (
             <button
@@ -118,6 +109,7 @@ export function ClarificationChoices({
           ))}
         </div>
       )}
+      {!hasOptions && !disabled && <div className="clarify-msg-hint">在下方输入框回复即可</div>}
     </div>
   );
 }

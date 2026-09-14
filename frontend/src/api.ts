@@ -11,9 +11,12 @@ import type {
   OrderSnapshot,
   Preference,
   PrefDraft,
+  PrepareOrderInput,
   ProductItem,
   SessionSnapshot,
+  TradeConfirmation,
 } from "./types";
+import { readConfirmations } from "./lib/confirmations";
 
 // GET /api/task/{tid}/inflight 返回：该 thread 是否仍有任务在后台跑（刷新/切回时据此续看）。
 // running=true 时带「正在跑那一轮」的提问原文与已发生的事件，供前端重建该轮再重连 WS 续直播。
@@ -420,12 +423,54 @@ export async function fetchOrders(): Promise<OrderSnapshot[]> {
   return (await resp.json()).orders ?? [];
 }
 
-export async function cancelOrder(orderId: string): Promise<{ ok: boolean; message: string }> {
-  const resp = await authFetch(`/api/orders/${encodeURIComponent(orderId)}/cancel`, {
+// --- 交易确认卡（对齐参考项目 confirmations 接口）------------------------------
+// 三条路都不经模型：表单出卡 / 列表 / 点按钮决议。错误把后端那句话原样带回（409 = 快照变了或
+// 已决议，410 = 过期，403 = 不是你的会话），比「操作失败」有用。
+
+export type ConfirmationResult =
+  | { ok: true; confirmation: TradeConfirmation }
+  | { ok: false; message: string };
+
+async function confirmationRequest(path: string, body?: unknown): Promise<ConfirmationResult> {
+  const resp = await authFetch(path, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
   });
-  if (resp.ok) return { ok: true, message: "已取消" };
-  // 409 = 状态机不允许（多半是已经取消过了）。把后端那句话原样带给用户——它比「操作失败」有用。
-  const detail = await resp.json().catch(() => ({}));
-  return { ok: false, message: detail?.detail ?? "取消失败" };
+  const data = await resp.json().catch(() => ({}));
+  if (resp.ok) {
+    const [confirmation] = readConfirmations([data]);
+    return confirmation
+      ? { ok: true, confirmation }
+      : { ok: false, message: "服务端返回的确认记录不完整，请刷新记录核对。" };
+  }
+  return { ok: false, message: (data as { detail?: string })?.detail ?? `请求失败（${resp.status}）` };
+}
+
+export function prepareOrder(threadId: string, input: PrepareOrderInput): Promise<ConfirmationResult> {
+  return confirmationRequest(`/api/threads/${encodeURIComponent(threadId)}/confirmations/orders`, input);
+}
+
+export function prepareCancel(orderId: string, reason: string, threadId: string): Promise<ConfirmationResult> {
+  return confirmationRequest(`/api/orders/${encodeURIComponent(orderId)}/cancel`, {
+    reason,
+    thread_id: threadId,
+  });
+}
+
+export function resolveConfirmation(
+  threadId: string,
+  confirmation: TradeConfirmation,
+  approved: boolean,
+): Promise<ConfirmationResult> {
+  return confirmationRequest(
+    `/api/threads/${encodeURIComponent(threadId)}/confirmations/${encodeURIComponent(confirmation.confirmation_id)}/resolve`,
+    { snapshot_hash: confirmation.snapshot_hash, approved },
+  );
+}
+
+export async function fetchConfirmations(threadId: string): Promise<TradeConfirmation[]> {
+  const resp = await authFetch(`/api/threads/${encodeURIComponent(threadId)}/confirmations`);
+  if (!resp.ok) return [];
+  return readConfirmations((await resp.json()).confirmations);
 }

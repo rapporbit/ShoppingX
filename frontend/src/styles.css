@@ -1332,37 +1332,31 @@ button:disabled {
   border-color: #f59e0b;
   box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.12), var(--shadow-md);
 }
-.clarification-banner {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 14px;
-  margin-bottom: 6px;
-  background: #fef7ed;
-  border: 1px solid #fde1a8;
-  border-radius: 9px;
-  font-size: 0.85rem;
-  color: #92400e;
-  line-height: 1.5;
-}
-.clarification-banner-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  flex-shrink: 0;
-  border-radius: 50%;
-  background: #f59e0b;
-  color: #fff;
-  font-size: 0.75rem;
-  font-weight: 700;
-}
 .send-btn.is-clarify.ready {
   background: linear-gradient(135deg, #f59e0b, #d97706);
 }
 
-/* ask_user 带 options 时展示区内嵌的可点选卡片（不复用聊天框） */
+/* ask_user 的问题：一条 assistant 消息（复用 .final），选项挂在下面 */
+.clarify-msg {
+  border-left: 3px solid #f59e0b;
+}
+.clarify-msg.is-done {
+  opacity: 0.72;
+}
+.clarify-msg-q {
+  white-space: pre-wrap;
+}
+.clarify-msg-hint {
+  margin-top: 8px;
+  font-size: 0.78rem;
+  color: var(--text-muted, #8a8f98);
+}
+.clarify-msg .clarify-options,
+.clarify-msg .clarify-checklist {
+  margin-top: 12px;
+}
+
+/* （旧）独立澄清卡壳：仍被多选清单/单选按钮的子样式引用，壳本身不再渲染 */
 .clarify-card {
   margin-top: 10px;
   padding: 14px 16px;
@@ -3916,4 +3910,260 @@ button:disabled {
 .session-summary dd {
   margin: 0;
   color: var(--text);
+}
+
+
+/* ===== 交易确认卡（移植自参考项目 confirmations.css，配色对齐本仓变量）===== */
+.confirmations-section {
+  margin: 20px 0 8px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #fff;
+}
+.confirmations-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.confirmations-heading h2 {
+  margin: 2px 0 0;
+  font-size: 1rem;
+}
+.confirmation-eyebrow {
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #b45309;
+  font-weight: 700;
+}
+.confirmation-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.confirmation-card {
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-strong);
+  border-radius: 12px;
+  background: #fff;
+}
+.confirmation-card.is-pending {
+  border-left-color: #f59e0b;
+  background: #fffdf8;
+}
+.confirmation-card.is-resolved {
+  opacity: 0.92;
+}
+.confirmation-card-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.confirmation-card-heading h3 {
+  margin: 2px 0 0;
+  font-size: 0.98rem;
+}
+.confirmation-status {
+  flex-shrink: 0;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  background: #fef3c7;
+  color: #92400e;
+}
+.confirmation-status.is-approved {
+  background: #dcfce7;
+  color: #166534;
+}
+.confirmation-status.is-rejected,
+.confirmation-status.is-expired {
+  background: #f1f5f9;
+  color: #475569;
+}
+.confirmation-details {
+  margin-top: 10px;
+}
+.confirmation-details summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.9rem;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+.confirmation-details summary span {
+  font-weight: 400;
+  font-size: 0.78rem;
+  color: var(--text-muted, #8a8f98);
+}
+.confirmation-items {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.confirmation-items li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.88rem;
+}
+.confirmation-items small,
+.confirmation-item-price small {
+  display: block;
+  color: var(--text-muted, #8a8f98);
+  font-size: 0.76rem;
+}
+.confirmation-item-price {
+  text-align: right;
+  flex-shrink: 0;
+}
+.confirmation-address {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+  font-size: 0.86rem;
+}
+.confirmation-address > span {
+  display: block;
+  font-size: 0.74rem;
+  color: var(--text-muted, #8a8f98);
+  margin-bottom: 2px;
+}
+.confirmation-address p {
+  margin: 2px 0 0;
+}
+.confirmation-cancel-reason {
+  margin: 8px 0 0;
+  font-size: 0.86rem;
+  color: #92400e;
+}
+.confirmation-total {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.confirmation-total small {
+  display: block;
+  font-size: 0.74rem;
+  color: var(--text-muted, #8a8f98);
+}
+.confirmation-total strong {
+  font-size: 1.05rem;
+}
+.confirmation-scope,
+.confirmation-order-id,
+.confirmation-hint {
+  margin: 8px 0 0;
+  font-size: 0.78rem;
+  color: var(--text-muted, #8a8f98);
+}
+.confirmation-order-id span {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text);
+}
+.confirmation-decision {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.confirmation-expiry {
+  margin: 0;
+  font-size: 0.8rem;
+  color: #92400e;
+}
+.confirmation-expiry.is-expired {
+  color: #64748b;
+}
+.confirmation-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.confirmation-cancel-area {
+  margin-top: 10px;
+}
+.confirmation-cancel-area label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.82rem;
+  margin-bottom: 8px;
+}
+.confirmation-cancel-area textarea {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font: inherit;
+  resize: vertical;
+}
+.confirmation-text-button {
+  background: none;
+  border: none;
+  padding: 0;
+  color: #b45309;
+  font-size: 0.82rem;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.confirmation-error {
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #991b1b;
+  font-size: 0.84rem;
+}
+.confirmation-error p {
+  margin: 4px 0 0;
+}
+/* 下单表单补充：多行地址、只读态、订单抽屉里的取消原因行 */
+.intent-form textarea {
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font: inherit;
+  resize: vertical;
+}
+.intent-form fieldset {
+  border: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.intent-item-meta {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.76rem;
+  color: var(--text-muted, #8a8f98);
+}
+.order-cancel-form {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.order-cancel-form input {
+  flex: 1 1 160px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font: inherit;
 }

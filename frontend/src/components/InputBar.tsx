@@ -8,7 +8,6 @@ const MAX_IMAGES = 3;
 type InputBarProps = {
   running: boolean;
   waiting?: boolean;
-  clarificationQuestion?: string | null;
   // 该轮澄清带了可点选卡片：由展示区的卡片接管作答，这里收起 composer，只留一行提示。
   clarificationHasChoices?: boolean;
   // 非 null 即「不能再发**新任务**了」（目前唯一来源：今日 credit 用尽）。文案直接展示给用户。
@@ -21,7 +20,6 @@ type InputBarProps = {
 export function InputBar({
   running,
   waiting,
-  clarificationQuestion,
   clarificationHasChoices,
   blockedReason,
   onSend,
@@ -91,7 +89,7 @@ export function InputBar({
   if (waiting && clarificationHasChoices) {
     return (
       <div className="composer">
-        <p className="composer-hint">请在上方卡片中点选作答 ↑</p>
+        <p className="composer-hint">请在上方消息里点选作答 ↑</p>
       </div>
     );
   }
@@ -102,12 +100,6 @@ export function InputBar({
         <div className="quota-banner">
           <span className="quota-banner-icon">!</span>
           <span>{blockedReason}</span>
-        </div>
-      )}
-      {waiting && clarificationQuestion && (
-        <div className="clarification-banner">
-          <span className="clarification-banner-icon">?</span>
-          <span>{clarificationQuestion}</span>
         </div>
       )}
       <div

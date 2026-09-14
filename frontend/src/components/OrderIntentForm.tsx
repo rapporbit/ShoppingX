@@ -1,115 +1,159 @@
 import { useEffect, useState, type FormEvent } from "react";
-import type { ProductItem } from "../types";
+import type { PrepareOrderInput, ProductItem, ShippingAddress } from "../types";
 import { Modal } from "./Modal";
-import { itemRef } from "./productText";
+import { platformName } from "./productText";
 
-// 下单意向表单：收件人 / 地址 / 数量一次填齐，免得 Agent 用 ask_user 一句一句追问。
-// 提交后**不直接打下单接口**——把信息组成一句话发进对话，仍由模型调 create_order(confirmed=False)
-// 出确认卡、经候选校验 / 幂等 / 归属那一整套闸。表单省掉的是追问的来回，不是任何一道闸。
+// 下单意向表单（对齐参考项目 OrderIntentForm）：收件信息 + 数量一次填齐，提交**直连**
+// POST /api/threads/{id}/confirmations/orders 由服务端生成确认卡，不经模型、零 LLM 往返。
+// 候选校验 / 幂等 / 归属 / 有效期这些闸全在服务端那条路上，表单省掉的只是追问的来回。
 // 收件信息记在 localStorage，下次自动带出（只存本机，不上传到偏好库）。
-const KEY = "shoppingx.order.address";
+const KEY = "shoppingx.order.address.v2";
 
-type Draft = { recipient: string; address: string; country: string; phone: string };
+const EMPTY: ShippingAddress = {
+  recipient_name: "",
+  country: "",
+  state: "",
+  city: "",
+  address_line: "",
+  postal_code: "",
+  phone: "",
+};
 
-function loadDraft(): Draft {
+function loadDraft(defaultCountry: string): ShippingAddress {
   try {
     const raw = localStorage.getItem(KEY);
-    if (raw) return { recipient: "", address: "", country: "", phone: "", ...JSON.parse(raw) };
+    if (raw) return { ...EMPTY, ...JSON.parse(raw) };
   } catch {
     /* 坏数据当没有 */
   }
-  return { recipient: "", address: "", country: "", phone: "" };
+  return { ...EMPTY, country: defaultCountry };
 }
 
 export function OrderIntentForm({
   item,
+  busy,
+  error,
   onClose,
-  onSubmit,
+  onPrepare,
 }: {
   item: ProductItem | null;
+  busy: boolean;
+  error: string | null;
   onClose: () => void;
-  onSubmit: (text: string) => void;
+  onPrepare: (input: PrepareOrderInput) => Promise<boolean>;
 }) {
-  const [draft, setDraft] = useState<Draft>(loadDraft);
-  const [qty, setQty] = useState(1);
-  const [err, setErr] = useState<string | null>(null);
+  const [addr, setAddr] = useState<ShippingAddress>(() => loadDraft(item?.dest_country || "CN"));
+  const [qty, setQty] = useState("1");
+  const [localErr, setLocalErr] = useState<string | null>(null);
 
   useEffect(() => {
     if (item) {
-      setQty(1);
-      setErr(null);
+      setQty("1");
+      setLocalErr(null);
+      setAddr(loadDraft(item.dest_country || "CN"));
     }
   }, [item]);
 
   if (!item) return null;
-  const set = (k: keyof Draft) => (e: React.ChangeEvent<HTMLInputElement>) =>
-    setDraft((d) => ({ ...d, [k]: e.target.value }));
+  const field = (k: keyof ShippingAddress) =>
+    (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
+      setAddr((a) => ({ ...a, [k]: e.target.value }));
+  const q = Number(qty);
+  const qtyOk = qty.trim() !== "" && Number.isSafeInteger(q) && q > 0 && q <= 99;
+  const price =
+    typeof item.landed_usd === "number"
+      ? `$${item.landed_usd.toFixed(2)} 到手价`
+      : typeof item.price_usd === "number"
+        ? `$${item.price_usd.toFixed(2)} 货价`
+        : "";
 
-  const submit = (e: FormEvent) => {
+  const submit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!draft.recipient.trim() || !draft.address.trim()) {
-      setErr("收件人和收货地址都要填。");
+    if (busy) return;
+    const n = Object.fromEntries(
+      Object.entries(addr).map(([k, v]) => [k, v.trim()]),
+    ) as unknown as ShippingAddress;
+    if (![n.recipient_name, n.country, n.city, n.address_line].every(Boolean)) {
+      setLocalErr("请补全收件人、国家或地区、城市与详细地址。");
       return;
     }
-    localStorage.setItem(KEY, JSON.stringify(draft));
-    const extra = [
-      draft.country.trim() && `收货国家：${draft.country.trim()}`,
-      draft.phone.trim() && `电话：${draft.phone.trim()}`,
-    ]
-      .filter(Boolean)
-      .join("；");
-    onSubmit(
-      `我要买 ${itemRef(item)} × ${qty}。收件人：${draft.recipient.trim()}；收货地址：${draft.address.trim()}` +
-        (extra ? `；${extra}` : "") +
-        "。请先给我确认卡，我确认后再下单。",
-    );
-    onClose();
+    if (!qtyOk) {
+      setLocalErr("数量要是 1～99 的整数。");
+      return;
+    }
+    setLocalErr(null);
+    localStorage.setItem(KEY, JSON.stringify(n));
+    const ok = await onPrepare({
+      items: [{ item_id: item.item_id, quantity: q }],
+      shipping_address: n,
+    });
+    if (ok) onClose();
   };
 
   return (
-    <Modal open title="填写收件信息" onClose={onClose}>
-      <form className="intent-form" onSubmit={submit}>
+    <Modal open title="填写收件信息" onClose={() => !busy && onClose()}>
+      <form className="intent-form" onSubmit={(e) => void submit(e)}>
         <div className="intent-item">
-          <span className="intent-item-title">{item.title}</span>
+          <div>
+            <span className="intent-item-title">{item.title}</span>
+            <small className="intent-item-meta">
+              {platformName(item.platform)}
+              {price ? ` · ${price}` : ""} · 确认卡金额按平台原币种货价算，不含税运
+            </small>
+          </div>
           <label className="intent-qty">
             数量
-            <input
-              type="number"
-              min={1}
-              max={99}
-              value={qty}
-              onChange={(e) => setQty(Math.max(1, Math.min(99, Number(e.target.value) || 1)))}
-            />
+            <input type="number" min={1} max={99} step={1} value={qty} inputMode="numeric"
+              onChange={(e) => setQty(e.target.value)} disabled={busy} />
           </label>
         </div>
-        <label>
-          收件人 *
-          <input value={draft.recipient} onChange={set("recipient")} placeholder="姓名" autoFocus />
-        </label>
-        <label>
-          收货地址 *
-          <input value={draft.address} onChange={set("address")} placeholder="国家 / 城市 / 街道门牌" />
-        </label>
-        <div className="intent-row">
+        <fieldset disabled={busy}>
           <label>
-            国家（可选）
-            <input value={draft.country} onChange={set("country")} placeholder="如 US / 日本" />
+            收件人 *
+            <input value={addr.recipient_name} onChange={field("recipient_name")} autoComplete="shipping name"
+              maxLength={100} placeholder="收件人姓名" autoFocus />
+          </label>
+          <div className="intent-row">
+            <label>
+              国家或地区 *
+              <input value={addr.country} onChange={field("country")} autoComplete="shipping country"
+                maxLength={40} placeholder="如 CN / US / 日本" />
+            </label>
+            <label>
+              省 / 州
+              <input value={addr.state} onChange={field("state")} autoComplete="shipping address-level1" maxLength={100} />
+            </label>
+          </div>
+          <label>
+            城市 *
+            <input value={addr.city} onChange={field("city")} autoComplete="shipping address-level2" maxLength={100} />
           </label>
           <label>
-            电话（可选）
-            <input value={draft.phone} onChange={set("phone")} placeholder="便于配送联系" />
+            详细地址 *
+            <textarea value={addr.address_line} onChange={field("address_line")} autoComplete="shipping street-address"
+              maxLength={500} rows={2} placeholder="街道、楼栋与门牌号" />
           </label>
-        </div>
-        {err && <div className="intent-err">{err}</div>}
+          <div className="intent-row">
+            <label>
+              邮政编码
+              <input value={addr.postal_code} onChange={field("postal_code")} autoComplete="shipping postal-code" maxLength={30} />
+            </label>
+            <label>
+              联系电话
+              <input type="tel" value={addr.phone} onChange={field("phone")} autoComplete="shipping tel" maxLength={40} />
+            </label>
+          </div>
+        </fieldset>
+        {(localErr || error) && <div className="intent-err">{localErr || error}</div>}
         <div className="intent-hint">
-          提交后 Agent 会先出一张<strong>确认卡</strong>（不会直接下单），你看过再点确认。
+          提交后服务端生成一张<strong>确认卡</strong>，不会下单；你在卡上点「确认下单」才算数。
         </div>
         <div className="compare-actions">
-          <button type="button" className="btn-ghost" onClick={onClose}>
+          <button type="button" className="btn-ghost" onClick={onClose} disabled={busy}>
             取消
           </button>
-          <button type="submit" className="btn-primary">
-            生成确认卡
+          <button type="submit" className="btn-primary" disabled={busy || !qtyOk}>
+            {busy ? "正在核对并生成…" : "生成确认卡"}
           </button>
         </div>
       </form>
