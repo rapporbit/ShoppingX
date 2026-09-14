@@ -110,6 +110,7 @@ _SLOT_RERANK_FLOOR: float
 _W_SLOT_RERANK: float
 PICK_DISPLAY_CAP: int
 PICK_REL_SHOW_RATIO: float
+PICK_RERANK_K: int
 
 
 def _load_params() -> None:
@@ -117,7 +118,7 @@ def _load_params() -> None:
     global _W_PREF, _W_RATING, _W_CHEAP, _W_MATCH_HARD, _W_MATCH_HARD_SEM, _W_ATTEN
     global _W_MATCH_SEM, _W_ATTEN_SEM, _W_AFFINITY, _W_SPEC_CONFLICT
     global _RERANK_FLOOR, _W_RERANK_MISS, _SLOT_RERANK_FLOOR, _W_SLOT_RERANK
-    global PICK_DISPLAY_CAP, PICK_REL_SHOW_RATIO
+    global PICK_DISPLAY_CAP, PICK_REL_SHOW_RATIO, PICK_RERANK_K
 
     # 打分权重：软偏好命中最重（这是「按偏好精挑」的本职），评分次之，价格便宜度再次。
     _W_PREF = 1.0
@@ -205,6 +206,12 @@ def _load_params() -> None:
     # 只收紧**渲染给模型的件数**——登记表仍是全量，收尾按 id hydrate 不受影响。
     # 8→3（2026-09 响应速度）：清单只给 3 件，且每件都由收尾 LLM 写选购理由（见 shopping_summary）。
     PICK_DISPLAY_CAP = env_int("PICK_DISPLAY_CAP", 3)
+
+    # 每批送 cross-encoder 的候选上限（round3 刀 3，30 → 15）：召回按向量分降序取头部送精排，
+    # 尾部在门生效时直接出局（它们本就是向量分最低的那截）。自动比价精挑（harness.autopick）
+    # 后登记表按检索轮次累积（实测 8 次检索 = 240 件），不封顶的话每轮 rerank 延迟随池子线性涨。
+    # 增量缓存照常：已按同一 query 打过分的候选不占额度。
+    PICK_RERANK_K = env_int("PICK_RERANK_K", 15)
 
     # 展示相对门：cross-encoder 品类相关分显著低于池内头部的候选，判为「品类不够相符」，宁缺毋滥
     # **不凑数展示**（哪怕没填满 PICK_DISPLAY_CAP）——单平台池小时尤要紧：老的「按分填满」策略会把
@@ -416,6 +423,8 @@ async def _category_relevance(
             if c.rerank_score is not None and c.rerank_query == query:
                 scores[c.item_id] = float(c.rerank_score)
         fresh = [c for c in cands if c.item_id not in scores]
+        if len(fresh) > PICK_RERANK_K:  # 向量分高的先送精排，尾部本轮不打分（门生效时出局）
+            fresh = sorted(fresh, key=lambda c: c.score or 0.0, reverse=True)[:PICK_RERANK_K]
         if not fresh:
             return True
         batch, used_remote = await get_reranker().score_detailed(
@@ -604,6 +613,12 @@ async def item_picker(
     # hard_must 已是 _split_specs 剥掉数值规格、normalize_terms 归一成英文的普通词，正是要拼进
     # rerank query 的那部分（prefer 不能拼，见 _category_relevance 的硬约束①）。
     rerank_scores, rerank_on, anchor_conflict = await _category_relevance(survivors, hard_must)
+    if rerank_on and len(rerank_scores) < len(survivors):
+        # 精排额度（PICK_RERANK_K）之外的候选没有相关分，「判不了不定罪」会让它们绕过品类门；
+        # 它们是向量分最低的那截，门生效时直接出局比放行更安全。
+        unscored = [c.item_id for c in survivors if c.item_id not in rerank_scores]
+        survivors = [c for c in survivors if c.item_id in rerank_scores]
+        logger.info("item_picker 精排额度外出局 %d 件（额度 %d）", len(unscored), PICK_RERANK_K)
     # 池内品类计数（补搜闸的污染信号，见 ItemPickerOutput 字段说明）。没拿到分的候选按品类
     # 相符算——判不了不定罪，与「rr < FLOOR 才沉底」的失效方向一致。
     oncat_count: int | None = None
