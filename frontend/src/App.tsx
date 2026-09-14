@@ -4,14 +4,16 @@ import {
   fetchFavorites,
   checkAdmin,
   fetchQuota,
+  fetchSkillCatalog,
   formatResetAt,
   removeFavorite,
   type Quota,
 } from "./api";
-import type { ProductItem, TurnExperiment } from "./types";
+import type { ProductItem, SkillCatalogItem, TurnExperiment } from "./types";
 import { ActivityFeed } from "./components/ActivityFeed";
 import { ClarificationChoices } from "./components/ClarificationChoices";
 import { FavoritesDrawer } from "./components/FavoritesDrawer";
+import { SkillsDrawer } from "./components/SkillsDrawer";
 import { FinalAnswer } from "./components/FinalAnswer";
 import { LearnedPrefsBar } from "./components/LearnedPrefsBar";
 import { PreferenceDrawer } from "./components/PreferenceDrawer";
@@ -183,6 +185,13 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
   const [navOpen, setNavOpen] = useState(false);
   const [favsOpen, setFavsOpen] = useState(false);
   const [ordersOpen, setOrdersOpen] = useState(false);
+  // Skill 目录（内置 + 我的）喂输入框 / 菜单；抽屉增删改后 bump refresh 重拉。
+  const [skillsOpen, setSkillsOpen] = useState(false);
+  const [skillCatalog, setSkillCatalog] = useState<SkillCatalogItem[]>([]);
+  const [skillRefresh, setSkillRefresh] = useState(0);
+  useEffect(() => {
+    void fetchSkillCatalog(userId).then(setSkillCatalog);
+  }, [userId, skillRefresh]);
   // 「搜同款」抽屉：存的是**源商品**（点了哪张卡），非 null 即打开——相似结果由抽屉自己现拉。
   const [similarOf, setSimilarOf] = useState<ProductItem | null>(null);
 
@@ -284,6 +293,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
           onOpenAdmin={isAdmin ? () => setAdminOpen(true) : null}
           onOpenFavorites={() => setFavsOpen(true)}
           onOpenOrders={() => setOrdersOpen(true)}
+          onOpenSkills={() => setSkillsOpen(true)}
           onLogout={onLogout}
           onOpenNav={() => setNavOpen(true)}
         />
@@ -453,7 +463,8 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
           clarificationHasChoices={
             (turns[turns.length - 1]?.clarificationOptions?.length ?? 0) > 0
           }
-          onSend={(text, files) => startTask(text, userId, files)}
+          skills={skillCatalog}
+          onSend={(text, files, skill) => startTask(text, userId, files, skill)}
           onCancel={cancelTask}
           onClarify={sendClarification}
         />
@@ -478,6 +489,13 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
       />
 
       <OrdersDrawer open={ordersOpen} onClose={() => setOrdersOpen(false)} />
+
+      <SkillsDrawer
+        userId={userId}
+        open={skillsOpen}
+        onClose={() => setSkillsOpen(false)}
+        onChanged={() => setSkillRefresh((n) => n + 1)}
+      />
 
       <SimilarDrawer source={similarOf} onClose={() => setSimilarOf(null)} />
 

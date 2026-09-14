@@ -188,6 +188,8 @@ export function useShoppingXTask() {
   // 本轮参考图在服务端的文件名：startTask 里先上传拿到，ws_ready 时随 POST /api/task 带上。
   // 走 ref 而不是给 openSocket 加参数——它只在「首连发任务」那一刻被读一次，用完即清。
   const pendingImagesRef = useRef<string[]>([]);
+  // 本轮 / 选中的 skill 目录名，与图一样在 ws_ready 时随任务发出、用完即清（重连不重发）。
+  const pendingSkillRef = useRef<string | undefined>(undefined);
   // 「已对该 thread 发起过续看」的守卫：记当前正在续看 / 直播的 thread_id。resumeIfRunning 同步据此
   // 去重——StrictMode（dev）会把挂载 effect 跑两次、追加式重建在跑轮不幂等，会重出两条一样的对话；
   // 同步守卫（在 fetchInflight 之前就置位）避开 promise 解析顺序的竞态。离开对话（teardownActive）清空，
@@ -390,7 +392,9 @@ export function useShoppingXTask() {
           // 仅首连发任务；重连时任务已在后台跑，重发会起第二个任务（同 thread 会被覆盖，但语义错）。
           const images = pendingImagesRef.current;
           pendingImagesRef.current = []; // 用完即清：下一轮没传图就不该还带着上一轮的
-          startTaskRequest(query, tid, userId, images).catch((e) => {
+          const skill = pendingSkillRef.current;
+          pendingSkillRef.current = undefined;
+          startTaskRequest(query, tid, userId, images, skill).catch((e) => {
             // 额度耗尽（402）在这里与其它启动失败走同一条路：翻 error 态、把这一轮标红。区别只在
             // 文案（describeStartError 认得它，给出重置时刻）。App 侧的余额条会因 status 变 error
             // 而重拉 /api/quota，随即把输入框锁掉——不必再从这里回传什么。
@@ -538,7 +542,7 @@ export function useShoppingXTask() {
   };
 
   const startTask = useCallback(
-    async (query: string, userId?: string, files?: File[]) => {
+    async (query: string, userId?: string, files?: File[], skill?: string) => {
       // 「只发一张图、一个字不打」是完整意图（就照这张图找），不能被空 query 守卫拦掉——
       // 否则用户点发送后界面毫无反应，而这恰恰是图搜最自然的用法。
       if (!query.trim() && !files?.length) return;
@@ -551,6 +555,7 @@ export function useShoppingXTask() {
       // 上一轮若在 ws_ready 之前就失败（WS 没连上），它上传的图还挂在 ref 上。开局先清，
       // 免得这一轮纯文字提问却莫名带着上一轮的参考图。
       pendingImagesRef.current = [];
+      pendingSkillRef.current = skill;
       // 先把旧连接的回调摘掉再关，避免上一轮 socket 残留帧改到这一轮的 state。
       const prev = wsRef.current;
       if (prev) {

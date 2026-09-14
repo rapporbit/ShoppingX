@@ -34,6 +34,7 @@ type TopBarProps = {
   onOpenAdmin: (() => void) | null;
   onOpenFavorites: () => void;
   onOpenOrders: () => void;
+  onOpenSkills: () => void;
   onLogout: () => void;
   // 窄屏专用：会话栏在手机上收成了抽屉，得有个入口把它唤回来。宽屏侧栏常驻，此按钮 CSS 隐藏。
   onOpenNav: () => void;
@@ -79,6 +80,7 @@ export function TopBar({
   onOpenAdmin,
   onOpenFavorites,
   onOpenOrders,
+  onOpenSkills,
   onLogout,
   onOpenNav,
 }: TopBarProps) {
@@ -119,6 +121,11 @@ export function TopBar({
         {/* 我的订单：与收藏并列。交易是 mock（无支付/物流/库存），入口文案不吹成真实电商。 */}
         <button className="ghost-btn" onClick={onOpenOrders} title="我的订单（模拟交易，无支付与物流）">
           <span>订单</span>
+        </button>
+        {/* 我的 Skill：自己写的选购方案。输入框敲 / 可选；Agent 也会按描述自己判断要不要读。 */}
+        <button className="ghost-btn" onClick={onOpenSkills} title="我的 Skill：自写选购方案，输入框敲 / 可选用">
+          <span className="skill-glyph">/</span>
+          <span>Skill</span>
         </button>
         {onOpenAdmin && (
           <button className="ghost-btn" onClick={onOpenAdmin} title="后台管理：模型与检索参数">

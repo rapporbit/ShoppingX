@@ -13,6 +13,8 @@ import type {
   PrefDraft,
   ProductItem,
   SessionSnapshot,
+  SkillCatalogItem,
+  UserSkill,
 } from "./types";
 
 // GET /api/task/{tid}/inflight 返回：该 thread 是否仍有任务在后台跑（刷新/切回时据此续看）。
@@ -45,6 +47,7 @@ export async function startTaskRequest(
   threadId: string,
   userId?: string,
   imagePaths?: string[],
+  skill?: string,
 ): Promise<void> {
   // platforms 在发任务这一刻从设置里读（唯一真源，见 settings.ts）：默认只搜 amazon，用户在设置
   // 里勾了多个平台才跨平台并行 fork 比价。不必把它一路穿过 hook 的参数链。
@@ -57,6 +60,8 @@ export async function startTaskRequest(
       user_id: userId,
       platforms: loadPlatforms(),
       image_paths: imagePaths?.length ? imagePaths : undefined,
+      // 输入框 / 选中的 skill 目录名；服务端校验归属后把正文注入本轮，找不到会直接报错结束本轮。
+      skill: skill || undefined,
     }),
   });
   // fetch 只在网络层失败才 reject；4xx/5xx 仍 resolve。不显式查 ok，任务起不来时 UI 会一直卡
@@ -428,4 +433,53 @@ export async function cancelOrder(orderId: string): Promise<{ ok: boolean; messa
   // 409 = 状态机不允许（多半是已经取消过了）。把后端那句话原样带给用户——它比「操作失败」有用。
   const detail = await resp.json().catch(() => ({}));
   return { ok: false, message: detail?.detail ?? "取消失败" };
+}
+
+// ---- 个人 Skill（买家自写选购方案）----------------------------------------
+// 目录 = 内置 + 我的（只有 name/description，喂输入框 / 菜单）。失败给空表，不阻塞输入。
+export async function fetchSkillCatalog(userId: string): Promise<SkillCatalogItem[]> {
+  const resp = await authFetch(`/api/skills/catalog?user_id=${encodeURIComponent(userId)}`);
+  if (!resp.ok) return [];
+  return (await resp.json()).skills ?? [];
+}
+
+export async function fetchMySkills(userId: string): Promise<UserSkill[]> {
+  const resp = await authFetch(`/api/skills?user_id=${encodeURIComponent(userId)}`);
+  if (!resp.ok) return [];
+  return (await resp.json()).skills ?? [];
+}
+
+async function skillWrite(url: string, method: "POST" | "PUT", payload: object): Promise<UserSkill> {
+  const resp = await authFetch(url, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) {
+    const detail = (await resp.json().catch(() => null))?.detail;
+    throw new Error(typeof detail === "string" ? detail : `保存失败（${resp.status}）`);
+  }
+  return (await resp.json()).skill as UserSkill;
+}
+
+export function createSkill(
+  userId: string,
+  draft: { name: string; description: string; body: string },
+): Promise<UserSkill> {
+  return skillWrite(`/api/skills?user_id=${encodeURIComponent(userId)}`, "POST", draft);
+}
+
+export function updateSkill(
+  userId: string,
+  name: string,
+  draft: { description: string; body: string },
+): Promise<UserSkill> {
+  const url = `/api/skills/${encodeURIComponent(name)}?user_id=${encodeURIComponent(userId)}`;
+  return skillWrite(url, "PUT", { name, ...draft });
+}
+
+export async function deleteSkill(userId: string, name: string): Promise<void> {
+  await authFetch(`/api/skills/${encodeURIComponent(name)}?user_id=${encodeURIComponent(userId)}`, {
+    method: "DELETE",
+  });
 }
