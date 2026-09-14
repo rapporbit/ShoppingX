@@ -98,7 +98,7 @@ def _load_params() -> None:
     MAX_TOP_K = env_int("ITEM_SEARCH_MAX_TOP_K", DEFAULT_TOP_K)
 
     # 单平台召回池：跨平台靠「平台数 × top_k」堆出大候选池（5×10=50）供 item_picker 精排；单平台没有
-    # 这个乘数——若同样只召 10 条，池子≈展示上限（PICK_DISPLAY_CAP=8），精排几乎无筛除空间（10 挑 8
+    # 这个乘数——若同样只召 10 条，池子≈展示上限（彼时 CAP=8），精排几乎无筛除空间（10 挑 8
     # 只淘汰 2 件，跨品类蹭词货照样露脸）。故单平台把召回池单独放大，让 cross-encoder 精排有料可挑。
     # **只放大「进登记表供 picker 精排」的池子，不放大「进模型上下文」的渲染量**（见 RENDER_CAP）。
     SINGLE_PLATFORM_POOL_K = env_int("ITEM_SEARCH_SINGLE_POOL_K", 30)
