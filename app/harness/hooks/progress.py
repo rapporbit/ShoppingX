@@ -25,6 +25,7 @@ from app.agent.retrieval_budget import (
     budget_relax_due,
 )
 from app.api.context import get_session_tasks
+from app.harness.autopick import autopick_applies
 from app.harness.middleware import HookRejectSignal, harness_hook
 from app.harness.phase_machine import Phase, get_phase_machine, set_phase_machine
 from app.harness.phase_machine import PhaseStateMachine as _PSM
@@ -349,9 +350,18 @@ async def append_transition_notice(context: dict[str, Any]) -> dict[str, Any] | 
         notice = (
             "\n\n[阶段推进] 候选已入池，检索阶段就此收线：不要再调用 item_search / "
             "task_dispatch / web_search——继续检索只会消耗全树检索预算并很快被机制拒绝。"
-            "请基于已入池候选继续（price_compare / shipping_calc / item_picker → "
-            "shopping_summary）。"
-        ) + _price_tasks_hint()
+        )
+        # round3 刀 2：普通轮由系统在下一次思考前自动比价 + 精挑（harness.autopick），指路
+        # 直接改成「等结果、然后收尾」；套装轮 / 关开关时仍指模型自己走 price_compare → picker。
+        if autopick_applies():
+            notice += (
+                "系统将自动完成比价（到手价）与精挑并把结果给你，届时直接 shopping_summary 收尾。"
+            )
+        else:
+            notice += (
+                "请基于已入池候选继续（price_compare / shipping_calc / item_picker → "
+                "shopping_summary）。"
+            ) + _price_tasks_hint()
     elif tool == "item_picker" and machine.phase is Phase.COMPARING:
         picks = context.get("call_picks", 0)
         oncat = context.get("call_oncat")
