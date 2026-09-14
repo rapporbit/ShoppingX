@@ -463,63 +463,6 @@ class TestPhaseHooks:
         finally:
             reset_phase_machine()
 
-    @pytest.mark.asyncio
-    async def test_reuse_turn_first_backfill_executes_immediately(self) -> None:
-        """复用轮第一次补搜**当场放行执行**（不再攒拒绝换逃生），结果尾部缀软线文案。
-
-        对应 2026-07-14 线上死锁：planner 误判 reuse → item_search 被阶段闸拦死 27 轮。
-        预算制下（REUSE_RETRIEVAL_BUDGET≥1，永不为 0）这类死锁在结构上不可能发生。
-        """
-        from pathlib import Path
-
-        from app.agent.retrieval_budget import reset_tree
-        from app.api.context import set_retrieval_mode
-        from app.harness.hooks.budget import charge_retrieval
-        from app.harness.state import GuardState
-        from app.utils.thread_ctx import thread_scope
-
-        guard = GuardState()
-        with thread_scope("t-reuse-budget", Path("/tmp/t-reuse-budget")):
-            set_retrieval_mode("reuse")
-            try:
-                ctx = {"tool_name": "item_search", "_guard": guard}
-                out = await charge_retrieval(ctx)
-                assert out is not None and "converge_note" in out  # 执行 + 缀收敛提示
-                assert "复用轮补搜" in out["converge_note"]
-            finally:
-                reset_tree()
-
-    @pytest.mark.asyncio
-    async def test_reuse_turn_budget_exhausted_then_hard_block(self) -> None:
-        """复用轮越过小预算后硬挡；改写 augment（补搜授权）即恢复全树预算。"""
-        from pathlib import Path
-
-        from app.agent.retrieval_budget import reset_tree
-        from app.api.context import set_retrieval_mode
-        from app.harness.hooks.budget import charge_retrieval
-        from app.harness.state import GuardState
-        from app.utils.thread_ctx import thread_scope
-
-        guard = GuardState()
-        with thread_scope("t-reuse-exhaust", Path("/tmp/t-reuse-exhaust")):
-            set_retrieval_mode("reuse")
-            try:
-                await charge_retrieval({"tool_name": "item_search", "_guard": guard})
-                with pytest.raises(HookRejectSignal, match="复用轮检索预算耗尽"):
-                    await charge_retrieval({"tool_name": "item_search", "_guard": guard})
-                # refine_backfill / phase_rollback 授权补搜 → mode=augment → 全树预算恢复
-                set_retrieval_mode("augment")
-                out = await charge_retrieval({"tool_name": "item_search", "_guard": guard})
-                assert out is None  # 常规放行（3 <= 全树 cap）
-            finally:
-                reset_tree()
-
-    def test_reuse_budget_never_zero(self) -> None:
-        """REUSE_RETRIEVAL_BUDGET 钉死 ≥1：配 0 等于把预算制改回禁令制，死锁风险回归。"""
-        from app.harness.budgets import REUSE_RETRIEVAL_BUDGET
-
-        assert REUSE_RETRIEVAL_BUDGET >= 1
-
     def test_session_tracks_planner_signal(self) -> None:
         """控制面状态记录 planner 已执行（post_reflect 据它把 PLANNING 推到 SEARCHING）。"""
         session = _mw("test")
@@ -1380,44 +1323,6 @@ class TestPicksSignalIsReal:
         truncated = '{"picks": [{"item_id": "A1", "pick_reason": "耐磨"' + "x" * 50
         assert _count_picks(truncated) >= 1
         assert _count_picks("[Harness 拒绝] 越权") == 0
-
-    @pytest.mark.asyncio
-    async def test_reuse_zero_must_hits_rolls_back_not_conclude(
-        self, clean_phase, tmp_path
-    ) -> None:
-        """集成重放 bad case「三件套 → 要中式刺绣」：复用轮 picker 返回 8 件但 must_have
-        池内 0 命中 → 阶段必须退回 SEARCHING 补搜，而不是推进 CONCLUDING 把补搜的路拦死；
-        picker 结果尾部当场缀上「阶段回退 + 请重新检索」的指路。
-        """
-        from app.api.context import get_retrieval_mode, set_retrieval_mode
-        from app.utils.thread_ctx import thread_scope
-
-        with thread_scope("t-zero-hits-e2e", tmp_path):
-            set_phase_machine(PhaseStateMachine(Phase.COMPARING))
-            set_retrieval_mode("reuse")
-            mw = _mw()
-            import json as _json
-
-            result = _json.dumps(
-                {
-                    "must_have_hits": 0,
-                    "picks": [{"item_id": f"B{i}", "title": "solid set"} for i in range(8)],
-                    "excluded": [],
-                }
-            )
-            msg = await _run_tool(
-                mw,
-                "item_picker",
-                {},
-                result=result,
-                diag={"picks": 8, "must_have_hits": 0, "oncat_count": None, "offcat_count": None},
-            )
-            assert "[阶段回退]" in msg.content and "重新检索" in msg.content
-            await _run_model(mw)
-
-            assert get_phase_machine().phase == Phase.SEARCHING, "0 命中不该推进 CONCLUDING"
-            # mode 改写 augment = 补搜授权：复用轮小预算解除，item_search 走全树预算放行
-            assert get_retrieval_mode() == "augment"
 
     @pytest.mark.asyncio
     async def test_diagnostics_channel_survives_truncation(self, clean_phase, tmp_path) -> None:

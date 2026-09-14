@@ -77,7 +77,7 @@ class CurationResult(BaseModel):
 
     曾经还有 current_intent / clear_budget / category / slots_patch / supersede_session_keys /
     new_open_questions / resolved_questions 一整排会话态字段——全删。会话态的产生**与撤销**都归
-    planner（唯一写者）：撤回走「LLM 抄 id 提议 + 代码词面核验」（见 session_state.merge_pt），
+    planner（唯一写者）：撤回走「LLM 按词提议 + 代码对原话核验」（见 session_state.merge_pt_lite），
     预算撤销走 ``PlanOutput.clear_budget``。给 curator 留这些字段，就是给双写者留还魂的门。
     """
 

@@ -22,28 +22,6 @@ def converge_directive(count: int) -> str:
     )
 
 
-def reuse_backfill_note(count: int, cap: int) -> str:
-    """复用轮补搜（soft）：工具照常执行，结果尾部注明这是小预算、搜完即收敛。
-
-    与 :func:`converge_directive` 分开写是为了拒绝理由真实：预算小不是因为「搜太多了」，
-    而是因为 planner 判了本轮复用旧候选。
-    """
-    return (
-        f"[复用轮补搜] planner 判定本轮复用上一轮候选，补搜预算仅 {cap} 次（已用 {count} 次）。"
-        "请把本次召回与既有候选合流后立即 item_picker 精挑并收尾，不要再检索；"
-        "若精挑后候选仍不够用，机制会自动授权补搜。"
-    )
-
-
-def reuse_retrieval_exhausted(count: int, cap: int) -> str:
-    """复用轮补搜预算耗尽（block）：工具**不执行**，直接回哨兵。"""
-    return (
-        f"[复用轮检索预算耗尽] planner 判定本轮复用上一轮候选，补搜预算 {cap} 次已用完"
-        f"（累计 {count} 次），本次未执行。立即基于现有候选调 item_picker 精挑、"
-        "shopping_summary 收尾；若精挑后候选确实不够用，机制会自动授权补搜，无需你重试检索。"
-    )
-
-
 def retrieval_exhausted(count: int) -> str:
     """再越检索预算（block）：工具**不执行**，直接回哨兵。"""
     return (

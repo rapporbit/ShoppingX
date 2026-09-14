@@ -382,29 +382,23 @@ async def report_session_constraints(pt: Any, thread_id: str | None = None) -> N
 
     可见可纠的第二腿（步骤三①的事件侧）：约束「录入」仍过 LLM 的手（极性判反 / keywords 抽漏
     照样进 P_t，且无自愈性），抽错时唯一的兜底是**用户看得见、点得掉**——看得见的前提是推送。
-    每条带 ``id``（面板删除按 id 打 DELETE）与 ``source_quote``（让用户看懂是自己哪句话）。
+    每条带 ``id``（``<词表>:<词>``，面板删除按 id 打 DELETE）；lite P_t 没有 source_quote（留空）。
 
     瞬态：面板打开 / 断线重连走 GET 主动拉，快照不进回放存档。空约束集也推——撤回 / 换代后
     面板要能清空，不推就永远停在删除前的样子。``thread_id`` 显式传入供 API 层（面板删除）使用，
     那里不在 thread_scope 里。
     """
+    from app.memory.session_state import constraint_rows
+
+    rows = constraint_rows(pt)
     await _emit(
         EVENT_SESSION_CONSTRAINTS,
-        f"本会话累积约束 {len(pt.constraints)} 条",
+        f"本会话累积约束 {len(rows)} 条",
         {
-            "epoch": pt.epoch,
+            "epoch": 0,  # lite P_t 无代际；字段保留给前端契约
             "budget_usd": pt.budget_usd,
             "category": pt.category,
-            "constraints": [
-                {
-                    "id": c.id,
-                    "content": c.content,
-                    "source_quote": c.source_quote,
-                    "polarity": c.polarity,
-                    "blocking": c.blocking,
-                }
-                for c in pt.constraints
-            ],
+            "constraints": rows,
         },
         thread_id=thread_id,
         transient=True,

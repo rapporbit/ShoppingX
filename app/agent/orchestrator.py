@@ -51,7 +51,6 @@ from app.api.context import (
     get_session_pt,
     reset_dest_country,
     reset_original_query,
-    reset_retrieval_mode,
     reset_session_domains,
     reset_session_pt,
     reset_session_tasks,
@@ -308,9 +307,8 @@ async def run_agent(
         if quota_left is not None:
             set_task_cap(quota_left)
 
-        # 清掉上一轮残留的 ContextVar / 模块级状态（retrieval 判定、收货国、品类域、任务清单）：
+        # 清掉上一轮残留的 ContextVar / 模块级状态（收货国、品类域、任务清单）：
         # 同 thread 续聊时它们会让本轮 planner 还没跑就先按上轮结论走。
-        reset_retrieval_mode()
         reset_dest_country()
         reset_session_domains()
         reset_session_tasks()
@@ -361,7 +359,6 @@ async def run_agent(
         turn_query = inject_runtime_context(
             query,
             history_block,
-            pt,
             enabled_platforms,
             image_paths=tuple(image_paths or ()),
         )
@@ -409,7 +406,6 @@ async def run_agent(
             reset_candidates()  # 候选登记表只活一轮；跨轮引用按 item_id 回源 Qdrant
             reset_diagnostics(thread_id)
             reset_session_bundle()
-            reset_retrieval_mode()
             reset_dest_country()
             reset_session_domains()
             reset_session_tasks()

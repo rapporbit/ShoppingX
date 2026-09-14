@@ -9,7 +9,7 @@
 - **少数安全底线的判据**：``phase_check`` 仍用「阶段还在 PLANNING」判定 shopping_summary
   不许交卷（本轮未规划/精挑），那是精确事实判定，不是白名单。
 
-效率约束改由预算兜：复用轮小预算（``REUSE_RETRIEVAL_BUDGET``）、全树检索预算、fork 预算、
+效率约束改由预算兜：全树检索预算、fork 预算、
 token 预算，见 ``hooks/tool_gates.py``——预算永不为 0，模型总有一条能走的路。
 
 仅主 loop（depth 0）维护阶段。子 Agent（depth ≥ 1）由深度闸管权限，与阶段机无关。

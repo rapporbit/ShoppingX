@@ -230,21 +230,10 @@ async def test_item_picker_enforces_session_pt() -> None:
     ContextVar 读 P_t，硬 dislike 并入 exclude、预算兜底，不靠模型每轮把旧约束转述进本次调用。
     """
     from app.api.context import set_session_pt
-    from app.memory.session_state import SessionConstraint, SessionPrefState
+    from app.memory.session_state import SessionPrefState
     from app.tools.item_picker import item_picker
 
-    pt = SessionPrefState(
-        budget_usd=100.0,
-        constraints=[
-            SessionConstraint(
-                id="c1",
-                category="material",
-                content="不要塑料",
-                polarity="dislike",
-                keywords=["plastic"],
-            ),
-        ],
-    )
+    pt = SessionPrefState(budget_usd=100.0, exclude_terms=["plastic"])
     cands = [
         ItemCandidate(
             item_id="X1", platform="a", title="plastic bottle set", landed_usd=10, rating=4.0
@@ -452,21 +441,11 @@ async def test_item_picker_pt_like_hard_routes_to_must(monkeypatch: Any) -> None
     """会话级 P_t 的 like-hard 约束机制性路由到 must_have（正向硬强上浮，不淘汰不匹配的）。"""
     import app.tools.item_picker as mod
     from app.api.context import set_session_pt
-    from app.memory.session_state import SessionConstraint, SessionPrefState
+    from app.memory.session_state import SessionPrefState
 
     monkeypatch.setattr(mod, "_W_MATCH_SEM", 0.0)
     monkeypatch.setattr(mod, "_W_MATCH_HARD_SEM", 0.0)
-    pt = SessionPrefState(
-        constraints=[
-            SessionConstraint(
-                id="c1",
-                category="material",
-                content="必须金属",
-                polarity="like",
-                keywords=["metal"],
-            )
-        ]
-    )
+    pt = SessionPrefState(prefer_terms=["metal"])
     cands = [
         ItemCandidate(item_id="A", platform="p", title="plastic case", landed_usd=20, rating=4.0),
         ItemCandidate(item_id="B", platform="p", title="metal case", landed_usd=20, rating=4.0),
@@ -1812,9 +1791,6 @@ async def test_planner_writes_session_pt_same_turn(monkeypatch: Any) -> None:
         pt = get_session_pt()
 
     assert pt is not None
-    # 三个桶 → 三条约束（**一桶一条**，不是一词一条：中英同义词属于同一件事，拆开只会让 P_t
-    # 渲染给模型时出现「不要塑料」「不要plastic」两行几乎一样的噪声）
-    assert len(pt.constraints) == 3
     # 硬排除词当轮可被 item_picker 机制淘汰（pt.dislike_terms() → exclude）
     assert pt.dislike_terms() == ["塑料", "plastic"]
     # 弱表达只减分、不淘汰
@@ -1822,8 +1798,6 @@ async def test_planner_writes_session_pt_same_turn(monkeypatch: Any) -> None:
     # 正向偏好当轮可被强加分（pt.like_terms() → must）
     assert set(pt.like_terms()) == {"帆布", "小众"}
     assert pt.budget_usd == pytest.approx(300 * 0.14)
-    # turn 的唯一递增点是 planner 自己（P_t 单写者，递增点随写权一起挪过来；曾归 curator）
-    assert pt.turn == 1
 
 
 async def test_planner_pt_reaches_item_picker_same_turn(monkeypatch: Any) -> None:

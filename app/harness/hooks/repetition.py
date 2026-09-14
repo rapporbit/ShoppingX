@@ -95,16 +95,12 @@ async def append_nudges(context: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(result, str):
         return None
 
-    converge_note = context.get("converge_note")
     converge_count = context.get("converge_count")
     budget_note = _budget_note(guard, tool_name)
 
     filtered_note = _filtered_out_note(context, tool_name)
 
-    if converge_note is not None:
-        # 复用轮小预算的软线文案（tool_gates.charge_retrieval 填入），比通用收敛指令更具体。
-        suffix = "\n\n[系统提示] " + converge_note
-    elif converge_count is not None:
+    if converge_count is not None:
         suffix = "\n\n[系统提示] " + converge_directive(converge_count)
     elif filtered_note is not None:
         # **排在检索预算批注之前**：批注是节流动机（少搜一次），本条是诚实证据（别把「有货但

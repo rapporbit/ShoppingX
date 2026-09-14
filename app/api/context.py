@@ -40,7 +40,7 @@ _SESSION_PT: dict[str, "SessionPrefState"] = {}
 # planner 判定后写入，供记忆读取端把偏好**限定在相关域内生效**（「买鞋时不要皮革」不该在买沙发时
 # 也杀掉皮沙发）。
 #
-# 同 _RETRIEVAL_MODE / _DEST_COUNTRY 用「按 session_dir 聚合的模块级 dict」而非裸 ContextVar：
+# 同 _DEST_COUNTRY 用「按 session_dir 聚合的模块级 dict」而非裸 ContextVar：
 # planner 与 item_picker 是两个工具、各自在独立 context 里跑，前者 set 的 ContextVar 后者**读不到**
 # （实测：planner 判出 footwear，item_picker 拿到空）。这个坑本文件已经踩过两次，别再踩第三次。
 #
@@ -58,18 +58,10 @@ _learned_prefs_var: ContextVar[list[dict[str, str]] | None] = ContextVar(
     "shoppingx_learned_prefs", default=None
 )
 
-# planner 本轮判定的取候选方式（reuse / augment / search）——「这轮要不要重新检索」是意图判断，
-# 只有 planner 有依据。阶段机与补搜闸读它来定向，而不是各自去数「候选池里有没有货」猜（有货
-# ≠ 这轮是追问，用户完全可能换品类）。
-#
-# **按 session_dir 聚合的模块级 dict，不是裸 ContextVar**：工具在独立 context 里执行，其中对
-# ContextVar 的 set 不回传主 loop——planner 判了 reuse，阶段机却读不到（实测：模型照样去重搜了
-# 一遍，200 秒）。同 app.agent.retrieval_budget / app.tools._candidates 的既有套路。
-_RETRIEVAL_MODE: dict[str, str] = {}
-
 # planner 本轮判定的任务清单（recommend / price_compare / landed_cost / ...）——「用户要不要比价」
 # 同样是意图判断，只有 planner 有依据。阶段机的转移通告读它来定向（无比价诉求时提示模型跳过
-# price_compare / shipping_calc，见 harness.hooks.progress）。聚合方式同 _RETRIEVAL_MODE。
+# price_compare / shipping_calc，见 harness.hooks.progress）。按 session_dir 聚合（理由见
+# _SESSION_DOMAINS）。
 _SESSION_TASKS: dict[str, list[str]] = {}
 
 # planner 本轮判定的收货国（ISO 码）——决定关税免征额（US $0 vs CN $7 vs AU $660，差两个数量级）。
@@ -81,7 +73,8 @@ _DEST_COUNTRY: dict[str, tuple[str, bool]] = {}
 
 # 本轮**原始用户 query**（未经任何 LLM 转述）——工具侧唯一的「用户到底说了什么」确定性信号源。
 # planner 的 domains / category 都是 LLM 结构化输出，「合法但错」时下游拿它当锚会静默反转
-# （品类门反着杀）；反证只能靠独立信号，而独立信号只有原文词面。聚合方式同 _RETRIEVAL_MODE。
+# （品类门反着杀）；反证只能靠独立信号，而独立信号只有原文词面。按 session_dir 聚合（理由见
+# _SESSION_DOMAINS）。
 _ORIGINAL_QUERY: dict[str, str] = {}
 
 
@@ -166,29 +159,6 @@ def get_session_dir() -> Path | None:
     return _session_dir_var.get()
 
 
-def set_retrieval_mode(mode: str) -> None:
-    """记下 planner 本轮判定的取候选方式（reuse / augment / search）。由 planner 工具写。
-
-    「这轮要不要重新检索」是**意图判断**，只有 planner 有依据（用户这句话 + 上一轮意图约束 +
-    手上还有没有候选）。判完写进这里，让阶段机与补搜闸读得到——而不是让它们各自去数「候选池里
-    有没有货」这种代理信号猜（有货 ≠ 这轮是追问，用户完全可能换品类）。
-    """
-    sd = get_session_dir()
-    if sd is not None:
-        _RETRIEVAL_MODE[str(sd)] = mode
-
-
-def get_retrieval_mode() -> str:
-    """读 planner 本轮的取候选判定；planner 还没跑（或无会话作用域）时返回 ``"search"``。
-
-    默认 ``search`` 是安全侧：多搜一遍只是慢，而错判 reuse 会让用户拿到一份漏掉新商品的清单。
-    """
-    sd = get_session_dir()
-    if sd is None:
-        return "search"
-    return _RETRIEVAL_MODE.get(str(sd), "search")
-
-
 def set_original_query(query: str) -> None:
     """记下本轮原始用户 query（``run_agent`` 入口写，每轮覆盖）。
 
@@ -215,17 +185,6 @@ def reset_original_query() -> None:
         _ORIGINAL_QUERY.pop(str(sd), None)
 
 
-def reset_retrieval_mode() -> None:
-    """清掉本会话的判定（``run_agent`` 开局 + 收尾调）。
-
-    开局清：同 thread 续聊时别让本轮 planner 还没跑，阶段机就先按上一轮的 reuse 走。
-    收尾清：模块级 dict 按 session_dir 为键，不清会无界增长。
-    """
-    sd = get_session_dir()
-    if sd is not None:
-        _RETRIEVAL_MODE.pop(str(sd), None)
-
-
 def set_session_tasks(tasks: Sequence[str]) -> None:
     """记下 planner 本轮判定的任务清单。由 planner 工具写，阶段机的转移通告读。"""
     sd = get_session_dir()
@@ -246,14 +205,17 @@ def get_session_tasks() -> list[str]:
 
 
 def reset_session_tasks() -> None:
-    """清掉本会话的任务判定（``run_agent`` 开局 + 收尾调，理由同 :func:`reset_retrieval_mode`）。"""
+    """清掉本会话的任务判定（``run_agent`` 开局 + 收尾调）。
+
+    开局清防上一轮残留、收尾清防模块级 dict 无界增长。
+    """
     sd = get_session_dir()
     if sd is not None:
         _SESSION_TASKS.pop(str(sd), None)
 
 
 def reset_session_domains() -> None:
-    """清掉本会话的品类域判定（``run_agent`` 开局 + 收尾调，同 :func:`reset_retrieval_mode`）。
+    """清掉本会话的品类域判定（``run_agent`` 开局 + 收尾调，理由同 reset_session_tasks）。
 
     开局清尤其重要：上一轮买鞋（domains=[footwear]），这一轮改口买沙发但 planner 还没跑完，
     此时若残留旧域，「买鞋时不要皮革」这条偏好会被误判为**与本轮相关**，把皮沙发全杀掉——
