@@ -284,57 +284,6 @@ async def test_cancel_requires_ownership_and_confirmed_status() -> None:
 # ---------- 工具层：确认门 / 顺序闸 / SQL 往返 ----------
 
 
-@pytest.mark.usefixtures("_candidates")
-async def test_create_order_first_call_only_previews(monkeypatch: pytest.MonkeyPatch, tmp_path):  # type: ignore[no-untyped-def]
-    """confirmed=False 只出确认卡、不落库；且**第一次就传 True 也照样先出卡**。
-
-    后半条是两段式的机制那一半：约定挡不住模型直接传 confirmed=True，会话级确认门挡得住。
-    """
-    from app.tools import create_order as mod
-    from app.tools._order_guard import reset_order_guard
-    from app.utils.thread_ctx import thread_scope
-
-    monkeypatch.setattr("app.tools.create_order.hydrate", _pool_hydrate)
-    saved: list[object] = []
-    monkeypatch.setattr(
-        "app.tools.create_order.place_order",
-        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("不该落库")),
-    )
-    with thread_scope("t-trade", tmp_path):
-        reset_order_guard()
-        out = await mod.create_order.ainvoke(
-            {
-                "item_ids": ["B01"],
-                "recipient": "张三",
-                "address_line": "上海市某路 1 号",
-                "confirmed": True,  # 跳过确认卡的企图
-            }
-        )
-    assert out.confirmed is False
-    assert out.preview and out.preview[0]["item_id"] == "B01"
-    assert not saved
-
-
-@pytest.mark.usefixtures("_candidates")
-async def test_create_order_confirms_after_preview(monkeypatch: pytest.MonkeyPatch, tmp_path):  # type: ignore[no-untyped-def]
-    """出过卡之后，confirmed=True 才真落库。"""
-    from app.tools import create_order as mod
-    from app.tools._order_guard import reset_order_guard
-    from app.utils.thread_ctx import thread_scope
-
-    repo = InMemoryRepo()
-    monkeypatch.setattr("app.tools.create_order.hydrate", _pool_hydrate)
-    monkeypatch.setattr("app.tools.create_order.order_repository", lambda **kw: repo)
-    monkeypatch.setattr("app.tools.create_order.get_user_id", lambda: "u1")
-    args = {"item_ids": ["B01"], "recipient": "张三", "address_line": "上海市某路 1 号"}
-    with thread_scope("t-trade2", tmp_path):
-        reset_order_guard()
-        await mod.create_order.ainvoke({**args, "confirmed": False})
-        out = await mod.create_order.ainvoke({**args, "confirmed": True})
-    assert out.confirmed is True and out.order["status"] == "CONFIRMED"
-    assert len(repo.rows) == 1
-
-
 def _pool_hydrate(ids):  # type: ignore[no-untyped-def]
     from app.tools.schemas import ItemCandidate
 
@@ -443,47 +392,31 @@ async def test_orders_api_requires_login_and_scopes_to_owner(_api_client) -> Non
 
 
 @pytest.mark.usefixtures("_candidates")
-async def test_orders_api_cancel_twice_conflicts(_api_client) -> None:  # type: ignore[no-untyped-def]
-    """前端取消：第一次 200，第二次 409（状态机不允许，且不能静默成功）。"""
-    from app.db.session import init_db
+async def test_orders_api_cancel_prepares_confirmation(_api_client) -> None:  # type: ignore[no-untyped-def]
+    """前端取消：只出取消确认卡（200，status=pending），订单本身仍是 CONFIRMED；缺原因 400。"""
+    from app.db.accounts import claim_thread
+    from app.db.session import init_db, session_factory
     from app.trade.repository_sql import SqlOrderRepository
 
     await init_db()
     uid, headers = await _signup(_api_client, "trader-c")
+    async with session_factory()() as db:
+        await claim_thread(db, "t-api2", uid, "取消测试")
+    repo = SqlOrderRepository()
     order = await place_order(
-        SqlOrderRepository(),
-        user_id=uid,
-        thread_id="t-api2",
-        lines=[LineRequest("B01")],
-        address=_addr(),
+        repo, user_id=uid, thread_id="t-api2", lines=[LineRequest("B01")], address=_addr()
     )
-    first = await _api_client.post(f"/api/orders/{order.order_id}/cancel", headers=headers)
-    assert first.status_code == 200 and first.json()["status"] == "CANCELLED"
-    second = await _api_client.post(f"/api/orders/{order.order_id}/cancel", headers=headers)
-    assert second.status_code == 409
-
-
-@pytest.mark.usefixtures("_candidates")
-async def test_create_order_preview_expires_and_reissues(monkeypatch: pytest.MonkeyPatch, tmp_path):  # type: ignore[no-untyped-def]
-    """确认卡带失效时刻；过了有效期再 confirmed=True 不落库，而是重新出卡并说明原因。"""
-    from app.tools import _order_guard as guard
-    from app.tools import create_order as mod
-    from app.utils.thread_ctx import thread_scope
-
-    monkeypatch.setattr("app.tools.create_order.hydrate", _pool_hydrate)
-    monkeypatch.setattr(
-        "app.tools.create_order.place_order",
-        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("过期卡不该落库")),
+    body = {"reason": "买错了", "thread_id": "t-api2"}
+    first = await _api_client.post(
+        f"/api/orders/{order.order_id}/cancel", headers=headers, json=body
     )
-    args = {"item_ids": ["B01"], "recipient": "张三", "address_line": "上海市某路 1 号"}
-    with thread_scope("t-trade3", tmp_path):
-        guard.reset_order_guard()
-        first = await mod.create_order.ainvoke({**args, "confirmed": False})
-        assert first.expires_at and first.expires_at.endswith("+00:00")
-        # 把出卡时刻拨回 TTL 之前，模拟过期
-        key = str(tmp_path)
-        for fp in guard._CONFIRMED_PREVIEWS[key]:
-            guard._CONFIRMED_PREVIEWS[key][fp] -= guard.PREVIEW_TTL_SECONDS + 1
-        again = await mod.create_order.ainvoke({**args, "confirmed": True})
-    assert again.confirmed is False
-    assert "已过期" in again.note and again.expires_at
+    assert first.status_code == 200, first.text
+    assert first.json()["action"] == "cancel" and first.json()["status"] == "pending"
+    still = await repo.find_by_id(order.order_id)
+    assert still is not None and still.status is OrderStatus.CONFIRMED
+    missing = await _api_client.post(
+        f"/api/orders/{order.order_id}/cancel",
+        headers=headers,
+        json={"reason": "", "thread_id": "t-api2"},
+    )
+    assert missing.status_code == 400

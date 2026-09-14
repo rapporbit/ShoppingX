@@ -12,7 +12,7 @@
 # **为什么是 4 个而不是教学口径的 2 个。** refdocs 08-1 的评测代码按
 # ``last_tool in {"shopping_summary", "chat_fallback"}`` 判收尾，create_order / cancel_order
 # 在教学里是「带前置条件的写工具」（17-4 的 PREREQUISITES）。本仓多出的两个是交易域落地时的
-# 自有扩展，理由是 ``create_order(confirmed=False)`` 出确认卡后本轮**确实该结束等用户表态**，
+# 自有扩展，理由是 ``create_order`` 出确认卡后本轮**确实该结束等用户表态**，
 # 继续跑没有意义。
 #
 # 这份字面量此前在 ``harness/budgets.py`` 另有一份 2 个的旧值，后果是交易轮收尾时

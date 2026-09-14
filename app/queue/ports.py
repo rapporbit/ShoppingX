@@ -14,8 +14,8 @@ AgentLoop，并发上限由 :mod:`app.api.concurrency` 的双池准入守着。�
 **投递语义是 at-least-once。** Redis Stream 的 pending 重投、worker 崩溃重启都会让同一条任务被
 消费两次，消费方必须自己幂等。本仓 API 侧的幂等第 1/3 层（``active_tasks`` 同 thread 去重、
 :mod:`app.api.dedup` 指纹去重）挡不到这里——它们在入队之前。真正的风险面是写工具
-（``create_order`` 重复消费 = 重复下单），靠 ``tools/_order_guard.py`` 的两段式确认卡兜：没出过卡
-的 ``confirmed=True`` 会被退回成出卡，重投的那次只会再出一张卡，不会真下单。
+（``create_order`` 重复消费 = 重复出卡），而落订单只在用户点确认卡的 ``resolve``（HTTP）里发生，
+幂等键 = 确认记录的 ``operation_id``：重投的那次最多再出一张卡，不会真下单。
 """
 
 from __future__ import annotations

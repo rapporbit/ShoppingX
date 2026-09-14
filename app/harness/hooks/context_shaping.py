@@ -1,6 +1,7 @@
 """塑形模型看到的上下文：压缩 / 偏好注入 / 成功策略注入与结账。
 
     on_system_prompt 50  strategy_inject     装配期按用户原话匹配在役策略，追加 <learned_strategies>
+    on_system_prompt 60  trade_state_inject  装配期把待决议确认卡 + 本会话订单追加成 <trade_state>
                                              （只给主 Agent）
     pre_think        90  context_compress    压缩历史视图（只改这一次送模型的那份，不动 state）
                                              **必须最后**
@@ -19,7 +20,7 @@ from contextvars import ContextVar
 from typing import Any
 
 from app.agent.fork_guard import current_fork_depth
-from app.api.context import get_user_id
+from app.api.context import get_thread_id, get_user_id
 from app.compress.blocks import DEFAULT_KEEP_RECENT, DEFAULT_MAX_TOOL_TOKENS, post_step_compress
 from app.harness.budgets import (
     TERMINAL_TOOLS,
@@ -27,6 +28,8 @@ from app.harness.budgets import (
 from app.harness.middleware import harness_hook
 from app.memory.injector import PREF_EMPTY, build_preference_block
 from app.memory.strategies import get_strategy_store, render_strategy_block, strategies_for_query
+from app.trade.confirmations import trade_state
+from app.trade.repository_sql import confirmation_repository, order_repository
 from app.utils.env import env_bool, env_int
 
 logger = logging.getLogger("shoppingx.harness.context_shaping")
@@ -114,6 +117,52 @@ async def inject_strategies(context: dict[str, Any]) -> dict[str, Any] | None:
     if not block:
         return None  # 一条都没匹配上 → 不塞空占位（省 token，也别给模型噪声）
     logger.info("注入 %d 条成功策略：%s", len(matched), ", ".join(s.dedup_key for s in matched))
+    context.setdefault("append", []).append(block)
+    return context
+
+
+def render_trade_state_block(state: dict[str, Any]) -> str:
+    """待决议确认卡 + 本会话订单 → ``<trade_state>`` 块。两边都空就返回空串（不塞空占位）。
+
+    对齐参考项目 ``agent_state``：**不带地址、不带 hash**——模型只需要知道「有一张卡等着用户点」
+    和「这轮已经落了哪些单」，好在用户问「我下单了吗」时不瞎答，也不重复出卡。
+    """
+    pending = state.get("pending_confirmations") or []
+    orders = state.get("orders") or []
+    if not pending and not orders:
+        return ""
+    lines = ["<trade_state>", "本会话的权威交易状态（服务端记录，以此为准，不要凭对话记忆猜）："]
+    for c in pending:
+        items = "、".join(f"{i['title']}×{i['quantity']}" for i in c.get("items", []))
+        what = f"取消订单 {c.get('order_id')}" if c.get("action") == "cancel" else f"下单：{items}"
+        lines.append(f"- 待用户在页面上点按钮的确认卡：{what}。用户口头说确认不算，别再出一张。")
+    for o in orders:
+        items = "、".join(f"{i['title']}×{i['quantity']}" for i in o.get("items", []))
+        head = f"订单 {o['order_id']}（{o['status']}，{o['total']} {o['currency']}）"
+        lines.append(f"- {head}：{items}")
+    lines.append("</trade_state>")
+    return "\n".join(lines)
+
+
+@harness_hook("on_system_prompt", name="trade_state_inject", priority=60)
+async def inject_trade_state(context: dict[str, Any]) -> dict[str, Any] | None:
+    """主 loop 装配期注入交易状态。未登录 / 无会话 / 库不可用时静默跳过——注入是锦上添花，
+    不能让一次读库失败把整轮任务拖死。"""
+    if context.get("role") != "main":
+        return None
+    user_id, thread_id = get_user_id(), get_thread_id()
+    if not user_id or not thread_id:
+        return None
+    try:
+        state = await trade_state(
+            confirmation_repository(), order_repository(), user_id=user_id, thread_id=thread_id
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("读取交易状态失败，本轮不注入 <trade_state>", exc_info=True)
+        return None
+    block = render_trade_state_block(state)
+    if not block:
+        return None
     context.setdefault("append", []).append(block)
     return context
 

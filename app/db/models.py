@@ -360,6 +360,33 @@ class OrderLineRow(Base):
     order: Mapped[OrderRow] = relationship(back_populates="lines")
 
 
+class ConfirmationRow(Base):
+    """交易确认记录（见 :mod:`app.trade.confirmation`）。
+
+    **确认卡落库**而不是留在会话内存里：刷新页面卡要还在、进程重启闸要还在、用户点「确认」时
+    服务端要能拿 ``snapshot_hash`` 比对「点的是不是看到的那张」。这三件事都不是一个进程内 dict
+    能给的（旧 ``_order_guard`` 就是那个 dict）。
+
+    ``payload`` / ``result`` 整块 JSON：确认卡是快照，不按其中字段查询，拆列只会得到一堆空列。
+    ``operation_id`` 唯一——approved 时拿它当订单的 ``idempotency_key``，同一张卡点两次只落一张单。
+    """
+
+    __tablename__ = "trade_confirmations"
+
+    confirmation_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    operation_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    thread_id: Mapped[str] = mapped_column(String(64), index=True)
+    action: Mapped[str] = mapped_column(String(16))  # create / cancel
+    status: Mapped[str] = mapped_column(String(16), default="pending")  # pending/approved/rejected
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    snapshot_hash: Mapped[str] = mapped_column(String(64))
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class StrategyRow(Base):
     """一条**成功策略**（18-4）：从高分轨迹蒸馏出来的「遇到这类局面就这么办」。
 
