@@ -121,8 +121,22 @@ class TestTransitionNotices:
         assert "price_compare" in result  # 点名别再调
         assert "shopping_summary" in result  # 并指路收尾
 
-    async def test_tasks_hint_when_no_price_demand(self, tmp_path: Path) -> None:
-        """planner 判定无比价 / 到手价诉求 → 收线通告附带「无需 price_compare」动机提示。"""
+    async def test_search_close_points_to_autopick(self, tmp_path: Path) -> None:
+        """round3 刀 2：自动比价精挑开着时，收线通告指路「等系统结果、直接收尾」，不再让模型
+        自己走 price_compare / item_picker，「无需 price_compare」动机提示也随之失去意义。"""
+        with thread_scope("t-tasks-auto", tmp_path):
+            set_session_tasks(["recommend"])
+            machine = PhaseStateMachine(initial=Phase.SEARCHING)
+            ctx = {"tool_name": "item_search", "call_candidates": 8}
+            out = await self._notice(machine, ctx)
+            assert "自动完成比价" in out and "无需 price_compare" not in out
+
+    async def test_tasks_hint_when_no_price_demand(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """planner 判定无比价 / 到手价诉求 → 收线通告附带「无需 price_compare」动机提示。
+        （关掉自动比价精挑时的口径；开着时见 test_search_close_points_to_autopick。）"""
+        monkeypatch.setenv("AUTOPICK", "0")
         with thread_scope("t-tasks-rec", tmp_path):
             set_session_tasks(["recommend"])
             machine = PhaseStateMachine(initial=Phase.SEARCHING)
