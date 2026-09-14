@@ -177,7 +177,8 @@ export type LearnedPref = {
 };
 
 // 会话级 P_t 约束（session_constraints 事件 / GET /api/session/{tid}/constraints）。
-// id 是后端发的跨轮身份（c1/c2/…），删除按它打 DELETE；source_quote 让用户看懂是自己哪句话。
+// id 形如 `<bucket>:<term>`（bucket = exclude / avoid / prefer），删除按它打 DELETE；
+// source_quote 现恒为空串、epoch 恒为 0（P_t 已退回词表结构，按词撤回，不再存原话）。
 export type SessionConstraint = {
   id: string;
   content: string;
