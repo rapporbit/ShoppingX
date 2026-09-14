@@ -9,7 +9,24 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from app.trade.confirmation import Confirmation
 from app.trade.order import Order
+
+
+class ConfirmationRepository(Protocol):
+    """确认记录仓储。实现见 ``repository_sql.SqlConfirmationRepository``。"""
+
+    async def save(self, confirmation: Confirmation) -> None:
+        """按 ``confirmation_id`` upsert。"""
+        ...
+
+    async def find_by_id(self, confirmation_id: str) -> Confirmation | None: ...
+
+    async def list_by_thread(
+        self, user_id: str, thread_id: str, limit: int = 20
+    ) -> list[Confirmation]:
+        """某用户某会话的确认记录，按创建时间**正序**（前端按顺序画、合并时后者覆盖前者）。"""
+        ...
 
 
 class OrderRepository(Protocol):

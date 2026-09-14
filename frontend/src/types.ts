@@ -36,10 +36,11 @@ export type AguiEvent = {
     // 会话级 P_t 约束快照（data: SessionSnapshot）：planner 每轮落 P_t 后推，偏好面板「本次
     // 会话」区据此实时刷新。瞬态：断线重连后面板走 GET /api/session/{tid}/constraints 主动拉。
     | "session_constraints"
-    // 订单卡（批 1 交易域，data: {kind, order?, preview?, total_display?, address?}）：
-    // kind=preview 是**尚未下单**的确认卡（用户回一句「确认」后模型才真下单），placed/cancelled
-    // 是结果。与 items_preview 同样不瞬态——刷新页面后确认卡要还在，它是用户下一句话的依据。
-    | "order_card";
+    // 交易确认卡（对齐参考项目 confirmation.required / resolved，data: {confirmation}）：
+    // 载荷是一条完整的服务端确认记录。真源在库里（GET /api/threads/{id}/confirmations），事件只是
+    // 「有变化」的通知；前端按 confirmation_id 合并、决议单向推进（lib/confirmations.ts）。
+    | "confirmation_required"
+    | "confirmation_resolved";
   message: string;
   data: Record<string, unknown>;
   thread_id: string | null;
@@ -95,27 +96,58 @@ export type OrderSnapshot = {
   }[];
 };
 
-// 确认卡（尚未下单）里的一行。字段与 OrderSnapshot.lines 刻意不同构：它还没有订单号、没有落库，
-// 混成一个类型只会让「这到底下没下单」在渲染层变成一个要靠 optional 字段猜的问题。
-export type OrderPreviewLine = {
-  item_id: string;
-  title: string;
-  platform: string;
-  unit_price: number | null;
-  currency: string;
-  quantity: number;
+// 交易确认记录（后端 Confirmation.envelope()，字段名对齐参考项目 TradeConfirmation）。
+// 一张确认卡 = 库里一条记录：pending → approved | rejected，expired 是按时钟算的派生态。
+// 决议**只走 HTTP**（用户点按钮），模型没有对应工具；金额是最小单位整数（分），前端换算显示。
+export type ShippingAddress = {
+  recipient_name: string;
+  country: string;
+  state: string;
+  city: string;
+  address_line: string;
+  postal_code: string;
+  phone: string;
 };
 
-// order_card 事件的载荷。
-export type OrderCardPayload = {
-  kind: "preview" | "placed" | "cancelled";
-  order?: OrderSnapshot;
-  preview?: OrderPreviewLine[];
-  total_display?: string;
-  address?: string;
-  // 确认卡失效时刻（UTC ISO，仅 kind=preview）。过期后「确认下单」按钮灰掉；后端同样会拒掉
-  // 过期确认并重新出卡（app/tools/_order_guard.py PREVIEW_TTL_SECONDS），前端只是把这件事提前告诉用户。
-  expires_at?: string;
+export type ConfirmationLine = {
+  platform: string;
+  item_id: string;
+  title: string;
+  unit_price_minor: number;
+  currency: string;
+  quantity: number;
+  landed_usd?: number | null;
+};
+
+export type TradeConfirmation = {
+  confirmation_id: string;
+  operation_id: string;
+  buyer_id: string;
+  session_id: string;
+  action: "create" | "cancel";
+  status: "pending" | "approved" | "rejected";
+  payload: {
+    items: ConfirmationLine[];
+    shipping_address: ShippingAddress;
+    total_amount_minor: number;
+    currency: string;
+    amount_scope: "merchandise_only";
+    order_kind: string;
+    order_id?: string;
+    reason?: string;
+  };
+  snapshot_hash: string;
+  expires_at: string;
+  expired: boolean;
+  result: { order_id: string; status: "CONFIRMED" | "CANCELLED"; total_amount_minor: number; currency: string } | null;
+  created_at: string;
+  resolved_at: string | null;
+};
+
+// 下单意向表单的提交体（POST /api/threads/{id}/confirmations/orders）。
+export type PrepareOrderInput = {
+  items: { item_id: string; quantity: number }[];
+  shipping_address: ShippingAddress;
 };
 
 // 本轮全树（主 + 各 fork 子 Agent）token 用量。随 task_result 事件下发、随 turns.json 落盘回看。

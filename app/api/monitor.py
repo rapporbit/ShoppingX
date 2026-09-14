@@ -68,10 +68,13 @@ EVENT_ITEMS_PREVIEW = "items_preview"
 # 否则「今天怎么变慢/变笨了」永远查不出根因。走 monitor_event 通道，前端已有兜底渲染，
 # 不动 AGUI 协议既有字段。**瞬态**：它是一次降级告警，不属于会话思考过程，不进活动流回看。
 EVENT_MODEL_FALLBACK = "model_fallback"
-# 订单卡（批 1 交易域）：确认卡与下单/取消结果都走它，前端用同一个 OrderCard 渲染，靠 kind 区分。
+# 交易确认卡（对齐参考项目的 confirmation.required / confirmation.resolved）：载荷是一条完整的
+# 确认记录（见 app/trade/confirmation.py 的 envelope），前端按 confirmation_id 合并、决议单向推进。
 # 与 items_preview 同一取向：**不瞬态**（进回放存档），否则跑到一半刷新页面，用户刚看到的确认卡
-# 就凭空消失了——而确认卡是他下一句「确认」的唯一依据。不进活动流（它是结果本身，不是思考行）。
-EVENT_ORDER_CARD = "order_card"
+# 就凭空消失了。不进活动流（它是结果本身，不是思考行）。真源在库里，事件只是「有变化」的通知，
+# 前端刷新时会再 GET 一次列表。
+EVENT_CONFIRMATION_REQUIRED = "confirmation_required"
+EVENT_CONFIRMATION_RESOLVED = "confirmation_resolved"
 
 # 事件里携带的自由文本（demands / preview / 最终答案）截断上限，避免单条事件灌爆前端。
 _MAX_TEXT = 2000
@@ -264,20 +267,32 @@ async def report_items_preview(items: list[dict[str, Any]]) -> None:
     )
 
 
-async def report_order_card(kind: str, payload: dict[str, Any]) -> None:
-    """订单卡：``kind`` 为 ``preview``（确认卡，未下单）/ ``placed`` / ``cancelled``。
+def root_thread_id() -> str | None:
+    """当前任务的根 thread：worker 子 loop 里也回根——确认记录按根 thread 归档，用户看的是那页。"""
+    rec = _activity_recorder.get()
+    if rec is not None and rec.root_thread_id:
+        return rec.root_thread_id
+    return get_thread_id()
+
+
+async def report_confirmation(
+    kind: str, confirmation: dict[str, Any], thread_id: str | None = None
+) -> None:
+    """确认卡变化通知：``kind`` 为 ``required``（新出一张）/ ``resolved``（已同意或拒绝）。
 
     **显式路由到根 thread**，理由同 :func:`report_items_preview`：交易动作可能发生在 TradeAgent
     的子 loop 里，而子 thread 没有前端连接——事件会静默丢掉，用户就永远等不到那张确认卡。
+    HTTP 入口（表单 / 按钮）没有任务上下文，由调用方把 ``thread_id`` 递进来。
     """
-    rec = _activity_recorder.get()
-    root = rec.root_thread_id if rec is not None and rec.root_thread_id else None
-    label = {"preview": "待确认订单", "placed": "下单成功", "cancelled": "订单已取消"}
+    action = "取消" if confirmation.get("action") == "cancel" else "下单"
+    if kind == "required":
+        event, label = EVENT_CONFIRMATION_REQUIRED, f"待确认{action}"
+    else:
+        status = confirmation.get("status")
+        event = EVENT_CONFIRMATION_RESOLVED
+        label = f"{action}已{'同意' if status == 'approved' else '拒绝'}"
     await _emit(
-        EVENT_ORDER_CARD,
-        label.get(kind, "订单"),
-        {"kind": kind, **payload},
-        thread_id=root,
+        event, label, {"confirmation": confirmation}, thread_id=thread_id or root_thread_id()
     )
 
 

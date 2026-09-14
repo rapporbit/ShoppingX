@@ -14,7 +14,8 @@ API 进程只做鉴权、配额、幂等、入队，然后立刻回 ``thread_id`
    照常落盘，用户完全无感。
 3. **超时就取消在飞任务**。被取消的那条消息**不 ack**，于是留在 PEL 里，由下一个 worker 的
    ``XAUTOCLAIM`` 领回重跑（``QUEUE_CLAIM_IDLE_MS`` 之后）。这就是「超时转回 pending」——宁可重跑
-   一次（投递语义本就是 at-least-once，写工具那侧有两段式确认卡兜着），也不让任务凭空消失。
+   一次（投递语义本就是 at-least-once，写工具那侧只出确认卡、落单要用户点按钮），也不让任务
+   凭空消失。
 
 配套的 K8s 侧写法是 ``terminationGracePeriodSeconds`` 要**大于** ``WORKER_GRACE_SECONDS``，否则
 kubelet 的 SIGKILL 会先到，第 2 步白设。那份 yaml 是批 2 后面一单的事。

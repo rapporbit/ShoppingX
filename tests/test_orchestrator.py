@@ -37,17 +37,19 @@ def _summary_block() -> ToolResultBlock:
 
 
 def _fake_agent(final_text: str, *, context: list[Msg] | None = None) -> Any:
-    """假 Agent：吐一条最终 Msg，state.context 里放本轮消息。"""
+    """假 Agent：吐一条最终 Msg；``context`` 是**本轮**产生的消息，与真实 Agent 一样在
+    ``reply_stream`` 里才追加进 state.context（收尾产物只从本轮下标往后找，预置进去会被当上一轮）。
+    """
     ctx = context if context is not None else []
 
     class _FakeAgent:
         def __init__(self) -> None:
             self.state = AgentState()
-            self.state.context = ctx
             self.inputs: list[Msg] = []
 
         async def reply_stream(self, inputs: Any, yield_final_msg: bool = False) -> Any:
             self.inputs = list(inputs)
+            self.state.context.extend(ctx)
             yield Msg(
                 name="shoppingx",
                 role="assistant",
@@ -244,6 +246,31 @@ async def test_run_agent_writes_artifacts_and_items(
     assert (session_dir / "result.json").exists()
     # 完整轨迹落盘（AgentScope 的 Msg 序列化，供审计 / 排障）
     assert (session_dir / orch.STATE_FILE).exists()
+
+
+async def test_run_agent_extracts_summary_only_from_this_turn(
+    monkeypatch: pytest.MonkeyPatch, patched: dict[str, Any]
+) -> None:
+    """续聊第二轮用 chat_fallback 收尾时，不能把恢复回来的上一轮 shopping_summary 当本轮产物。
+
+    真踩过：turn 2「帮我下单第一款」缺地址走 chat_fallback，task_result 却带回 turn 1 的清单。
+    """
+    session_dir = orch.ensure_session_dir("as-t5b")
+    prior = AgentState()
+    prior.context = [Msg(name="shoppingx", role="assistant", content=[_summary_block()])]
+    (session_dir / orch.STATE_FILE).write_text(prior.model_dump_json(), encoding="utf-8")
+
+    agent = _fake_agent("请先填收件信息。")
+
+    async def _build(**kw: Any) -> Any:
+        agent.state = kw["state"]  # 与真实装配一致：恢复的 state 直接挂到 agent 上
+        return agent, SimpleNamespace()
+
+    monkeypatch.setattr(orch, "build_main_agent", _build)
+    out = await orch.run_agent("帮我下单第一款", thread_id="as-t5b")
+
+    assert out["items"] == []
+    assert not patched["items"]
 
 
 async def test_run_agent_reports_cancel_and_reraises(

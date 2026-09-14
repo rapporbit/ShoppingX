@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 from app.agent.fork_guard import current_fork_depth
 from app.api import monitor
@@ -26,6 +27,17 @@ from app.utils.env import env_int
 logger = logging.getLogger("shoppingx.tools.ask_user")
 
 ASK_USER_TIMEOUT_SEC = env_int("ASK_USER_TIMEOUT_SEC", 120)
+
+
+_INLINE_MD = re.compile(r"(\*\*|__|`)(.+?)\1")
+
+
+def strip_inline_markdown(text: str) -> str:
+    """剥掉行内加粗 / 下划线 / 反引号，保留内容。只处理成对标记，落单的星号原样留着。"""
+    prev = None
+    while prev != text:
+        prev, text = text, _INLINE_MD.sub(r"\2", text)
+    return text
 
 
 @tool
@@ -61,6 +73,9 @@ async def ask_user(
     if thread_id is None:
         return "（无活跃会话，跳过澄清）用户未回复，请基于已有信息继续。"
 
+    # 问句渲染成一条普通 assistant 消息，不走 Markdown：模型爱在商品名上套 **粗体**，星号会原样
+    # 露出来。这里用规则剥掉行内标记，比在 prompt 里叮嘱「别写 Markdown」可靠。
+    question = strip_inline_markdown(question)
     await monitor.report_tool_start("ask_user", question=question)
 
     # 只把真在 options 里的项当默认勾选（模型偶尔会把 preselected 写成 options 外的词）。

@@ -114,11 +114,18 @@ from app.queue import (
 from app.recall import get_recall_client
 from app.recall.geo import SUPPORTED_COUNTRIES
 from app.recall.semantic_cache import turn_cache_status
+from app.tools._candidates import hydrate
 from app.tools.image_understand import sniff_image_mime
+from app.trade.confirmation import ConfirmationError
+from app.trade.confirmations import (
+    list_confirmations,
+    prepare_cancel_confirmation,
+    prepare_order_confirmation,
+    resolve_confirmation,
+)
 from app.trade.order import OrderStateError
-from app.trade.repository_sql import order_repository
-from app.trade.usecases import OrderNotFoundError, query_orders
-from app.trade.usecases import cancel_order as trade_cancel_order
+from app.trade.repository_sql import confirmation_repository, order_repository
+from app.trade.usecases import LineRequest, NoCandidateError, OrderNotFoundError, query_orders
 from app.utils.env import env_int
 from app.utils.path_utils import (
     OUTPUT_ROOT,
@@ -126,6 +133,7 @@ from app.utils.path_utils import (
     safe_join,
 )
 from app.utils.terms import term_hits
+from app.utils.thread_ctx import thread_scope
 from app.utils.tokens import warm_tokenizer
 from app.worker import WORKER_CONCURRENCY
 from app.worker import handle_task as worker_handle_task
@@ -1569,21 +1577,161 @@ async def get_order(
     return found[0].snapshot()
 
 
+class CancelOrderBody(BaseModel):
+    reason: str
+    thread_id: str
+
+
 @app.post("/api/orders/{order_id}/cancel")
 async def cancel_order_endpoint(
     order_id: str,
+    body: CancelOrderBody,
     auth_uid: str | None = Depends(get_current_user_id),
 ) -> dict[str, Any]:
-    """从前端直接取消一张订单（不经 Agent）。
+    """从前端为一张订单**生成取消确认卡**（不经 Agent，也不直接取消）。
 
-    这条路**没有**「先 query_order」的顺序闸——那道闸拦的是模型编订单号，而前端的取消按钮是长在
-    订单卡片上的，订单号来自刚渲染的那张卡，不存在编造。归属与状态机仍照常校验。
+    对齐参考项目：取消和下单一样要先出卡、用户再点「确认取消」。这条路**没有**「先 query_order」
+    的顺序闸——那道闸拦的是模型编订单号，而前端的取消按钮长在订单卡片上，订单号来自刚渲染的
+    那张卡。归属与状态机仍照常校验。
     """
     uid = _require_login(auth_uid)
+    await _guard_thread(body.thread_id, auth_uid)
     try:
-        order = await trade_cancel_order(order_repository(), user_id=uid, order_id=order_id)
+        conf = await prepare_cancel_confirmation(
+            confirmation_repository(),
+            order_repository(),
+            user_id=uid,
+            thread_id=body.thread_id,
+            order_id=order_id,
+            reason=body.reason,
+        )
     except OrderNotFoundError as e:
         raise HTTPException(404, str(e)) from e
     except OrderStateError as e:
         raise HTTPException(409, str(e)) from e
-    return order.snapshot()
+    except ConfirmationError as e:
+        raise _confirmation_http_error(e) from e
+    env = conf.envelope()
+    await monitor.report_confirmation("required", env, thread_id=body.thread_id)
+    return env
+
+
+# --- 交易确认卡（对齐参考项目 confirmations 接口）----------------------------
+
+_CONFIRMATION_STATUS = {
+    "unauthorized": 401,
+    "not_found": 404,
+    "conflict": 409,
+    "expired": 410,
+    "invalid": 400,
+}
+
+
+def _confirmation_http_error(e: ConfirmationError) -> HTTPException:
+    return HTTPException(_CONFIRMATION_STATUS.get(e.code, 400), str(e))
+
+
+class OrderItemBody(BaseModel):
+    item_id: str
+    quantity: int = 1
+
+
+class PrepareOrderBody(BaseModel):
+    items: list[OrderItemBody]
+    shipping_address: dict[str, Any]
+
+
+class ResolveConfirmationBody(BaseModel):
+    snapshot_hash: str
+    approved: bool
+
+
+def _hydrate_for_thread(thread_id: str, uid: str) -> Any:
+    """给 HTTP 入口用的候选 hydrate：进该 thread 的作用域再按 id 取。
+
+    表单点「生成确认单」时任务早已结束、登记表只活一轮（候选不落盘），这里靠 :func:`hydrate`
+    自带的「登记表未命中 → 按 id 回源 Qdrant」取回商品与价格。"""
+    session_dir = _safe_session_dir(OUTPUT_ROOT, thread_id)
+
+    def _hydrate(ids: list[str]) -> list[Any]:
+        with thread_scope(thread_id, session_dir, uid):
+            return hydrate(ids)
+
+    return _hydrate
+
+
+@app.post("/api/threads/{thread_id}/confirmations/orders")
+async def prepare_order_endpoint(
+    thread_id: str,
+    body: PrepareOrderBody,
+    auth_uid: str | None = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    """下单意向表单 → 服务端生成确认卡（不经模型、不下单）。商品与价格按 item_id 从本会话候选取。"""
+    uid = _require_login(auth_uid)
+    await _guard_thread(thread_id, auth_uid)
+    lines = [LineRequest(item_id=i.item_id, quantity=i.quantity) for i in body.items]
+    try:
+        conf = await prepare_order_confirmation(
+            confirmation_repository(),
+            user_id=uid,
+            thread_id=thread_id,
+            lines=lines,
+            shipping_address=body.shipping_address,
+            hydrate=_hydrate_for_thread(thread_id, uid),
+        )
+    except ConfirmationError as e:
+        raise _confirmation_http_error(e) from e
+    except (NoCandidateError, ValueError) as e:
+        raise HTTPException(400, str(e)) from e
+    env = conf.envelope()
+    await monitor.report_confirmation("required", env, thread_id=thread_id)
+    return env
+
+
+@app.get("/api/threads/{thread_id}/confirmations")
+async def list_confirmations_endpoint(
+    thread_id: str,
+    limit: int = 20,
+    auth_uid: str | None = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    """本会话的确认记录（真源）。前端打开 / 刷新会话时拉一次，与事件流合并。"""
+    uid = _require_login(auth_uid)
+    await _guard_thread(thread_id, auth_uid)
+    try:
+        confs = await list_confirmations(
+            confirmation_repository(), user_id=uid, thread_id=thread_id, limit=limit
+        )
+    except ConfirmationError as e:
+        raise _confirmation_http_error(e) from e
+    return {"confirmations": [c.envelope() for c in confs]}
+
+
+@app.post("/api/threads/{thread_id}/confirmations/{confirmation_id}/resolve")
+async def resolve_confirmation_endpoint(
+    thread_id: str,
+    confirmation_id: str,
+    body: ResolveConfirmationBody,
+    auth_uid: str | None = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    """用户在确认卡上点「确认 / 拒绝」。**唯一**能真正下单 / 取消的入口，模型没有对应工具。"""
+    uid = _require_login(auth_uid)
+    await _guard_thread(thread_id, auth_uid)
+    try:
+        conf = await resolve_confirmation(
+            confirmation_repository(),
+            order_repository(),
+            user_id=uid,
+            thread_id=thread_id,
+            confirmation_id=confirmation_id,
+            snapshot_hash=body.snapshot_hash,
+            approved=body.approved,
+        )
+    except ConfirmationError as e:
+        raise _confirmation_http_error(e) from e
+    except OrderNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except OrderStateError as e:
+        raise HTTPException(409, str(e)) from e
+    env = conf.envelope()
+    await monitor.report_confirmation("resolved", env, thread_id=thread_id)
+    return env
