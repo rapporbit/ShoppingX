@@ -86,36 +86,10 @@ export function SkillsDrawer({ userId, open, onClose, onChanged }: SkillsDrawerP
           不选时 Agent 也会按「用途」一句话自己判断要不要读。它只是参考资料，改不了你当轮说的预算和禁忌。
         </div>
 
-        {editing !== null ? (
-          <div className="skill-editor">
-            <input
-              className="skill-input"
-              placeholder="标识（小写字母/数字/-，如 weekend-backpack）"
-              value={draft.name}
-              disabled={editing !== ""}
-              onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-            />
-            <input
-              className="skill-input"
-              placeholder="用途一句话（Agent 靠它判断何时用，写具体）"
-              value={draft.description}
-              onChange={(e) => setDraft({ ...draft, description: e.target.value })}
-            />
-            <textarea
-              className="skill-body"
-              placeholder="正文：步骤 / 取舍规则 / 到手价口径……（Markdown）"
-              rows={10}
-              value={draft.body}
-              onChange={(e) => setDraft({ ...draft, body: e.target.value })}
-            />
-            {error && <div className="composer-image-error">{error}</div>}
-            <div className="skill-editor-acts">
-              <button className="ghost-btn" onClick={() => setEditing(null)}>取消</button>
-              <button className="pref-save" onClick={() => void save()}>保存</button>
-            </div>
-          </div>
-        ) : (
-          <>
+        {/* 列表 + 编辑器两栏：整页视图里并排（左选右改，像参考项目的 workspace）；
+            抽屉视图里 CSS 退回「二选一」——窄 460px 放不下两栏。 */}
+        <div className={`skill-page-grid ${editing !== null ? "editing" : ""}`}>
+          <div className="skill-list-col">
             <div className="skill-list-head">
               <button className="pref-save" onClick={() => startEdit()}>+ 新建 Skill</button>
             </div>
@@ -148,8 +122,45 @@ export function SkillsDrawer({ userId, open, onClose, onChanged }: SkillsDrawerP
                 ))}
               </ul>
             )}
-          </>
-        )}
+          </div>
+          <div className="skill-editor-col">
+            {editing !== null ? (
+              <div className="skill-editor">
+                <input
+                  className="skill-input"
+                  placeholder="标识（小写字母/数字/-，如 weekend-backpack）"
+                  value={draft.name}
+                  disabled={editing !== ""}
+                  onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                />
+                <input
+                  className="skill-input"
+                  placeholder="用途一句话（Agent 靠它判断何时用，写具体）"
+                  value={draft.description}
+                  onChange={(e) => setDraft({ ...draft, description: e.target.value })}
+                />
+                <textarea
+                  className="skill-body"
+                  placeholder="正文：步骤 / 取舍规则 / 到手价口径……（Markdown）"
+                  rows={10}
+                  value={draft.body}
+                  onChange={(e) => setDraft({ ...draft, body: e.target.value })}
+                />
+                {error && <div className="composer-image-error">{error}</div>}
+                <div className="skill-editor-acts">
+                  <button className="ghost-btn" onClick={() => setEditing(null)}>取消</button>
+                  <button className="pref-save" onClick={() => void save()}>保存</button>
+                </div>
+              </div>
+            ) : (
+              <div className="skill-page-empty">
+                左边选一份 Skill 来改，或者点「新建 Skill」。
+                <br />
+                写清先问什么、比什么、到手价怎么算，Agent 读它的时候就照这个打法走。
+              </div>
+            )}
+          </div>
+        </div>
       </aside>
     </>
   );

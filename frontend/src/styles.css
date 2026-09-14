@@ -4368,3 +4368,103 @@ button:disabled {
   border-radius: 6px;
   font: inherit;
 }
+
+/* ============================ 「我的东西」整页视图 ============================ */
+/* panel-host 装着收藏 / 订单 / Skill / 长期偏好四个组件。默认它们各自还是 fixed 抽屉（其它入口
+   仍可能以抽屉方式唤起）；带 .page 时把当前打开的那个改成静态流布局、占满对话区，其余藏掉，
+   遮罩也不要——这时它就是一页，不是浮层。对话区、输入框、对比栏一并藏起来但不卸载。 */
+.workspace.paged > :not(.topbar):not(.panel-host) {
+  display: none;
+}
+.panel-host.page {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  justify-content: center;
+}
+.panel-host.page .drawer-scrim {
+  display: none;
+}
+.panel-host.page .drawer:not(.open) {
+  display: none;
+}
+.panel-host.page .drawer.open {
+  position: static;
+  height: auto;
+  min-height: 100%;
+  width: 100%;
+  max-width: 800px; /* 单列表单 / 列表：太宽读起来累 */
+  transform: none;
+  border-left: none;
+  box-shadow: none;
+  background: transparent;
+  padding: 18px 40px 60px;
+  overflow: visible;
+}
+.panel-host.page .drawer.open:has(.skill-page-grid) {
+  max-width: 1040px; /* Skill 两栏才用得上 */
+}
+.panel-host.page .drawer-head {
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 14px;
+}
+.panel-host.page .drawer-title {
+  font-family: var(--serif);
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+/* 整页里「关闭」的语义是「返回对话」：把 X 换成文字，靠 ::after 补，不动四个组件。 */
+.panel-host.page .drawer-tools .icon-btn[title="关闭"] {
+  display: inline-flex;
+  align-items: center;
+  width: auto;
+  height: 32px;
+  padding: 0 10px;
+  gap: 6px;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--text-2);
+}
+.panel-host.page .drawer-tools .icon-btn[title="关闭"]::after {
+  content: "返回对话";
+}
+/* 收藏在整页里排成网格；订单 / 偏好保持单列但放宽到 720px 好读 */
+.panel-host.page .fav-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.panel-host.page .skill-page-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  gap: 32px;
+  align-items: start;
+}
+.panel-host.page .skill-page-grid .fav-list {
+  grid-template-columns: 1fr;
+}
+.panel-host.page .skill-page-empty {
+  padding: 40px 24px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 6px;
+  color: var(--muted);
+  text-align: center;
+  line-height: 1.7;
+}
+@media (max-width: 900px) {
+  .panel-host.page .drawer.open {
+    padding: 14px 18px 40px;
+  }
+  .panel-host.page .fav-list,
+  .panel-host.page .skill-page-grid {
+    grid-template-columns: 1fr;
+  }
+}
+/* 抽屉视图（非 .page）里 Skill 两栏退回二选一 */
+.panel-host:not(.page) .skill-page-grid.editing .skill-list-col,
+.panel-host:not(.page) .skill-page-grid:not(.editing) .skill-editor-col {
+  display: none;
+}
