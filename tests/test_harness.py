@@ -980,6 +980,7 @@ class TestTerminalDirectClose:
 
         mw = _mw()
         mw.guard.terminal_reached = True
+        mw.called_tools.add("shopping_summary")  # 直出只认本轮真调过它
         art = ShoppingSummaryOutput(summary="## 清单\n- A 好货")
         msgs = [
             Msg(

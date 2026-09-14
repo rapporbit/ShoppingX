@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from agentscope.agent import Agent
 from agentscope.credential import OpenAICredential
-from agentscope.message import Msg, TextBlock, ToolCallBlock
+from agentscope.message import Msg, TextBlock, ToolCallBlock, ToolResultBlock
 from agentscope.model import ChatResponse, ChatUsage, OpenAIChatModel
 from agentscope.tool import FunctionTool, Toolkit
 from agentscope.tool._response import ToolChunk, ToolResultState
@@ -529,3 +529,52 @@ async def test_streaming_usage_charged_once_not_per_chunk(
     assert snap["model_calls"] == 1  # 3 个 chunk，1 笔账
     assert snap["input_tokens"] == 1000  # 不是 3000
     assert snap["output_tokens"] == 300  # 最后一个 chunk 的累计值
+
+
+def _old_summary_msg() -> Msg:
+    """恢复回来的上一轮上下文里的 shopping_summary 结果（本轮没调过它）。"""
+    block = ToolResultBlock(
+        type="tool_result",
+        id="old",
+        name="shopping_summary",
+        output=json.dumps({"summary": "上一轮的清单", "items": []}),
+    )
+    return Msg(name="adapter_test", role="assistant", content=[block])
+
+
+@pytest.mark.asyncio
+async def test_terminal_shortcut_ignores_previous_turn_summary(
+    isolated_harness: HarnessMiddleware,
+) -> None:
+    """终结直出只认**本轮**调过 shopping_summary；上一轮的清单不能被拿来当本轮回复。
+
+    真踩过：续聊第二轮 chat_fallback 收尾后，直出把恢复上下文里第一轮的清单原样复述了一遍。
+    """
+    session = HarnessSession()
+    session.guard.terminal_reached = True
+    session.called_tools = {"chat_fallback"}
+    agent = await _build(session, [_text("请先填收件信息。")])
+    agent.state.context.append(_old_summary_msg())
+
+    reply = await agent.reply(_user("帮我下单第一款"))
+
+    text = "".join(b.text for b in reply.content if b.type == "text")
+    assert "上一轮的清单" not in text
+    assert "请先填收件信息" in text
+
+
+@pytest.mark.asyncio
+async def test_terminal_shortcut_still_fires_when_summary_called_this_turn(
+    isolated_harness: HarnessMiddleware,
+) -> None:
+    """对照：本轮真调过 shopping_summary，直出照旧生效、不再唤模型。"""
+    session = HarnessSession()
+    session.guard.terminal_reached = True
+    session.called_tools = {"shopping_summary"}
+    agent = await _build(session, [_text("不该被调用")])
+    agent.state.context.append(_old_summary_msg())
+
+    reply = await agent.reply(_user("收尾"))
+
+    text = "".join(b.text for b in reply.content if b.type == "text")
+    assert text == "上一轮的清单"
