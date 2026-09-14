@@ -145,14 +145,13 @@ def _formatter() -> OpenAIChatFormatter:
     """格式化层：开了 ``COMPRESS_CACHE_CONTROL`` 就换成会打断点标记的那版。
 
     每档模型各持一个实例（formatter 无状态，共享与否都行；各持一份省得将来有人往里加状态时
-    踩到跨档串扰）。``keep_recent`` 与压缩 Hook 同源，两处用同一把尺子量断点，否则标记会打在
-    压缩边界之外——缓存前缀里混进易变内容，命中率白丢。
+    踩到跨档串扰）。标记只钉在 system 那一条上，不依赖任何压缩参数。
     """
     if not _env_bool("COMPRESS_CACHE_CONTROL", False):
         return OpenAIChatFormatter()
     from app.harness.formatter import CacheAwareOpenAIFormatter
 
-    return CacheAwareOpenAIFormatter(keep_recent=_env_int("COMPRESS_KEEP_RECENT", 3))
+    return CacheAwareOpenAIFormatter()
 
 
 def build_model(

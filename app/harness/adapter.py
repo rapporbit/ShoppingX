@@ -39,10 +39,8 @@ from pydantic import ValidationError
 from app.agent.fork_guard import current_fork_depth
 from app.agent.token_budget import charge_usage
 from app.api import monitor
-from app.compress.blocks import post_step_compress
-from app.harness.hooks.context_shaping import _compress_opts
 from app.harness.middleware import harness
-from app.harness.msgs import block_text, context_tokens, terminal_summary, text_of
+from app.harness.msgs import block_text, terminal_summary, text_of
 from app.harness.phase_machine import get_phase_machine
 from app.harness.prefill import prefill
 from app.harness.session import HarnessSession, collect_call_signals
@@ -239,49 +237,8 @@ class HarnessAgentAdapter(MiddlewareBase):
             charge_usage(model_name, getattr(last, "usage", None))
             self._s.track_token_delta()
 
-    # ── 框架自带的摘要压缩：接管，不放行 ──
-
-    async def on_compress_context(
-        self,
-        agent: Agent,
-        input_kwargs: dict,
-        next_handler: Callable[..., Any],
-    ) -> None:
-        """把框架的「LLM 摘要 + 替换 context」换成本仓的 block 级压缩。**刻意不调 next_handler。**
-
-        框架的实现会让模型写一份 continuation summary，然后用它**替换掉** ``state.context`` 里
-        被压的那几条。两处与本仓冲突：
-
-        1. 本仓的第一性原则是「压缩只改这一次送给模型的视图，不改历史原文」（见 as_blocks）。
-           原文一旦被摘要替换，``session.json`` 落盘的就是摘要，跨进程续聊读回来的历史
-           从此是二手的——L3 验收过的那条「模型接住了上文」的链路会悄悄降级。
-        2. 它要额外烧一次 LLM 调用，而触发它的场景（上下文逼近 102k）恰恰是预算最紧的时候。
-
-        所以这里就地对 ``state.context`` 跑一次同一套 block 级压缩：把较旧的工具结果截到上限，
-        一条消息不删、一个 block 不丢。这是**兜底**——正常路径上 pre_think 的视图压缩早已把体积
-        压住，能走到这里说明历史真的异常长，此时保结构比保细节重要。
-
-        压缩后仍不达标不会死循环：本函数幂等（已截断的不再压），框架下一轮照常调模型，真超上限
-        由网关报错——比静默把历史换成摘要更诚实。
-
-        **阈值判断必须自己做**（实测踩到的坑）：本钩子是 ``_reply_impl`` 在**每次** Reasoning
-        前无条件调的，「超没超阈值」判在 ``_compress_context_impl`` 里、也就是 next_handler
-        那一侧。不判就直接压 = 每轮都把 ``state.context`` 的历史原文截一遍，比框架的摘要还狠。
-        """
-        threshold = agent.context_config.trigger_ratio * agent.model.context_size
-        if context_tokens(agent.state.context) < threshold:
-            return
-
-        keep_recent, max_tool_tokens, _ = _compress_opts()
-        before = len(agent.state.context)
-        agent.state.context = post_step_compress(
-            list(agent.state.context),
-            keep_recent=keep_recent,
-            max_tool_tokens=max_tool_tokens,
-        )
-        logger.warning(
-            "上下文逼近上限，已就地做 block 级压缩兜底（%d 条消息，未启用框架摘要）", before
-        )
+    # 框架自带的摘要压缩（``on_compress_context``）**不接管**：超阈值时由框架写 continuation
+    # summary 进 ``state.summary``，随 session.json 一起持久化。本仓不再做 block 级视图压缩。
 
     # ── post_reflect ──
 

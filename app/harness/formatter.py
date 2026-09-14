@@ -2,15 +2,19 @@
 
 为什么标记非落在这一层不可：AgentScope 的 content block 是 pydantic 强类型（``TextBlock``
 不收未知字段），``cache_control`` 塞不进 ``Msg``；``Msg.metadata`` 又是**消息级**的，而
-AgentScope 一整轮就是一条 assistant 消息（见 :mod:`app.compress.blocks`），标记落在它上面
-等于标了一整轮。formatter 输出的 dict 序列则**就是**线上 payload 本身，标在这里所见即所得。
+AgentScope 一整轮就是一条 assistant 消息（轮内所有 tool_call / tool_result 都 extend 进它的
+content），标记落在它上面等于标了一整轮。formatter 输出的 dict 序列则**就是**线上 payload
+本身，标在这里所见即所得。
 
 **别把命中率归到这个标记头上**（L0 的 S1 实测）：本仓网关（DashScope OpenAI 兼容）是**隐式**
 前缀缓存——带标记组与不带标记的对照组第二次都命中 1024 token。标记继续打，因为成本为零、且
-换 Anthropic 直连时它是必需品；但缓存收益的真正来源是「断点前的字节逐轮不变」，那是压缩
-（``as_blocks``）与注入纪律（注入随 state 长驻、不每轮重发）挣来的，不是这一行 JSON。
+换 Anthropic 直连时它是必需品；但缓存收益的真正来源是「前缀的字节逐轮不变」，那是注入纪律
+（注入随 state 长驻、不每轮重发）挣来的，不是这一行 JSON。
 
 两条硬约束照 refdocs/05 §4.4 落实：单请求 ≤4 个标记、前缀不足最小写入阈值不打。
+
+上下文压缩本身不在本仓做：交给框架 ``compress_context``（超阈值时 LLM 摘要进 ``state.summary``），
+见 ``agents._assemble`` 的 ``ContextConfig``。
 """
 
 from typing import Any
@@ -18,8 +22,12 @@ from typing import Any
 from agentscope.formatter import OpenAIChatFormatter
 from agentscope.message import Msg
 
-from app.compress.blocks import DEFAULT_KEEP_RECENT, MIN_CACHE_PREFIX_TOKENS
 from app.utils.tokens import count_tokens
+
+# Anthropic cache_control 硬约束（refdocs/05 §4.4）。
+MAX_CACHE_MARKERS = 4
+# Sonnet 写入缓存的最小前缀 token 阈值；不足则写了也不会被缓存，白占一个标记额度。
+MIN_CACHE_PREFIX_TOKENS = 1024
 
 _EPHEMERAL: dict[str, str] = {"type": "ephemeral"}
 
@@ -67,13 +75,7 @@ class CacheAwareOpenAIFormatter(OpenAIChatFormatter):
 
     system 段是全天不变、跨轮跨会话都字节稳定的最长缓存层（本仓 system prompt 纯静态、无运行时
     注入，见 ``agents._assemble``），标记钉死在它上面：位置不动、形态不动，前缀就还是那份前缀。
-
-    ``keep_recent`` 仍然收下，但只用来解释「压缩断点在哪」——formatter 不再依赖它做落点决策。
     """
-
-    def __init__(self, *args: Any, keep_recent: int = DEFAULT_KEEP_RECENT, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self._keep_recent = keep_recent
 
     async def format(self, msgs: list[Msg]) -> list[dict[str, Any]]:
         formatted = await super().format(msgs)

@@ -36,7 +36,7 @@ post_tool_call：
   - truncate_result(10) 必须早于所有追加提示的钩子（19 / 20），否则刚贴的提示被截掉。
   - schema_assertion(40) 用 raw_decode 容忍 19 / 20 缀在尾部的通告。
 
-pre_think：5 liveness_watchdog · 20 budget_router · 90 context_compress（压缩必须最后）。
+pre_think：5 liveness_watchdog · 20 budget_router。（上下文压缩交框架 compress_context，无 Hook。）
 post_reflect：15 assertion_handler · 20 drift_detector · 39 refine_backfill · 40 phase_transition
     · 41 phase_rollback · 60 terminal_enforcer。
 on_session_start：10 phase_init。

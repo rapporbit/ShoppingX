@@ -19,8 +19,6 @@ from typing import Any
 
 from agentscope.message import Msg, TextBlock, ToolCallBlock, ToolResultBlock
 
-from app.utils.tokens import count_tokens
-
 
 def system_message(text: str, context: dict[str, Any] | None = None) -> Msg:
     """造一条「系统提示」消息。
@@ -105,32 +103,6 @@ def tool_blocks(call_id: str, name: str, args: dict[str, Any], result: str) -> l
             output=result,
         ),
     ]
-
-
-def context_tokens(messages: list[Msg]) -> int:
-    """粗估整段历史的 token（只为「该不该兜底压缩」这一个是非题服务）。
-
-    刻意不用框架的 ``model.count_tokens``——它要先跑 ``_prepare_model_input``（私有、还要拉一遍
-    工具 schema），而这里只需要判个数量级。本仓的 ``count_tokens`` 对中文更准（框架默认实现是
-    bytes/4，中文低估约 3 倍），偏保守正合适：宁可早压一轮，不可撑爆上下文。
-    """
-    total = 0
-    for msg in messages:
-        content = msg.content
-        if isinstance(content, str):
-            total += count_tokens(content)
-            continue
-        for block in content:
-            for field in ("text", "thinking"):
-                value = getattr(block, field, None)
-                if isinstance(value, str):
-                    total += count_tokens(value)
-            output = getattr(block, "output", None)
-            if isinstance(output, str):
-                total += count_tokens(output)
-            elif isinstance(output, list):
-                total += sum(count_tokens(getattr(x, "text", "") or "") for x in output)
-    return total
 
 
 def terminal_summary(messages: list[Msg]) -> str:

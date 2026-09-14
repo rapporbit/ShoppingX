@@ -119,7 +119,7 @@ TERMINAL_TOOL_NUDGE = (
 )
 
 # token 预算软线提示原先住在这里（``BUDGET_SOFT_HINT``），已被 ``model_router.MINIMAL_HINT`` 取代：
-# 那一档不只提醒，还换模型 + 收工具（见 hooks/context_compress.py 的 budget_router）。不留兼容层。
+# 那一档不只提醒，还换模型 + 收工具（见 hooks/budget.py 的 budget_router）。不留兼容层。
 
 
 # 这里曾有 TOOL_NOT_ALLOWED（refdocs 16-6 §2.1 的 L1 白名单拒绝文案）。工具名不在 Toolkit 里

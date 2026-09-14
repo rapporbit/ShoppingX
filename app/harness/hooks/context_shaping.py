@@ -1,15 +1,13 @@
-"""塑形模型看到的上下文：压缩 / 偏好注入 / 成功策略注入与结账。
+"""塑形模型看到的上下文：偏好注入 / 成功策略注入与结账。
 
     on_system_prompt 50  strategy_inject     装配期按用户原话匹配在役策略，追加 <learned_strategies>
                                              （只给主 Agent）
-    pre_think        90  context_compress    压缩历史视图（只改这一次送模型的那份，不动 state）
-                                             **必须最后**
     post_tool_call   50  preference_inject   planner 判出域后注入域内长期偏好
                                              （worker 由 task_dispatch 注入）
     on_session_end   90  strategy_feedback   给本轮注入过的策略结账：命中回血、连续失败淘汰
 
-压缩排最后：它要对**最终**送给模型的 messages 生效，前面所有 Hook 注入的内容都已在列表里。
-cache_control 不在这里打，落在 formatter 层。
+上下文压缩不在本仓做：交给框架 ``compress_context``（超阈值时 LLM 摘要进 ``state.summary``，
+随 session.json 一起持久化）。cache_control 也不在这里打，落在 formatter 层。
 """
 
 from __future__ import annotations
@@ -20,43 +18,14 @@ from typing import Any
 
 from app.agent.fork_guard import current_fork_depth
 from app.api.context import get_user_id
-from app.compress.blocks import DEFAULT_KEEP_RECENT, DEFAULT_MAX_TOOL_TOKENS, post_step_compress
 from app.harness.budgets import (
     TERMINAL_TOOLS,
 )
 from app.harness.middleware import harness_hook
 from app.memory.injector import PREF_EMPTY, build_preference_block
 from app.memory.strategies import get_strategy_store, render_strategy_block, strategies_for_query
-from app.utils.env import env_bool, env_int
 
 logger = logging.getLogger("shoppingx.harness.context_shaping")
-
-
-def _compress_opts() -> tuple[int, int, bool]:
-    return (
-        env_int("COMPRESS_KEEP_RECENT", DEFAULT_KEEP_RECENT),
-        env_int("COMPRESS_MAX_TOOL_TOKENS", DEFAULT_MAX_TOOL_TOKENS),
-        env_bool("COMPRESS_CACHE_CONTROL", False),
-    )
-
-
-@harness_hook("pre_think", name="context_compress", priority=90)
-async def compress_context(context: dict[str, Any]) -> dict[str, Any] | None:
-    """压缩历史视图（只改这一次送给模型的那份，不动 state 里的原文）。"""
-    messages = context.get("messages")
-    if not isinstance(messages, list) or not messages:
-        return None
-
-    keep_recent, max_tool_tokens, _ = _compress_opts()
-    # 一整轮 = 一条 assistant 消息，断点下沉到 block 级（见 compress/blocks.py）。
-    # cache_control **不在这里打**：system 就在 messages 里，标记落在 formatter 那一层
-    # （content block 是强类型的，塞不进未知字段）。
-    context["messages"] = post_step_compress(
-        messages,
-        keep_recent=keep_recent,
-        max_tool_tokens=max_tool_tokens,
-    )
-    return context
 
 
 @harness_hook("post_tool_call", name="preference_inject", priority=50)
