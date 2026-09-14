@@ -19,6 +19,10 @@ type InputBarProps = {
   blockedReason?: string | null;
   // 输入框 / 菜单的候选（内置 + 我的 skill 目录）。空表 = 不弹菜单。
   skills?: SkillCatalogItem[];
+  // 外部预填（追问 chip「调整预算」/ 空态「调整一下需求」）：draftKey 变一次就把 draft 写进输入框并聚焦。
+  // 用 key 而不是直接比较 text：连点两次同一个 chip 也该再填一次。
+  draft?: string;
+  draftKey?: number;
   onSend: (text: string, files?: File[], skill?: string) => void;
   onCancel: () => void;
   onClarify?: (text: string) => void;
@@ -30,11 +34,23 @@ export function InputBar({
   clarificationHasChoices,
   blockedReason,
   skills = [],
+  draft,
+  draftKey = 0,
   onSend,
   onCancel,
   onClarify,
 }: InputBarProps) {
   const [text, setText] = useState("");
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  useEffect(() => {
+    if (!draftKey || draft == null) return;
+    setText(draft);
+    const el = textareaRef.current;
+    if (el) {
+      el.focus();
+      el.setSelectionRange(draft.length, draft.length);
+    }
+  }, [draft, draftKey]);
   // / 选中的 skill：以 chip 挂在输入框上方随本轮发出；发送 / 点 × 即清。
   const [skill, setSkill] = useState<SkillCatalogItem | null>(null);
   const [menuIndex, setMenuIndex] = useState(0);
@@ -208,6 +224,7 @@ export function InputBar({
           </ul>
         )}
         <textarea
+          ref={textareaRef}
           className="composer-input"
           placeholder={placeholder}
           value={text}
