@@ -1789,7 +1789,7 @@ async def test_planner_writes_session_pt_same_turn(monkeypatch: Any) -> None:
     """
     import app.tools.planner as mod
     from app.api.context import get_session_pt, set_session_pt
-    from app.memory.session_state import SessionPrefState, load_pt
+    from app.memory.session_state import SessionPrefState
     from app.tools.planner import ExcludeTerm, PlanOutput
     from app.utils.thread_ctx import thread_scope
 
@@ -1824,8 +1824,6 @@ async def test_planner_writes_session_pt_same_turn(monkeypatch: Any) -> None:
     assert pt.budget_usd == pytest.approx(300 * 0.14)
     # turn 的唯一递增点是 planner 自己（P_t 单写者，递增点随写权一起挪过来；曾归 curator）
     assert pt.turn == 1
-    # 落盘了，续聊轮 load_pt 能读回
-    assert load_pt(session_dir).dislike_terms() == ["塑料", "plastic"]
 
 
 async def test_planner_pt_reaches_item_picker_same_turn(monkeypatch: Any) -> None:

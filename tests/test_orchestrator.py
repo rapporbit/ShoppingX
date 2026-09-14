@@ -4,7 +4,7 @@
 这里守的是迁移最容易悄悄摔的四处：
 
 1. 收尾取的是**流出去的那条 Msg**（已过输出审核），不是 ``state.context`` 里的原文；
-2. 续聊两条腿：有 ``agent_state.json`` 就恢复它，没有才回放精简 (q,a)；
+2. 续聊唯一一条腿：有 ``session.json`` 就恢复它，没有就空开局；
 3. 写工具是**精准放行**的——没进放行表的工具照样要用户确认（不能靠 BYPASS 一档全开）；
 4. ``task_dispatch`` 把子任务的失败转成工具结果，而不是让主 loop 崩。
 """
@@ -100,69 +100,72 @@ def test_extract_summary_none_without_terminal_tool() -> None:
     assert orch._extract_summary([msg]) is None
 
 
-# ---------- 会话恢复两条腿 ----------
+# ---------- 会话恢复：唯一一条腿 session.json ----------
 
 
-async def test_run_agent_replays_history_when_no_state(
+async def test_run_agent_starts_fresh_without_session_file(
     monkeypatch: pytest.MonkeyPatch, patched: dict[str, Any]
 ) -> None:
-    """没有 agent_state.json 时回放精简 (q,a)，且当轮 query 拼在最后一条 user 消息里。"""
+    """没有 session.json → 空开局：不回放 messages 表，当轮 query 是唯一的输入消息。"""
     agent = _fake_agent("已为你整理好清单。")
 
     async def _build(**kw: Any) -> Any:
         patched["state_arg"] = kw.get("state")
         return agent, SimpleNamespace()
 
-    async def _prior(*_a: Any, **_kw: Any) -> list[tuple[str, str]]:
-        return [("user", "上轮问题"), ("assistant", "上轮回答")]
-
     monkeypatch.setattr(orch, "build_main_agent", _build)
-    monkeypatch.setattr(orch, "load_prior_turns", _prior)
-
     await orch.run_agent("买个旅行包", thread_id="as-t1")
 
-    assert patched["state_arg"] is None  # 没有落盘 state → 走回放腿
-    roles = [m.role for m in agent.inputs]
-    assert roles == ["user", "assistant", "user"]
-    assert agent.inputs[0].get_text_content() == "上轮问题"
+    assert patched["state_arg"] is None
+    assert [m.role for m in agent.inputs] == ["user"]
     assert agent.inputs[-1].get_text_content().endswith("买个旅行包")
 
 
-async def test_run_agent_resumes_from_agent_state(
+async def test_run_agent_resumes_from_session_file(
     monkeypatch: pytest.MonkeyPatch, patched: dict[str, Any]
 ) -> None:
-    """有 agent_state.json 就恢复它，并且**不再回放**历史（否则同一段对话进两遍上下文）。"""
+    """有 session.json 就恢复它（含 middle_context 里的 P_t），当轮只追加一条 user 消息。"""
+    from app.memory.session_state import SessionConstraint, SessionPrefState, pt_into_state
+
     session_dir = orch.ensure_session_dir("as-t2")
     prior = AgentState()
     prior.context = [Msg(name="user", role="user", content=[TextBlock(type="text", text="上轮")])]
+    pt_into_state(
+        prior.middle_context,
+        SessionPrefState(
+            category="旅行包",
+            constraints=[
+                SessionConstraint(
+                    id="c1", content="不要塑料", polarity="dislike", keywords=["塑料"]
+                )
+            ],
+        ),
+    )
     (session_dir / orch.STATE_FILE).write_text(prior.model_dump_json(), encoding="utf-8")
 
     agent = _fake_agent("好的。")
-    replayed = {"called": False}
 
     async def _build(**kw: Any) -> Any:
         patched["state_arg"] = kw.get("state")
         return agent, SimpleNamespace()
 
-    async def _prior(*_a: Any, **_kw: Any) -> list[tuple[str, str]]:
-        replayed["called"] = True
-        return [("user", "上轮"), ("assistant", "上轮回答")]
-
     monkeypatch.setattr(orch, "build_main_agent", _build)
-    monkeypatch.setattr(orch, "load_prior_turns", _prior)
-
     await orch.run_agent("接着聊", thread_id="as-t2")
 
     state_arg = patched["state_arg"]
     assert isinstance(state_arg, AgentState)
     assert state_arg.context[0].get_text_content() == "上轮"
-    assert replayed["called"] is False
     assert [m.role for m in agent.inputs] == ["user"]
+    # 追问轮继承上一轮约束：P_t 从 middle_context 读回并渲染进当轮 user 消息
+    assert "不要塑料" in agent.inputs[-1].get_text_content()
 
 
-async def test_run_agent_saves_state_for_next_turn(
+async def test_run_agent_saves_state_with_pt_for_next_turn(
     monkeypatch: pytest.MonkeyPatch, patched: dict[str, Any]
 ) -> None:
+    """成功收尾 → session.json 落盘，P_t 住 middle_context（跨轮唯一产物）。"""
+    from app.memory.session_state import pt_from_state
+
     ctx = [Msg(name="user", role="user", content=[TextBlock(type="text", text="本轮")])]
     agent = _fake_agent("好的。", context=ctx)
 
@@ -172,14 +175,29 @@ async def test_run_agent_saves_state_for_next_turn(
     monkeypatch.setattr(orch, "build_main_agent", _build)
     await orch.run_agent("买个包", thread_id="as-t3")
 
-    saved = orch._load_state(orch.ensure_session_dir("as-t3"))
+    session_dir = orch.ensure_session_dir("as-t3")
+    saved = orch.load_session_state(session_dir)
     assert saved is not None and saved.context[0].get_text_content() == "本轮"
+    assert "pt" in saved.middle_context and pt_from_state(saved.middle_context).is_empty()
+    # 老的多份产物一份都不再写
+    for legacy in ("agent_state.json", "pt.json", "candidates.json", "history.json"):
+        assert not (session_dir / legacy).exists()
 
 
 def test_load_state_returns_none_on_corrupt_file(tmp_path: Path) -> None:
-    """坏掉的 state 只降级成「少一段上下文」，不能让整轮聊天起不来。"""
+    """坏掉的 state 只降级成空开局，不能让整轮聊天起不来。"""
     (tmp_path / orch.STATE_FILE).write_text("{ not json", encoding="utf-8")
-    assert orch._load_state(tmp_path) is None
+    assert orch.load_session_state(tmp_path) is None
+
+
+def test_save_state_is_atomic(tmp_path: Path) -> None:
+    """临时文件 + rename：写完不留 .tmp，文件内容能整体读回。"""
+    st = AgentState()
+    st.middle_context["pt"] = {"category": "x"}
+    orch.save_session_state(tmp_path, st)
+    assert not list(tmp_path.glob("*.tmp"))
+    loaded = orch.load_session_state(tmp_path)
+    assert loaded is not None and loaded.middle_context["pt"]["category"] == "x"
 
 
 # ---------- 收尾：审核后的文本 / 产物 / 取消 ----------
@@ -234,7 +252,7 @@ async def test_run_agent_writes_artifacts_and_items(
     assert (session_dir / "summary.md").read_text(encoding="utf-8") == "为你精选 1 件：帆布旅行包。"
     assert (session_dir / "result.json").exists()
     # 完整轨迹落盘（AgentScope 的 Msg 序列化，供审计 / 排障）
-    assert (session_dir / "history.json").exists()
+    assert (session_dir / orch.STATE_FILE).exists()
 
 
 async def test_run_agent_reports_cancel_and_reraises(
@@ -265,6 +283,41 @@ async def test_run_agent_reports_cancel_and_reraises(
     with pytest.raises(asyncio.CancelledError):
         await orch.run_agent("买个包", thread_id="as-t6")
     assert cancelled["n"] == 1
+
+
+async def test_cancelled_turn_leaves_session_file_untouched(
+    monkeypatch: pytest.MonkeyPatch, patched: dict[str, Any]
+) -> None:
+    """取消 / 超时不写任何会话文件：session.json 字节不变，上一轮那份原样留着。"""
+    import asyncio
+
+    session_dir = orch.ensure_session_dir("as-t7")
+    prior = AgentState()
+    prior.context = [Msg(name="user", role="user", content=[TextBlock(type="text", text="上轮")])]
+    (session_dir / orch.STATE_FILE).write_text(prior.model_dump_json(), encoding="utf-8")
+    before = (session_dir / orch.STATE_FILE).read_bytes()
+
+    class _CancelAgent:
+        def __init__(self) -> None:
+            self.state = AgentState()
+
+        async def reply_stream(self, *_a: Any, **_kw: Any) -> Any:
+            raise asyncio.CancelledError
+            yield  # pragma: no cover
+
+    async def _build(**_kw: Any) -> Any:
+        return _CancelAgent(), SimpleNamespace()
+
+    async def _report() -> None:
+        pass
+
+    monkeypatch.setattr(orch, "build_main_agent", _build)
+    monkeypatch.setattr(orch.monitor, "report_task_cancelled", _report)
+    with pytest.raises(asyncio.CancelledError):
+        await orch.run_agent("接着聊", thread_id="as-t7")
+
+    assert (session_dir / orch.STATE_FILE).read_bytes() == before
+    assert sorted(p.name for p in session_dir.iterdir()) == [orch.STATE_FILE]
 
 
 # ---------- 事件泵 ----------

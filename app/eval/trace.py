@@ -167,7 +167,11 @@ def last_assistant_text(messages: Any) -> str:
 
 
 def load_history(path: str | Path) -> list[NormMsg]:
-    """读 ``history.json``（两套运行时的落盘格式都吃），返回中立轨迹；文件不存在给空列表。
+    """读轨迹文件，返回中立轨迹；文件不存在给空列表。
+
+    三种落盘形态都吃：``session.json``（当前，``AgentState`` 整体，轨迹在 ``context``）、
+    迁移后的 ``history.json``（``Msg.model_dump()`` 列表，已停写）、迁移前的 ``history.json``
+    （``messages_to_dict`` 列表）。
 
     不在这里做「哪个格式更可信」的判断——同一个 ``session_dir`` 只会被一个运行时写过，
     格式由 :func:`normalize_message` 逐条自识别即可。
@@ -176,4 +180,7 @@ def load_history(path: str | Path) -> list[NormMsg]:
     if not p.exists():
         return []
     raw = json.loads(p.read_text(encoding="utf-8"))
+    if isinstance(raw, dict):
+        # session.json（AgentState.model_dump_json()）：轨迹在 ``context`` 字段里
+        raw = raw.get("context", [])
     return normalize_messages(raw if isinstance(raw, list) else [])

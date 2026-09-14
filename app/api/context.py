@@ -26,9 +26,9 @@ _session_dir_var: ContextVar[Path | None] = ContextVar("shoppingx_session_dir", 
 # 当前请求的登录用户（用于工具层读长期偏好 / 黑名单）。匿名任务为 None。
 _user_id_var: ContextVar[str | None] = ContextVar("shoppingx_user_id", default=None)
 
-# 当前会话的短期偏好状态 P_t（本会话逐轮累积的约束）——run_agent 入口 load_pt 后写入、**planner
-# 在识别出本轮约束后当轮改写**，供 item_picker 等工具机制性读取并强制执行（把「不要塑料」「预算
-# ≤X」从 prompt 建议升为硬保证，不靠模型每轮转述）。
+# 当前会话的短期偏好状态 P_t（本会话逐轮累积的约束）——run_agent 入口从 session.json 读回后
+# 写入、**planner 在识别出本轮约束后当轮改写**，供 item_picker 等工具机制性读取并强制执行
+# （把「不要塑料」「预算 ≤X」从 prompt 建议升为硬保证，不靠模型每轮转述）。
 #
 # 同 _SESSION_DOMAINS 用「按 session_dir 聚合的模块级 dict」而非裸 ContextVar，理由见下面那段
 # 注释——planner 与 item_picker 各自在独立 context 里跑，前者 set 的 ContextVar 后者读不到。
@@ -107,9 +107,9 @@ def get_user_id() -> str | None:
 
 
 def set_session_pt(pt: "SessionPrefState | None") -> None:
-    """写入本会话的短期状态 P_t。两个写入点：``run_agent`` 入口（load_pt 后）与 ``planner``
-    （识别出本轮约束后当轮改写）。按 session_dir 聚合，故**跨工具可见**；fork 子 Agent 继承
-    父 session_dir，因此天然读到同一份。无 session_dir（单测直调工具）时静默丢弃。"""
+    """写入本会话的短期状态 P_t。两个写入点：``run_agent`` 入口（从 session.json 读回后）与
+    ``planner``（识别出本轮约束后当轮改写）。按 session_dir 聚合，故**跨工具可见**；fork 子 Agent
+    继承父 session_dir，因此天然读到同一份。无 session_dir（单测直调工具）时静默丢弃。"""
     sd = get_session_dir()
     if sd is None:
         return

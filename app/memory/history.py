@@ -1,32 +1,26 @@
-"""对话历史持久化 —— 把每段 thread 的多轮对话落盘，支撑「回看」与「续聊」。
+"""对话历史持久化 —— 把每段 thread 的多轮对话落盘，支撑前端「回看」。
 
 和 :mod:`app.memory.store` 的长期记忆是两回事，别混：
 - store.py 存的是**跨会话的偏好结论**（「不要塑料」），按用户聚合、只在识别到新偏好时写。
 - 本模块存的是**单个 thread_id 内的逐轮对话**，按 thread 隔离、随轮数增长。
 
 两份产物各司其职，**存放位置刻意不同**：
-- **逐轮 ``user → assistant`` 对 → 关系库的 ``messages`` 表**（累加写）。它是「多轮续聊」回喂
-  上下文的源，也是前端「回看本段对话」的读源。**为什么从 turns.json 搬进库**：``threads`` 表已经
+- **逐轮 ``user → assistant`` 对 → 关系库的 ``messages`` 表**（累加写）。它**只给前端「回看本段
+  对话」**，Agent 不读它（续聊靠 ``session.json`` 恢复完整上下文，不回放精简 (q,a)）。
+  **为什么从 turns.json 搬进库**：``threads`` 表已经
   把「这段会话归谁」搬进库了，正文却还在文件系统上——两者生命周期一旦不一致（换机器 / 卷没挂上 /
   多副本各写各的盘），侧栏就会列出一段点进去空白的会话。元信息与正文必须同生共死，见
   :class:`app.db.models.Message`。
-- ``history.json`` —— 最近一次 ``run_agent`` 的**完整 message 轨迹**（含工具调用 / 观察），覆盖式
-  写在会话目录 ``output/<thread_id>/``。它**不进库**：排障产物，重跑即得，且项目刻意不挂
-  checkpointer（无「从中途恢复」的语义要它常驻）。
+- ``session.json`` —— ``AgentState`` 全量（模型看得见的完整上下文 + P_t），写在会话目录
+  ``output/<thread_id>/``，由 ``orchestrator`` 维护。它是**续聊的唯一读源**；本模块不碰。
 
 **旧会话怎么办（惰性迁移）。** 库上线前的会话，正文还在各自的 ``turns.json`` 里。读 / 写任一路径
 发现「库里没有这个 thread 但磁盘上有旧文件」，就把旧文件整段导进库、之后只认库——不需要停机跑
 迁移脚本，也不会漏掉那些再也没人点开的老会话（它们本就不必迁）。旧文件读完保留不删：迁移出岔子
 时那是唯一的后路。
 
-**为什么续聊只回喂 turns.json、不回放整条轨迹（对齐 CLAUDE.md §2.2，刻意不挂 checkpointer）：**
-本项目无跨进程恢复 / 中途 interrupt 续跑的需求（划在范围外）。续聊只需让模型知道「上一轮聊了
-什么、给了什么结论」，把上一轮的结论文案当作历史消息回喂即可——回放整条工具轨迹既会按轮数
-膨胀 token（与 M6 压缩相悖），又要维护 ``tool_call`` / ``tool_message`` 的严格配对（任一缺失即
-模型报错），脆弱且不值。轻量 turns 接续是这里的 YAGNI 落地。
-
 **容错口径（与 store.py 同一套「降级不崩」）：** 历史是附带产物，读 / 写任一环出问题都只记
-日志降级——续聊退化为「从空开局」、回看返回空列表，绝不反噬主链路（任务该跑还跑）。
+日志降级——回看返回空列表，绝不反噬主链路（任务该跑还跑）。
 """
 
 from __future__ import annotations
@@ -43,15 +37,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Message
 from app.db.session import session_factory
-from app.utils.env import env_int
 
 logger = logging.getLogger("shoppingx.history")
 
-# 续聊回喂的历史轮数上限（一轮 = 一对 user/assistant）。太长既膨胀 token 又稀释当前意图；
-# 取最近 N 轮足够接住上下文。≤0 视为不回喂历史（等价关闭续聊）。可经 env 覆盖。
-HISTORY_MAX_TURNS = env_int("HISTORY_MAX_TURNS", 10)
-
-# turns.json 里合法 role 的白名单——回喂时直接当 ``(role, content)`` 二元组的 role 用。
+# turns.json 里合法 role 的白名单（惰性迁移旧文件时校验用）。
 _VALID_ROLES = {"user", "assistant"}
 
 
@@ -66,7 +55,7 @@ def _new_id() -> str:
 
 def _row_to_turn(row: Message) -> dict[str, Any]:
     """一行 ``messages`` → 前端认得的轮次 dict。可选字段仅在非空时出现，与旧 turns.json 逐字同形，
-    故前端与续聊两侧都不必改（搬家只搬存储，不改契约）。"""
+    故前端不必改（搬家只搬存储，不改契约）。"""
     rec: dict[str, Any] = {"role": row.role, "content": row.content}
     if row.role == "user" and row.images:
         rec["images"] = row.images
@@ -140,7 +129,7 @@ def _load_turns_raw(path: Path) -> list[dict[str, Any]]:
 
     assistant 轮额外携带两个**回看专用**的可选字段（只在结构合法时保留，缺/坏则静默忽略，
     不影响这一轮的文本）：``items``（精选商品卡）、``activity``（思考过程的 AGUI 事件流）。
-    续聊回喂只取 role/content（见 :func:`load_prior_turns`），这两个字段对它透明、不增 token。
+    Agent 不读这张表，这两个字段只服务回看。
     """
     if not path.exists():
         return []
@@ -198,23 +187,6 @@ async def read_turns(thread_id: str, session_dir: Path | None = None) -> list[di
         return []
 
 
-async def load_prior_turns(
-    thread_id: str, session_dir: Path | None = None
-) -> list[tuple[str, str]]:
-    """为「续聊」取出本段会话此前的历史轮次，转成 ``(role, content)`` 二元组列表。
-
-    只取最近 ``HISTORY_MAX_TURNS`` 轮（截尾保留最新），回喂进新一轮 ``run_agent`` 的开局
-    messages，让模型接住上下文。``HISTORY_MAX_TURNS<=0`` 时返回空（等价关闭续聊）。
-    """
-    if HISTORY_MAX_TURNS <= 0:
-        return []
-    turns = await read_turns(thread_id, session_dir)
-    max_msgs = HISTORY_MAX_TURNS * 2  # 一轮两条消息
-    if len(turns) > max_msgs:
-        turns = turns[-max_msgs:]
-    return [(t["role"], t["content"]) for t in turns]
-
-
 async def append_turn(
     thread_id: str,
     query: str,
@@ -227,16 +199,15 @@ async def append_turn(
     images: list[str] | None = None,
     experiment: dict[str, Any] | None = None,
 ) -> None:
-    """把本轮 ``user → assistant`` 这一对追加进 ``messages`` 表（累加写，供下次续聊 / 前端回看）。
+    """把本轮 ``user → assistant`` 这一对追加进 ``messages`` 表（累加写，供前端回看）。
 
     ``items``（精选商品卡）/ ``activity``（思考过程 AGUI 事件流）/ ``elapsed_ms``（本轮耗时）/
     ``tokens``（本轮全树 token 用量）挂在 assistant 轮上，是**回看**的还原源——让历史轮也能画出
     商品卡、「思考过程」折叠区、用时与 token 消耗，而非只剩一段结论文本。皆可选、仅非空才写（闲聊
-    兜底无商品卡、无连接时无事件流、未记账时无 tokens）。续聊回喂不读它们。
+    兜底无商品卡、无连接时无事件流、未记账时无 tokens）。
 
-    在 ``run_agent`` 收尾、且 ``load_prior_turns`` 已读过旧轮之后调用，故不会重复计入本轮。
-    写失败只记日志降级——一轮没落库，下轮续聊少一段上下文，但绝不该拖垮主链路的偏好写回与
-    task_result 上报（用户已经拿到答案了）。
+    在 ``run_agent`` 收尾调用。写失败只记日志降级——一轮没落库，前端少一轮回看，但绝不该
+    拖垮主链路的偏好写回与 task_result 上报（用户已经拿到答案了）。
     """
     assistant: dict[str, Any] = {"role": "assistant", "content": final_text}
     if items:

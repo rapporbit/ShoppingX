@@ -8,8 +8,9 @@
 2. **on_session_end 不在这里调**：由 ``HarnessAgentAdapter.on_reply`` 在框架内部改写最终
    ``Msg``，所以这里拿到的 ``final_text`` **已经是审核后的**。别再补一次——重复审核会把哨兵
    文案二次剥离，且 ``output_audit`` 的计数会翻倍。
-3. **会话恢复两条腿**：``agent_state.json``（``AgentState`` 全量落盘）优先，缺失时退回精简的
-   (q,a) 回放。任一条失效另一条还能把会话续上，见 :func:`_load_state`。
+3. **会话恢复只有一条腿**：``session.json``（``AgentState.model_dump_json()``，P_t 住
+   ``middle_context``）。读不到 / 读坏 → 空开局，不回放 messages 表——那张表只给前端回看，
+   Agent 不读。见 :func:`load_session_state` / :func:`save_session_state`。
 
 与运行时无关的那几件事（当轮上下文拼装、产物落盘、配额记账）住在 ``app/agent/session_io.py``。
 """
@@ -17,10 +18,11 @@
 import asyncio
 import json
 import logging
+import os
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from agentscope.message import Msg, TextBlock
 from agentscope.state import AgentState
@@ -63,9 +65,9 @@ from app.harness.msgs import iter_tool_results
 from app.harness.phase_machine import reset_phase_machine
 from app.harness.setup import setup_harness
 from app.memory.curator import curate_turn
-from app.memory.history import append_turn, load_prior_turns
+from app.memory.history import append_turn
 from app.memory.injector import build_history_block, record_search_history
-from app.memory.session_state import load_pt
+from app.memory.session_state import pt_from_state, pt_into_state
 from app.memory.store import get_store
 from app.observability import metrics
 from app.recall.semantic_cache import (
@@ -77,12 +79,7 @@ from app.recall.semantic_cache import (
     turn_is_cacheable,
 )
 from app.tools._bundle import reset_session_bundle
-from app.tools._candidates import (
-    load_candidates,
-    persist_candidates,
-    render_prior_candidates,
-    reset_candidates,
-)
+from app.tools._candidates import reset_candidates
 from app.tools._diagnostics import reset_diagnostics
 from app.tools.shopping_summary import ShoppingSummaryOutput
 from app.utils.path_utils import ensure_session_dir
@@ -90,19 +87,19 @@ from app.utils.thread_ctx import thread_scope
 
 logger = logging.getLogger("shoppingx.orchestrator")
 
-# AgentState 落盘文件名（每会话一份，与 turns.json / history.json 并列在 session_dir 下）。
-STATE_FILE = "agent_state.json"
+# 会话唯一的跨轮产物：AgentState 全量（含 messages 上下文、框架摘要、middle_context 里的 P_t）。
+STATE_FILE = "session.json"
 
 
 def _state_path(session_dir: Path) -> Path:
     return session_dir / STATE_FILE
 
 
-def _load_state(session_dir: Path) -> AgentState | None:
-    """读回上一轮落盘的 ``AgentState``（续聊恢复的第一条腿）。
+def load_session_state(session_dir: Path) -> AgentState | None:
+    """读回上一轮落盘的 ``AgentState``（续聊恢复的唯一一条腿）。
 
-    读不到 / 读坏了都返回 ``None``——调用方会退回第二条腿（精简 (q,a) 回放）。恢复是**加成**，
-    不是前提：一份坏掉的 state 让整轮聊天起不来，比少一段上下文糟得多。
+    读不到 / 读坏了都返回 ``None`` → 调用方按空开局。恢复是**加成**，不是前提：一份坏掉的
+    state 让整轮聊天起不来，比少一段上下文糟得多。
     """
     path = _state_path(session_dir)
     if not path.exists():
@@ -110,21 +107,25 @@ def _load_state(session_dir: Path) -> AgentState | None:
     try:
         return AgentState.model_validate_json(path.read_text(encoding="utf-8"))
     except Exception:
-        logger.warning("agent_state.json 解析失败，退回历史回放（%s）", path, exc_info=True)
+        logger.warning("session.json 解析失败，按空开局（%s）", path, exc_info=True)
         return None
 
 
-def _save_state(session_dir: Path, state: AgentState) -> None:
-    """把本轮结束时的 ``AgentState`` 落盘，供下一轮 / 换进程恢复。
+def save_session_state(session_dir: Path, state: AgentState) -> None:
+    """把本轮结束时的 ``AgentState`` 原子落盘（临时文件 + rename），供下一轮 / 换进程恢复。
 
-    与 ``append_turn`` 写库是**双做**而非二选一：state 保住的是「模型看得见的完整上下文」
-    （含工具调用与结果，恢复后模型不必重新推一遍），turns 表保住的是「人看得懂的对话」
-    （前端回看、跨会话行为历史、评测取样都吃它）。任一条腿失效，另一条还能把会话续上。
+    这是会话状态的**唯一写点**，只在成功收尾时调；取消 / 超时不写，上一轮那份原样留着。
+    原子写是为了同一个保证：任何时刻磁盘上要么是上一轮的完整 state，要么是这一轮的，
+    绝不会是写到一半的残片。写失败只记日志——下轮空开局，比拖垮本轮的收尾好。
     """
+    path = _state_path(session_dir)
+    tmp = path.with_suffix(".json.tmp")
     try:
-        _state_path(session_dir).write_text(state.model_dump_json(), encoding="utf-8")
+        tmp.write_text(state.model_dump_json(), encoding="utf-8")
+        os.replace(tmp, path)
     except Exception:
-        logger.warning("写 agent_state.json 失败，下轮退回历史回放", exc_info=True)
+        logger.warning("写 session.json 失败，下轮按空开局", exc_info=True)
+        tmp.unlink(missing_ok=True)
 
 
 def _extract_summary(messages: Sequence[Msg]) -> ShoppingSummaryOutput | None:
@@ -144,37 +145,6 @@ def _extract_summary(messages: Sequence[Msg]) -> ShoppingSummaryOutput | None:
         except Exception:
             continue  # 哨兵文案 / 报错文本：不是清单，继续往前找真正出货的那次
     return None
-
-
-def _replay_msgs(prior_turns: Sequence[tuple[str, str]]) -> list[Msg]:
-    """精简 (role, content) 历史 → ``list[Msg]``（续聊恢复的第二条腿）。
-
-    历史前缀逐字稳定才命中 prompt cache，所以这里只做类型转换，不加任何装饰。
-    """
-    out: list[Msg] = []
-    for role, content in prior_turns:
-        # 库里存的 role 只会是 user / assistant（append_turn 那两行写死的）；真混进别的值就
-        # 跳过，不猜也不硬塞——一条 role 不合法的历史消息会让整轮请求被网关打回。
-        if not content or role not in ("user", "assistant"):
-            continue
-        speaker: Literal["user", "assistant"] = "user" if role == "user" else "assistant"
-        out.append(Msg(name=speaker, role=speaker, content=[TextBlock(type="text", text=content)]))
-    return out
-
-
-def _save_trace(session_dir: Path, messages: Sequence[Msg]) -> None:
-    """完整消息轨迹落 history.json（覆盖式，供审计 / 排障）。
-
-    与 ``memory.history.save_full_trace`` 同一个文件、同一个用途，只是这里按
-    ``Msg.model_dump()`` 序列化。读取侧对两种落盘形态都兼容，见 ``app/eval/trace.py``。
-    """
-    try:
-        data = [m.model_dump() for m in messages]
-        (session_dir / "history.json").write_text(
-            json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
-        )
-    except Exception:
-        logger.warning("写完整对话轨迹失败（session_dir=%s），降级跳过", session_dir, exc_info=True)
 
 
 async def _turn_cache_key(
@@ -213,8 +183,8 @@ async def _replay_cached_turn(
     """整轮缓存命中：把上次那轮的文案与商品卡原样发出去，一次模型调用都不发起。
 
     仍然**照常落一轮历史**（``append_turn``）——命中与否对用户是透明的，聊天记录不能因为走了
-    缓存就缺一轮。不落的是 ``agent_state.json`` / 候选池：那两样是给续聊用的，而带上文的轮次
-    本就不进缓存，这一轮之后的追问会退回「有历史但无 state」那条腿（精简 (q,a) 回放）。
+    缓存就缺一轮。不落的是 ``session.json``：这一轮之后的追问会按空开局（缓存只在干净的
+    第一轮参与，命中那轮本就没有可恢复的 state）。
     """
     elapsed_ms = int((time.monotonic() - started_at) * 1000)
     logger.info("整轮缓存命中 thread=%s（%d 件商品，未调用模型）", thread_id, len(cached.items))
@@ -338,8 +308,6 @@ async def run_agent(
         if quota_left is not None:
             set_task_cap(quota_left)
 
-        # 上一轮候选池读回内存登记表；「这轮要不要重搜」仍由 planner 判，不由「有没有候选」猜。
-        prior_cands = load_candidates(session_dir)
         # 清掉上一轮残留的 ContextVar / 模块级状态（retrieval 判定、收货国、品类域、任务清单）：
         # 同 thread 续聊时它们会让本轮 planner 还没跑就先按上轮结论走。
         reset_retrieval_mode()
@@ -361,23 +329,21 @@ async def run_agent(
         # 入口只读近期行为历史；长期偏好等 planner 判出品类域之后由 preference_inject 注入
         # （在这里读等于跨域全量注入，见 session_io.inject_runtime_context 的说明）。
         history_block = await build_history_block(user_id or "")
-        pt = load_pt(session_dir)
-        set_session_pt(pt)
 
-        # 续聊恢复两条腿：优先 AgentState（模型视野的完整上下文），缺失退回精简 (q,a) 回放。
-        prior_state = _load_state(session_dir)
-        prior_turns = (
-            [] if prior_state is not None else await load_prior_turns(thread_id, session_dir)
-        )
+        # 续聊恢复唯一一条腿：session.json → AgentState（模型视野的完整上下文 + middle_context
+        # 里的 P_t）。缺失 / 读坏 → 空开局。候选池**不跨轮**：追问轮照常重搜，跨轮引用
+        # （「买第 2 个」）按 item_id 回源 Qdrant（见 _candidates.hydrate）。
+        prior_state = load_session_state(session_dir)
+        pt = pt_from_state(prior_state.middle_context) if prior_state else pt_from_state({})
+        set_session_pt(pt)
 
         # 整轮结果缓存（默认关，压测 / 演示用）。**只有干净的第一轮才参与**：带上文的轮次，
         # 答案依赖的上文根本不在 key 里，命中就是串味。查得到就直接回放，一轮 LLM 都不跑。
-        # 「干净的第一轮」= 两条恢复腿都空。**只看 prior_turns 是不够的**：有 agent_state.json 时
-        # 那条腿根本不会去读历史（恒为空列表），于是第二轮会被误判成第一轮、直接命中上一轮的答案。
+        # 「干净的第一轮」= 没有可恢复的 session.json。
         cache_key = await _turn_cache_key(
             query,
             user_id,
-            first_turn=prior_state is None and not prior_turns,
+            first_turn=prior_state is None,
             prompt_version=ab_assign.version,
         )
         if cache_key is not None:
@@ -392,18 +358,14 @@ async def run_agent(
             image_paths=tuple(image_paths or ()),
             state=prior_state,
         )
-        replay: list[Msg] = _replay_msgs(prior_turns)
-
         turn_query = inject_runtime_context(
             query,
             history_block,
             pt,
             enabled_platforms,
-            prior_candidates=render_prior_candidates(prior_cands),
             image_paths=tuple(image_paths or ()),
         )
         inputs: list[Msg] = [
-            *replay,
             Msg(name="user", role="user", content=[TextBlock(type="text", text=turn_query)]),
         ]
 
@@ -444,8 +406,7 @@ async def run_agent(
                 )
             reset_token_tree()
             reset_retrieval_tree()
-            persist_candidates(session_dir)  # 先落盘再清内存，顺序不能反
-            reset_candidates()
+            reset_candidates()  # 候选登记表只活一轮；跨轮引用按 item_id 回源 Qdrant
             reset_diagnostics(thread_id)
             reset_session_bundle()
             reset_retrieval_mode()
@@ -462,8 +423,10 @@ async def run_agent(
         # 由 HarnessAgentAdapter 在 on_reply 里改写**流出去的**消息（L4），state 里留的是原文。
         # 从 context 取等于把未审核的文本发给用户、落进产物和历史——审核就白做了。
         final_text = (final_msg.get_text_content() or "") if final_msg is not None else ""
-        # 本轮结束态落盘，供下一轮 / 换进程恢复（与 append_turn 双做，见 _save_state）。
-        _save_state(session_dir, agent.state)
+        # 成功收尾的唯一写点：P_t 填进 middle_context，随 AgentState 一起原子落盘。取消 / 超时
+        # 走不到这里，session.json 保持上一轮那份。append_turn 只喂前端回看，Agent 不读它。
+        pt_into_state(agent.state.middle_context, pt)
+        save_session_state(session_dir, agent.state)
 
         # 用量以**记账树**为准（snap 在 finally 里取，那时树还没 reset）：一次 reply 只落一条
         # assistant 消息，光数消息会得到 model_calls 恒为 1 的废指标。
@@ -520,8 +483,6 @@ async def run_agent(
             images=list(image_paths or ()),
             experiment=experiment,
         )
-        _save_trace(session_dir, messages)
-
         # 只记 query 不记结果：items[0] 是系统排序第一名，用户从未表过态，记成「你上次选的」
         # 会让烂召回反过来污染下一轮上下文。
         if summary is not None:

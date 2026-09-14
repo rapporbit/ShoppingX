@@ -20,6 +20,4 @@
 # 重发（多一轮往返，且文案只提 shopping_summary / chat_fallback，与 system prompt 的
 # ``<termination>`` 段「交易轮的终结工具是 create_order / cancel_order 本身」自相矛盾）。
 # 2026-09-10 统一到这一份（审查报告 B1）。
-TERMINAL_TOOLS = frozenset(
-    {"shopping_summary", "chat_fallback", "create_order", "cancel_order"}
-)
+TERMINAL_TOOLS = frozenset({"shopping_summary", "chat_fallback", "create_order", "cancel_order"})

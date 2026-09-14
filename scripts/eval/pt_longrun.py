@@ -53,8 +53,15 @@ TURNS = [
 
 
 def _snapshot(session_dir: Path, turn_no: int, query: str) -> dict:
-    pt_path = session_dir / "pt.json"
-    pt = json.loads(pt_path.read_text(encoding="utf-8")) if pt_path.exists() else {}
+    # P_t 住 session.json（AgentState）的 middle_context.pt；无文件 / 读坏按空
+    state_path = session_dir / "session.json"
+    try:
+        pt = (
+            json.loads(state_path.read_text(encoding="utf-8")).get("middle_context", {}).get("pt")
+            or {}
+        )
+    except (OSError, ValueError, AttributeError):
+        pt = {}
     return {
         "turn": turn_no,
         "query": query,

@@ -2,7 +2,6 @@
 
 覆盖：
 - messages 表累加写 + 回看读出 + 逐轮顺序。
-- load_prior_turns 转成 (role, content) 元组 + 按 HISTORY_MAX_TURNS 截尾 + 设 0 关闭续聊。
 - 惰性迁移：库上线前的 turns.json 第一次被读 / 写时整段迁进库，且不重复迁、续号不撞。
 - 容错：旧 turns.json 损坏 / 单条结构异常一律降级（空 / 跳过坏条），不抛。
 - GET /api/history/{tid} 读出逐轮对话。
@@ -21,8 +20,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 import app.api.server as server
-import app.memory.history as history
-from app.memory.history import append_turn, load_prior_turns, read_turns
+from app.memory.history import append_turn, read_turns
 
 
 def _write_legacy(session_dir: Path, raw: Any) -> None:
@@ -75,39 +73,12 @@ async def test_append_persists_elapsed_ms_and_tokens() -> None:
     turns = await read_turns("t-elapsed")
     assert turns[1]["elapsed_ms"] == 12345
     assert turns[1]["tokens"] == tokens
-    # 续聊回喂对它们透明，不进上下文、不增 token。
-    assert await load_prior_turns("t-elapsed") == [
-        ("user", "买个旅行包"),
-        ("assistant", "为你精选 1 件。"),
-    ]
 
 
 async def test_optional_fields_omitted_when_none() -> None:
     await append_turn("t-none", "你好", "你好呀～")
     turn = (await read_turns("t-none"))[1]
     assert turn == {"role": "assistant", "content": "你好呀～"}
-
-
-# ---------- load_prior_turns：续聊回喂 ----------
-async def test_load_prior_turns_returns_role_content_tuples() -> None:
-    await append_turn("t-prior", "q1", "a1")
-    assert await load_prior_turns("t-prior") == [("user", "q1"), ("assistant", "a1")]
-
-
-async def test_load_prior_turns_caps_to_recent(monkeypatch: Any) -> None:
-    # 只回喂最近 N 轮：造 5 轮、上限设 2 → 取最后 2 轮（4 条消息）。
-    monkeypatch.setattr(history, "HISTORY_MAX_TURNS", 2)
-    for i in range(5):
-        await append_turn("t-cap", f"q{i}", f"a{i}")
-    prior = await load_prior_turns("t-cap")
-    assert prior == [("user", "q3"), ("assistant", "a3"), ("user", "q4"), ("assistant", "a4")]
-
-
-async def test_load_prior_turns_disabled_when_zero(monkeypatch: Any) -> None:
-    # 上限 ≤0 等价关闭续聊：不回喂任何历史（每次全新开局）。
-    monkeypatch.setattr(history, "HISTORY_MAX_TURNS", 0)
-    await append_turn("t-off", "q", "a")
-    assert await load_prior_turns("t-off") == []
 
 
 # ---------- 惰性迁移：库上线前的 turns.json ----------
@@ -151,7 +122,6 @@ async def test_legacy_not_migrated_without_session_dir(tmp_path: Path) -> None:
 async def test_corrupt_legacy_json_degrades_to_empty(tmp_path: Path) -> None:
     (tmp_path / "turns.json").write_text("{ not json", encoding="utf-8")
     assert await read_turns("t-corrupt", tmp_path) == []
-    assert await load_prior_turns("t-corrupt", tmp_path) == []
 
 
 async def test_non_list_top_level_degrades_to_empty(tmp_path: Path) -> None:
@@ -198,9 +168,7 @@ async def test_elapsed_ms_bool_rejected_on_migration(tmp_path: Path) -> None:
     assert "elapsed_ms" not in (await read_turns("t-bad-elapsed", tmp_path))[1]
 
 
-# 说明：完整轨迹 history.json 的落盘现在归 ``orchestrator._save_trace``（吃 AgentScope 的
-# ``Msg``），续聊接缝（回放干净 (q,a) + 当轮 query 拼在最后）由 tests/test_orchestrator.py 的
-# 两条恢复腿用例覆盖，这里不再重复。
+# 说明：续聊恢复不读这张表（唯一读源是 session.json），由 tests/test_orchestrator.py 覆盖。
 
 
 # ---------- GET /api/history/{tid} ----------

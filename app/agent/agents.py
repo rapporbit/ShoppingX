@@ -73,7 +73,7 @@ async def _assemble(
     """按「一个 session + 一份 Toolkit + 一个 Agent」装一套，返回 Agent 与它的 session。
 
     ``state`` 非空即**会话恢复**：把落盘读回来的那份 ``AgentState`` 原样交给 Agent，它的
-    context / permission / tool 上下文一并接上（见 orchestrator 的 agent_state.json）。
+    context / permission / tool 上下文一并接上（见 orchestrator 的 session.json）。
     """
     session = HarnessSession(original_query=original_query, image_paths=image_paths)
     base_prompt = system_prompt or get_system_prompt()

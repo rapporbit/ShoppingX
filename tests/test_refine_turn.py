@@ -17,14 +17,7 @@ from app.api.context import get_retrieval_mode, reset_retrieval_mode, set_retrie
 from app.harness.hooks.progress import check_refine_backfill, try_phase_transition
 from app.harness.phase_machine import Phase, PhaseStateMachine, set_phase_machine
 from app.harness.signals import _count_candidates, candidate_count
-from app.tools._candidates import (
-    load_candidates,
-    persist_candidates,
-    register,
-    registry_snapshot,
-    render_prior_candidates,
-    reset_candidates,
-)
+from app.tools._candidates import register, registry_snapshot, reset_candidates
 from app.tools.planner import PlanOutput
 from app.tools.schemas import ItemCandidate
 from app.utils.thread_ctx import thread_scope
@@ -44,28 +37,6 @@ def _cand(item_id: str = "A1") -> ItemCandidate:
         url=f"https://example.com/{item_id}",
         image_url=f"https://img.example.com/{item_id}.jpg",
     )
-
-
-def test_candidates_survive_across_turns(tmp_path: Path) -> None:
-    """收尾落盘 → 内存清空 → 下一轮读回：追问轮才拿得到上一轮的 item_id。"""
-    with thread_scope("t-refine", tmp_path):
-        register([_cand("A1"), _cand("A2")])
-        persist_candidates(tmp_path)
-        reset_candidates()  # 模拟本轮收尾清内存
-
-        recovered = load_candidates(tmp_path)
-
-    assert [c.item_id for c in recovered] == ["A1", "A2"]
-    # url/image_url 也要活过来——收尾回填商品卡靠它们，模型侧则永远看不到（见 compact 投影）。
-    assert recovered[0].url == "https://example.com/A1"
-    assert "example.com" not in render_prior_candidates(recovered)
-
-
-def test_load_candidates_missing_file_is_silent(tmp_path: Path) -> None:
-    """首轮（无 candidates.json）读空，不报错——普通轮照常走 planner → item_search。"""
-    with thread_scope("t-fresh", tmp_path):
-        assert load_candidates(tmp_path) == []
-        assert render_prior_candidates([]) == ""
 
 
 # ---------- planner 判 retrieval：谁来决定「这轮要不要重搜」 ----------
@@ -445,8 +416,7 @@ async def test_search_turn_drops_prior_candidates(
     品类的商品去答本轮的问题。
     """
     with thread_scope("t-search", tmp_path):
-        load_candidates(tmp_path)  # 首轮无文件；显式登记两件旧候选模拟读回
-        register([_cand("OLD1"), _cand("OLD2")])
+        register([_cand("OLD1"), _cand("OLD2")])  # 显式登记两件旧候选
         assert len(registry_snapshot()) == 2
 
         await _run_planner(monkeypatch, "search")

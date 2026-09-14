@@ -23,12 +23,8 @@ shipping_calc → item_picker → shopping_summary）。其中 ``url`` / ``image
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Iterable
-from pathlib import Path
-
-from pydantic import ValidationError
 
 from app.api.context import get_session_dir
 from app.tools.schemas import ItemCandidate
@@ -203,30 +199,39 @@ def picker_finalized() -> bool:
 
 
 def hydrate(item_ids: Iterable[str]) -> list[ItemCandidate]:
-    """按 id 列表从会话登记表捞回全量候选（含 url + 渐进填充字段），保序、去重、跳过未命中。
+    """按 id 列表取回全量候选（含 url + 渐进填充字段），保序、去重、跳过取不到的。
 
-    下游工具（price_compare / shipping_calc / shopping_summary）不让模型把整包候选当参数重吐——
-    只收 ``item_ids``，在此按 id hydrate 回全量候选。（``item_picker`` 更进一步：连 id 都不收，直接
-    吃 :func:`registry_snapshot` 的全集——本轮该精挑哪批是 planner 定的，不是模型抄出来的。）
-    无会话作用域或某 id 未登记时该条跳过（调用方需对空结果兜底）。
+    下游工具（price_compare / shipping_calc / shopping_summary / create_order）不让模型把整包候选
+    当参数重吐——只收 ``item_ids``，在此按 id hydrate 回全量候选。（``item_picker`` 更进一步：
+    连 id 都不收，直接吃 :func:`registry_snapshot` 的全集。）
+
+    两级：先查本轮登记表；未命中（跨轮引用——登记表只活一轮）按 id 回源 Qdrant，取回的
+    也顺手登记，本轮后续工具就不必再回源。无会话作用域 / 库里也没有的 id 跳过（调用方需对
+    空结果兜底）。回源失败只记日志，退回「登记表里有的那些」。
     """
-    seen: set[str] = set()
-    out: list[ItemCandidate] = []
-    for i in item_ids:
-        if i in seen:
-            continue
-        seen.add(i)
-        c = enrich(i)
-        if c is not None:
-            out.append(c)
-    return out
+    ids = list(dict.fromkeys(i for i in item_ids if i))
+    missing = [i for i in ids if enrich(i) is None]
+    if missing and _key() is not None:
+        register(_fetch_from_store(missing))
+    return [c for i in ids if (c := enrich(i)) is not None]
+
+
+def _fetch_from_store(item_ids: list[str]) -> list[ItemCandidate]:
+    """跨轮候选按 id 回源 Qdrant；召回层不可用时返回空（不抛——hydrate 是收尾链路的一环）。"""
+    try:
+        from app.recall.qdrant_store import get_recall_client
+
+        recs = get_recall_client().fetch_by_ids(item_ids)
+    except Exception as exc:
+        logger.warning("候选按 id 回源 Qdrant 失败（%d 个 id）：%s", len(item_ids), exc)
+        return []
+    return [ItemCandidate.from_recall(rc) for rc in recs]
 
 
 def reset_candidates() -> None:
     """清当前会话的登记条目（run_agent 收尾调，防模块级 dict 无界增长）。
 
-    只清**内存**。跨轮复用所需的那份已由 :func:`persist_candidates` 落到会话目录，下一轮开局由
-    :func:`load_candidates` 读回——内存池仍按轮清，避免长会话把模块级 dict 撑爆。
+    登记表只活一轮：跨轮引用（「买第 2 个」）由 :func:`hydrate` 按 id 回源 Qdrant，不落盘。
     """
     k = _key()
     if k is not None:
@@ -234,58 +239,8 @@ def reset_candidates() -> None:
         _LAST_PICKS.pop(k, None)
 
 
-# 落盘上限：只留最近登记的这么多条。候选是「上一轮搜过什么」的工作记忆，不是持久数据集；
-# 一轮通常 10~30 条，60 足够覆盖「上一轮全部候选」，又不至于让文件与开局读盘无界增长。
-_PERSIST_LIMIT = 60
-_CANDIDATES_FILE = "candidates.json"
-
-
-def persist_candidates(session_dir: Path) -> None:
-    """把当前会话的候选登记表落到 ``session_dir/candidates.json``（run_agent 收尾、reset 之前调）。
-
-    **为什么要落盘**：候选池原本随 :func:`reset_candidates` 每轮清空，于是「防水的我才要」这类
-    追问在下一轮完全拿不到上一轮的候选——模型只好从 planner 重跑整条检索链（实测多花约 90 秒）。
-    落盘后下一轮 :func:`load_candidates` 读回，追问轮直接 ``item_picker(新条件)`` 就地过滤（候选取自
-    登记表，模型不必也无法指定是哪几件）。换品类那轮由 planner 判 ``search`` 时清掉（见 planner）。
-
-    进程重启 / 多 worker 下也能续（同一 session_dir 即同一份文件）。写失败只记日志——候选池是
-    加速用的工作记忆，丢了最多退回重新检索，不该拖垮收尾。
-    """
-    k = _key()
-    bucket = _REGISTRY.get(k, {}) if k is not None else {}
-    if not bucket:
-        return
-    recent = list(bucket.values())[-_PERSIST_LIMIT:]
-    try:
-        (session_dir / _CANDIDATES_FILE).write_text(
-            json.dumps([c.model_dump() for c in recent], ensure_ascii=False),
-            encoding="utf-8",
-        )
-    except OSError as exc:
-        logger.warning("候选池落盘失败，下一轮将退回重新检索：%s", exc)
-
-
-def load_candidates(session_dir: Path) -> list[ItemCandidate]:
-    """从 ``session_dir/candidates.json`` 读回上一轮候选并灌进内存登记表（run_agent 开局调）。
-
-    返回读回的候选（保序），供 :func:`render_prior_candidates` 拼进当轮 human——模型得先「看见」
-    这些 item_id 才可能复用它们。文件不存在 / 损坏一律返回空并静默走「本轮重新检索」的老路。
-    """
-    path = session_dir / _CANDIDATES_FILE
-    if not path.exists():
-        return []
-    try:
-        rows = json.loads(path.read_text(encoding="utf-8"))
-        cands = [ItemCandidate.model_validate(r) for r in rows]
-    except (OSError, ValueError, ValidationError) as exc:
-        logger.warning("候选池读回失败（本轮退回重新检索）：%s", exc)
-        return []
-    register(cands)
-    return cands
-
-
 def registry_snapshot() -> list[ItemCandidate]:
-    """当前会话登记表里的全部候选（含跨轮读回的）。无会话作用域返回空。
+    """当前会话登记表里的全部候选（本轮登记 + hydrate 回源的）。无会话作用域返回空。
 
     两个消费者：
       - planner 判 ``retrieval``：它得知道「手上还有没有上一轮的候选、都是些什么」，才判得了本轮是
@@ -297,16 +252,3 @@ def registry_snapshot() -> list[ItemCandidate]:
     if k is None:
         return []
     return list(_REGISTRY.get(k, {}).values())
-
-
-def render_prior_candidates(cands: Iterable[ItemCandidate], *, limit: int = 24) -> str:
-    """把读回的上轮候选渲染成当轮 human 里的 ``<prior_candidates>`` 块；无候选返回空串。
-
-    喂的是 :func:`compact_candidates` 的同一份**模型可见投影**（无 url / 无召回分），只截前
-    ``limit`` 条——这块的用途仅是让模型知道「哪些 item_id 现成可用」，不是让它在这里做精挑
-    （精挑仍归 item_picker，候选体在工具内 hydrate）。
-    """
-    rows = compact_candidates(list(cands)[:limit])
-    if not rows:
-        return ""
-    return json.dumps(rows, ensure_ascii=False)

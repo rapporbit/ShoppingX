@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from app.api.context import set_session_pt
-from app.memory.session_state import SessionConstraint, SessionPrefState, save_pt
+from app.memory.session_state import SessionConstraint, SessionPrefState
 from app.tools.item_picker import item_picker
 from app.tools.schemas import ItemCandidate
 from app.utils.thread_ctx import thread_scope
@@ -68,13 +68,9 @@ async def _query_used(monkeypatch, tmp_path: Path, tag: str, like_terms: list[st
     sd = tmp_path / tag
     sd.mkdir(parents=True, exist_ok=True)
     with thread_scope(f"t-rrq-{tag}", sd):
-        # **两处都要设**：同一份 P_t 有两个读法——``assemble`` 读 ContextVar（get_session_pt），
-        # 而 ``_category_relevance`` 的普通轮读的是落盘那份（load_pt(sd).category）。
-        # 只设 ContextVar → 品类门因「P_t 无品类」整个停用，压根走不到 reranker；
-        # 只 save_pt → mem.must 恒为空，这条测试**假绿**。两个坑都实测踩过。
+        # P_t 只有 ContextVar 一个读法（assemble 与 _category_relevance 都读 get_session_pt）。
         pt = _pt(like_terms)
         set_session_pt(pt)
-        save_pt(sd, pt)
         await item_picker.ainvoke(
             {
                 "candidates": [
