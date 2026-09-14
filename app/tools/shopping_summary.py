@@ -80,6 +80,14 @@ class SummaryItem(BaseModel):
     # 回填真实值。image_url 供卡片显图，url 供点击跳转到该平台商品页。
     image_url: str = ""
     url: str = ""
+    # 卡片附加信息（对齐参考项目商品卡）：品牌行、评分行、到手价「寄往哪」。
+    # rating 只给分不给评价数——数据集 reviews_count 恒为 0（见 _candidates._MODEL_NOISE_FIELDS），
+    # 显示「(0)」等于告诉用户零评价。category **刻意不出**：库里该字段值域乱（整机配件同类目、
+    # TCL 标成 Nintendo DS），当角标只会误导。dest_country 只在 landed_usd 有值时填——
+    # 这个数只在某个收货国下成立，前端据此标「寄往 JP」。
+    brand: str = ""
+    rating: float | None = None
+    dest_country: str = ""
 
 
 class ShoppingSummaryOutput(BaseModel):
@@ -522,6 +530,10 @@ async def shopping_summary(
         # 形态只查一次（会话级常量），逐件重复的是同一个值。
         mode = get_session_mode()
         slot_mode = SLOT_MODE_PARALLEL if mode == SLOT_MODE_PARALLEL else ""
+        # 到手价的收货国口径（会话级常量，逐件一样）：只要本轮有任何一件带 landed 才取。
+        dest_for_cards = (
+            get_dest_country().upper() if any(c.landed_usd is not None for c in picks) else ""
+        )
         for c in picks:
             # url/image 优先从登记表按 item_id 取真实值（无 session / 单测直传 picks 时退回 c）。
             src = enrich(c.item_id) or c
@@ -543,6 +555,9 @@ async def shopping_summary(
                     # 内部盖章是槽 id；出卡片映射成展示名（旧会话按名字盖的章原样透传）。
                     slot=slot_display(src.slot or c.slot),
                     slot_mode=slot_mode,
+                    brand=src.brand or c.brand,
+                    rating=src.rating if src.rating is not None else c.rating,
+                    dest_country=dest_for_cards if c.landed_usd is not None else "",
                 )
             )
         out = ShoppingSummaryOutput(summary=draft.summary, items=items)

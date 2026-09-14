@@ -839,7 +839,8 @@ button:disabled {
   .step-icon.running,
   .thought-head.is-running .thought-spark,
   .skeleton span,
-  .step-row {
+  .step-row,
+  .product-card {
     animation: none !important;
   }
   .shimmer-text {
@@ -1070,6 +1071,53 @@ button:disabled {
   transition: box-shadow 0.18s, transform 0.18s, border-color 0.18s, opacity 0.18s;
   display: flex;
   flex-direction: column;
+  /* 入场错峰：animation-delay 由卡片内联（序号 × 55ms，见 ProductCards.staggerStyle）。
+     both 填充让延迟期间保持起始态（不闪一下再消失）。 */
+  animation: card-in 0.32s ease-out both;
+}
+@keyframes card-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 卡顶行：品牌（左）+ 评分（右）。评分只有分值——数据集评价数恒 0，不显示 (0)。 */
+.card-topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--muted);
+  min-height: 16px;
+}
+.card-brand {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-2);
+  font-weight: 500;
+}
+.card-rating {
+  flex-shrink: 0;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+.card-rating i {
+  font-style: normal;
+  color: #e5a50a;
+}
+
+/* 只有货价时的到手价说明：灰字一行，与「到手价（含税运）」对齐口径，不冒充。 */
+.card-landed-pending {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: -4px;
 }
 
 /* ♡ 收藏按钮：默认隐藏，hover 才现（不打扰浏览）；已收藏则常驻可见——状态得看得见。

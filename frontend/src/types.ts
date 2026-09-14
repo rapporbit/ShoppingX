@@ -66,6 +66,11 @@ export type ProductItem = {
   // 该槽花费），代替平台胶囊筛选。走结构化字段而非理由文案的【槽名】前缀（前缀会被收尾 LLM
   // 重写时丢掉）。
   slot?: string;
+  // 卡片附加行（后端 SummaryItem / _preview_item 同构下发）：品牌、评分（只有分、没有评价数——
+  // 数据集评价数恒为 0，不显示）、到手价寄往哪（只在 landed_usd 有值时非空）。
+  brand?: string;
+  rating?: number | null;
+  dest_country?: string;
   // 槽位形态："parallel" = 几类互不相干的东西分头推荐（跑鞋 + 耳机），此时**不显示合计**——
   // 把它们的价格加起来对用户没有任何意义。空 / 缺省 = 「一套齐」，照常显示这一套合计多少钱。
   slot_mode?: string;
