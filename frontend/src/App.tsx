@@ -34,7 +34,7 @@ import { SparkleIcon } from "./components/icons";
 import { Landing } from "./components/Landing";
 import { Legal, type LegalPage } from "./components/Legal";
 import { Login } from "./components/Login";
-import { useShoppingXTask } from "./hooks/useShoppingXTask";
+import { useShoppingXTask, type Turn } from "./hooks/useShoppingXTask";
 import { clearSession, loadSession, type Session } from "./auth";
 import { loadPlatforms, savePlatforms } from "./settings";
 
@@ -116,6 +116,16 @@ function formatTokens(n: number): string {
   if (n < 1000) return String(n);
   if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
   return `${(n / 1_000_000).toFixed(2)}M`;
+}
+
+// 本轮是否真的起过检索（item_search 直调或派 search worker）。骨架卡与零结果空态都以此为闸：
+// 纯闲聊 / 澄清 / 下单轮既不该摆骨架，也不该说「没找到」。
+function turnSearched(turn: Turn): boolean {
+  return turn.events.some(
+    (e) =>
+      e.event === "tool_start" &&
+      ["item_search", "task_dispatch"].includes(String(e.data?.tool ?? "")),
+  );
 }
 
 // 本轮「实验与自进化」chip 行：提示词版本（实验组高亮）/ 注入的策略 / 读过的 skill。
@@ -234,6 +244,9 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
   }, []);
   // 详情 / 对比 / 表单要「说一句话」时都走这条：跟输入框发消息完全同一条路。
   const say = (text: string) => startTask(text, userId);
+  // 输入框预填（不发送）：追问 chip 与零结果空态用。key 自增保证同文案连点也重填。
+  const [draft, setDraft] = useState<{ text: string; key: number }>({ text: "", key: 0 });
+  const prefill = (text: string) => setDraft((d) => ({ text, key: d.key + 1 }));
 
   // 收藏（♡）：用户级、跨会话、以回看为主 —— 不进 prompt、不进长期偏好库，但会经 app.memory.affinity
   // 聚合成弱信号，在 item_picker 精挑里给同类属性小幅加分（只上浮不淘汰）。开局拉一次就够（抽屉打开时自己会再刷）。
@@ -502,6 +515,50 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
                             />
                           )}
 
+                          {/* 检索已开始、卡片还没到：先摆 3 张骨架卡占位（推荐限 3 件，位置就是终态的位置）。
+                              只在真的开始搜之后才画——planner / 澄清阶段摆骨架是在撒谎。 */}
+                          {turnRunning && turn.items.length === 0 && turnSearched(turn) && (
+                            <div className="product-grid loading-grid" aria-label="正在查找商品">
+                              <div className="loading-card" />
+                              <div className="loading-card" />
+                              <div className="loading-card" />
+                            </div>
+                          )}
+
+                          {/* 搜过却零结果：给一条出路，把这句话回填输入框让用户改，而不是让文案自己解释。 */}
+                          {isLast && turn.status === "done" && turn.items.length === 0 && turnSearched(turn) && (
+                            <div className="search-empty">
+                              <p>这次没有找到符合条件的商品。放宽预算、换个说法或去掉一条限制，再试一次。</p>
+                              <button className="btn-ghost" onClick={() => prefill(turn.query)}>
+                                调整一下需求
+                              </button>
+                            </div>
+                          )}
+
+                          {/* 追问 chips：只挂最后一轮、且已出结果时。三个都是「下一步最常做的事」，
+                              不发请求（预填 / 打开对比 / 切页），所以不占 credit。 */}
+                          {isLast && turn.status === "done" && turn.items.length > 0 && (
+                            <div className="followups">
+                              <button className="followup" onClick={() => prefill("预算想再少一点，")}>
+                                调整预算
+                              </button>
+                              {turn.items.length > 1 && (
+                                <button
+                                  className="followup"
+                                  onClick={() => {
+                                    setCompareList(turn.items.slice(0, Math.min(3, COMPARE_MAX)));
+                                    setCompareOpen(true);
+                                  }}
+                                >
+                                  一起比较
+                                </button>
+                              )}
+                              <button className="followup" onClick={() => setFavsOpen(true)}>
+                                看看收藏
+                              </button>
+                            </div>
+                          )}
+
                           {/* 本轮结束后在右下角用小字标注用时 + token 消耗（后端权威口径，实时与回看一致）。
                               token 总量主显，hover 看输入/输出/成本拆分（全树记账，含 fork 子 Agent）。 */}
                           {/* 实验与自进化归属：提示词版本 / 注入策略 / 读过的 skill（后端随 task_result 下发，回看同源）。 */}
@@ -575,6 +632,8 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
             (turns[turns.length - 1]?.clarificationOptions?.length ?? 0) > 0
           }
           skills={skillCatalog}
+          draft={draft.text}
+          draftKey={draft.key}
           onSend={(text, files, skill) => startTask(text, userId, files, skill)}
           onCancel={cancelTask}
           onClarify={sendClarification}

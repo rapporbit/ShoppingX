@@ -37,7 +37,7 @@
   --shadow-lg: 0 12px 32px rgba(26, 26, 25, 0.08);
 
   --sidebar-w: 264px;
-  --content-w: 860px;
+  --content-w: 1040px;
 }
 
 * {
@@ -1139,12 +1139,12 @@ button:disabled {
   background: rgba(255, 255, 255, 0.22);
 }
 
-/* 固定四列（而非按 minmax 自动填）：一屏里能并排比较的商品越多越好，卡片紧凑些不碍事。
-   窄屏才退到两列——四列挤到 150px 以下时图和标题都没法看了。 */
+/* 固定三列：推荐清单已限 3 件（pick-cap-3），三列正好一行放满；四列永远空一格，
+   卡也被挤到 200px 图看不清。窄屏退到两列。 */
 .product-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
 }
 @media (max-width: 1000px) {
   .product-grid {
@@ -4467,4 +4467,79 @@ button:disabled {
 .panel-host:not(.page) .skill-page-grid.editing .skill-list-col,
 .panel-host:not(.page) .skill-page-grid:not(.editing) .skill-editor-col {
   display: none;
+}
+
+/* ============================ 结果区标题 / 脚注 / 骨架 / 空态 / 追问 ============================ */
+.results-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 6px 0 12px;
+  font-family: var(--serif);
+  font-size: 18px;
+  letter-spacing: 0.02em;
+}
+.results-heading strong {
+  font-weight: 500;
+}
+.results-count {
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.results-footnote {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--faint);
+  line-height: 1.6;
+}
+/* 骨架卡：和真卡同尺寸同圆角，只有一层很淡的扫光，不闪不跳。 */
+.loading-grid {
+  margin-top: 8px;
+}
+.loading-card {
+  height: 300px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: linear-gradient(100deg, var(--surface) 30%, var(--surface-soft) 50%, var(--surface) 70%);
+  background-size: 200% 100%;
+  animation: skeleton-sweep 1.8s ease-in-out infinite;
+}
+.search-empty {
+  margin-top: 10px;
+  padding: 26px 24px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 6px;
+  text-align: center;
+  color: var(--text-2);
+}
+.search-empty p {
+  margin: 0 0 14px;
+  line-height: 1.7;
+}
+.followups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+.followup {
+  padding: 7px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 13px;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.followup:hover {
+  background: var(--surface-soft);
+  color: var(--text);
+  border-color: var(--text-2);
+}
+@media (max-width: 1000px) {
+  .loading-card {
+    height: 240px;
+  }
 }

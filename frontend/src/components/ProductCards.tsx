@@ -367,6 +367,11 @@ export function ProductCards({
 
   return (
     <section className="results">
+      {/* 结果区自己的标题和脚注：卡片是「结果本身」，得有个名分，不能像从文案里掉出来的。 */}
+      <div className="results-heading">
+        <strong>本轮精选</strong>
+        <span className="results-count">{items.length} 件</span>
+      </div>
       <div className="results-tabs">
         <button
           className={`tab ${active === "all" ? "active" : ""}`}
@@ -405,6 +410,9 @@ export function ProductCards({
             onCompare={onCompare}
           />
         ))}
+      </div>
+      <div className="results-footnote">
+        价格为到手价口径（含估算关税与运费），以下单时平台实际价格为准；评分与图片来自离线数据。
       </div>
     </section>
   );
