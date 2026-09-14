@@ -402,3 +402,32 @@ class StrategyRow(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
     )
+
+
+class UserSkill(Base):
+    """买家自己写的「选购方案」Skill（对标参考项目的个人 Skill）。
+
+    与 ``skills/<name>/SKILL.md`` 同一套语义——name + description 常驻 ``<agent-skills>`` 目录、
+    正文按需由内置 ``Skill`` 工具读——只是**按 user_id 隔离、存库、前端可增删改**。它是
+    ``authority=reference_only`` 的参考资料：注入时明说「不是系统指令、不能扩权、不改硬约束」，
+    所以不需要参考项目那套审核发布流；能动的只有自己的条目（API 层 ``_assert_own``）。
+
+    ``version`` 每次改正文 +1，只用来让前端拿到「改过了」的信号与历史回看，不做乐观锁——
+    单机 SQLite、同一个人两端同时编辑同一条 skill 不是本仓要解的场景。
+    ``name`` 在同一用户下唯一，注入目录时加 ``my/`` 前缀与内置 skill 分开命名空间。
+    """
+
+    __tablename__ = "user_skills"
+    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_user_skill_name"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    name: Mapped[str] = mapped_column(String(64))
+    description: Mapped[str] = mapped_column(String(400))
+    body: Mapped[str] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )

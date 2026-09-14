@@ -58,7 +58,17 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.agent.orchestrator import load_session_state, run_agent, save_session_state
-from app.api import accounts, admin, backplane, clarification, control, dedup, event_log, monitor
+from app.api import (
+    accounts,
+    admin,
+    backplane,
+    clarification,
+    control,
+    dedup,
+    event_log,
+    monitor,
+    skills,
+)
 from app.api.auth import (
     auth_enabled,
     create_access_token,
@@ -248,7 +258,10 @@ app.add_middleware(
 
 
 app.include_router(accounts.router)  # M16：注册 / 登录 / 我是谁 / 我的会话清单
-app.include_router(admin.router)  # 后台管理：热更新模型档位 / 检索 / 展示参数
+app.include_router(admin.router)
+app.include_router(
+    skills.router
+)  # 买家个人 Skill CRUD + 目录  # 后台管理：热更新模型档位 / 检索 / 展示参数
 
 
 # --- 会话归属（M16：堵 thread 维度越权）------------------------------------
@@ -321,6 +334,9 @@ class TaskRequest(BaseModel):
     # 本轮参考图的文件名（M20 图搜）：先 POST /api/upload 拿到 filename，再随任务带上来。
     # 只传文件名不传内容——图已在服务端 uploaded/<thread_id>/ 下，image_understand 工具自己去读。
     image_paths: list[str] | None = None
+    # 输入框 ``/`` 显式选中的 skill 目录名（``my/<name>`` 个人 / 内置名）。服务端校验归属后把正文
+    # 拼进本轮用户消息；找不到直接报错，不静默降级成普通搜索（见 orchestrator）。
+    skill: str | None = None
 
 
 class TokenRequest(BaseModel):
@@ -524,6 +540,7 @@ def _start_queued(
         user_id=user_id,
         platforms=req.platforms,
         image_paths=req.image_paths,
+        skill=req.skill,
     )
     position = depth + 1
     task = asyncio.create_task(_queued_runner(intent, position))
@@ -682,6 +699,7 @@ async def create_task(
                 user_id=user_id,
                 platforms=req.platforms,
                 image_paths=req.image_paths,
+                skill=req.skill,
             )
         except asyncio.CancelledError:
             logger.info("task cancelled: thread_id=%s", thread_id)
@@ -748,6 +766,7 @@ async def create_task_async(
         user_id=user_id,
         platforms=req.platforms,
         image_paths=req.image_paths,
+        skill=req.skill,
     )
     try:
         await _enqueue_intent(intent, depth)

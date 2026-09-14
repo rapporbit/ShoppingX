@@ -34,7 +34,7 @@ def test_frontmatter_name_matches_dir(name: str) -> None:
 
 async def test_loader_loads_all_three() -> None:
     """``scan_subdir=True`` 是必须的：默认只扫目录自身，会静默加载到 0 个。"""
-    (loader,) = skill_loaders("main")
+    loader = skill_loaders("main")[0]  # [0] 内置目录 loader，[1] 是个人 skill loader
     skills = await loader.list_skills()
     assert {s.name for s in skills} == EXPECTED_SKILLS
     assert all(s.markdown.strip() for s in skills)

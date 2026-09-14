@@ -116,6 +116,7 @@ async def handle_task(task: IntentTask, queue: TaskQueue | None = None) -> None:
             # 把空列表解释为「一个平台都不启用」，两者差着一整轮空军。
             platforms=list(task.platforms) or None,
             image_paths=list(task.image_paths) or None,
+            skill=task.skill or None,
         )
     except asyncio.CancelledError:
         if not control.was_cancelled_locally(task.task_id):
