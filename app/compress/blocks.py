@@ -93,6 +93,7 @@ def _smart_compress_json(text: str, max_tokens: int) -> str | None:
         return result
     return None
 
+
 # Anthropic cache_control 硬约束（refdocs/05 §4.4）。
 MAX_CACHE_MARKERS = 4
 # Sonnet 写入缓存的最小前缀 token 阈值；不足则写了也不会被缓存，白占一个标记额度。

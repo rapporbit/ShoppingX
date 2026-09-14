@@ -7,9 +7,11 @@
 import json
 from pathlib import Path
 
+import app.tools._candidates as cand_mod
 from app.tools._candidates import (
     compact_candidates,
     enrich,
+    hydrate,
     register,
     reset_candidates,
 )
@@ -161,6 +163,40 @@ def test_register_and_enrich_roundtrip(tmp_path: Path) -> None:
         assert enrich("NOPE") is None  # 未登记 → None
         reset_candidates()
         assert enrich("A1") is None  # 清理后取不到
+
+
+def test_hydrate_falls_back_to_store_for_unknown_ids(tmp_path: Path, monkeypatch) -> None:
+    """登记表只活一轮：跨轮引用（「买第 2 个」）按 id 回源 Qdrant，回源后顺手登记，保入参顺序。"""
+    calls: list[list[str]] = []
+
+    def _fake_fetch(ids: list[str]) -> list[ItemCandidate]:
+        calls.append(list(ids))
+        return [_cand(i) for i in ids if i != "GONE"]
+
+    monkeypatch.setattr(cand_mod, "_fetch_from_store", _fake_fetch)
+    with thread_scope("t-hyd", tmp_path):
+        register([_cand("A1")])
+        got = hydrate(["B2", "A1", "GONE", "B2"])
+        assert [c.item_id for c in got] == ["B2", "A1"]  # 保序去重，库里没有的跳过
+        assert calls == [["B2", "GONE"]]  # 只回源未命中的
+        assert enrich("B2") is not None  # 回源后已登记，本轮后续工具不再回源
+        assert hydrate(["B2"]) and calls == [["B2", "GONE"]]
+        reset_candidates()
+
+
+def test_hydrate_store_failure_degrades_to_registry(tmp_path: Path, monkeypatch) -> None:
+    """召回层挂了不抛：退回登记表里有的那些（hydrate 在收尾链路上，不能拖垮 summary）。"""
+    import app.recall.qdrant_store as qs
+
+    class _Boom:
+        def fetch_by_ids(self, ids: list[str]) -> list:
+            raise RuntimeError("qdrant down")
+
+    monkeypatch.setattr(qs, "get_recall_client", lambda: _Boom())
+    with thread_scope("t-hyd2", tmp_path):
+        register([_cand("A1")])
+        assert [c.item_id for c in hydrate(["A1", "X9"])] == ["A1"]
+        reset_candidates()
 
 
 def test_register_no_session_is_silent_noop() -> None:

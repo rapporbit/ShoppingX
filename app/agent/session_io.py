@@ -67,7 +67,6 @@ def inject_runtime_context(
     history_block: str,
     pt: SessionPrefState,
     enabled_platforms: tuple[str, ...] = (),
-    prior_candidates: str = "",
     image_paths: Sequence[str] = (),
 ) -> str:
     """把运行时用户上下文（启用平台 + 近期行为历史 + 会话级 P_t）拼进本轮 query 前，组成当轮
@@ -94,16 +93,6 @@ def inject_runtime_context(
         parts.append(f"<user_recent_history>\n{history_block}\n</user_recent_history>")
     if not pt.is_empty():
         parts.append(f"<session_constraints>\n{pt.render()}\n</session_constraints>")
-    # 上一轮已检索、已登记的候选：让「只要防水的」这类追问能直接在既有候选上过滤（item_picker），
-    # 而不是把 planner → item_search → price_compare 整条链重跑一遍。候选体本身仍在工具内 hydrate，
-    # 这里只给模型看 item_id + 决策字段（compact 投影）。
-    if prior_candidates:
-        parts.append(
-            "<prior_candidates>\n"
-            "上一轮已检索并登记的候选（本会话内可直接按 item_id 复用，无需重新检索）：\n"
-            f"{prior_candidates}\n"
-            "</prior_candidates>"
-        )
     # 参考图（M20）：只报**文件名**，图本身不进 messages——主模型是纯文本的，多模态消息塞进来只会
     # 报错或被静默忽略。图关在 image_understand 工具里，它的识别结果已由 Harness 在开局预跑写进上文
     # （先于 planner）。这条块只交代「用户是拿图来买东西的」这个意图，免得模型把上文那条

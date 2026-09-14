@@ -43,13 +43,12 @@ from pydantic import BaseModel
 from app.api import monitor
 from app.api.context import (
     get_original_query,
-    get_session_dir,
     get_session_domains,
+    get_session_pt,
     get_user_id,
 )
 from app.memory.assemble import assemble
 from app.memory.domains import infer_domains_from_text
-from app.memory.session_state import load_pt
 from app.recall.reranker import get_reranker
 from app.recall.towers import get_tower_client
 from app.tools._args import StrListArg
@@ -385,8 +384,8 @@ async def _category_relevance(
             (slot_query(s), by_slot[s.id]) for s in slots if slot_query(s) and by_slot.get(s.id)
         ]
     else:  # 普通轮：全池一批，query = planner 判的英文主品类
-        sd = get_session_dir()
-        category = load_pt(sd).category.strip() if sd is not None else ""
+        pt = get_session_pt()
+        category = pt.category.strip() if pt is not None else ""
         if category:
             # 锚核验（解锚）：category 与 domains 同出 planner 一张嘴，互证无意义；能反证的
             # 只有用户原文词面。两侧词表域都判得出且交集为空 → 锚不可信 → 本轮不执法。

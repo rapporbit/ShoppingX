@@ -175,6 +175,31 @@ class QdrantRecall:
             out.append(RecallCandidate(**payload, score=float(p.score)))
         return out
 
+    def fetch_by_ids(self, item_ids: list[str]) -> list[RecallCandidate]:
+        """按业务 ``item_id`` 批量取回商品（走 payload 索引 scroll，一次请求；不重新 embed）。
+
+        跨轮候选引用的回源口：候选登记表只活一轮，追问轮说「买第 2 个」时登记表里已没有它，
+        按 id 来这里取。库里没有的 id（换过库 / 老会话）静默跳过，返回按入参顺序排列。
+        ``score`` 无意义（不是检索结果），置 0。
+        """
+        ids = [i for i in dict.fromkeys(item_ids) if i]
+        if not ids:
+            return []
+        found, _ = self._client.scroll(
+            COLLECTION,
+            scroll_filter=models.Filter(
+                must=[models.FieldCondition(key="item_id", match=models.MatchAny(any=ids))]
+            ),
+            limit=len(ids),
+            with_payload=True,
+            with_vectors=False,
+        )
+        by_id = {
+            str((pt.payload or {}).get("item_id")): RecallCandidate(**(pt.payload or {}))
+            for pt in found
+        }
+        return [by_id[i] for i in ids if i in by_id]
+
     def similar(self, item_id: str, top_k: int = 8) -> list[RecallCandidate]:
         """「搜同款」：按已入库商品的向量找全库近邻（不重新 embed，向量在服务端取）。
 

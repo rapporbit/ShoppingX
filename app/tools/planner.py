@@ -61,7 +61,6 @@ from app.memory.session_state import (
     SessionPrefState,
     constraint_verb,
     merge_pt,
-    save_pt,
 )
 from app.recall.fx import to_base_or_none
 from app.recall.geo import (
@@ -605,8 +604,7 @@ def _sync_session_pt(plan: PlanOutput, intent: str, *, dest_stated_now: bool = F
     自然随写权一起挪过来（曾归 curator——它退出 P_t 时这个缝差点漏掉）。``turn_added`` 语义
     不变：约束记的就是它落进 P_t 的那一轮号。
     """
-    session_dir = get_session_dir()
-    if session_dir is None:
+    if get_session_dir() is None:
         return  # 没会话（单测 / examples 直调工具）→ 无 P_t 可言，退化成纯拆解
     # 「还没有 P_t」的正确语义是**空 P_t**，不是「不写 P_t」——首轮本来就没有，正是要在这里开第一份。
     prev = get_session_pt() or SessionPrefState()
@@ -633,10 +631,10 @@ def _sync_session_pt(plan: PlanOutput, intent: str, *, dest_stated_now: bool = F
         if plan.dest_country and dest_stated_now
         else None,
     )
-    # 双写：ContextVar 供本轮 item_picker 即时消费；pt.json 供续聊轮 load_pt 读回。planner 是
-    # P_t 的唯一写者——curator 只读不写，没有第二个写者需要协调时序。
+    # 只写 ContextVar：本轮 item_picker 即时消费；跨轮持久化由 run_agent 成功收尾时把它填进
+    # AgentState.middle_context 随 session.json 落盘（唯一写点）。planner 是 P_t 的唯一写者——
+    # curator 只读不写，没有第二个写者需要协调时序。
     set_session_pt(merged)
-    save_pt(session_dir, merged)
 
 
 def _render_pt_constraints(pt: SessionPrefState) -> list[str]:

@@ -50,14 +50,14 @@ class TestReconcileDomains:
 async def test_anchor_conflict_fails_open(monkeypatch) -> None:
     """category 锚（planner 输出）与用户原文词面分歧 → 门不执法且**不触发 reranker**。"""
     import app.tools.item_picker as ip
-    from app.api.context import set_original_query
-    from app.memory.session_state import SessionPrefState, save_pt
+    from app.api.context import set_original_query, set_session_pt
+    from app.memory.session_state import SessionPrefState
     from app.tools.schemas import ItemCandidate
 
     monkeypatch.setattr(ip, "get_reranker", lambda: pytest.fail("锚分歧下不该走到打分"))
     sd = Path(tempfile.mkdtemp())
     with thread_scope("t-anchor-conf", sd):
-        save_pt(sd, SessionPrefState(category="dress shoes"))  # 锚漂成鞋履
+        set_session_pt(SessionPrefState(category="dress shoes"))  # 锚漂成鞋履
         set_original_query("想买一块正装手表")  # 原文明明在买表
         cands = [ItemCandidate(item_id="W1", platform="amazon", title="Quartz Watch")]
         scores, gate_on, conflict = await ip._category_relevance(cands)
@@ -68,8 +68,8 @@ async def test_anchor_conflict_fails_open(monkeypatch) -> None:
 async def test_anchor_agreement_enforces_gate(monkeypatch) -> None:
     """锚与原文一致 → 照旧执法（对照组，防解锚把门整个焊死）。"""
     import app.tools.item_picker as ip
-    from app.api.context import set_original_query
-    from app.memory.session_state import SessionPrefState, save_pt
+    from app.api.context import set_original_query, set_session_pt
+    from app.memory.session_state import SessionPrefState
     from app.tools.schemas import ItemCandidate
 
     class _Fake:
@@ -79,7 +79,7 @@ async def test_anchor_agreement_enforces_gate(monkeypatch) -> None:
     monkeypatch.setattr(ip, "get_reranker", lambda: _Fake())
     sd = Path(tempfile.mkdtemp())
     with thread_scope("t-anchor-ok", sd):
-        save_pt(sd, SessionPrefState(category="watch"))
+        set_session_pt(SessionPrefState(category="watch"))
         set_original_query("想买一块正装手表")
         cands = [ItemCandidate(item_id="W1", platform="amazon", title="Quartz Watch")]
         scores, gate_on, conflict = await ip._category_relevance(cands)
@@ -95,8 +95,8 @@ async def test_must_terms_join_rerank_query(monkeypatch) -> None:
     **prefer 软偏好词绝不能进**（背包 badcase：偏好词字面命中把跨品类垃圾抬到真品之上）。
     """
     import app.tools.item_picker as ip
-    from app.api.context import set_original_query
-    from app.memory.session_state import SessionPrefState, save_pt
+    from app.api.context import set_original_query, set_session_pt
+    from app.memory.session_state import SessionPrefState
     from app.tools.schemas import ItemCandidate
 
     seen: list[str] = []
@@ -109,7 +109,7 @@ async def test_must_terms_join_rerank_query(monkeypatch) -> None:
     monkeypatch.setattr(ip, "get_reranker", lambda: _Fake())
     sd = Path(tempfile.mkdtemp())
     with thread_scope("t-must-join", sd):
-        save_pt(sd, SessionPrefState(category="backpack"))
+        set_session_pt(SessionPrefState(category="backpack"))
         set_original_query("想买一个防水的双肩包")
         cands = [ItemCandidate(item_id="B1", platform="amazon", title="Waterproof Backpack")]
         await ip._category_relevance(cands, ["waterproof"])
@@ -120,8 +120,8 @@ async def test_must_terms_join_rerank_query(monkeypatch) -> None:
 async def test_no_must_terms_falls_back_to_category(monkeypatch) -> None:
     """没有 must（多数轮次的常态）→ 退回纯品类词，行为与 M22 之前一致。"""
     import app.tools.item_picker as ip
-    from app.api.context import set_original_query
-    from app.memory.session_state import SessionPrefState, save_pt
+    from app.api.context import set_original_query, set_session_pt
+    from app.memory.session_state import SessionPrefState
     from app.tools.schemas import ItemCandidate
 
     seen: list[str] = []
@@ -134,7 +134,7 @@ async def test_no_must_terms_falls_back_to_category(monkeypatch) -> None:
     monkeypatch.setattr(ip, "get_reranker", lambda: _Fake())
     sd = Path(tempfile.mkdtemp())
     with thread_scope("t-must-none", sd):
-        save_pt(sd, SessionPrefState(category="backpack"))
+        set_session_pt(SessionPrefState(category="backpack"))
         set_original_query("想买一个双肩包")
         cands = [ItemCandidate(item_id="B1", platform="amazon", title="Backpack")]
         await ip._category_relevance(cands, [])

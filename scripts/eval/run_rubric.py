@@ -55,10 +55,9 @@ EVAL_QUERY_TIMEOUT_SEC = 900
 async def _reset_thread(thread_id: str) -> None:
     """评测线程回零：清 DB 对话历史 + 清 session_dir（候选池 / 产物）。
 
-    种子集用**稳定 thread_id**（产物可回溯），代价是「续聊」上线后状态跨评测运行存活：
-    上一次基线跑的对话历史会被 load_prior_turns 读回、候选池被 load_candidates 读回，
-    第二次跑同一条 query 时 planner 可能因「手上有候选」判成 reuse——基线就不可复现了。
-    每条 query 开跑前回零，保证永远从干净的第 1 轮开始；多轮 case（"turns"）同理。
+    种子集用**稳定 thread_id**（产物可回溯），代价是状态跨评测运行存活：上一次基线跑落的
+    session.json 会被下一次读回当上文——基线就不可复现了。每条 query 开跑前回零，保证永远
+    从干净的第 1 轮开始；多轮 case（"turns"）同理。
     """
     async with session_factory()() as db:
         await db.execute(delete(Message).where(Message.thread_id == thread_id))

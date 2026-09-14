@@ -57,7 +57,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from app.agent.orchestrator import run_agent
+from app.agent.orchestrator import load_session_state, run_agent, save_session_state
 from app.api import accounts, admin, backplane, clarification, control, dedup, event_log, monitor
 from app.api.auth import (
     auth_enabled,
@@ -84,7 +84,7 @@ from app.memory.assemble import blocking_exclude_terms
 from app.memory.history import read_turns
 from app.memory.injector import persist_new_preferences
 from app.memory.parser import UserPrefDraft, parse_user_preference
-from app.memory.session_state import load_pt, save_pt
+from app.memory.session_state import SessionPrefState, pt_from_state, pt_into_state
 from app.memory.store import FavoriteItem, PreferenceEntry, get_store
 from app.observability import alerts, metrics
 from app.observability.logging import configure_logging
@@ -1218,11 +1218,11 @@ async def get_session_constraints(
 
     可见可纠（P_t 重构步骤三①）：约束录入过 LLM 的手（极性判反 / keywords 抽漏照样进 P_t 且无
     自愈性），抽错时唯一的兜底是用户看得见、点得掉。每条带 ``id``（删除按它打 DELETE）与
-    ``source_quote``（让用户看懂这是自己哪句话）。会话无 pt.json / 已过期 → 空列表（同 load_pt
-    容错口径）。
+    ``source_quote``（让用户看懂这是自己哪句话）。会话无 session.json / 读坏 → 空列表（同
+    run_agent 开局的容错口径）。
     """
     await _guard_thread(thread_id, auth_uid)
-    pt = load_pt(_safe_session_dir(OUTPUT_ROOT, thread_id))
+    pt = _read_session_pt(_safe_session_dir(OUTPUT_ROOT, thread_id))
     return {
         "thread_id": thread_id,
         "epoch": pt.epoch,
@@ -1248,19 +1248,32 @@ async def delete_session_constraint(
     """从本次会话的 P_t 里删一条约束（面板每行的 ×）——抽取出错时的人纠错入口。
 
     **不走撤回词面核验**：那道闸挡的是 LLM 幻觉 / 抄错 id，用户亲手点的就是那一条，他的删除
-    是最高权威（识别 / 授权分离里的「授权」端）。直接按 id 从 active 集移除并落盘；下一轮
-    run_agent 开局 load_pt 读回的就是删除后的状态。不存在的 id 静默成功（幂等，连点两次不报错）。
-    删完把新快照推给该 thread 的 WS 连接，面板不必自己再拉一次。
+    是最高权威（识别 / 授权分离里的「授权」端）。直接按 id 从 active 集移除、写回 session.json
+    的 middle_context；下一轮 run_agent 开局读回的就是删除后的状态。不存在的 id / 无 session.json
+    静默成功（幂等，连点两次不报错）。删完把新快照推给该 thread 的 WS 连接，面板不必自己再拉一次。
+
+    **与 run_agent 的写点不冲突**：任务在跑时 session.json 只在成功收尾那一刻被整体覆盖，
+    这里的删改若与之交错会被那次覆盖冲掉（用户再点一次即可）——不为这个极窄的窗口加锁。
     """
     await _guard_thread(thread_id, auth_uid)
     session_dir = _safe_session_dir(OUTPUT_ROOT, thread_id)
-    pt = load_pt(session_dir)
+    state = load_session_state(session_dir)
+    if state is None:
+        return {"status": "ok"}
+    pt = pt_from_state(state.middle_context)
     kept = [c for c in pt.constraints if c.id != constraint_id]
     if len(kept) != len(pt.constraints):
         pt.constraints = kept
-        save_pt(session_dir, pt)
+        pt_into_state(state.middle_context, pt)
+        save_session_state(session_dir, state)
         await monitor.report_session_constraints(pt, thread_id=thread_id)
     return {"status": "ok"}
+
+
+def _read_session_pt(session_dir: Path) -> SessionPrefState:
+    """偏好面板读 P_t：从 session.json 的 middle_context 取；无文件 / 读坏 → 空。"""
+    state = load_session_state(session_dir)
+    return pt_from_state(state.middle_context) if state is not None else SessionPrefState()
 
 
 @app.delete("/api/preferences/{user_id}/{dedup_key:path}")

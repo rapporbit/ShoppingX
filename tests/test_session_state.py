@@ -14,14 +14,13 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 from app.memory.session_state import (
     SessionConstraint,
     SessionPrefState,
-    load_pt,
     merge_pt,
-    save_pt,
+    pt_from_state,
+    pt_into_state,
 )
 
 
@@ -250,8 +249,8 @@ def test_like_terms_from_keywords() -> None:
     assert s.like_terms() == ["金属"]
 
 
-# ---------- pt.json roundtrip 与容错 ----------
-def test_save_load_roundtrip(tmp_path: Path) -> None:
+# ---------- middle_context roundtrip 与容错 ----------
+def test_state_roundtrip() -> None:
     s = merge_pt(
         SessionPrefState(),
         [_c("不要塑料、plastic", "dislike", keywords=["塑料", "plastic"], quote="不要塑料的")],
@@ -259,29 +258,29 @@ def test_save_load_roundtrip(tmp_path: Path) -> None:
         category="旅行收纳",
         retrieval="search",
     )
-    save_pt(tmp_path, s)
-    loaded = load_pt(tmp_path)
+    ctx: dict = {}
+    pt_into_state(ctx, s)
+    loaded = pt_from_state(json.loads(json.dumps(ctx)))  # 走一遍 JSON：模拟 session.json 落盘读回
     assert loaded.budget_usd == 42.0
     assert loaded.category == "旅行收纳"
     assert [(c.id, c.source_quote) for c in loaded.constraints] == [("c1", "不要塑料的")]
     assert loaded.next_id == 2 and loaded.epoch == 0
-    assert loaded.updated_at  # save 刷新了时间戳
+    assert loaded.updated_at  # 写入时刷新了时间戳
 
 
-def test_load_missing_returns_empty(tmp_path: Path) -> None:
-    assert load_pt(tmp_path).is_empty()
+def test_load_missing_returns_empty() -> None:
+    assert pt_from_state({}).is_empty()
 
 
-def test_load_corrupt_degrades_to_empty(tmp_path: Path) -> None:
-    (tmp_path / "pt.json").write_text("{ 坏 json", encoding="utf-8")
-    assert load_pt(tmp_path).is_empty()  # 损坏 → 降级空，不抛
+def test_load_corrupt_degrades_to_empty() -> None:
+    assert pt_from_state({"pt": {"constraints": "不是列表"}}).is_empty()  # 损坏 → 降级空，不抛
 
 
-def test_load_old_slug_format_degrades_to_empty(tmp_path: Path) -> None:
-    """旧格式 pt.json（id 化之前：约束带 slug、状态带 open_questions）→ 按空开局，不写迁移。
+def test_load_old_slug_format_degrades_to_empty() -> None:
+    """旧格式（id 化之前：约束带 slug、状态带 open_questions）→ 按空开局，不写迁移。
 
     这是**钉行为**的测试：extra="forbid" 使旧字段触发 ValidationError → 走「读不出当空」容错。
-    若未来有人把 forbid 放松成 ignore，旧文件会静默载入成「无 id 约束」，撤回 / 归并全部失灵
+    若未来有人把 forbid 放松成 ignore，旧数据会静默载入成「无 id 约束」，撤回 / 归并全部失灵
     ——这条测试就是那时的绊线。
     """
     old = {
@@ -304,18 +303,16 @@ def test_load_old_slug_format_degrades_to_empty(tmp_path: Path) -> None:
         "turn": 1,
         "updated_at": datetime.now(UTC).isoformat(),
     }
-    (tmp_path / "pt.json").write_text(json.dumps(old, ensure_ascii=False), encoding="utf-8")
-    assert load_pt(tmp_path).is_empty()
+    assert pt_from_state({"pt": old}).is_empty()
 
 
-def test_load_expired_returns_empty(tmp_path: Path) -> None:
-    """同一 thread 隔很久再来 → 视为新一段选购，旧约束不该复活。"""
+def test_stale_state_is_not_expired() -> None:
+    """P_t 没有 TTL：同一 thread 隔多久回来都接着上次（随 session.json 同生共死）。"""
     stale = SessionPrefState(
         constraints=[_c("要蓝色", keywords=["蓝色"])],
         updated_at=(datetime.now(UTC) - timedelta(hours=999)).isoformat(),
     )
-    (tmp_path / "pt.json").write_text(stale.model_dump_json(), encoding="utf-8")
-    assert load_pt(tmp_path).is_empty()
+    assert not pt_from_state({"pt": stale.model_dump()}).is_empty()
 
 
 # ---------- render ----------
