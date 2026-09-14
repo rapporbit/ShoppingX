@@ -19,7 +19,7 @@ from app.api import monitor
 from app.api.context import get_thread_id, get_user_id
 from app.tools._args import StrListArg
 from app.tools._candidates import hydrate
-from app.tools._order_guard import mark_preview_shown, preview_shown
+from app.tools._order_guard import mark_preview_shown, preview_expired, preview_shown
 from app.tools._shell import tool
 from app.trade.address import Address
 from app.trade.repository_sql import order_repository
@@ -34,6 +34,7 @@ class CreateOrderOutput(BaseModel):
     preview: list[dict[str, Any]] = Field(default_factory=list, description="确认卡里的商品行")
     total_display: str = Field(default="", description="合计（含币种）")
     address: str = Field(default="", description="收货地址摘要")
+    expires_at: str = Field(default="", description="确认卡失效时刻（UTC ISO），未确认时才有")
     note: str = Field(default="", description="给模型与用户的说明")
 
 
@@ -77,6 +78,8 @@ async def create_order(
 
     # 两段式的**机制**那一半：没出过确认卡就当 confirmed=False 处理，退回去先出卡。
     # 退回而不是硬拒——硬拒只会让模型原地再试一次同样的调用，退回则把它推上正确的那条路。
+    # 出过卡但卡已过期（PREVIEW_TTL_SECONDS）也退回重新出卡：候选与价格可能已变，让用户再看一眼。
+    expired = confirmed and preview_expired(ids)
     if confirmed and not preview_shown(ids):
         confirmed = False
 
@@ -98,13 +101,14 @@ async def create_order(
         ]
         total = sum((c.price or 0.0) * qty_of.get(c.item_id, 1) for c in cands)
         currency = cands[0].currency
-        mark_preview_shown(ids)
+        expires_at = mark_preview_shown(ids)
         await monitor.report_order_card(
             "preview",
             {
                 "preview": preview,
                 "total_display": f"{total:.2f} {currency}",
                 "address": addr.masked(),
+                "expires_at": expires_at,
             },
         )
         await monitor.report_tool_end("create_order", confirmed=False, items=len(preview))
@@ -113,8 +117,10 @@ async def create_order(
             preview=preview,
             total_display=f"{total:.2f} {currency}",
             address=addr.masked(),
+            expires_at=expires_at,
             note=(
-                "这是确认卡，尚未下单。请展示给用户，"
+                ("上一张确认卡已过期，已重新出卡。" if expired else "")
+                + "这是确认卡，尚未下单。请展示给用户，"
                 "等用户明确确认后再以 confirmed=True 调一次。"
             ),
         )

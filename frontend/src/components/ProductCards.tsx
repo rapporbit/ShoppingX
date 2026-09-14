@@ -1,25 +1,13 @@
-import { useMemo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import type { ProductItem } from "../types";
 import { CheckIcon, ExternalLinkIcon, GlobeIcon, SearchIcon } from "./icons";
+import { platformName, shownPrice, splitReasons } from "./productText";
 
 // 商品结果区（复刻 Accio）：平台筛选胶囊 + 商品卡网格。卡片把 shopping_summary 随 task_result
 // 下发的结构化精选商品（平台 / 到手价 / 选购理由 / 商品图）呈现成「看得见」的卡。
 //
 // 图区优先显示数据集里的真实商品图（image_url）；URL 缺失或加载失败时，才回退到「按 item_id
 // 派生的稳定柔和渐变 + 平台名」占位——不伪造图片，也不让裂图破坏版式。
-
-// 与后端 app/utils/clean.py 的 PLATFORMS 对齐（eBay 在清洗阶段整体剔除，库里没有它的商品）。
-const PLATFORM_LABEL: Record<string, string> = {
-  amazon: "Amazon",
-  lazada: "Lazada",
-  shein: "SHEIN",
-  shopee: "Shopee",
-  walmart: "Walmart",
-};
-
-function platformName(p: string): string {
-  return PLATFORM_LABEL[p.toLowerCase()] ?? p;
-}
 
 // 由 item_id 派生稳定色相，给图区一个不抖动的柔和渐变（同一商品每次渲染一致）。
 function hueFrom(seed: string): number {
@@ -56,21 +44,35 @@ function Thumb({ item }: { item: ProductItem }) {
   );
 }
 
-function Card({
+// 入场错峰：前 6 张按序号各晚 55ms 出现，后面的一起出（CSS .product-card 的 card-in 动画读这个
+// 变量；prefers-reduced-motion 下动画整体关掉）。
+function staggerStyle(index: number): React.CSSProperties {
+  return { animationDelay: `${Math.min(index, 5) * 55}ms` };
+}
+
+// 单卡按 memo 包起来：收尾文案是流式逐字推的（summary_delta），每一段都让父组件重渲——
+// 卡片的 props（item 引用 / 收藏态 / 回调）不变时不必跟着重绘整张卡。回调由 App 用 useCallback
+// 固定引用，否则 memo 形同虚设。
+const Card = memo(function Card({
   item,
+  index = 0,
   favorited,
+  compared,
   onFavorite,
   onSimilar,
+  onDetail,
+  onCompare,
 }: {
   item: ProductItem;
+  index?: number;
   favorited: boolean;
+  compared: boolean;
   onFavorite: (item: ProductItem, undo: boolean) => void;
   onSimilar: (item: ProductItem) => void;
+  onDetail: (item: ProductItem) => void;
+  onCompare: (item: ProductItem) => void;
 }) {
-  const reasons = (item.reason ?? "")
-    .split(/[；;\n]+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const reasons = splitReasons(item.reason);
 
   // 有商品页 URL 才让整卡可点：渲染成新标签页打开的链接（外站，带 noreferrer）。无 URL 退化为
   // 普通 article（不可点）——离线数据偶有缺链，宁可不可点也不给死链。
@@ -87,6 +89,12 @@ function Card({
     onFavorite(item, favorited);
   };
 
+  const stop = (fn: () => void) => (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    fn();
+  };
+
   const openSimilar = (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -94,7 +102,11 @@ function Card({
   };
 
   return (
-    <Wrapper className={`product-card ${href ? "clickable" : ""}`} {...linkProps}>
+    <Wrapper
+      className={`product-card ${href ? "clickable" : ""}`}
+      style={staggerStyle(index)}
+      {...linkProps}
+    >
       <button
         className={`card-fav ${favorited ? "on" : ""}`}
         title={favorited ? "取消收藏" : "收藏"}
@@ -111,22 +123,42 @@ function Card({
         </span>
       )}
       <div className="card-body">
+        {/* 顶行：品牌 + 评分。评分只给分不给评价数（数据集评价数恒为 0，显示「(0)」等于说零评价）；
+            两者都没有就整行不渲染，标题顶上去。 */}
+        {(item.brand || typeof item.rating === "number") && (
+          <div className="card-topline">
+            <span className="card-brand">{item.brand || ""}</span>
+            {typeof item.rating === "number" && (
+              <span className="card-rating" title="平台评分（离线数据集）">
+                <i aria-hidden>★</i> {item.rating.toFixed(1)}
+              </span>
+            )}
+          </div>
+        )}
         <h4 className="card-title" title={item.title}>
           {item.title}
         </h4>
 
-        {/* 本轮跑过 shipping_calc 才有到手价（含税运）；没跑就只有货价——照实标注，不冒充到手价。 */}
+        {/* 本轮跑过 shipping_calc 才有到手价（含税运）；没跑就只有货价——照实标注，不冒充到手价。
+            到手价只在某个收货国下成立，标上「寄往 XX」；只有货价时另给一行灰字说明到手价还没估。 */}
         {typeof item.landed_usd === "number" ? (
           <div className="card-price">
             <span className="price-num">${item.landed_usd.toFixed(2)}</span>
-            <span className="price-label">到手价（含税运）</span>
+            <span className="price-label">
+              到手价
+              {item.dest_country ? ` · 寄往 ${item.dest_country}` : ""}
+              （含税运）
+            </span>
           </div>
         ) : (
           typeof item.price_usd === "number" && (
-            <div className="card-price">
-              <span className="price-num">${item.price_usd.toFixed(2)}</span>
-              <span className="price-label">货价（未含税运）</span>
-            </div>
+            <>
+              <div className="card-price">
+                <span className="price-num">${item.price_usd.toFixed(2)}</span>
+                <span className="price-label">货价（未含税运）</span>
+              </div>
+              <div className="card-landed-pending">到手价待收货地与税运估算</div>
+            </>
           )
         )}
 
@@ -150,22 +182,29 @@ function Card({
           </div>
         )}
 
-        {/* 搜同款：一次纯向量近邻检索（不过 Agent、不烧 LLM），结果在右侧抽屉里给。 */}
-        <button className="card-similar" onClick={openSimilar} title="按商品向量找相似商品">
-          <SearchIcon width={13} height={13} />
-          搜同款
-        </button>
+        {/* 卡内动作：详情 / 对比 / 搜同款。整卡是 <a>，三个按钮都得自己吃掉点击。
+            搜同款是一次纯向量近邻检索（不过 Agent、不烧 LLM），结果在右侧抽屉里给。 */}
+        <div className="card-actions">
+          <button className="card-similar" onClick={stop(() => onDetail(item))} title="看大图与全部理由">
+            详情
+          </button>
+          <button
+            className={`card-similar ${compared ? "on" : ""}`}
+            aria-pressed={compared}
+            onClick={stop(() => onCompare(item))}
+            title={compared ? "移出对比" : "加入对比（最多 4 件）"}
+          >
+            {compared ? "✓ 对比中" : "对比"}
+          </button>
+          <button className="card-similar" onClick={openSimilar} title="按商品向量找相似商品">
+            <SearchIcon width={13} height={13} />
+            搜同款
+          </button>
+        </div>
       </div>
     </Wrapper>
   );
-}
-
-// 一件商品的展示价：优先到手价（含税运），没算过就用货价——只取数字，口径由卡片自己标注。
-function shownPrice(it: ProductItem): number | null {
-  if (typeof it.landed_usd === "number") return it.landed_usd;
-  if (typeof it.price_usd === "number") return it.price_usd;
-  return null;
-}
+});
 
 // 槽位轮的分组视图：按槽位（床品 / 台灯 / …）分节渲染，组头带槽名与该槽花费。平台胶囊在
 // 这里没有意义（分组本身就是筛选维度），整个替换掉。
@@ -176,13 +215,19 @@ function shownPrice(it: ProductItem): number | null {
 function BundleGroups({
   items,
   favorited,
+  compared,
   onFavorite,
   onSimilar,
+  onDetail,
+  onCompare,
 }: {
   items: ProductItem[];
   favorited: Set<string>;
+  compared: Set<string>;
   onFavorite: (item: ProductItem, undo: boolean) => void;
   onSimilar: (item: ProductItem) => void;
+  onDetail: (item: ProductItem) => void;
+  onCompare: (item: ProductItem) => void;
 }) {
   // 保序分组：槽的顺序 = 后端组合优选给出的顺序（essential 在前），不重排。
   const groups: { slot: string; items: ProductItem[] }[] = [];
@@ -210,14 +255,18 @@ function BundleGroups({
     return (
       <section className="results">
         <div className="product-grid">
-          {groups.map((g) => (
+          {groups.map((g, i) => (
             <div className="bundle-cell" key={g.slot}>
               <div className="bundle-cell-slot">{g.slot}</div>
               <Card
                 item={g.items[0]}
+                index={i}
                 favorited={favorited.has(g.items[0].item_id)}
+                compared={compared.has(g.items[0].item_id)}
                 onFavorite={onFavorite}
                 onSimilar={onSimilar}
+                onDetail={onDetail}
+                onCompare={onCompare}
               />
             </div>
           ))}
@@ -242,13 +291,17 @@ function BundleGroups({
               )}
             </div>
             <div className="product-grid">
-              {g.items.map((it) => (
+              {g.items.map((it, i) => (
                 <Card
                   key={`${it.platform}-${it.item_id}`}
                   item={it}
+                  index={i}
                   favorited={favorited.has(it.item_id)}
+                  compared={compared.has(it.item_id)}
                   onFavorite={onFavorite}
                   onSimilar={onSimilar}
+                  onDetail={onDetail}
+                  onCompare={onCompare}
                 />
               ))}
             </div>
@@ -270,13 +323,19 @@ function BundleGroups({
 export function ProductCards({
   items,
   favorited,
+  compared,
   onFavorite,
   onSimilar,
+  onDetail,
+  onCompare,
 }: {
   items: ProductItem[];
   favorited: Set<string>;
+  compared: Set<string>;
   onFavorite: (item: ProductItem, undo: boolean) => void;
   onSimilar: (item: ProductItem) => void;
+  onDetail: (item: ProductItem) => void;
+  onCompare: (item: ProductItem) => void;
 }) {
   const [active, setActive] = useState<string>("all");
 
@@ -294,8 +353,11 @@ export function ProductCards({
       <BundleGroups
         items={items}
         favorited={favorited}
+        compared={compared}
         onFavorite={onFavorite}
         onSimilar={onSimilar}
+                onDetail={onDetail}
+                onCompare={onCompare}
       />
     );
   }
@@ -330,13 +392,17 @@ export function ProductCards({
       </div>
 
       <div className="product-grid">
-        {shown.map((it) => (
+        {shown.map((it, i) => (
           <Card
             key={`${it.platform}-${it.item_id}`}
             item={it}
+            index={i}
             favorited={favorited.has(it.item_id)}
+            compared={compared.has(it.item_id)}
             onFavorite={onFavorite}
             onSimilar={onSimilar}
+            onDetail={onDetail}
+            onCompare={onCompare}
           />
         ))}
       </div>

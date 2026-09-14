@@ -44,3 +44,15 @@ Vite 把 `/api` 与 `/ws` 反向代理到后端 `:8000`（见 `vite.config.ts`�
 ```bash
 npm run build      # tsc -b（strict）+ vite build → dist/
 ```
+
+## 商品动作：详情 / 对比 / 下单表单 / 确认卡按钮
+
+对着参考项目（globex-agent）前端补的四块交互，共同原则是**前端不新增任何绕过 Agent 的写路径**：
+
+- `ProductDetail.tsx`：商品详情弹窗（大图 / 全部理由 / 收藏 / 搜同款 / 加入对比 / 去下单）。数据就是收尾下发的那份结构化商品，不另外请求。
+- `ProductComparison.tsx`：勾选 2～4 件并排看；「让 Agent 帮我比一比」把 item_id 组成一句话发进对话，比价仍由 `price_compare` / `shipping_calc` 在会话内跑。
+- `OrderIntentForm.tsx`：收件人 / 地址 / 数量一次填齐后组成一句话发出，模型照旧调 `create_order(confirmed=False)` 出确认卡。收件信息只存 localStorage。
+- `OrderCard.tsx`：确认卡上的「确认下单 / 先不下单」只是替用户把那句话发出去；`expires_at` 由后端出卡时给（`app/tools/_order_guard.py` 的 `PREVIEW_TTL_SECONDS`），过期后按钮灰掉、后端也会拒掉过期确认并重新出卡。
+- 偏好面板「本次会话」区多了选购摘要（当前需求 / 品类 / 预算 / 槽位），字段来自 `GET /api/session/{tid}/constraints` 与 `session_constraints` 事件。
+
+三个弹窗共用 `Modal.tsx`；平台名 / 理由拆行 / 展示价抽在 `productText.ts`，卡片、详情、对比对同一件商品的解读一致。
