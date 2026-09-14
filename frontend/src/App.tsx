@@ -19,7 +19,7 @@ import { LearnedPrefsBar } from "./components/LearnedPrefsBar";
 import { PreferenceDrawer } from "./components/PreferenceDrawer";
 import { ConfirmationCards } from "./components/ConfirmationCards";
 import { OrdersDrawer } from "./components/OrdersDrawer";
-import { ProductCards } from "./components/ProductCards";
+import { MiniThumb, ProductCards } from "./components/ProductCards";
 import { ProductDetail } from "./components/ProductDetail";
 import { ProductComparison } from "./components/ProductComparison";
 import { OrderIntentForm } from "./components/OrderIntentForm";
@@ -607,14 +607,32 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
 
         {compareList.length > 0 && (
           <div className="compare-bar">
+            {/* 已选商品的缩略图排成一行，点哪张就把哪件移出——比只显示一个数字更知道自己选了什么。 */}
+            <div className="compare-mini">
+              {compareList.map((it) => (
+                <button
+                  key={`${it.platform}-${it.item_id}`}
+                  className="compare-mini-item"
+                  onClick={() => toggleCompare(it)}
+                  title={`移出对比：${it.title}`}
+                >
+                  <MiniThumb item={it} />
+                </button>
+              ))}
+            </div>
             <span>
-              已选 <strong>{compareList.length}</strong> / {COMPARE_MAX} 件对比
+              已选 <strong>{compareList.length}</strong> / {COMPARE_MAX} 件
+              {compareList.length === 1 && "，再选一件才能比"}
             </span>
             <button className="btn-ghost" onClick={() => setCompareList([])}>
               清空
             </button>
-            <button className="btn-primary" onClick={() => setCompareOpen(true)}>
-              对比
+            <button
+              className="btn-primary"
+              disabled={compareList.length < 2}
+              onClick={() => setCompareOpen(true)}
+            >
+              开始对比
             </button>
           </div>
         )}
