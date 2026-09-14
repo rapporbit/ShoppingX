@@ -490,7 +490,7 @@ async def test_item_picker_degrades_without_landed_price() -> None:
     assert not any("货价" in (c.pick_reason or "") for c in out.picks)
 
 
-# item_picker：合适的候选全部展示，但封顶 PICK_DISPLAY_CAP（默认 20）
+# item_picker：合适的候选全部展示，但封顶 PICK_DISPLAY_CAP（默认 3）
 async def test_item_picker_caps_display_at_limit() -> None:
     from app.tools.item_picker import PICK_DISPLAY_CAP, item_picker
 
@@ -499,9 +499,9 @@ async def test_item_picker_caps_display_at_limit() -> None:
         ItemCandidate(item_id=f"C{i}", platform="a", title=f"canvas pouch {i}", landed_usd=10 + i)
         for i in range(30)
     ]
-    # 不传 top_k：默认应等于展示上限（20→8：token 审计后收紧渲染件数，登记表仍全量）。
+    # 不传 top_k：默认应等于展示上限（20→8→3：先 token 审计、后响应速度，登记表仍全量）。
     out = await item_picker.ainvoke({"candidates": [c.model_dump() for c in cands]})
-    assert len(out.picks) == PICK_DISPLAY_CAP == 8
+    assert len(out.picks) == PICK_DISPLAY_CAP == 3
     # 模型即便传一个超大的 top_k，机制也封顶。
     out2 = await item_picker.ainvoke({"candidates": [c.model_dump() for c in cands], "top_k": 999})
     assert len(out2.picks) == PICK_DISPLAY_CAP
@@ -2042,7 +2042,7 @@ async def test_shopping_summary_defaults_to_all_picker_picks(
     """
     import app.tools.shopping_summary as mod
     from app.tools._candidates import register
-    from app.tools.item_picker import item_picker
+    from app.tools.item_picker import PICK_DISPLAY_CAP, item_picker
     from app.tools.shopping_summary import ShoppingSummaryOutput, _SummaryDraft
     from app.utils.thread_ctx import thread_scope
 
@@ -2051,16 +2051,17 @@ async def test_shopping_summary_defaults_to_all_picker_picks(
         "get_fast_llm",
         lambda: _FakeLLM(structured_payload=_SummaryDraft(summary="清单如下。")),
     )
+    # 件数跟展示上限走：本测试验的是「收尾拿 picker 定稿的全部」，不是某个具体件数。
     cands = [
         ItemCandidate(
             item_id=f"C{i}", platform="amazon", title=f"canvas pouch {i}", landed_usd=10 + i
         )
-        for i in range(5)
+        for i in range(PICK_DISPLAY_CAP)
     ]
     with thread_scope("t-picks", tmp_path):
         register(cands)  # 真实链路里由 item_search 登记；收尾按 id hydrate 全靠这张表
         picked = await item_picker.ainvoke({"item_ids": [c.item_id for c in cands]})
-        assert len(picked.picks) == 5
+        assert len(picked.picks) == PICK_DISPLAY_CAP
         # pref_matched 已随 register_updates 回写登记表：收尾 hydrate 拿到的是判过的值。
         from app.tools._candidates import hydrate
 

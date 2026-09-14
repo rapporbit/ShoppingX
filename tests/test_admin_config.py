@@ -54,7 +54,7 @@ def _restore_params():
     """每个用例后把 env 与模块常量复原。
 
     **不加这个就会污染整个测试会话**：本文件会把 PICK_DISPLAY_CAP 之类改掉，而模块常量是进程级
-    全局——后面 test_tools 里那些断言 `len(picks) == PICK_DISPLAY_CAP == 8` 的用例会莫名其妙地挂，
+    全局——后面 test_tools 里那些断言 `len(picks) == PICK_DISPLAY_CAP == 3` 的用例会莫名其妙地挂，
     且看起来像是它们自己的 bug。
     """
     snapshot = {p.key: os.environ.get(p.key) for p in PARAMS}

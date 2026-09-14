@@ -101,13 +101,13 @@ class ShoppingSummaryOutput(BaseModel):
     items: list[SummaryItem] = Field(default_factory=list)
 
 
-# LLM 重写理由的件数上限。**这是延迟与文风之间的那颗螺丝**：
+# 理由件数（2026-09 起，见 :func:`_llm_reason_ids`）：
 #
-# 旧版让模型给**每一件**写理由，解码量随件数线性涨（实测 10 件 → 8.5s，主 loop 降快档后它成了
-# 全链路单点最贵的一段）。可 picks 是**按分排好序**的——用户的注意力也是；第 8 件的理由写得多
-# 漂亮，多半没人读。于是只给最前面这几件重写成叙事句，后面的用 item_picker 的确定性理由
-# （``_card_reason``）。解码量因此**固定**：3 件和 10 件花一样的时间。
-_LLM_REASON_TOP_N = 3
+# 旧版曾因 10 件 → 8.5s 解码而只给前 3 件写、其余走确定性理由。现在件数在上游封顶——普通轮
+# item_picker 最多 PICK_DISPLAY_CAP=3 件、套装每槽 1 件——这两种**逐件**由 LLM 写叙事理由。
+# 并列形态每类 PARALLEL_PER_SLOT=3 件，类数一多就是 9 件，故**每类只写第一件**（该类主推），
+# 其余用 ``_card_reason``。``_card_reason`` 同时是**兜底**：该写的件模型漏写 / 写崩时顶上，
+# 并记 warning 让「规则句冒充叙事」可见。
 
 # 理由完整性兜底的启发式：快模型偶尔把某件的 reason 生成到一半就停（实测出现过 "评分4.1，标题"
 # 这种半句话直接进了商品卡）。structured_output 拿不到可靠的 finish_reason，只能判「明显异常」：
@@ -137,6 +137,23 @@ def _looks_truncated(reason: str) -> bool:
     return len(r) < _MIN_REASON_CHARS or r.endswith(_DANGLING_TAIL)
 
 
+def _llm_reason_ids(picks: list[ItemCandidate], *, parallel: bool) -> list[str]:
+    """该由 LLM 写叙事理由的 item_id：普通轮 / 套装逐件；并列形态每类（槽）只取第一件。
+
+    picks 类内已按推荐度排序，第一件就是该类主推。没有槽位章的件（空 slot）算作同一类。
+    """
+    if not parallel:
+        return [c.item_id for c in picks]
+    seen: set[str] = set()
+    ids: list[str] = []
+    for c in picks:
+        if c.slot in seen:
+            continue
+        seen.add(c.slot)
+        ids.append(c.item_id)
+    return ids
+
+
 class SummaryReason(BaseModel):
     """一件候选的选购理由（按 item_id 对应回 picks）。"""
 
@@ -145,14 +162,14 @@ class SummaryReason(BaseModel):
 
 
 class _SummaryDraft(BaseModel):
-    """喂给 LLM 的**精简产出契约**：一段收尾文案 + 前 N 件的叙事理由。
+    """喂给 LLM 的**精简产出契约**：一段收尾文案 + 每一件的叙事理由。
 
     模型**不产**商品卡的任何确定字段（title / platform / 到手价 / 图 / 链接）——那些 picks 里都有，
     让模型逐件重吐既费解码又平白引入「改写标题 / 生成到一半截断」的风险。它只写两样人写得比规则
-    好的东西：① 把整批货与用户原话对上的那段话；② 最前面 :data:`_LLM_REASON_TOP_N` 件的理由。
+    好的东西：① 把整批货与用户原话对上的那段话；② 清单里每一件的理由。
 
-    第 N+1 件之后一律用 ``item_picker`` 算好的确定性理由（``_card_reason``）——它同时也是前 N 件的
-    **兜底**：模型漏写、写崩、超时，卡片照样有完整理由。
+    ``item_picker`` 算好的确定性理由（``_card_reason``）是**兜底**：模型漏写、写崩、超时，卡片照样
+    有完整理由。
     """
 
     # 显式 null 归一为缺席（badcase cdee1d6d 同族，见 drop_none_values）。
@@ -161,7 +178,7 @@ class _SummaryDraft(BaseModel):
     summary: str = Field(description="面向用户的收尾文案（推荐清单开场白 / 评价结论）")
     reasons: list[SummaryReason] = Field(
         default_factory=list,
-        description=f"**只为最前面 {_LLM_REASON_TOP_N} 件**写选购理由，按 item_id 对应",
+        description="为清单里**每一件**写选购理由，按 item_id 对应，一件都不能漏",
     )
     # off-intent 判定为什么放这里而不是加一条确定性规则：picker 是纯确定性打分，而库里配件与
     # 整机同 category、标题全含品类词（"Camera Case for Sony"），静态品类过滤 / 黑名单两方案均被
@@ -186,9 +203,8 @@ def _card_reason(src: ItemCandidate) -> str:
     ``item_picker._build_reason``）；候选没经过 picker（模型直接拿检索结果收尾）时，用评分 /
     价格 / 平台兜一句完整话。
 
-    两个用处：**第 4 件起的常规理由**，以及**前 3 件的兜底**（模型漏写 / 写崩 / 超时）。所以它
-    必须永远返回一句完整的话——绝不返回空串，让商品卡带着空理由上桌。这句话是**用户正脸看到的**，
-    措辞得是人话：不出现「检索」「候选」这类只有工程师会说的词。
+    用处是**模型理由的兜底**（模型漏写 / 写崩 / 超时）。所以它必须永远返回一句完整的话——绝不
+    返回空串，让商品卡带着空理由上桌。这句话是**用户正脸看到的**，措辞得是人话：不出现「检索」「候选」这类只有工程师会说的词。
     """
     if src.pick_reason.strip():
         return src.pick_reason.strip()
@@ -482,11 +498,15 @@ async def shopping_summary(
     await monitor.report_tool_start("shopping_summary", count=len(picks))
     try:
         # 文案生成用非推理快模型（perf/model-tiering）：这步只按既定 picks 组织文案，不需深推理。
-        # **只让 LLM 产一段开场白**（_SummaryDraft）——title/platform/到手价/图/链接/每件理由全是
-        # picks 里已知的确定字段，一律不经模型（省解码 + 杜绝改写/截断风险，见 _SummaryDraft）。
-        # 于是这次调用的解码量不再随 picks 件数线性涨——10 件与 3 件花的时间基本一样。
+        # **LLM 只产开场白 + 逐件理由**（_SummaryDraft）——title/platform/到手价/图/链接全是 picks
+        # 里已知的确定字段，一律不经模型（省解码 + 杜绝改写/截断风险，见 _SummaryDraft）。
+        # 理由件数：普通轮 ≤3、套装每槽 1 → 逐件写；并列形态每类 ≤3 件、类数一多就是 9 件，
+        # 故**每类只写第一件**（picks 类内已按分排序），其余用 item_picker 的确定性理由。
         # 流式优先（summary_delta 逐字推给前端）、失败降级阻塞；usage 两条路都入账。
-        top_ids = [c.item_id for c in picks[:_LLM_REASON_TOP_N]]
+        # 形态只查一次（会话级常量），逐件重复的是同一个值。
+        mode = get_session_mode()
+        slot_mode = SLOT_MODE_PARALLEL if mode == SLOT_MODE_PARALLEL else ""
+        top_ids = _llm_reason_ids(picks, parallel=bool(slot_mode))
         id_map = {c.item_id: c.title for c in picks}
         draft = await _generate_draft(
             [
@@ -495,7 +515,7 @@ async def shopping_summary(
                     "user",
                     f"用户意图：{user_intent}\n\n{_bundle_note(picks)}{_landed_note(picks)}"
                     f"精选候选（JSON，已按推荐度排序）：\n{_compact(picks)}"
-                    f"\n\n**只为这 {len(top_ids)} 件写 reason**：{', '.join(top_ids)}",
+                    f"\n\n**只为这 {len(top_ids)} 件逐件写 reason**：{', '.join(top_ids)}",
                 ),
             ],
             id_map,
@@ -524,12 +544,11 @@ async def shopping_summary(
                     sorted(off),
                 )
         # 商品卡逐字段**确定性组装**：item_id/platform/title/到手价/图/链接全取自 picks（登记表
-        # hydrate 的全量候选，url/image 不穿过模型）。reason 两档：前 N 件用模型写的叙事句，其余
-        # （以及模型漏写 / 写崩的那几件）用 item_picker 算好的确定性理由。顺序 = picks 顺序。
+        # hydrate 的全量候选，url/image 不穿过模型）。reason：top_ids 里的件用模型写的叙事句；
+        # 其余件（并列形态每类第 2 件起）以及模型漏写 / 写崩的，用 item_picker 算好的确定性理由。
+        # 顺序 = picks 顺序。
         items: list[SummaryItem] = []
-        # 形态只查一次（会话级常量），逐件重复的是同一个值。
-        mode = get_session_mode()
-        slot_mode = SLOT_MODE_PARALLEL if mode == SLOT_MODE_PARALLEL else ""
+        fallback_ids: list[str] = []  # 该有模型理由却漏写 / 写崩的件（记 warning 用）
         # 到手价的收货国口径（会话级常量，逐件一样）：只要本轮有任何一件带 landed 才取。
         dest_for_cards = (
             get_dest_country().upper() if any(c.landed_usd is not None for c in picks) else ""
@@ -539,6 +558,8 @@ async def shopping_summary(
             src = enrich(c.item_id) or c
             reason = reason_map.get(c.item_id, "") if c.item_id in top_ids else ""
             if _looks_truncated(reason):
+                if c.item_id in top_ids:
+                    fallback_ids.append(c.item_id)
                 reason = _card_reason(src)
             items.append(
                 SummaryItem(
@@ -559,6 +580,14 @@ async def shopping_summary(
                     rating=src.rating if src.rating is not None else c.rating,
                     dest_country=dest_for_cards if c.landed_usd is not None else "",
                 )
+            )
+        if fallback_ids:
+            # 规则句冒充叙事是静默的——卡片照样有理由、不报错，只有这条日志看得见。
+            logger.warning(
+                "收尾理由 %d/%d 件退回确定性理由（模型漏写或写崩）：%s",
+                len(fallback_ids),
+                len(items),
+                fallback_ids,
             )
         out = ShoppingSummaryOutput(summary=draft.summary, items=items)
     except Exception:
