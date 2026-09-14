@@ -9,16 +9,14 @@ item_id hydrate 得到上一轮的候选。
 """
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-from app.api.context import get_retrieval_mode, reset_retrieval_mode, set_retrieval_mode
-from app.harness.hooks.progress import check_refine_backfill, try_phase_transition
+from app.harness.hooks.progress import BACKFILL_LATCH, check_refine_backfill
 from app.harness.phase_machine import Phase, PhaseStateMachine, set_phase_machine
 from app.harness.signals import _count_candidates, candidate_count
-from app.tools._candidates import register, registry_snapshot, reset_candidates
-from app.tools.planner import PlanOutput
+from app.harness.state import GuardState
+from app.tools._candidates import register
 from app.tools.schemas import ItemCandidate
 from app.utils.thread_ctx import thread_scope
 
@@ -39,35 +37,6 @@ def _cand(item_id: str = "A1") -> ItemCandidate:
     )
 
 
-# ---------- planner 判 retrieval：谁来决定「这轮要不要重搜」 ----------
-
-
-def test_no_prior_candidates_forces_search(tmp_path: Path) -> None:
-    """手上没有既有候选时，模型填什么都强制 search——首轮判 reuse 会让主 loop 去精挑一个空池子。"""
-    with thread_scope("t-first", tmp_path):
-        plan = PlanOutput(retrieval="reuse", tasks=["recommend"])
-        if not registry_snapshot():  # planner 工具体里的那道确定性兜底
-            plan.retrieval = "search"
-
-        assert plan.retrieval == "search"
-
-
-def test_retrieval_mode_survives_tool_context(tmp_path: Path) -> None:
-    """判定必须能被主 loop 的 hook 读到。
-
-    工具在独立 context 里执行，其中对 ContextVar 的 set **不回传**主 loop——planner 判了 reuse、
-    阶段机却读不到，模型照样重搜一遍（实测 200 秒）。故按 session_dir 聚合，不用裸 ContextVar。
-    """
-    with thread_scope("t-mode", tmp_path):
-        assert get_retrieval_mode() == "search"  # planner 没跑时的安全默认
-
-        set_retrieval_mode("reuse")
-        assert get_retrieval_mode() == "reuse"
-
-        reset_retrieval_mode()
-        assert get_retrieval_mode() == "search"
-
-
 # ---------- 阶段推进只认工具返回，不数登记表 ----------
 
 
@@ -86,96 +55,7 @@ def test_candidate_signal_counts_tool_return_not_registry(tmp_path: Path) -> Non
         assert _count_candidates("子 Agent 回传的自然语言总结") == 0  # 数不出来就不算，宁可少算
 
 
-# ---------- planner 的判定驱动阶段 + 补搜降级 ----------
-
-
-async def test_reuse_sends_planner_straight_to_comparing(tmp_path: Path) -> None:
-    """planner 判 reuse → 阶段（遥测）直接跳 COMPARING，一次 item_search 都不调。"""
-    with thread_scope("t-reuse", tmp_path):
-        machine = PhaseStateMachine()
-        set_phase_machine(machine)
-        set_retrieval_mode("reuse")
-
-        await try_phase_transition({"planner_output_ready": True})
-
-        assert machine.phase is Phase.COMPARING
-
-
-async def test_search_mode_goes_to_searching(tmp_path: Path) -> None:
-    """换品类（search）→ 照常进 SEARCHING；不被上一轮的旧候选卡在 COMPARING。"""
-    with thread_scope("t-search", tmp_path):
-        machine = PhaseStateMachine()
-        set_phase_machine(machine)
-        set_retrieval_mode("search")
-
-        await try_phase_transition({"planner_output_ready": True})
-
-        assert machine.phase is Phase.SEARCHING
-
-
-async def test_thin_reuse_result_triggers_backfill(tmp_path: Path) -> None:
-    """复用轮精挑后只剩 1 件 → 退回 SEARCHING 补搜，并把 retrieval 改写成 augment（只触发一次）。"""
-    with thread_scope("t-thin", tmp_path):
-        machine = PhaseStateMachine(initial=Phase.COMPARING)
-        set_phase_machine(machine)
-        set_retrieval_mode("reuse")
-
-        ctx = await check_refine_backfill({"picker_attempted": True, "picks_count": 1})
-
-        assert machine.phase is Phase.SEARCHING
-        assert get_retrieval_mode() == "augment"  # 已在补搜 → 本闸不会再触发，不会无限回退
-        # 「请重新检索」的指路不再走 inject（晚一轮）——由 transition_notice 缀在 picker 结果上
-        assert ctx is not None and not ctx.get("inject_messages")
-
-
-async def test_enough_reuse_picks_no_backfill(tmp_path: Path) -> None:
-    """复用轮精挑够多（≥3 件）且 must_have 有命中 → 不补搜，省下那近百秒的重新检索。"""
-    with thread_scope("t-enough", tmp_path):
-        machine = PhaseStateMachine(initial=Phase.COMPARING)
-        set_phase_machine(machine)
-        set_retrieval_mode("reuse")
-
-        await check_refine_backfill(
-            {"picker_attempted": True, "picks_count": 5, "must_have_hits": 2}
-        )
-
-        assert machine.phase is Phase.COMPARING
-        assert get_retrieval_mode() == "reuse"
-
-
-async def test_reuse_zero_must_hits_triggers_backfill(tmp_path: Path) -> None:
-    """复用轮 picks 件数正常、但 must_have 池内 0 命中 → 照样退回补搜。
-
-    重现 bad case「三件套 → 要中式刺绣」：picker 的 must_have 是加分不淘汰，8 件素色候选
-    对「必须刺绣」原样返回 8 件——件数闸（<3）对这种质量假阳性是瞎的，径直推进 CONCLUDING
-    后模型想补搜已被阶段哨兵拦死，只能收尾承认失败。
-    """
-    with thread_scope("t-zero-hits", tmp_path):
-        machine = PhaseStateMachine(initial=Phase.COMPARING)
-        set_phase_machine(machine)
-        set_retrieval_mode("reuse")
-
-        await check_refine_backfill(
-            {"picker_attempted": True, "picks_count": 8, "must_have_hits": 0}
-        )
-
-        assert machine.phase is Phase.SEARCHING
-        assert get_retrieval_mode() == "augment"  # 只触发一次，不会无限回退
-
-
-async def test_reuse_without_must_have_no_quality_backfill(tmp_path: Path) -> None:
-    """本轮没传 must_have（hits=None）→ 没有「质」可判，件数够就不补搜。"""
-    with thread_scope("t-no-must", tmp_path):
-        machine = PhaseStateMachine(initial=Phase.COMPARING)
-        set_phase_machine(machine)
-        set_retrieval_mode("reuse")
-
-        await check_refine_backfill(
-            {"picker_attempted": True, "picks_count": 5, "must_have_hits": None}
-        )
-
-        assert machine.phase is Phase.COMPARING
-        assert get_retrieval_mode() == "reuse"
+# ---------- 补搜闸：污染 / 硬淘汰杀池，一轮只补一次 ----------
 
 
 # ---------- 污染分支：首搜轮品类门吃空池子 → 补搜（手表 badcase 6718ed65） ----------
@@ -187,12 +67,10 @@ async def test_polluted_first_search_triggers_backfill(tmp_path: Path) -> None:
     重现手表 badcase：检索词 formal dress watch men business 召回一堆西装皮鞋，品类一致性门
     正确沉底 8 条，但旧闸只认 reuse 轮，没人补货，径直收尾出了 2 件的清单。
     """
-    from app.harness.state import GuardState
 
     with thread_scope("t-polluted", tmp_path):
         machine = PhaseStateMachine(initial=Phase.COMPARING)
         set_phase_machine(machine)
-        set_retrieval_mode("search")
         guard = GuardState()
 
         ctx = await check_refine_backfill(
@@ -207,7 +85,7 @@ async def test_polluted_first_search_triggers_backfill(tmp_path: Path) -> None:
         )
 
         assert machine.phase is Phase.SEARCHING
-        assert get_retrieval_mode() == "augment"  # 只触发一次，不会无限回退
+        assert BACKFILL_LATCH in guard.notified_transitions  # 只触发一次，不会无限回退
         # 污染批不再算「本轮已搜到货」：同轮 40 号钩子不得凭它把 SEARCHING 立刻推回 COMPARING。
         assert ctx is not None and ctx["total_candidates"] == 0
         assert ctx["reset_fresh_candidates"] is True
@@ -221,14 +99,12 @@ async def test_sparse_but_clean_pool_no_backfill(tmp_path: Path) -> None:
     with thread_scope("t-sparse", tmp_path):
         machine = PhaseStateMachine(initial=Phase.COMPARING)
         set_phase_machine(machine)
-        set_retrieval_mode("search")
 
         await check_refine_backfill(
             {"picker_attempted": True, "picks_count": 2, "oncat_count": 2, "offcat_count": 0}
         )
 
         assert machine.phase is Phase.COMPARING
-        assert get_retrieval_mode() == "search"
 
 
 # ---------- 硬淘汰杀池分支：预算/排除把干净池杀空 → 补搜（交接遗留洞 #1） ----------
@@ -240,12 +116,10 @@ async def test_hard_cull_first_search_triggers_backfill(tmp_path: Path) -> None:
     池子是按相关性召回的 top-k，不是按「预算内的相关性」——库里预算内的货可能排在
     k 名开外，带 price_usd_max 补搜捞得回来。旧闸对这形态完全不触发（手表 badcase 的
     同型未爆洞）。"""
-    from app.harness.state import GuardState
 
     with thread_scope("t-hard-cull", tmp_path):
         machine = PhaseStateMachine(initial=Phase.COMPARING)
         set_phase_machine(machine)
-        set_retrieval_mode("search")
         guard = GuardState()
 
         ctx = await check_refine_backfill(
@@ -260,7 +134,7 @@ async def test_hard_cull_first_search_triggers_backfill(tmp_path: Path) -> None:
         )
 
         assert machine.phase is Phase.SEARCHING
-        assert get_retrieval_mode() == "augment"  # 只触发一次
+        assert BACKFILL_LATCH in guard.notified_transitions  # 只触发一次
         assert ctx is not None and ctx["total_candidates"] == 0
         assert ctx["reset_fresh_candidates"] is True
         assert guard.postfork_search_grants == 1
@@ -272,7 +146,6 @@ async def test_sparse_pool_without_cull_no_backfill(tmp_path: Path) -> None:
     with thread_scope("t-cull-sparse", tmp_path):
         machine = PhaseStateMachine(initial=Phase.COMPARING)
         set_phase_machine(machine)
-        set_retrieval_mode("search")
 
         await check_refine_backfill(
             {
@@ -286,19 +159,16 @@ async def test_sparse_pool_without_cull_no_backfill(tmp_path: Path) -> None:
 
         await check_refine_backfill({"picker_attempted": True, "picks_count": 2})
         assert machine.phase is Phase.COMPARING
-        assert get_retrieval_mode() == "search"
 
 
 async def test_hard_cull_notice_points_to_price_filter(tmp_path: Path) -> None:
     """杀池通告必须指到实处：超预算为主 → 带 price_usd_max 重搜（召回期过滤），
     照原样重搜只会拿回同一批超预算的货。判据与闸共用 _hard_cull_backfill_due。"""
     from app.harness.hooks.progress import append_transition_notice
-    from app.harness.state import GuardState
 
     with thread_scope("t-cull-notice", tmp_path):
         machine = PhaseStateMachine(initial=Phase.COMPARING)
         set_phase_machine(machine)
-        set_retrieval_mode("search")
 
         ctx = {
             "tool_name": "item_picker",
@@ -315,18 +185,25 @@ async def test_hard_cull_notice_points_to_price_filter(tmp_path: Path) -> None:
 
 
 async def test_pollution_backfill_fires_only_once(tmp_path: Path) -> None:
-    """已在补搜（augment）后即使仍污染也不再回退——防「重搜还是脏 → 无限回退」。"""
+    """已补搜过一次（闩已写）后即使仍污染也不再回退——防「重搜还是脏 → 无限回退」。"""
     with thread_scope("t-once", tmp_path):
         machine = PhaseStateMachine(initial=Phase.COMPARING)
         set_phase_machine(machine)
-        set_retrieval_mode("augment")
+        guard = GuardState()
+        guard.notified_transitions.add(BACKFILL_LATCH)  # 已补搜过一次
 
         await check_refine_backfill(
-            {"picker_attempted": True, "picks_count": 2, "oncat_count": 1, "offcat_count": 9}
+            {
+                "picker_attempted": True,
+                "picks_count": 2,
+                "oncat_count": 1,
+                "offcat_count": 9,
+                "_guard": guard,
+            }
         )
 
         assert machine.phase is Phase.COMPARING
-        assert get_retrieval_mode() == "augment"
+        assert machine.phase is Phase.COMPARING  # 没有第二次回退
 
 
 async def test_no_rerank_signal_no_pollution_judgement(tmp_path: Path) -> None:
@@ -334,14 +211,12 @@ async def test_no_rerank_signal_no_pollution_judgement(tmp_path: Path) -> None:
     with thread_scope("t-no-rerank", tmp_path):
         machine = PhaseStateMachine(initial=Phase.COMPARING)
         set_phase_machine(machine)
-        set_retrieval_mode("search")
 
         await check_refine_backfill(
             {"picker_attempted": True, "picks_count": 2, "oncat_count": None, "offcat_count": None}
         )
 
         assert machine.phase is Phase.COMPARING
-        assert get_retrieval_mode() == "search"
 
 
 def test_picker_head_counts_visible_to_model_only_when_polluted() -> None:
@@ -376,65 +251,3 @@ def test_diagnostics_channel_roundtrip_and_isolation(tmp_path) -> None:
         assert consume_diagnostics("item_picker") == {"picks": 3, "oncat_count": 2}  # FIFO
         assert consume_diagnostics("item_picker") == {"picks": 7}
         assert consume_diagnostics("item_picker") is None  # 消费即删除
-
-
-# ---------- 换品类那轮：旧候选必须被清掉 ----------
-#
-# 「登记表里该有什么」只有 planner 判得了（就是 retrieval 判定本身）。清干净之后，登记表**自身**
-# 即「本轮该精挑的全集」——下游因此不需要任何「哪些是本轮新召回的」额外账本，item_picker 直接
-# 吃全集（它的 item_ids 参数已删：让模型抄 id 是纯搬运，还给它开了「再自己筛一遍」的口子）。
-
-
-class _FakePlannerLLM:
-    """假模型：``generate_structured_output`` 回固定 PlanOutput（见 invoke.call_structured）。"""
-
-    model = "fake-fast"
-
-    def __init__(self, plan: PlanOutput) -> None:
-        self._plan = plan
-
-    async def generate_structured_output(
-        self, _messages: object, _schema: object, **_kw: object
-    ) -> object:
-        return SimpleNamespace(content=self._plan.model_dump(), usage=None)
-
-
-async def _run_planner(monkeypatch: pytest.MonkeyPatch, retrieval: str) -> None:
-    import app.tools.planner as mod
-
-    plan = PlanOutput(category="沙发", tasks=["recommend"], retrieval=retrieval)  # type: ignore[arg-type]
-    monkeypatch.setattr(mod, "get_planner_llm", lambda: _FakePlannerLLM(plan))
-    await mod.planner.ainvoke({"intent": "换个方向，想看真皮沙发"})
-
-
-async def test_search_turn_drops_prior_candidates(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """planner 判 search（换品类）→ 上一轮读回的旧候选清空。
-
-    否则「上一轮的鞋」会混进「这一轮的沙发」：item_picker 吃的是登记表全集，旧货留着就是拿别的
-    品类的商品去答本轮的问题。
-    """
-    with thread_scope("t-search", tmp_path):
-        register([_cand("OLD1"), _cand("OLD2")])  # 显式登记两件旧候选
-        assert len(registry_snapshot()) == 2
-
-        await _run_planner(monkeypatch, "search")
-
-        assert registry_snapshot() == []  # 旧品类的候选不许留下
-        reset_retrieval_mode()
-        reset_candidates()
-
-
-async def test_reuse_turn_keeps_prior_candidates(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """planner 判 reuse（只收紧条件）→ 旧候选原样留着：本轮不检索，它们就是精挑的全集。"""
-    with thread_scope("t-reuse", tmp_path):
-        register([_cand("A1"), _cand("A2")])
-
-        await _run_planner(monkeypatch, "reuse")
-
-        assert [c.item_id for c in registry_snapshot()] == ["A1", "A2"]
-        reset_retrieval_mode()
-        reset_candidates()

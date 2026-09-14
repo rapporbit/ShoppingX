@@ -1,6 +1,6 @@
 """一轮任务的**运行时无关**周边：当轮上下文拼装、产物落盘、配额记账。
 
-这三件事都不碰 Agent 框架——它们吃的是 query / P_t / 会话目录 / 用量快照，产出的是给模型看的
+这三件事都不碰 Agent 框架——它们吃的是 query / 会话目录 / 用量快照，产出的是给模型看的
 一段文本、磁盘上的两个文件、账本里的一条记录。独立成模块是因为它们与「跑在哪个运行时」无关，
 塞在某个 Agent 实现文件里只是历史包袱。
 
@@ -18,7 +18,6 @@ from pathlib import Path
 
 from app.db.quota import add_usage
 from app.memory.injector import HISTORY_EMPTY
-from app.memory.session_state import SessionPrefState
 from app.tools.shopping_summary import ShoppingSummaryOutput
 
 logger = logging.getLogger("shoppingx.session_io")
@@ -65,16 +64,15 @@ def render_platform_block(enabled: tuple[str, ...]) -> str:
 def inject_runtime_context(
     query: str,
     history_block: str,
-    pt: SessionPrefState,
     enabled_platforms: tuple[str, ...] = (),
     image_paths: Sequence[str] = (),
 ) -> str:
-    """把运行时用户上下文（启用平台 + 近期行为历史 + 会话级 P_t）拼进本轮 query 前，组成当轮
+    """把运行时用户上下文（启用平台 + 近期行为历史 + 参考图）拼进本轮 query 前，组成当轮
     用户消息——而不是塞进 system prompt。
 
-    它们都**每轮必变**：历史每轮收尾覆盖、P_t 每轮更新。system prompt 在请求里排在 messages 之前，
+    它们都**每轮必变**：历史每轮收尾覆盖、平台随用户改。system prompt 在请求里排在 messages 之前，
     把任何每轮变的东西混进去，都会连累它自己 + 它后面「本该跨轮稳定」的全部历史一起打断 prompt
-    cache 前缀。这条用户消息排在**干净的** ``prior_turns``(q,a) 之后、是缓存断点之后永不缓存的
+    cache 前缀。这条用户消息排在恢复的 session.json 上下文之后、是缓存断点之后永不缓存的
     部分（对齐 refdocs/05 §4.4「按易变性分层，越易变越靠后」）。空的块跳过（不塞「暂无」占位，
     省 token 也不给模型噪声）；全空则原样返回 query。
 
@@ -85,14 +83,12 @@ def inject_runtime_context(
     改由 ``harness.hooks.context_shaping`` 在 planner **之后**注入域内偏好——那时域才存在。
     """
     parts: list[str] = []
-    # 启用平台随用户设置而变（默认单平台 amazon），同属「每轮可变」——与历史/P_t 一样走
+    # 启用平台随用户设置而变（默认单平台 amazon），同属「每轮可变」——与历史一样走
     # 用户消息，不进 system prompt（否则打断跨轮稳定的 cache 前缀）。
     if enabled_platforms:
         parts.append(render_platform_block(enabled_platforms))
     if history_block and history_block != HISTORY_EMPTY:
         parts.append(f"<user_recent_history>\n{history_block}\n</user_recent_history>")
-    if not pt.is_empty():
-        parts.append(f"<session_constraints>\n{pt.render()}\n</session_constraints>")
     # 参考图（M20）：只报**文件名**，图本身不进 messages——主模型是纯文本的，多模态消息塞进来只会
     # 报错或被静默忽略。图关在 image_understand 工具里，它的识别结果已由 Harness 在开局预跑写进上文
     # （先于 planner）。这条块只交代「用户是拿图来买东西的」这个意图，免得模型把上文那条

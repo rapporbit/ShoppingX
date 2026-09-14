@@ -1293,8 +1293,8 @@ QUERIES: list[dict] = [
         "constraints": {"category": "双肩包", "budget": "400 CNY（不变）", "add": ["黑色"]},
         "expected_path": ["planner", "item_picker", "shopping_summary"],
         "probe": (
-            "P0 在既有候选上收紧（retrieval=reuse），清单全黑且仍在预算内；"
-            "P1 不必重新检索，也不许把预算约束弄丢"
+            "P0 在上一轮约束（预算）之上叠加本轮新条件，清单全黑且仍在预算内；"
+            "P1 不许把预算约束弄丢（每轮都重新检索，会话约束由系统自动带到本轮）"
         ),
     },
     {
@@ -1342,7 +1342,7 @@ QUERIES: list[dict] = [
         "expected_path": ["planner", "shopping_summary"],
         "probe": (
             "P0 答的是**上一轮那件**的推荐理由，不许重新搜一批新的（探指代解析 + "
-            "retrieval=reuse）；P1 理由要落到该商品的具体属性"
+            "按 item_id 回源）；P1 理由要落到该商品的具体属性"
         ),
     },
     # ── 交易域（批 1-7.2）：三条写操作红线。都是多轮——交易动作必然发生在「先有清单 / 先有

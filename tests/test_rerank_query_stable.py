@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from app.api.context import set_session_pt
-from app.memory.session_state import SessionConstraint, SessionPrefState
+from app.memory.session_state import SessionPrefState
 from app.tools.item_picker import item_picker
 from app.tools.schemas import ItemCandidate
 from app.utils.thread_ctx import thread_scope
@@ -35,22 +35,8 @@ def _cand(item_id: str, title: str) -> ItemCandidate:
 
 
 def _pt(like_terms: list[str]) -> SessionPrefState:
-    """带一条 like 约束的 P_t —— 正是 planner 每轮现生成、每轮都不同的那种软偏好。"""
-    return SessionPrefState(
-        category="旅行收纳",
-        constraints=[
-            SessionConstraint(
-                id="c1",
-                content="偏好" + "、".join(like_terms),
-                polarity="like",
-                keywords=like_terms,
-                category="other",
-                source_quote="想买便宜又抗造的旅行收纳三件套",
-                turn_added=1,
-                blocking=False,
-            )
-        ],
-    )
+    """带正向偏好词的 P_t —— 正是 planner 每轮现生成、每轮都不同的那种软偏好。"""
+    return SessionPrefState(category="旅行收纳", prefer_terms=list(like_terms))
 
 
 async def _query_used(monkeypatch, tmp_path: Path, tag: str, like_terms: list[str]) -> str:

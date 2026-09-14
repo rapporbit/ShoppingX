@@ -224,7 +224,6 @@ async def test_nudge_absent_when_nothing_blocked(tmp_path: Path) -> None:
 
 async def test_backfill_gate_suggests_relaxing_instead_of_empty_research(tmp_path: Path) -> None:
     """探测已证明「预算内没货」→ 补搜闸不再回退重搜（那一轮必然空手），改口指路问用户。"""
-    from app.api.context import get_retrieval_mode, set_retrieval_mode
     from app.harness.hooks.progress import append_transition_notice, check_refine_backfill
     from app.harness.phase_machine import Phase, PhaseStateMachine, set_phase_machine
     from app.harness.state import GuardState
@@ -232,7 +231,6 @@ async def test_backfill_gate_suggests_relaxing_instead_of_empty_research(tmp_pat
     with thread_scope("t-relax-gate", tmp_path):
         machine = PhaseStateMachine(initial=Phase.COMPARING)
         set_phase_machine(machine)
-        set_retrieval_mode("search")
         note_filtered_probe(hits=0, price_blocked=4, other_blocked=0)
 
         notice_ctx: dict[str, Any] = {
@@ -258,9 +256,8 @@ async def test_backfill_gate_suggests_relaxing_instead_of_empty_research(tmp_pat
                 "_guard": GuardState(),
             }
         )
-        # 阶段不退、mode 不改：这一轮补搜被证伪，留给模型去问用户。
+        # 阶段不退：这一轮补搜被证伪，留给模型去问用户。
         assert machine.phase is Phase.COMPARING
-        assert get_retrieval_mode() == "search"
 
 
 async def test_diagnostics_side_channel_reaches_adapter(tiny_search: Any, tmp_path: Path) -> None:

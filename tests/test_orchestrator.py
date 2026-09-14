@@ -125,28 +125,19 @@ async def test_run_agent_resumes_from_session_file(
     monkeypatch: pytest.MonkeyPatch, patched: dict[str, Any]
 ) -> None:
     """有 session.json 就恢复它（含 middle_context 里的 P_t），当轮只追加一条 user 消息。"""
-    from app.memory.session_state import SessionConstraint, SessionPrefState, pt_into_state
+    from app.memory.session_state import SessionPrefState, pt_into_state
 
     session_dir = orch.ensure_session_dir("as-t2")
     prior = AgentState()
     prior.context = [Msg(name="user", role="user", content=[TextBlock(type="text", text="上轮")])]
-    pt_into_state(
-        prior.middle_context,
-        SessionPrefState(
-            category="旅行包",
-            constraints=[
-                SessionConstraint(
-                    id="c1", content="不要塑料", polarity="dislike", keywords=["塑料"]
-                )
-            ],
-        ),
-    )
+    pt_into_state(prior.middle_context, SessionPrefState(category="旅行包", exclude_terms=["塑料"]))
     (session_dir / orch.STATE_FILE).write_text(prior.model_dump_json(), encoding="utf-8")
 
     agent = _fake_agent("好的。")
 
     async def _build(**kw: Any) -> Any:
         patched["state_arg"] = kw.get("state")
+        patched["pt_seen"] = orch.get_session_pt()
         return agent, SimpleNamespace()
 
     monkeypatch.setattr(orch, "build_main_agent", _build)
@@ -156,8 +147,8 @@ async def test_run_agent_resumes_from_session_file(
     assert isinstance(state_arg, AgentState)
     assert state_arg.context[0].get_text_content() == "上轮"
     assert [m.role for m in agent.inputs] == ["user"]
-    # 追问轮继承上一轮约束：P_t 从 middle_context 读回并渲染进当轮 user 消息
-    assert "不要塑料" in agent.inputs[-1].get_text_content()
+    # 追问轮继承上一轮约束：P_t 从 middle_context 读回、进 ContextVar（planner / picker 机制读）
+    assert patched["pt_seen"].exclude_terms == ["塑料"]
 
 
 async def test_run_agent_saves_state_with_pt_for_next_turn(

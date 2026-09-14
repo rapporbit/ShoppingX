@@ -84,7 +84,13 @@ from app.memory.assemble import blocking_exclude_terms
 from app.memory.history import read_turns
 from app.memory.injector import persist_new_preferences
 from app.memory.parser import UserPrefDraft, parse_user_preference
-from app.memory.session_state import SessionPrefState, pt_from_state, pt_into_state
+from app.memory.session_state import (
+    SessionPrefState,
+    constraint_rows,
+    drop_constraint,
+    pt_from_state,
+    pt_into_state,
+)
 from app.memory.store import FavoriteItem, PreferenceEntry, get_store
 from app.observability import alerts, metrics
 from app.observability.logging import configure_logging
@@ -1218,26 +1224,17 @@ async def get_session_constraints(
 
     可见可纠（P_t 重构步骤三①）：约束录入过 LLM 的手（极性判反 / keywords 抽漏照样进 P_t 且无
     自愈性），抽错时唯一的兜底是用户看得见、点得掉。每条带 ``id``（删除按它打 DELETE）与
-    ``source_quote``（让用户看懂这是自己哪句话）。会话无 session.json / 读坏 → 空列表（同
+    （``<词表>:<词>``，lite P_t 没有 source_quote）。会话无 session.json / 读坏 → 空列表（同
     run_agent 开局的容错口径）。
     """
     await _guard_thread(thread_id, auth_uid)
     pt = _read_session_pt(_safe_session_dir(OUTPUT_ROOT, thread_id))
     return {
         "thread_id": thread_id,
-        "epoch": pt.epoch,
+        "epoch": 0,  # lite P_t 无代际；字段保留给前端契约
         "budget_usd": pt.budget_usd,
         "category": pt.category,
-        "constraints": [
-            {
-                "id": c.id,
-                "content": c.content,
-                "source_quote": c.source_quote,
-                "polarity": c.polarity,
-                "blocking": c.blocking,
-            }
-            for c in pt.constraints
-        ],
+        "constraints": constraint_rows(pt),
     }
 
 
@@ -1261,9 +1258,7 @@ async def delete_session_constraint(
     if state is None:
         return {"status": "ok"}
     pt = pt_from_state(state.middle_context)
-    kept = [c for c in pt.constraints if c.id != constraint_id]
-    if len(kept) != len(pt.constraints):
-        pt.constraints = kept
+    if drop_constraint(pt, constraint_id):
         pt_into_state(state.middle_context, pt)
         save_session_state(session_dir, state)
         await monitor.report_session_constraints(pt, thread_id=thread_id)

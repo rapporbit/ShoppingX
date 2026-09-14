@@ -81,21 +81,14 @@ def _first_round_tier(ctx: dict[str, Any]) -> str | None:
     三条豁免各对应一个真会犯的错：
     - **worker 不加档**：子 Agent 也有自己的 round_number=1，但它只按 demands 搜一个平台，
       没有编排可言（能力边界靠 Toolkit 发放范围保证，不靠模型强弱）。
-    - **复用轮不加档**：planner 判 ``retrieval=reuse`` 时 plan 已写死「不检索，直接在上一轮
-      候选里精挑」，第一轮值得开思考的那几个分支一个都不在。预置降级时读到默认 search →
-      照常加档，落在安全侧。
     - **预算降档优先**：调用方只在 ``model_tier`` 仍为空时才问本函数，所以 budget_router 写过
       lite 就是 lite —— 钱不够的时候，「想清楚」让位于「跑完」。
     """
     from app.agent.fork_guard import current_fork_depth
     from app.agent.llm import main_loop_tier_base, main_loop_tier_first
-    from app.api.context import get_retrieval_mode
 
     tier = main_loop_tier_first()
     if tier == "same" or ctx.get("round_number") != 1 or current_fork_depth() >= 1:
-        return None
-    if get_retrieval_mode() == "reuse":
-        logger.debug("复用轮：第一轮不加档（编排已由 plan 定死）")
         return None
     return None if tier == main_loop_tier_base() else tier
 

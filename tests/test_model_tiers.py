@@ -91,19 +91,9 @@ def test_worker_first_round_not_boosted(_boost_on: None, monkeypatch: pytest.Mon
     assert adapter._first_round_tier(_ctx(1)) is None
 
 
-def test_reuse_turn_not_boosted(_boost_on: None, monkeypatch: pytest.MonkeyPatch) -> None:
-    """复用轮：plan 已写死「不检索，直接精挑」，第一轮值得开思考的分支一个都不在。"""
-    monkeypatch.setattr("app.api.context.get_retrieval_mode", lambda: "reuse")
-    assert adapter._first_round_tier(_ctx(1)) is None
-
-
-def test_search_and_augment_turns_still_boosted(
-    _boost_on: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """护栏：只有 reuse 豁免。planner 预置降级时读到默认 search → 照常加档（安全侧）。"""
-    for mode in ("search", "augment"):
-        monkeypatch.setattr("app.api.context.get_retrieval_mode", lambda m=mode: m)
-        assert adapter._first_round_tier(_ctx(1)) == "reasoning"
+def test_first_round_boosted(_boost_on: None) -> None:
+    """主 loop 首轮照常加档（planner 预置降级也不影响——每轮都检索，没有「复用轮」豁免）。"""
+    assert adapter._first_round_tier(_ctx(1)) == "reasoning"
 
 
 def test_boost_is_noop_when_base_already_equals_first(

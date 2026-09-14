@@ -37,12 +37,10 @@ from app.agent.retrieval_budget import (
     note_web_search,
     web_search_allowed,
 )
-from app.api.context import get_retrieval_mode
 from app.harness.budgets import (
     COST_AMPLIFIER_TOOLS,
     FORK_TOOLS,
     RETRIEVAL_TOOLS,
-    REUSE_RETRIEVAL_BUDGET,
     SUB_ITEM_SEARCH_CAP,
     get_fork_budget,
 )
@@ -54,8 +52,6 @@ from app.harness.sentinels import (
     SUB_SEARCH_EXHAUSTED,
     WEBSEARCH_DENIED,
     retrieval_exhausted,
-    reuse_backfill_note,
-    reuse_retrieval_exhausted,
 )
 from app.harness.signals import candidate_count
 from app.harness.state import GuardState, guard_of
@@ -182,15 +178,10 @@ async def charge_retrieval(context: dict[str, Any]) -> dict[str, Any] | None:
     优先用跨 fork 树共享的全树计数（``charge_tree_retrieval``，按 session_dir 聚合，连子里的
     item_search 一起兜）；无 session 作用域（单测）回退 per-instance。
 
-    常规轮（search / augment）：
     - ``count <= cap``：放行。
     - ``count == cap + 1``（刚越线）：**执行**，但在结果尾部追加强制收敛指令（软收敛）——
       经 ``context["converge_count"]`` 传给 post_tool_call 的 nudge Hook。
     - 再越线：硬挡，工具不执行。
-
-    复用轮（planner 判 reuse）：全树 cap 收紧到 ``REUSE_RETRIEVAL_BUDGET``（≥1），预算内执行 +
-    缀软线文案（``context["converge_note"]``），越线硬挡。reuse 从「禁止检索」降为「小预算
-    检索」的理由见 docs/decisions/0001-阶段白名单降级为遥测.md。
     """
     tool_name = context.get("tool_name", "")
     if tool_name not in RETRIEVAL_TOOLS:
@@ -212,18 +203,6 @@ async def charge_retrieval(context: dict[str, Any]) -> dict[str, Any] | None:
         count, cap = guard.retrieval_count, guard.retrieval_cap
     else:
         count, cap = tree, guard.tree_retrieval_cap
-
-    # 复用轮小预算：planner 判 reuse 后本轮检索不被锁死，而是收紧到
-    # REUSE_RETRIEVAL_BUDGET（≥1，永不为 0）——reuse 是假设不是承诺，模型确认
-    # 旧候选不适用（如换品类）时第一次补搜就直接放行执行，不用攒拒绝换逃生。预算内执行并在结果
-    # 尾部缀「搜完即收敛」的软线文案；越线硬挡。refine_backfill / phase_rollback 授权补搜时会把
-    # mode 改写为 augment，本分支即不再命中、自动恢复全树预算。
-    if get_retrieval_mode() == "reuse":
-        if count <= REUSE_RETRIEVAL_BUDGET:
-            context["converge_note"] = reuse_backfill_note(count, REUSE_RETRIEVAL_BUDGET)
-            logger.info("复用轮补搜（%d/%d），执行并缀收敛提示", count, REUSE_RETRIEVAL_BUDGET)
-            return context
-        raise HookRejectSignal(reuse_retrieval_exhausted(count, REUSE_RETRIEVAL_BUDGET), raw=True)
 
     if count <= cap:
         return None

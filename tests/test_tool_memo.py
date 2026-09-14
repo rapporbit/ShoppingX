@@ -1,4 +1,4 @@
-"""同参数重复调用回放（tool_memo）+ 阶段转移通告补边（picks_ready / reuse 跳转 / tasks 提示）。
+"""同参数重复调用回放（tool_memo）+ 阶段转移通告补边（picks_ready / tasks 提示）。
 
 对应延迟审计第三轮的三处残留浪费：静默转移让模型撞阶段哨兵白耗一轮、同参数重复检索真执行、
 无比价诉求的轮次照跑 price_compare / shipping_calc。
@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from app.api.context import set_retrieval_mode, set_session_tasks
+from app.api.context import set_session_tasks
 from app.harness.hooks.progress import append_transition_notice
 from app.harness.hooks.repetition import record_tool_result, replay_duplicate_call
 from app.harness.middleware import HookRejectSignal
@@ -120,24 +120,6 @@ class TestTransitionNotices:
         result = await self._notice(machine, ctx)
         assert "price_compare" in result  # 点名别再调
         assert "shopping_summary" in result  # 并指路收尾
-
-    async def test_reuse_skip_rides_planner_result(self, tmp_path: Path) -> None:
-        with thread_scope("t-notice-reuse", tmp_path):
-            set_retrieval_mode("reuse")
-            machine = PhaseStateMachine()  # PLANNING：planner 刚返回、转移尚未发生
-            ctx = {"tool_name": "planner"}
-            result = await self._notice(machine, ctx)
-            assert "复用上一轮候选" in result and "item_picker" in result
-
-    async def test_thin_reuse_picks_redirects_to_research(self, tmp_path: Path) -> None:
-        """薄复用（<3 件）不发「去收尾」，改指路「重新检索」——refine_backfill 马上退阶段。"""
-        with thread_scope("t-notice-thin", tmp_path):
-            set_retrieval_mode("reuse")
-            machine = PhaseStateMachine(initial=Phase.COMPARING)
-            ctx = {"tool_name": "item_picker", "call_picks": 1}
-            result = await self._notice(machine, ctx)
-            assert "[阶段回退]" in result and "重新检索" in result
-            assert "shopping_summary" not in result
 
     async def test_tasks_hint_when_no_price_demand(self, tmp_path: Path) -> None:
         """planner 判定无比价 / 到手价诉求 → 收线通告附带「无需 price_compare」动机提示。"""

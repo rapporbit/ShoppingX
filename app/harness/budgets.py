@@ -25,12 +25,6 @@ RETRIEVAL_TOOLS = frozenset({"item_search", "web_search"})
 # 一棵 fork 树（一次 run_agent）的商品检索总量上限。
 TREE_RETRIEVAL_BUDGET = env_int("RETRIEVAL_BUDGET", 8)
 
-# 复用轮（planner 判 retrieval=reuse）的全树检索小预算：「不重新检索」是经济约束而非硬禁令，
-# 理由见 docs/decisions/0001-阶段白名单降级为遥测.md。``max(1, ...)`` 钉死「永不为 0」——
-# 配 0 等于把预算制改回禁令制，死锁风险立刻回归。refine_backfill / phase_rollback 把 mode
-# 改写为 augment 后自动恢复全树预算（见 tool_gates.charge_retrieval）。
-REUSE_RETRIEVAL_BUDGET = max(1, env_int("REUSE_RETRIEVAL_BUDGET", 1))
-
 # 无 session 作用域（单测 / 无树）时的 per-instance 回退上限。
 DEFAULT_RETRIEVAL_CAP = 6
 
