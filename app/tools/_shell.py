@@ -174,6 +174,13 @@ def _unwrap(out: Any) -> Any:
 def _to_text(out: Any) -> str:
     """实现函数的返回值 → 给模型看的文本。``*Output`` 一律 JSON，保持结构化契约。"""
     if isinstance(out, BaseModel):
+        # 定义了紧凑投影（``__str__``，如 item_search / item_picker / price_compare / shipping_calc）
+        # 的 Output 走投影：那是给模型看的形态（丢 url / image_url / 未填充的 null 字段、渲染收敛）。
+        # 迁 AgentScope 后这里曾一律 model_dump_json，把这些投影全变成了死代码——item_search 一条
+        # 结果 12k 字符里近半是 url / null（round3 刀 5 实测），且 harness 的 schema 断言本就按
+        # 「投影可裁剪」来验（validation._restore_render_projection）。没定义投影的照旧全量 JSON。
+        if type(out).__str__ is not BaseModel.__str__:
+            return str(out)
         return out.model_dump_json()
     if isinstance(out, str):
         return out

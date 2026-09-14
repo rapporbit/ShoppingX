@@ -86,14 +86,8 @@ async def shipping_calc(
     dest_country: str = "",
     candidates: Annotated[list[ItemCandidate] | None, InjectedToolArg] = None,
 ) -> ShippingCalcOutput:
-    """估算每件候选商品的到手价（货价 + 国际运费 + 关税）。
-
-    何时调用：**通常不需要**——price_compare 已一步算好到手价（landed_usd）。仅当手里的候选
-    缺到手价（如未经 price_compare、或需要换收货国重算）时才单独调本工具。
-    参数：
-      - item_ids：要算到手价的候选 **item_id 列表**（通常是 price_compare 之后的那批 id）。只传 id
-        即可——工具自动按 id 从会话登记表捞回全量候选（已含 price_usd），**不要**重吐候选对象。
-      - dest_country：收货国 ISO 码。**通常不必传**——系统已按用户原话 / 会话状态确定，留空即可。
+    """按 item_id 补算到手价（货价+运费+关税）。仅候选缺 landed_usd 或要换收货国重算时调。
+    参数 item_ids；dest_country 通常不传（系统已判）。
     """
     # 基准币钉死 USD（同 price_compare）：输入 price_usd、输出 *_usd 全是 USD 语义，
     # base 若可被模型改写只会造出字段名与量纲不符的脏数据。

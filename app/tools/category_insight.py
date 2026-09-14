@@ -333,19 +333,9 @@ def _insight_result(out: CategoryInsightOutput) -> str:
 async def category_insight(
     category: str, depth: Literal["quick", "deep"] = "quick"
 ) -> CategoryInsightOutput:
-    """查一个品类的典型爆款 / 评分大盘 / 价格档位 / 选购维度（RAG 品类知识库）。
-
-    返回里的 ``attribute_schema`` 给出这个品类「该看哪些维度、每维有哪些取值」（材质 / 特性 /
-    闭合方式…），用来把用户的软硬约束（如「不要塑料的」「要抗造」）落到具体属性上。
-
-    何时调用：检索或精挑前想先了解某品类的行情、典型属性与选购维度时。
-    返回的 ``matched_category`` / ``resolution_confidence`` 标明实际定位到的品类与置信度；
-    matched_category 为空或置信度很低说明知识库没接住这个品类，可转 web_search 补充。
-    ``data_note`` 非空 = 库内该品类数据薄，返回的大盘参考价值有限——评价类结论请以
-    web_search 口碑佐证，不要只拿它背书。
-    参数：
-      - category：品类名 / 关键词（如「luggage」「running shoes」「旅行收纳」）。
-      - depth：quick（默认，不算属性分布）/ deep（额外算评分分布，更适合 fork）。
+    """查品类的库内爆款/评分大盘/价位档/选购维度（RAG 知识库）；开局已按 plan 品类预取一次。
+    参数 category、depth（quick/deep）。matched_category 空或置信度低 = 库没接住；
+    data_note 非空 = 库内数据薄，评价类结论以 web_search 佐证。
     """
     category = normalize_category(category)
     await monitor.report_tool_start("category_insight", category=category, depth=depth)
