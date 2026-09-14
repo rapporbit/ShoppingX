@@ -228,13 +228,13 @@ class UsageLedger(Base):
 class Message(Base):
     """一条对话消息（``user`` 或 ``assistant``）——**会话正文的真源**，原先落 ``turns.json``。
 
-    **为什么它必须进库，而同目录的 pt.json / candidates.json / history.json 不必。** ``threads``
-    表已经把「这段会话归谁、叫什么」搬进库了，正文却还躺在 ``output/<thread_id>/`` 的文件里——
-    库与文件系统的生命周期一旦不一致（换机器、卷没挂上、多副本各写各的盘），侧栏就会列出一段
-    点进去空白的会话：**元信息说它存在，正文说它不存在**。这不是「丢了点日志」，是用户回来发现
-    自己聊过的东西没了。而那三份是过程产物：pt.json 是带 TTL 的会话缓存（过期就该当空开局）、
-    candidates.json 随会话清理（商品真源在 Qdrant，要长留的已在 :class:`Favorite` 存了快照）、
-    history.json 是排障用的完整轨迹（项目刻意不挂 checkpointer，没有「从中途恢复」的语义要它）。
+    **为什么它必须进库，而同目录的 session.json 不必。** ``threads`` 表已经把「这段会话归谁、
+    叫什么」搬进库了，正文却还躺在 ``output/<thread_id>/`` 的文件里——库与文件系统的生命周期
+    一旦不一致（换机器、卷没挂上、多副本各写各的盘），侧栏就会列出一段点进去空白的会话：
+    **元信息说它存在，正文说它不存在**。这不是「丢了点日志」，是用户回来发现自己聊过的东西
+    没了。而 session.json（``AgentState`` 整体：轨迹、框架摘要、``middle_context`` 里的会话级
+    偏好 P_t）是运行时的续聊状态，丢了就当空开局，用户看侧栏时并不指望它。候选池只在轮内内存
+    （商品真源在 Qdrant，要长留的已在 :class:`Favorite` 存了快照）。
     **判据是「用户回来还指望看到它吗」**，不是「它是不是状态」。
 
     ``seq`` 而非只靠 ``created_at`` 定序：同一轮的 user / assistant 两条在同一次写入里产生，
@@ -340,8 +340,9 @@ class OrderRow(Base):
 class OrderLineRow(Base):
     """订单行：下单那一刻的商品**快照**。
 
-    存标题 / 单价 / 到手价的值，而不是指向候选池的引用——候选池是会话级的（``output/<thread_id>/
-    candidates.json``），会话一过就没了，而订单要能在三个月后查出来还显示得出买了什么。
+    存标题 / 单价 / 到手价的值，而不是指向候选池的引用——候选池只在轮内内存
+    （``app/tools/_candidates.py``，跨轮按 item_id 从 Qdrant 重取），一轮一过就没了，而订单要能在
+    三个月后查出来还显示得出买了什么。
     """
 
     __tablename__ = "order_lines"
