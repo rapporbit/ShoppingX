@@ -1,32 +1,40 @@
-/* ShoppingX 前端 —— Accio (accio.com) 风格：浅色、窄图标侧栏、居中对话流、悬浮输入框、
-   薄荷绿点缀、慷慨圆角。设计语言对齐 Accio 截图，配色集中在这组变量里，便于统一调。 */
+/* ShoppingX 前端 —— 布局借鉴参考项目 Globex（窄侧栏 + 居中对话流 + 悬浮输入框），
+   视觉语言是自己的：克制的单色系。
+   规则：全站没有饱和色，只有暖白 / 石灰 / 炭黑四个明度档 + 一处暖灰做「选中 / 用户气泡」；
+   主按钮是炭黑不是彩色；线用发丝线，阴影几乎不用，圆角收到 6~8px；标题衬线加字距。
+   状态色（等待 / 出错）也压成沙色 / 砖红，只求能分辨、不求醒目。配色全在这组变量里。 */
 
 :root {
-  --bg: #ffffff;
-  --rail: #f7f7f8;
-  --surface: #ffffff;
-  --surface-soft: #f5f6f7;
-  --surface-softer: #fafafb;
-  --border: #ececee;
-  --border-strong: #e1e1e4;
+  --bg: #f6f5f2; /* 暖白底 */
+  --rail: #efeeea; /* 侧栏：比底深一档的石灰，不带色相 */
+  --surface: #fdfcfa;
+  --surface-soft: #f1f0ec;
+  --surface-softer: #f7f6f3;
+  --border: #e5e3de; /* 发丝线 */
+  --border-strong: #d3d0c9;
 
-  --text: #1c1d1f;
-  --text-2: #4b4d52;
-  --muted: #8a8d93;
-  --faint: #b6b9bf;
+  --text: #1a1a19; /* 炭黑 */
+  --text-2: #55534f;
+  --muted: #8c8a84;
+  --faint: #b8b5ae;
 
-  --accent: #14c08a; /* 薄荷绿主色 */
-  --accent-strong: #0fae7c;
-  --accent-soft: #e8f8f0; /* 用户气泡 / 选中胶囊底 */
-  --accent-softer: #f1fbf6;
-  --user-bubble: #e7f7ee;
+  --accent: #1f1f1e; /* 主色 = 炭黑：主按钮 / 选中项 / 状态点 */
+  --accent-strong: #000000;
+  --accent-soft: #e9e6e0; /* 暖灰：用户气泡 / 选中胶囊底 */
+  --accent-softer: #f1efea;
+  --user-bubble: #e9e6e0;
+  --warm: #a89c8a; /* 唯一带一点温度的灰：焦点环 / 次要强调 */
 
-  --danger: #e5533c;
-  --danger-soft: #fdeceA;
+  --danger: #9e4a3c; /* 砖红，压暗 */
+  --danger-soft: #f3e9e6;
 
-  --shadow-sm: 0 1px 2px rgba(20, 22, 26, 0.05);
-  --shadow-md: 0 6px 24px rgba(20, 22, 26, 0.08);
-  --shadow-lg: 0 12px 40px rgba(20, 22, 26, 0.12);
+  --serif: "Iowan Old Style", "Baskerville", "Songti SC", "STSong", "Noto Serif SC", serif;
+  --sans: "Avenir Next", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", sans-serif;
+
+  --shadow-sm: none;
+  --shadow-md: 0 1px 0 rgba(26, 26, 25, 0.04), 0 8px 24px rgba(26, 26, 25, 0.05);
+  --shadow-lg: 0 12px 32px rgba(26, 26, 25, 0.08);
 
   --sidebar-w: 264px;
   --content-w: 860px;
@@ -46,10 +54,9 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "PingFang SC",
-    "Microsoft YaHei", Roboto, sans-serif;
+  font-family: var(--sans);
   font-size: 14px;
-  line-height: 1.5;
+  line-height: 1.55;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -83,7 +90,7 @@ button:disabled {
   border: none;
   background: transparent;
   color: var(--text-2);
-  border-radius: 9px;
+  border-radius: 6px;
   flex-shrink: 0;
 }
 .nav-toggle:hover {
@@ -126,12 +133,14 @@ button:disabled {
   place-items: center;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: 6px;
 }
 .sidebar-brand {
-  font-weight: 650;
-  font-size: 15px;
-  letter-spacing: 0.2px;
+  font-family: var(--serif);
+  font-weight: 600;
+  font-size: 18px;
+  letter-spacing: 0.02em;
+  color: var(--accent);
 }
 
 /* 顶部「新建对话」 */
@@ -142,7 +151,7 @@ button:disabled {
   width: 100%;
   padding: 9px 12px;
   border: 1px solid var(--border-strong);
-  border-radius: 10px;
+  border-radius: 6px;
   background: var(--surface);
   color: var(--text);
   font-weight: 550;
@@ -165,9 +174,9 @@ button:disabled {
   overflow-y: auto;
 }
 .history-label {
-  font-size: 11.5px;
-  font-weight: 600;
-  letter-spacing: 0.4px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
   color: var(--muted);
   padding: 6px 8px 4px;
   text-transform: uppercase;
@@ -190,7 +199,7 @@ button:disabled {
   align-items: center;
   gap: 6px;
   padding: 8px 10px;
-  border-radius: 9px;
+  border-radius: 6px;
   color: var(--text-2);
   cursor: pointer;
   transition: background 0.13s, color 0.13s;
@@ -239,7 +248,7 @@ button:disabled {
   width: 100%;
   padding: 9px 12px;
   border: none;
-  border-radius: 10px;
+  border-radius: 6px;
   background: transparent;
   color: var(--text-2);
   font-weight: 550;
@@ -274,8 +283,10 @@ button:disabled {
   min-width: 0;
 }
 .title-text {
-  font-size: 15px;
+  font-family: var(--serif);
+  font-size: 16px;
   font-weight: 500;
+  letter-spacing: 0.02em;
   color: var(--text);
   white-space: nowrap;
   overflow: hidden;
@@ -292,14 +303,14 @@ button:disabled {
 .status-dot.status-running,
 .status-dot.status-connecting {
   background: var(--accent);
-  box-shadow: 0 0 0 0 rgba(20, 192, 138, 0.5);
+  box-shadow: 0 0 0 0 rgba(31, 31, 30, 0.5);
   animation: pulse 1.6s infinite;
 }
 .status-dot.status-done {
   background: var(--accent);
 }
 .status-dot.status-waiting {
-  background: #f59e0b;
+  background: #b08d5b;
   box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.5);
   animation: pulse 1.6s infinite;
 }
@@ -311,13 +322,13 @@ button:disabled {
 }
 @keyframes pulse {
   0% {
-    box-shadow: 0 0 0 0 rgba(20, 192, 138, 0.45);
+    box-shadow: 0 0 0 0 rgba(31, 31, 30, 0.45);
   }
   70% {
-    box-shadow: 0 0 0 6px rgba(20, 192, 138, 0);
+    box-shadow: 0 0 0 6px rgba(31, 31, 30, 0);
   }
   100% {
-    box-shadow: 0 0 0 0 rgba(20, 192, 138, 0);
+    box-shadow: 0 0 0 0 rgba(31, 31, 30, 0);
   }
 }
 
@@ -336,7 +347,7 @@ button:disabled {
   background: transparent;
   color: var(--text-2);
   padding: 7px 10px;
-  border-radius: 9px;
+  border-radius: 6px;
   font-size: 13.5px;
   transition: background 0.15s;
 }
@@ -384,7 +395,7 @@ button:disabled {
 .welcome-mark {
   width: 56px;
   height: 56px;
-  border-radius: 18px;
+  border-radius: 6px;
   background: var(--accent-soft);
   color: var(--accent-strong);
   display: grid;
@@ -392,8 +403,10 @@ button:disabled {
   margin-bottom: 18px;
 }
 .welcome h1 {
-  font-size: 26px;
-  font-weight: 600;
+  font-family: var(--serif);
+  font-size: 30px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
   margin: 0 0 10px;
 }
 .welcome p {
@@ -413,7 +426,7 @@ button:disabled {
   text-align: left;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 6px;
   padding: 13px 16px;
   color: var(--text-2);
   font-size: 13.5px;
@@ -447,7 +460,7 @@ button:disabled {
 .bubble {
   max-width: 80%;
   padding: 11px 16px;
-  border-radius: 18px;
+  border-radius: 6px;
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
@@ -738,7 +751,7 @@ button:disabled {
   padding: 6px 10px;
   margin: 4px 0;
   border: 1px solid var(--accent);
-  border-radius: 10px;
+  border-radius: 6px;
   background: var(--accent-softer);
   font-size: 12.5px;
   color: var(--text-2);
@@ -767,7 +780,7 @@ button:disabled {
   padding: 6px 10px;
   margin: 4px 0;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 6px;
   background: var(--surface-soft);
   font-size: 12.5px;
   color: var(--text-2);
@@ -851,7 +864,7 @@ button:disabled {
 /* ============================ 横幅 ============================ */
 .error-banner,
 .info-banner {
-  border-radius: 12px;
+  border-radius: 6px;
   padding: 11px 14px;
   font-size: 13.5px;
   display: flex;
@@ -947,7 +960,7 @@ button:disabled {
   text-decoration: none;
   border: 1px solid var(--border);
   padding: 6px 11px;
-  border-radius: 9px;
+  border-radius: 6px;
   cursor: pointer;
   transition: border-color 0.15s, color 0.15s;
 }
@@ -1005,7 +1018,7 @@ button:disabled {
   padding: 10px 14px;
   background: var(--surface);
   border: 1px solid var(--border-strong);
-  border-radius: 10px;
+  border-radius: 6px;
   font-size: 13px;
   color: var(--text-2);
 }
@@ -1065,7 +1078,7 @@ button:disabled {
 .product-card {
   position: relative; /* 卡上的 ✕/♡ 与「已排除」角标都靠它定位（不可点的 <article> 也要） */
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: 6px;
   overflow: hidden;
   background: var(--surface);
   transition: box-shadow 0.18s, transform 0.18s, border-color 0.18s, opacity 0.18s;
@@ -1153,7 +1166,7 @@ button:disabled {
   border-color: var(--muted);
 }
 .card-fav.on {
-  color: #e5484d;
+  color: var(--danger);
   border-color: #f3c3c5;
   background: #fff;
 }
@@ -1322,23 +1335,23 @@ button:disabled {
 }
 .composer-box:focus-within {
   border-color: var(--accent);
-  box-shadow: 0 0 0 4px rgba(20, 192, 138, 0.1), var(--shadow-md);
+  box-shadow: 0 0 0 4px rgba(31, 31, 30, 0.1), var(--shadow-md);
 }
 .composer-box.is-running {
   border-color: var(--accent-soft);
-  box-shadow: 0 0 0 4px rgba(20, 192, 138, 0.08), var(--shadow-md);
+  box-shadow: 0 0 0 4px rgba(31, 31, 30, 0.08), var(--shadow-md);
 }
 .composer-box.is-waiting {
-  border-color: #f59e0b;
+  border-color: #b08d5b;
   box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.12), var(--shadow-md);
 }
 .send-btn.is-clarify.ready {
-  background: linear-gradient(135deg, #f59e0b, #d97706);
+  background: linear-gradient(135deg, #b08d5b, #9a7a4e);
 }
 
 /* ask_user 的问题：一条 assistant 消息（复用 .final），选项挂在下面 */
 .clarify-msg {
-  border-left: 3px solid #f59e0b;
+  border-left: 3px solid #b08d5b;
 }
 .clarify-msg.is-done {
   opacity: 0.72;
@@ -1360,9 +1373,9 @@ button:disabled {
 .clarify-card {
   margin-top: 10px;
   padding: 14px 16px;
-  background: #fffdf8;
+  background: #faf8f4;
   border: 1px solid #fde1a8;
-  border-radius: 12px;
+  border-radius: 6px;
 }
 .clarify-card.is-done {
   opacity: 0.72;
@@ -1381,7 +1394,7 @@ button:disabled {
   height: 20px;
   flex-shrink: 0;
   border-radius: 50%;
-  background: #f59e0b;
+  background: #b08d5b;
   color: #fff;
   font-size: 0.75rem;
   font-weight: 700;
@@ -1403,8 +1416,8 @@ button:disabled {
   gap: 10px;
   padding: 9px 12px;
   background: #fff;
-  border: 1px solid #eadfce;
-  border-radius: 9px;
+  border: 1px solid #e3ddd0;
+  border-radius: 6px;
   cursor: pointer;
   font-size: 0.88rem;
   color: var(--text);
@@ -1412,7 +1425,7 @@ button:disabled {
   transition: border-color 0.12s, background 0.12s;
 }
 .clarify-check:hover:not(:disabled) {
-  border-color: #f6c667;
+  border-color: #d9c59e;
 }
 .clarify-check.on {
   border-color: var(--accent);
@@ -1444,8 +1457,8 @@ button:disabled {
   width: 100%;
   margin-top: 10px;
   padding: 9px 12px;
-  border: 1px solid #eadfce;
-  border-radius: 9px;
+  border: 1px solid #e3ddd0;
+  border-radius: 6px;
   font: inherit;
   font-size: 0.85rem;
   outline: none;
@@ -1453,7 +1466,7 @@ button:disabled {
   color: var(--text);
 }
 .clarify-extra:focus {
-  border-color: #f6c667;
+  border-color: #d9c59e;
 }
 .clarify-actions {
   margin-top: 12px;
@@ -1463,8 +1476,8 @@ button:disabled {
 .clarify-confirm {
   padding: 8px 18px;
   border: none;
-  border-radius: 9px;
-  background: linear-gradient(135deg, #f59e0b, #d97706);
+  border-radius: 6px;
+  background: linear-gradient(135deg, #b08d5b, #9a7a4e);
   color: #fff;
   font-size: 0.86rem;
   font-weight: 600;
@@ -1483,8 +1496,8 @@ button:disabled {
 .clarify-option {
   padding: 9px 16px;
   background: #fff;
-  border: 1px solid #eadfce;
-  border-radius: 9px;
+  border: 1px solid #e3ddd0;
+  border-radius: 6px;
   cursor: pointer;
   font-size: 0.88rem;
   color: var(--text);
@@ -1525,7 +1538,7 @@ button:disabled {
   height: 32px;
   padding: 0 12px 0 10px;
   border: 1px solid var(--border-strong);
-  border-radius: 16px;
+  border-radius: 6px;
   background: transparent;
   color: #6b6f76;
   display: inline-flex;
@@ -1544,7 +1557,7 @@ button:disabled {
 .attach-btn.has-images {
   border-color: var(--accent);
   color: var(--accent);
-  background: rgba(20, 192, 138, 0.08);
+  background: rgba(31, 31, 30, 0.08);
 }
 .attach-btn:disabled {
   opacity: 0.4;
@@ -1553,7 +1566,7 @@ button:disabled {
 .composer-box.is-dragging {
   border-color: var(--accent);
   border-style: dashed;
-  background: rgba(20, 192, 138, 0.04);
+  background: rgba(31, 31, 30, 0.04);
 }
 .composer-drop-hint {
   display: flex;
@@ -1581,7 +1594,7 @@ button:disabled {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  border-radius: 8px;
+  border-radius: 6px;
   border: 1px solid #e2e3e6;
 }
 .composer-image-remove {
@@ -1700,7 +1713,7 @@ button:disabled {
   height: 32px;
   border: none;
   background: transparent;
-  border-radius: 9px;
+  border-radius: 6px;
   color: var(--muted);
   display: grid;
   place-items: center;
@@ -1765,7 +1778,7 @@ button:disabled {
   gap: 10px;
   padding: 10px 12px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 6px;
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s;
 }
@@ -1798,7 +1811,7 @@ button:disabled {
   gap: 10px;
   padding: 12px;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 6px;
   background: var(--surface-softer);
 }
 .pref-item.pref-dislike {
@@ -1847,7 +1860,7 @@ button:disabled {
 .conversation::-webkit-scrollbar-thumb,
 .drawer-list::-webkit-scrollbar-thumb {
   background: #e2e2e5;
-  border-radius: 8px;
+  border-radius: 6px;
 }
 .conversation::-webkit-scrollbar-thumb:hover {
   background: #d2d2d6;
@@ -1915,7 +1928,7 @@ button:disabled {
   color: var(--text);
   background: var(--surface);
   border: 1px solid var(--border-strong);
-  border-radius: 9px;
+  border-radius: 6px;
   outline: none;
 }
 .profile-row select:focus,
@@ -1935,7 +1948,7 @@ button:disabled {
   color: #fff;
   background: var(--accent);
   border: none;
-  border-radius: 9px;
+  border-radius: 6px;
   cursor: pointer;
 }
 .pref-save:disabled,
@@ -1991,7 +2004,7 @@ button:disabled {
   padding: 8px 12px;
   background: var(--accent-softer);
   border: 1px solid var(--accent-soft);
-  border-radius: 10px;
+  border-radius: 6px;
   font-size: 12px;
   color: var(--text-2);
 }
@@ -2029,14 +2042,14 @@ button:disabled {
    与「偏好管理」共用 .drawer 外壳，但力度差一个量级：偏好会注入 prompt、显式改变 Agent 行为；
    收藏不进 prompt，只经行为亲和给同类属性弱加分。fav-note 就是把这条边界说给用户听。 */
 .fav-glyph {
-  color: #e5484d;
+  color: var(--danger);
   font-size: 15px;
   line-height: 1;
 }
 .fav-note {
   margin: 0 20px 14px;
   padding: 9px 12px;
-  border-radius: 10px;
+  border-radius: 6px;
   background: var(--surface-2, #fafafa);
   border: 1px solid var(--border);
   color: var(--muted);
@@ -2057,7 +2070,7 @@ button:disabled {
   gap: 12px;
   padding: 10px;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 6px;
   background: var(--surface);
 }
 .fav-row:hover {
@@ -2068,7 +2081,7 @@ button:disabled {
   height: 52px;
   flex: none;
   object-fit: cover;
-  border-radius: 8px;
+  border-radius: 6px;
   background: var(--surface-2, #fafafa);
 }
 .fav-thumb.placeholder {
@@ -2120,7 +2133,7 @@ button:disabled {
   justify-content: center;
   gap: 5px;
   padding: 6px 10px;
-  border-radius: 8px;
+  border-radius: 6px;
   border: 1px solid var(--border);
   background: var(--surface-2, #fafafa);
   color: var(--muted);
@@ -2149,7 +2162,7 @@ button:disabled {
   margin: 0 20px 14px;
   padding: 12px;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 6px;
   background: var(--surface-2, #fafafa);
 }
 .similar-source-thumb {
@@ -2157,7 +2170,7 @@ button:disabled {
   width: 64px;
   height: 64px;
   object-fit: contain;
-  border-radius: 8px;
+  border-radius: 6px;
   background: #fff;
 }
 .similar-source-main {
@@ -2213,7 +2226,7 @@ button:disabled {
   flex-direction: column;
   height: 100%;
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 6px;
   background: var(--surface);
   overflow: hidden;
   transition: all 0.15s ease;
@@ -2313,7 +2326,7 @@ button:disabled {
   margin-bottom: 8px;
   background: var(--surface);
   border: 1px solid var(--accent-soft);
-  border-radius: 12px;
+  border-radius: 6px;
 }
 .pref-editor-content {
   width: 100%;
@@ -2321,7 +2334,7 @@ button:disabled {
   font-size: 13px;
   color: var(--text);
   border: 1px solid var(--border-strong);
-  border-radius: 9px;
+  border-radius: 6px;
   outline: none;
 }
 .pref-editor-content:focus,
@@ -2344,7 +2357,7 @@ button:disabled {
   color: var(--text);
   background: var(--surface);
   border: 1px solid var(--border-strong);
-  border-radius: 8px;
+  border-radius: 6px;
   outline: none;
 }
 .pref-editor-label {
@@ -2368,7 +2381,7 @@ button:disabled {
   padding: 8px 10px;
   background: var(--surface-soft);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 6px;
   cursor: pointer;
 }
 .pref-editor-block.on {
@@ -2409,7 +2422,7 @@ button:disabled {
   color: var(--text-2);
   background: var(--surface-soft);
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: 6px;
   cursor: pointer;
 }
 .pref-manual {
@@ -2524,7 +2537,7 @@ button:disabled {
   padding: 32px 28px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: 6px;
   box-shadow: 0 8px 32px rgb(0 0 0 / 6%);
 }
 
@@ -2548,7 +2561,7 @@ button:disabled {
   color: var(--text);
   background: var(--surface-soft);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 6px;
   outline: none;
 }
 
@@ -2565,7 +2578,7 @@ button:disabled {
   color: #fff;
   background: var(--accent);
   border: none;
-  border-radius: 10px;
+  border-radius: 6px;
   cursor: pointer;
 }
 
@@ -2596,7 +2609,7 @@ button:disabled {
   font-size: 13px;
   color: var(--danger);
   background: var(--danger-soft);
-  border-radius: 8px;
+  border-radius: 6px;
 }
 
 /* ── credit 余额（M18）──────────────────────────────────────────────────────
@@ -2638,10 +2651,10 @@ button:disabled {
   background: var(--accent);
 }
 .quota-low .quota-fill {
-  background: #f59e0b;
+  background: #b08d5b;
 }
 .quota-low .quota-text {
-  color: #b45309;
+  color: #8a6a3f;
 }
 .quota-empty .quota-fill {
   background: var(--danger);
@@ -2659,7 +2672,7 @@ button:disabled {
   padding: 8px 14px;
   background: var(--danger-soft);
   border: 1px solid #f6c3b8;
-  border-radius: 9px;
+  border-radius: 6px;
   font-size: 0.85rem;
   color: #9c2f1c;
   line-height: 1.5;
@@ -2756,10 +2769,11 @@ button:disabled {
 
 .landing-title {
   margin: 0 0 20px;
-  font-size: 44px;
-  font-weight: 680;
-  line-height: 1.25;
-  letter-spacing: -0.5px;
+  font-family: var(--serif);
+  font-size: 46px;
+  font-weight: 500;
+  line-height: 1.3;
+  letter-spacing: 0.03em;
   color: var(--text);
 }
 
@@ -2807,7 +2821,7 @@ button:disabled {
   padding: 24px;
   background: var(--surface-softer);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: 6px;
 }
 
 .landing-card h3 {
@@ -3162,7 +3176,7 @@ button:disabled {
 .query-image {
   padding: 0;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 6px;
   overflow: hidden;
   background: var(--surface);
   cursor: zoom-in;
@@ -3194,7 +3208,7 @@ button:disabled {
 .image-lightbox img {
   max-width: 100%;
   max-height: 100%;
-  border-radius: 12px;
+  border-radius: 6px;
   box-shadow: var(--shadow-lg);
 }
 
@@ -3233,7 +3247,7 @@ button:disabled {
 .admin-error,
 .admin-toast {
   font-size: 13px;
-  border-radius: 8px;
+  border-radius: 6px;
   padding: 8px 10px;
   margin: 0 0 12px;
 }
@@ -3272,7 +3286,7 @@ button:disabled {
 /* 单个参数卡。改动过的用左侧色条标出来——30 个参数里改了哪两个，扫一眼就得知道。 */
 .admin-field {
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 6px;
   padding: 10px 12px;
   margin-bottom: 10px;
   border-left: 3px solid transparent;
@@ -3404,7 +3418,7 @@ button:disabled {
   border: 1px solid var(--accent-strong);
   background: var(--accent);
   color: #fff;
-  border-radius: 8px;
+  border-radius: 6px;
   padding: 7px 14px;
   font-size: 13px;
   font-weight: 600;
@@ -3464,7 +3478,7 @@ button:disabled {
   padding: 14px 16px;
   border: 1px solid var(--border);
   border-left: 3px solid var(--border-strong);
-  border-radius: 10px;
+  border-radius: 6px;
   background: #fff;
 }
 .order-card-preview {
@@ -3495,8 +3509,8 @@ button:disabled {
   border-radius: 999px;
 }
 .order-badge-pending {
-  background: #fdf0d5;
-  color: #9a6a12;
+  background: #f3eee4;
+  color: #7a6240;
 }
 .order-badge-placed {
   background: var(--accent-soft);
@@ -3540,14 +3554,14 @@ button:disabled {
   color: var(--muted);
 }
 .order-hint {
-  color: #9a6a12;
+  color: #7a6240;
 }
 
 /* 订单抽屉里的一行（复用订单卡的内部类，外层给个卡片壳）。 */
 .order-row {
   padding: 12px 14px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 6px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -3602,7 +3616,7 @@ button:disabled {
   max-height: 220px;
   overflow: auto;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 6px;
   background: var(--surface, #fff);
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
 }
@@ -3646,7 +3660,7 @@ button:disabled {
   padding: 7px 10px;
   font-size: 13px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 6px;
   background: var(--surface, #fff);
   color: var(--text);
   font-family: inherit;
@@ -3687,7 +3701,7 @@ button:disabled {
   flex-direction: column;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 6px;
   box-shadow: var(--shadow-lg);
 }
 .modal-wide {
@@ -3752,7 +3766,7 @@ button:disabled {
 }
 .detail-media {
   aspect-ratio: 1;
-  border-radius: 12px;
+  border-radius: 6px;
   background: var(--surface-soft);
   display: flex;
   align-items: center;
@@ -3839,7 +3853,7 @@ button:disabled {
 .compare-thumb {
   width: 96px;
   height: 96px;
-  border-radius: 10px;
+  border-radius: 6px;
   background: var(--surface-soft);
   display: flex;
   align-items: center;
@@ -3881,10 +3895,10 @@ button:disabled {
 .compare-note {
   margin-top: 12px;
   font-size: 12px;
-  color: #9a6a12;
-  background: #fdf0d5;
+  color: #7a6240;
+  background: #f3eee4;
   padding: 8px 12px;
-  border-radius: 8px;
+  border-radius: 6px;
 }
 .compare-actions {
   display: flex;
@@ -3938,7 +3952,7 @@ button:disabled {
   margin-top: 12px;
 }
 .order-expiry {
-  color: #9a6a12;
+  color: #7a6240;
 }
 
 /* 下单意向表单 */
@@ -3957,7 +3971,7 @@ button:disabled {
 .intent-form input {
   padding: 9px 12px;
   border: 1px solid var(--border-strong);
-  border-radius: 8px;
+  border-radius: 6px;
   font-size: 14px;
   color: var(--text);
   background: var(--surface);
@@ -3971,7 +3985,7 @@ button:disabled {
   align-items: center;
   gap: 12px;
   padding: 10px 12px;
-  border-radius: 10px;
+  border-radius: 6px;
   background: var(--surface-soft);
   font-size: 13px;
 }
@@ -4029,7 +4043,7 @@ button:disabled {
   margin: 20px 0 8px;
   padding: 16px 18px;
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 6px;
   background: #fff;
 }
 .confirmations-heading {
@@ -4047,7 +4061,7 @@ button:disabled {
   font-size: 0.72rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: #b45309;
+  color: #8a6a3f;
   font-weight: 700;
 }
 .confirmation-list {
@@ -4059,12 +4073,12 @@ button:disabled {
   padding: 14px 16px;
   border: 1px solid var(--border);
   border-left: 3px solid var(--border-strong);
-  border-radius: 12px;
+  border-radius: 6px;
   background: #fff;
 }
 .confirmation-card.is-pending {
-  border-left-color: #f59e0b;
-  background: #fffdf8;
+  border-left-color: #b08d5b;
+  background: #faf8f4;
 }
 .confirmation-card.is-resolved {
   opacity: 0.92;
@@ -4086,7 +4100,7 @@ button:disabled {
   font-size: 0.76rem;
   font-weight: 600;
   background: #fef3c7;
-  color: #92400e;
+  color: #6e5432;
 }
 .confirmation-status.is-approved {
   background: #dcfce7;
@@ -4155,7 +4169,7 @@ button:disabled {
 .confirmation-cancel-reason {
   margin: 8px 0 0;
   font-size: 0.86rem;
-  color: #92400e;
+  color: #6e5432;
 }
 .confirmation-total {
   display: flex;
@@ -4195,7 +4209,7 @@ button:disabled {
 .confirmation-expiry {
   margin: 0;
   font-size: 0.8rem;
-  color: #92400e;
+  color: #6e5432;
 }
 .confirmation-expiry.is-expired {
   color: #64748b;
@@ -4218,7 +4232,7 @@ button:disabled {
 .confirmation-cancel-area textarea {
   padding: 8px 10px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 6px;
   font: inherit;
   resize: vertical;
 }
@@ -4226,7 +4240,7 @@ button:disabled {
   background: none;
   border: none;
   padding: 0;
-  color: #b45309;
+  color: #8a6a3f;
   font-size: 0.82rem;
   cursor: pointer;
   text-decoration: underline;
@@ -4234,7 +4248,7 @@ button:disabled {
 .confirmation-error {
   margin-bottom: 10px;
   padding: 10px 12px;
-  border-radius: 10px;
+  border-radius: 6px;
   background: #fef2f2;
   border: 1px solid #fecaca;
   color: #991b1b;
@@ -4247,7 +4261,7 @@ button:disabled {
 .intent-form textarea {
   padding: 9px 11px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 6px;
   font: inherit;
   resize: vertical;
 }
@@ -4275,6 +4289,6 @@ button:disabled {
   flex: 1 1 160px;
   padding: 6px 9px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 6px;
   font: inherit;
 }
