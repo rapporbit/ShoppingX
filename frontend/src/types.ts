@@ -245,3 +245,21 @@ export type AdminConfig = {
   groups: Record<string, { label: string; desc: string }>;
   params: AdminParam[];
 };
+
+// GET /api/skills/catalog 的一条：内置（skills/ 下的 SKILL.md）或个人（my/ 前缀）skill 的目录项。
+// 只有 name / description，正文按需由 Agent 的 Skill 工具读，或在用户 / 显式选中时由服务端注入。
+export type SkillCatalogItem = {
+  name: string;
+  description: string;
+  source: "builtin" | "user";
+};
+
+// 个人 Skill 全量（GET /api/skills，编辑面板用）。catalog_name 即 `my/<name>`，是发任务时要传的 skill 字段。
+export type UserSkill = {
+  name: string;
+  catalog_name: string;
+  description: string;
+  body: string;
+  version: number;
+  updated_at: string | null;
+};

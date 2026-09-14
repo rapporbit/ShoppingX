@@ -52,6 +52,8 @@ class IntentTask:
     user_id: str | None = None
     platforms: tuple[str, ...] = ()
     image_paths: tuple[str, ...] = ()
+    # 用户在输入框 ``/`` 显式选中的 skill 目录名（``my/xxx`` 或内置名）；空 = 没选。
+    skill: str = ""
     kind: RequestClass = "normal"
     enqueued_at: str = field(default_factory=_now_iso)
 
@@ -66,6 +68,7 @@ class IntentTask:
         user_id: str | None = None,
         platforms: Sequence[str] | None = None,
         image_paths: Sequence[str] | None = None,
+        skill: str | None = None,
     ) -> IntentTask:
         """按历史轮数判池并构造任务——分流阈值的唯一入口，调用方不要自己拿轮数比大小。"""
         return cls(
@@ -75,6 +78,7 @@ class IntentTask:
             user_id=user_id,
             platforms=tuple(platforms or ()),
             image_paths=tuple(image_paths or ()),
+            skill=skill or "",
             kind=classify_request(history_turns),
         )
 
@@ -86,6 +90,7 @@ class IntentTask:
             "user_id": self.user_id,
             "platforms": list(self.platforms),
             "image_paths": list(self.image_paths),
+            "skill": self.skill,
             "kind": self.kind,
             "enqueued_at": self.enqueued_at,
         }
@@ -105,6 +110,7 @@ class IntentTask:
             user_id=raw.get("user_id"),
             platforms=tuple(raw.get("platforms") or ()),
             image_paths=tuple(raw.get("image_paths") or ()),
+            skill=str(raw.get("skill") or ""),
             kind="heavy" if kind == "heavy" else "normal",
             enqueued_at=raw.get("enqueued_at", ""),
         )

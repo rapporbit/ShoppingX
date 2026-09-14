@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { SkillCatalogItem } from "../types";
 import { ArrowUp, ImageIcon, StopIcon } from "./icons";
+
+// 只有**独立词首**的 / 才算命令（行首或空格后）：https:// 、路径中间、「3/4」这类比例写法保持普通文字。
+// 只在光标停在命令末尾时弹菜单——命令必须是文本末尾这一段。
+const SLASH_RE = /(?:^|\s)\/([\p{L}\p{N}_./-]*)$/u;
 
 // 一次最多带几张参考图：与后端预跑上限（MAX_PREFILL_IMAGES）对齐——多传的图后端也不会看，
 // 与其让用户白传，不如在这里就挡住并说清楚。
@@ -13,7 +18,9 @@ type InputBarProps = {
   clarificationHasChoices?: boolean;
   // 非 null 即「不能再发**新任务**了」（目前唯一来源：今日 credit 用尽）。文案直接展示给用户。
   blockedReason?: string | null;
-  onSend: (text: string, files?: File[]) => void;
+  // 输入框 / 菜单的候选（内置 + 我的 skill 目录）。空表 = 不弹菜单。
+  skills?: SkillCatalogItem[];
+  onSend: (text: string, files?: File[], skill?: string) => void;
   onCancel: () => void;
   onClarify?: (text: string) => void;
 };
@@ -24,11 +31,15 @@ export function InputBar({
   clarificationQuestion,
   clarificationHasChoices,
   blockedReason,
+  skills = [],
   onSend,
   onCancel,
   onClarify,
 }: InputBarProps) {
   const [text, setText] = useState("");
+  // / 选中的 skill：以 chip 挂在输入框上方随本轮发出；发送 / 点 × 即清。
+  const [skill, setSkill] = useState<SkillCatalogItem | null>(null);
+  const [menuIndex, setMenuIndex] = useState(0);
   const [images, setImages] = useState<File[]>([]);
   const [imgError, setImgError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -39,6 +50,25 @@ export function InputBar({
   const blocked = !!blockedReason && !waiting;
   // 有图时允许空文字发送：「就照这张图找」是完整的意图，不该逼用户再补一句废话。
   const canSend = (text.trim().length > 0 || images.length > 0) && !running && !blocked;
+
+  // / 菜单：文本末尾是 /xxx 且不在澄清轮时弹出，按 name/description 子串过滤。
+  const slash = !waiting && !running ? text.match(SLASH_RE) : null;
+  const slashQuery = slash ? slash[1].toLowerCase() : null;
+  const menu = useMemo(() => {
+    if (slashQuery === null) return [];
+    return skills.filter(
+      (s) => s.name.toLowerCase().includes(slashQuery) || s.description.toLowerCase().includes(slashQuery),
+    );
+  }, [skills, slashQuery]);
+  const menuOpen = menu.length > 0;
+  const activeIndex = Math.min(menuIndex, Math.max(0, menu.length - 1));
+
+  // 选中：把 /xxx 这段从文本里摘掉，chip 顶上去。选内置 skill 也走同一条路（服务端按 name 找）。
+  const pickSkill = (item: SkillCatalogItem) => {
+    setSkill(item);
+    setText((t) => t.replace(SLASH_RE, (m) => (m.startsWith("/") ? "" : m[0])).trimEnd());
+    setMenuIndex(0);
+  };
 
   // 预览用的 object URL：**只在 images 变化时**重建。裸在渲染体里 map 会让每敲一个字符都
   // create 一批新 URL、revoke 一批旧 URL，并逼 <img> 重新解码一遍。卸载时 revoke，不然内存不回收。
@@ -68,11 +98,12 @@ export function InputBar({
       onClarify(text);
     } else {
       // 澄清轮不带图（那是在回答 Agent 的提问，不是发起新检索）。
-      onSend(text, images.length ? images : undefined);
+      onSend(text, images.length ? images : undefined, skill?.name);
     }
     setText("");
     setImages([]);
     setImgError(null);
+    setSkill(null);
   };
 
   const placeholder = blocked
@@ -152,6 +183,38 @@ export function InputBar({
           </div>
         )}
         {imgError && <div className="composer-image-error">{imgError}</div>}
+        {skill && (
+          <div className="composer-skill-chip" title={skill.description}>
+            <span className="skill-glyph">/</span>
+            <span className="composer-skill-name">{skill.name}</span>
+            <button className="composer-skill-remove" onClick={() => setSkill(null)} title="取消选用">
+              ×
+            </button>
+          </div>
+        )}
+        {menuOpen && (
+          <ul className="slash-menu" role="listbox">
+            {menu.map((item, i) => (
+              <li
+                key={item.name}
+                role="option"
+                aria-selected={i === activeIndex}
+                className={`slash-item ${i === activeIndex ? "active" : ""}`}
+                onMouseDown={(e) => {
+                  e.preventDefault(); // 别让 textarea 失焦
+                  pickSkill(item);
+                }}
+                onMouseEnter={() => setMenuIndex(i)}
+              >
+                <span className="slash-name">
+                  {item.name}
+                  {item.source === "user" && <em>我的</em>}
+                </span>
+                <span className="slash-desc">{item.description}</span>
+              </li>
+            ))}
+          </ul>
+        )}
         <textarea
           className="composer-input"
           placeholder={placeholder}
@@ -168,10 +231,24 @@ export function InputBar({
           }}
           onChange={(e) => {
             setText(e.target.value);
+            setMenuIndex(0);
             e.target.style.height = "auto";
             e.target.style.height = `${Math.min(e.target.scrollHeight, 160)}px`;
           }}
           onKeyDown={(e) => {
+            if (menuOpen) {
+              // 菜单开着时上下键选、Enter/Tab 选中、Esc 关（关 = 把 / 留在文本里当普通字符）。
+              if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                e.preventDefault();
+                setMenuIndex((i) => (i + (e.key === "ArrowDown" ? 1 : menu.length - 1)) % menu.length);
+                return;
+              }
+              if (e.key === "Enter" || e.key === "Tab") {
+                e.preventDefault();
+                pickSkill(menu[activeIndex]);
+                return;
+              }
+            }
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
               submit();
