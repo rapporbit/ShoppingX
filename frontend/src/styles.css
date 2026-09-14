@@ -241,26 +241,58 @@ button:disabled {
 }
 
 /* 底部「长期偏好」 */
-.sidebar-foot-btn {
+/* 主导航（收藏 / 订单 / Skill / 长期偏好）：紧跟「新建对话」之下、历史列表之上。
+   选中态只换底色不换字色——单色系里靠明度区分，不靠颜色。 */
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0 6px;
+  border-bottom: 1px solid var(--border);
+}
+.sidebar-nav-item {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   width: 100%;
-  padding: 9px 12px;
+  padding: 8px 10px;
   border: none;
   border-radius: 6px;
   background: transparent;
   color: var(--text-2);
-  font-weight: 550;
+  font-size: 13.5px;
+  text-align: left;
   transition: background 0.15s, color 0.15s;
 }
-.sidebar-foot-btn:hover {
-  background: #ececee;
+.sidebar-nav-item:hover {
+  background: var(--surface-soft);
   color: var(--text);
 }
-.sidebar-foot-btn.active {
+.sidebar-nav-item.active {
   background: var(--accent-soft);
-  color: var(--accent-strong);
+  color: var(--text);
+}
+.sidebar-nav-item svg {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.sidebar-nav-item.active svg,
+.sidebar-nav-item:hover svg {
+  color: var(--text);
+}
+.nav-glyph {
+  width: 17px;
+  text-align: center;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 14px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.nav-count {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 
 /* ============================ 顶栏 ============================ */
@@ -369,8 +401,52 @@ button:disabled {
   margin-left: 4px;
   transition: box-shadow 0.15s;
 }
-.avatar:hover {
+.avatar:hover,
+.avatar[aria-expanded="true"] {
   box-shadow: 0 0 0 3px var(--accent-soft);
+}
+/* 头像下拉：用户名 / 后台管理 / 退出 */
+.avatar-wrap {
+  position: relative;
+}
+.avatar-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 160px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: var(--shadow-md);
+  z-index: 30;
+}
+.avatar-menu-name {
+  padding: 6px 10px 8px;
+  font-size: 12px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.avatar-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 13.5px;
+  text-align: left;
+}
+.avatar-menu button:hover {
+  background: var(--surface-soft);
+  color: var(--text);
 }
 
 /* ============================ 对话区 ============================ */

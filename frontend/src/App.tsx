@@ -311,11 +311,26 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
           setNavOpen(false);
         }}
         onDeleteConversation={deleteConversation}
-        onOpenPreferences={() => {
-          setPrefsOpen(true);
+        onOpenPanel={(panel) => {
+          // 四个面板互斥：开一个就把别的关掉，免得右侧叠两层抽屉。
+          setFavsOpen(panel === "favorites");
+          setOrdersOpen(panel === "orders");
+          setSkillsOpen(panel === "skills");
+          setPrefsOpen(panel === "preferences");
           setNavOpen(false);
         }}
-        prefsOpen={prefsOpen}
+        activePanel={
+          favsOpen
+            ? "favorites"
+            : ordersOpen
+              ? "orders"
+              : skillsOpen
+                ? "skills"
+                : prefsOpen
+                  ? "preferences"
+                  : null
+        }
+        favoriteCount={favorites.length}
       />
       {/* 会话栏抽屉的遮罩：只在窄屏 + 抽屉展开时可点（CSS 里宽屏直接 display:none）。 */}
       <div
@@ -329,14 +344,9 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
           status={status}
           username={session.username}
           platformCount={platforms.length}
-          favoriteCount={favorites.length}
           quota={quota}
-          onOpenPreferences={() => setPrefsOpen(true)}
           onOpenSettings={() => setSettingsOpen(true)}
           onOpenAdmin={isAdmin ? () => setAdminOpen(true) : null}
-          onOpenFavorites={() => setFavsOpen(true)}
-          onOpenOrders={() => setOrdersOpen(true)}
-          onOpenSkills={() => setSkillsOpen(true)}
           onLogout={onLogout}
           onOpenNav={() => setNavOpen(true)}
         />
