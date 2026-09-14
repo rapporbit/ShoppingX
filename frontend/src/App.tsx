@@ -17,7 +17,7 @@ import { SkillsDrawer } from "./components/SkillsDrawer";
 import { FinalAnswer } from "./components/FinalAnswer";
 import { LearnedPrefsBar } from "./components/LearnedPrefsBar";
 import { PreferenceDrawer } from "./components/PreferenceDrawer";
-import { OrderCard } from "./components/OrderCard";
+import { ConfirmationCards } from "./components/ConfirmationCards";
 import { OrdersDrawer } from "./components/OrdersDrawer";
 import { ProductCards } from "./components/ProductCards";
 import { ProductDetail } from "./components/ProductDetail";
@@ -169,6 +169,13 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
     sessions,
     sessionConstraints,
     setSessionConstraints,
+    confirmations,
+    confirmationBusy,
+    confirmationError,
+    refreshConfirmations,
+    prepareOrder,
+    prepareCancel,
+    resolveConfirmation,
     startTask,
     cancelTask,
     sendClarification,
@@ -386,20 +393,17 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
                             <ActivityFeed events={turn.events} running={turnRunning} />
                           )}
 
-                          {/* ask_user 带了 options → 在展示区内嵌可点选卡片（不复用底部聊天框）。
-                              只对最新一轮且正等待回复时可交互；答完 options 即被清空、卡片消失。 */}
-                          {isLast &&
-                            turn.status === "waiting" &&
-                            turn.clarificationOptions &&
-                            turn.clarificationOptions.length > 0 && (
-                              <ClarificationChoices
-                                question={turn.clarificationQuestion ?? ""}
-                                options={turn.clarificationOptions}
-                                multiSelect={turn.clarificationMultiSelect ?? false}
-                                preselected={turn.clarificationPreselected}
-                                onSubmit={sendClarification}
-                              />
-                            )}
+                          {/* ask_user 的问题：渲染成一条普通 assistant 消息（不是横幅、不是另一种卡）；
+                              带 options 时选项挂在气泡下方。只对最新一轮且正等待回复时可交互。 */}
+                          {isLast && turn.status === "waiting" && turn.clarificationQuestion !== null && (
+                            <ClarificationChoices
+                              question={turn.clarificationQuestion}
+                              options={turn.clarificationOptions ?? []}
+                              multiSelect={turn.clarificationMultiSelect ?? false}
+                              preselected={turn.clarificationPreselected}
+                              onSubmit={sendClarification}
+                            />
+                          )}
 
                           {turn.errorMsg && (
                             <div className="error-banner">
@@ -450,18 +454,6 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
                             />
                           )}
 
-                          {/* 订单卡（交易域）：确认卡 / 下单成功 / 已取消。放在商品卡之后——
-                              先看到买的是什么，再看到这单的状态。 */}
-                          {/* 按钮只挂最后一轮：历史轮的确认卡早已被后面的对话覆盖，点它没有意义。 */}
-                          {turn.orderCard && (
-                            <OrderCard
-                              payload={turn.orderCard}
-                              busy={running || waiting || !isLast}
-                              onConfirm={isLast ? () => say("确认下单") : undefined}
-                              onDecline={isLast ? () => say("这张确认卡不要了，先不买。") : undefined}
-                            />
-                          )}
-
                           {/* 本轮结束后在右下角用小字标注用时 + token 消耗（后端权威口径，实时与回看一致）。
                               token 总量主显，hover 看输入/输出/成本拆分（全树记账，含 fork 子 Agent）。 */}
                           {/* 实验与自进化归属：提示词版本 / 注入策略 / 读过的 skill（后端随 task_result 下发，回看同源）。 */}
@@ -493,6 +485,18 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
                 })}
               </section>
             )}
+            {/* 交易确认卡（会话级）：一张卡从出现到决议可能跨好几轮，故不挂在某一轮下面，而是
+                跟在整段对话之后。决议只走 HTTP（点按钮），对话里说「确认」不算数。 */}
+            {turns.length > 0 && (
+              <ConfirmationCards
+                confirmations={confirmations}
+                busy={confirmationBusy}
+                error={confirmationError}
+                onResolve={(c, approved) => void resolveConfirmation(c, approved)}
+                onCancelOrder={(id, reason) => void prepareCancel(id, reason)}
+                onRefresh={() => void refreshConfirmations()}
+              />
+            )}
           </div>
         </main>
 
@@ -518,9 +522,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
               ? `今日 credit 已用完，${formatResetAt(quota.reset_at)} 重置后可继续。`
               : null
           }
-          clarificationQuestion={turns[turns.length - 1]?.clarificationQuestion ?? null}
-          // 带 options 的澄清由展示区那张可点选卡片接管——此时收起底部的回复横幅/输入框，
-          // 免得两处都能作答（用户点了卡片、又在这里打一句，语义打架）。
+          // 带 options 的澄清由消息下方的选项接管——此时收起底部输入框，免得两处都能作答。
           clarificationHasChoices={
             (turns[turns.length - 1]?.clarificationOptions?.length ?? 0) > 0
           }
@@ -549,7 +551,13 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
         onChanged={setFavorites}
       />
 
-      <OrdersDrawer open={ordersOpen} onClose={() => setOrdersOpen(false)} />
+      <OrdersDrawer
+        open={ordersOpen}
+        canCancel={threadId !== null}
+        busy={confirmationBusy}
+        onClose={() => setOrdersOpen(false)}
+        onCancel={prepareCancel}
+      />
 
       <SkillsDrawer
         userId={userId}
@@ -588,7 +596,13 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
         onAsk={say}
       />
 
-      <OrderIntentForm item={orderIntentOf} onClose={() => setOrderIntentOf(null)} onSubmit={say} />
+      <OrderIntentForm
+        item={orderIntentOf}
+        busy={confirmationBusy}
+        error={confirmationError}
+        onClose={() => setOrderIntentOf(null)}
+        onPrepare={prepareOrder}
+      />
 
       <AdminDrawer open={adminOpen} onClose={() => setAdminOpen(false)} />
 

@@ -162,7 +162,11 @@ class HarnessAgentAdapter(MiddlewareBase):
 
         # 终结直出（延迟治理 round2 刀 2）：shopping_summary 已产出面向用户的完整清单，此处再
         # 唤起模型只会把同一份清单复述一遍（实测 729 tok / 7.5s，还多一道转录出错风险）。
-        if s.guard.terminal_reached:
+        # **只认本轮真调过 shopping_summary 的情况**：``messages`` 是多轮上下文，续聊时里面还躺着
+        # 上一轮的清单——第二轮用 chat_fallback 收尾（比如「帮我下单第一款」缺地址）若也走这里，
+        # 会把上一轮的清单当成本轮回复原样复述（e2e 实测踩到）。called_tools 每轮新建，答得了
+        # 「本轮」。
+        if s.guard.terminal_reached and "shopping_summary" in s.called_tools:
             summary = terminal_summary(messages)
             if summary:
                 return ChatResponse(

@@ -5,17 +5,24 @@ import {
   describeStartError,
   fetchHistory,
   fetchInflight,
+  fetchConfirmations,
   fetchSessions,
+  prepareCancel as apiPrepareCancel,
+  prepareOrder as apiPrepareOrder,
+  resolveConfirmation as apiResolveConfirmation,
   startTaskRequest,
   uploadImage,
+  type ConfirmationResult,
   type SessionMeta as ApiSessionMeta,
 } from "../api";
 import { THREAD_KEY, wsToken } from "../auth";
+import { mergeConfirmations, readConfirmations } from "../lib/confirmations";
 import type {
+  PrepareOrderInput,
+  TradeConfirmation,
   AguiEvent,
   HistoryTurn,
   LearnedPref,
-  OrderCardPayload,
   ProductItem,
   SessionMeta,
   SessionSnapshot,
@@ -37,9 +44,6 @@ export type Turn = {
   images: string[];
   events: AguiEvent[];
   items: ProductItem[];
-  // 本轮的订单卡（交易域）。与 items 并列而不是塞进 items：一件商品和一张订单是两种东西，
-  // 混在一起渲染层就得靠字段有无去猜「这张卡该画成什么」。
-  orderCard: OrderCardPayload | null;
   finalAnswer: string | null;
   // 收尾文案的流式预览（summary_delta 事件的累计全文）：任务还在跑时逐字渲染，让用户在
   // task_result 之前 ~10s 就开始读清单。定稿到达（task_result）即清空，finalAnswer 接管。
@@ -130,7 +134,6 @@ function rebuildTurns(history: HistoryTurn[]): Turn[] {
         images: h.images ?? [],
         events: [],
         items: [],
-        orderCard: null,
         finalAnswer: null,
         streamingText: null,
         status: "done",
@@ -171,6 +174,11 @@ export function useShoppingXTask() {
   const [turns, setTurns] = useState<Turn[]>([]);
   // 会话级 P_t 约束快照（session_constraints 事件实时推；换会话清空，偏好面板打开时主动拉兜底）。
   const [sessionConstraints, setSessionConstraints] = useState<SessionSnapshot | null>(null);
+  // 交易确认卡（会话级，不挂在某一轮上）：一张卡从出现到决议可能跨好几轮对话，且刷新后要还在。
+  // 真源是 GET /api/threads/{id}/confirmations，事件流只是「有变化」的通知，两路都经 mergeConfirmations。
+  const [confirmations, setConfirmations] = useState<TradeConfirmation[]>([]);
+  const [confirmationBusy, setConfirmationBusy] = useState(false);
+  const [confirmationError, setConfirmationError] = useState<string | null>(null);
   const [status, setStatus] = useState<TaskStatus>("idle");
   // 侧栏历史会话列表（按 updatedAt 倒序）。首屏为空，挂载后从后端拉——它是登录用户的会话，
   // 不再是这台浏览器的会话。
@@ -257,12 +265,19 @@ export function useShoppingXTask() {
           // 回放里的 items_preview 与实时路径同样待遇：不进 events（不是思考行），而是还原成商品卡——
           // 刷新 / 切回时已推过的卡片跟着回来，不必干等收尾重发一遍。取最后一条（picker 可能跑多次）。
           const events = replayed.filter(
-            (e) => e.event !== "items_preview" && e.event !== "order_card",
+            (e) =>
+              e.event !== "items_preview" &&
+              e.event !== "confirmation_required" &&
+              e.event !== "confirmation_resolved",
           );
-          // 回放里的订单卡同样还原（取最后一条）：刷新页面后确认卡要还在——它是用户下一句
-          // 「确认」的唯一依据，消失了就等于逼他从头再说一遍买什么。
-          const lastOrder = [...replayed].reverse().find((e) => e.event === "order_card");
-          const orderCard = (lastOrder?.data as unknown as OrderCardPayload) ?? null;
+          // 回放里的确认卡并进会话级确认列表（真源是 GET /confirmations，这里只是先到先画）。
+          const replayedConfs = readConfirmations(
+            replayed
+              .filter((e) => e.event === "confirmation_required" || e.event === "confirmation_resolved")
+              .map((e) => e.data.confirmation),
+          );
+          if (replayedConfs.length)
+            setConfirmations((prev) => mergeConfirmations(prev, replayedConfs));
           const lastPreview = [...replayed].reverse().find((e) => e.event === "items_preview");
           const previewItems = (lastPreview?.data.items as ProductItem[]) ?? [];
           // 澄清等待中刷新/切回：回放里最后一条 clarification_request 之后若还没出现 ask_user 的
@@ -304,7 +319,6 @@ export function useShoppingXTask() {
               images: inflight.images ?? [],
               events: [...events],
               items: previewItems,
-              orderCard,
               finalAnswer: null,
               streamingText: null,
               status: pendingQuestion !== null ? ("waiting" as TaskStatus) : "running",
@@ -438,11 +452,10 @@ export function useShoppingXTask() {
         return;
       }
 
-      // 订单卡：确认卡 / 下单成功 / 已取消。同样不进 events（是结果本身，不是思考行）。
-      // 后到的覆盖先到的——一轮里最多一次交易动作，而「确认卡 → 下单成功」正是要覆盖的。
-      if (evt.event === "order_card") {
-        const payload = evt.data as unknown as OrderCardPayload;
-        patchLastTurn(() => ({ orderCard: payload }));
+      // 确认卡变化通知：并进会话级确认列表（按 id 合并、决议单向推进）。不进 events。
+      if (evt.event === "confirmation_required" || evt.event === "confirmation_resolved") {
+        const incoming = readConfirmations([evt.data.confirmation]);
+        if (incoming.length) setConfirmations((prev) => mergeConfirmations(prev, incoming));
         return;
       }
 
@@ -577,7 +590,7 @@ export function useShoppingXTask() {
       // 追加一条活动轮（其余轮已冻结为历史）。不复位别的轮，多轮对话流逐条累加。
       setTurns((prevTurns) => [
         ...prevTurns,
-        { id: newId(), query, images: [], events: [], items: [], orderCard: null, finalAnswer: null, streamingText: null, status: "connecting", errorMsg: null, elapsedMs: null, tokens: null, experiment: null, clarificationQuestion: null, learnedPrefs: [] },
+        { id: newId(), query, images: [], events: [], items: [], finalAnswer: null, streamingText: null, status: "connecting", errorMsg: null, elapsedMs: null, tokens: null, experiment: null, clarificationQuestion: null, learnedPrefs: [] },
       ]);
       setStatusSafe("connecting");
 
@@ -707,6 +720,77 @@ export function useShoppingXTask() {
 
   const running = status === "connecting" || status === "running";
   const waiting = status === "waiting";
+  // 进入 / 切换会话即拉一次确认列表；离开会话清空（别把上一段对话的卡带到新对话里）。
+  useEffect(() => {
+    setConfirmationError(null);
+    if (!threadId) {
+      setConfirmations([]);
+      return;
+    }
+    let alive = true;
+    void fetchConfirmations(threadId).then((list) => {
+      if (alive) setConfirmations((prev) => mergeConfirmations(prev, list));
+    });
+    return () => {
+      alive = false;
+    };
+  }, [threadId]);
+
+  const refreshConfirmations = useCallback(async () => {
+    const tid = threadIdRef.current;
+    if (!tid) return;
+    setConfirmationBusy(true);
+    try {
+      const list = await fetchConfirmations(tid);
+      setConfirmations((prev) => mergeConfirmations(prev, list));
+      setConfirmationError(null);
+    } finally {
+      setConfirmationBusy(false);
+    }
+  }, []);
+
+  // 三个用户动作共用一条：成功即并入列表（不等事件流那条通知），失败把后端那句话摆出来。
+  const runConfirmation = useCallback(
+    async (call: (tid: string) => Promise<ConfirmationResult>): Promise<boolean> => {
+      const tid = threadIdRef.current;
+      if (!tid) {
+        setConfirmationError("请先进入一段对话再操作。");
+        return false;
+      }
+      setConfirmationBusy(true);
+      try {
+        const res = await call(tid);
+        if (res.ok) {
+          setConfirmations((prev) => mergeConfirmations(prev, [res.confirmation]));
+          setConfirmationError(null);
+          return true;
+        }
+        setConfirmationError(res.message);
+        return false;
+      } catch {
+        setConfirmationError("连接中断，操作结果尚未确定。可刷新记录核对；重试同一确认不会重复执行。");
+        return false;
+      } finally {
+        setConfirmationBusy(false);
+      }
+    },
+    [],
+  );
+  const prepareOrder = useCallback(
+    (input: PrepareOrderInput) => runConfirmation((tid) => apiPrepareOrder(tid, input)),
+    [runConfirmation],
+  );
+  const prepareCancel = useCallback(
+    (orderId: string, reason: string) =>
+      runConfirmation((tid) => apiPrepareCancel(orderId, reason, tid)),
+    [runConfirmation],
+  );
+  const resolveConfirmation = useCallback(
+    (c: TradeConfirmation, approved: boolean) =>
+      runConfirmation((tid) => apiResolveConfirmation(tid, c, approved)),
+    [runConfirmation],
+  );
+
   return {
     threadId,
     turns,
@@ -716,6 +800,13 @@ export function useShoppingXTask() {
     sessions,
     sessionConstraints,
     setSessionConstraints,
+    confirmations,
+    confirmationBusy,
+    confirmationError,
+    refreshConfirmations,
+    prepareOrder,
+    prepareCancel,
+    resolveConfirmation,
     startTask,
     cancelTask,
     sendClarification,
