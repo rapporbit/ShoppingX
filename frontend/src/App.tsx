@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   addFavorite,
   fetchFavorites,
@@ -196,7 +196,9 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
   const [compareOpen, setCompareOpen] = useState(false);
   const compareIds = useMemo(() => new Set(compareList.map((c) => c.item_id)), [compareList]);
   const COMPARE_MAX = 4;
-  const toggleCompare = (item: ProductItem) => {
+  // 传给商品卡的回调用 useCallback 固定引用：Card 是 memo 的，收尾流式逐字推时父组件每段都重渲，
+  // 回调引用一变 memo 就白包。
+  const toggleCompare = useCallback((item: ProductItem) => {
     setCompareList((cur) =>
       cur.some((c) => c.item_id === item.item_id)
         ? cur.filter((c) => c.item_id !== item.item_id)
@@ -204,7 +206,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
           ? cur
           : [...cur, item],
     );
-  };
+  }, []);
   // 详情 / 对比 / 表单要「说一句话」时都走这条：跟输入框发消息完全同一条路。
   const say = (text: string) => startTask(text, userId);
 
@@ -218,13 +220,16 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
   }, []);
 
   // 乐观更新：先改 UI 再发请求。点 ♡ 要立刻见到实心，等一个 round-trip 会显得迟钝。
-  const handleFavorite = async (item: ProductItem, undo: boolean) => {
-    setFavorites((cur) =>
-      undo ? cur.filter((f) => f.item_id !== item.item_id) : [item, ...cur],
-    );
-    if (undo) await removeFavorite(userId, item.item_id);
-    else await addFavorite(userId, item);
-  };
+  const handleFavorite = useCallback(
+    async (item: ProductItem, undo: boolean) => {
+      setFavorites((cur) =>
+        undo ? cur.filter((f) => f.item_id !== item.item_id) : [item, ...cur],
+      );
+      if (undo) await removeFavorite(userId, item.item_id);
+      else await addFavorite(userId, item);
+    },
+    [userId],
+  );
 
   // 启用平台：真源在 localStorage（api.startTaskRequest 发任务时读它），这里持一份镜像供顶栏显示
   // 启用个数、抽屉做勾选。全取消会被 savePlatforms 兜回默认（amazon），故回填它的返回值。
