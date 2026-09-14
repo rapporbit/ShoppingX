@@ -30,11 +30,16 @@ export function ProductDetail({
   if (!item) return null;
   const reasons = splitReasons(item.reason);
   const href = item.url?.trim();
+  // 价格口径与卡片一致（ProductCards）：到手价标寄往哪；只有货价时另说一句到手价还没估。
   const price =
     typeof item.landed_usd === "number"
-      ? { num: item.landed_usd, label: "到手价（含税运）" }
+      ? {
+          num: item.landed_usd,
+          label: `到手价${item.dest_country ? ` · 寄往 ${item.dest_country}` : ""}（含税运）`,
+          pending: false,
+        }
       : typeof item.price_usd === "number"
-        ? { num: item.price_usd, label: "货价（未含税运）" }
+        ? { num: item.price_usd, label: "货价（未含税运）", pending: true }
         : null;
 
   return (
@@ -53,14 +58,25 @@ export function ProductDetail({
           <h3 className="detail-title">{item.title}</h3>
           <div className="detail-meta">
             <span className="supplier-name">{platformName(item.platform)}</span>
+            {item.brand && <span className="detail-brand">{item.brand}</span>}
+            {typeof item.rating === "number" && (
+              <span className="card-rating" title="平台评分（离线数据集）">
+                <i aria-hidden>★</i> {item.rating.toFixed(1)}
+              </span>
+            )}
             {item.slot && <span className="detail-slot">槽位：{item.slot}</span>}
             <span className="detail-id">ID {item.item_id}</span>
           </div>
           {price ? (
-            <div className="detail-price">
-              <span className="price-num">${price.num.toFixed(2)}</span>
-              <span className="price-label">{price.label}</span>
-            </div>
+            <>
+              <div className="detail-price">
+                <span className="price-num">${price.num.toFixed(2)}</span>
+                <span className="price-label">{price.label}</span>
+              </div>
+              {price.pending && (
+                <div className="card-landed-pending">到手价待收货地与税运估算</div>
+              )}
+            </>
           ) : (
             <div className="detail-price price-label">暂无价格</div>
           )}

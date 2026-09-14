@@ -196,6 +196,15 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
   const [compareOpen, setCompareOpen] = useState(false);
   const compareIds = useMemo(() => new Set(compareList.map((c) => c.item_id)), [compareList]);
   const COMPARE_MAX = 4;
+  // 换会话（新建 / 切换）就清掉这几样：它们绑的是「眼前这几件」，item_id 只在本会话的候选
+  // 登记表里有效——带到别的会话去对比 / 下单，后端根本找不到那些 id。
+  useEffect(() => {
+    setDetailOf(null);
+    setOrderIntentOf(null);
+    setCompareList([]);
+    setCompareOpen(false);
+    setSimilarOf(null);
+  }, [threadId]);
   // 传给商品卡的回调用 useCallback 固定引用：Card 是 memo 的，收尾流式逐字推时父组件每段都重渲，
   // 回调引用一变 memo 就白包。
   const toggleCompare = useCallback((item: ProductItem) => {
@@ -439,7 +448,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
                               payload={turn.orderCard}
                               busy={running || waiting || !isLast}
                               onConfirm={isLast ? () => say("确认下单") : undefined}
-                              onDecline={isLast ? () => say("这张确认卡先不下单了，取消它。") : undefined}
+                              onDecline={isLast ? () => say("这张确认卡不要了，先不买。") : undefined}
                             />
                           )}
 
