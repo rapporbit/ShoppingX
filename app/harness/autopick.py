@@ -83,7 +83,6 @@ async def maybe_autopick(s: HarnessSession) -> None:
     try:
         pc = await price_compare.ainvoke({})
         await after_tool_success(s, "price_compare", {}, _to_text(pc))
-        texts.append(f"到手价已按收货国 {pc.dest_country or 'US'} 折算并回写全部候选。")
         pk = await item_picker.ainvoke({})
         texts.append(await after_tool_success(s, "item_picker", {}, _to_text(pk)))
     except Exception:  # noqa: BLE001 - 自动步骤失败就退回模型自己调，绝不打断主 loop
@@ -92,8 +91,8 @@ async def maybe_autopick(s: HarnessSession) -> None:
     s.pending_inject.append(
         {
             "content": (
-                "[系统已自动执行] 检索已合流，系统已按本轮约束（预算 / 排除 / 偏好）完成 "
-                "price_compare 与 item_picker，无需再调这两个工具。item_picker 结果：\n"
+                "[系统已自动执行] 已按本轮约束完成 price_compare（到手价已折算）与 item_picker，"
+                "勿再调这两个工具。精选结果：\n"
                 + "\n".join(texts)
             )
         }

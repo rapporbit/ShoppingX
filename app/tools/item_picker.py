@@ -262,15 +262,18 @@ class ItemPickerOutput(BaseModel):
         if self.offcat_count:
             payload["oncat_count"] = self.oncat_count
             payload["offcat_count"] = self.offcat_count
-        payload.update(
-            {
-                # 标题截短回显：picks 的完整标题在上下文里的检索结果中已出现过，这里只要
-                # 短 handle + item_id 够模型对上号（见 compact_candidates 的 title_chars 说明）。
-                "picks": compact_candidates(self.picks, title_chars=60),
-                "excluded": self.excluded,
-                "over_budget": self.over_budget,
-            }
+        # picks 回显**不截标题**：picks 从整池（单平台 30 条）精排而来，模型在 item_search 渲染里
+        # 只见过头部 RENDER_CAP 条；截短标题会让它为没见过全名的商品写理由 → 去「核实」白搜一轮
+        # （A0-3 q_backpack 实测）。到手价只留 landed_usd：运费 / 关税 / 重量 / 精排分是工具内部量，
+        # 写理由用不上，收尾按 id hydrate 全量。
+        payload["picks"] = compact_candidates(
+            self.picks,
+            drop={"shipping_usd", "duty_usd", "weight_kg", "rerank_score", "rerank_query"},
         )
+        # excluded / over_budget 是 Output 必填字段，投影必须能 round-trip 回 schema
+        # （test_render_projection），只裁可推导的冗余，这两个照带。
+        payload["excluded"] = self.excluded
+        payload["over_budget"] = self.over_budget
         if self.bundle is not None:
             b = self.bundle
             # rows 不回显（与 picks 同一批货，重复烧 token）；空集合字段全丢；feasible/total

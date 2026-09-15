@@ -443,9 +443,17 @@ async def item_search(
     """在单个平台检索商品（dense 召回，长期偏好与硬排除已由系统并入）；跨平台用 task_dispatch 并行。
     参数：query 用品类核心词（场景/人群词交给 item_picker 的 prefer）；platform 见
     <enabled_platforms>；price_usd_max / min_rating / brand_exclude 召回期过滤；定点调查传
-    target_name + expected_category；top_k / slot 不用传。返回 filtered_out = 库里有但被条件
-    挡住（不是候选，如实说被哪个条件挡的）。
+    target_name（商品名/型号，不是 item_id）+ expected_category；top_k / slot 不用传。返回
+    filtered_out = 库里有但被条件挡住（不是候选，如实说被哪个条件挡的）。
     """
+    # target_name 是「商品名 / 型号」，不是 item_id：实测模型会拿已登记候选的 id 当 target_name
+    # 去「核实详情」，型号过滤必然 0 召回、白耗一轮（A0-3 q_backpack 1/3 遍）。登记表命中即拒，
+    # 报错走 state=ERROR，不触发 autopick 重新武装。
+    if target_name and enrich(target_name.strip()) is not None:
+        raise ValueError(
+            f"target_name={target_name!r} 是已登记商品的 item_id，不是商品名/型号；"
+            "该商品信息已在上文候选中，无需再检索，直接基于现有候选继续。"
+        )
     # 个性化：把用户**本轮域内**的 like 偏好原子词拼进检索词（见 memory.assemble.search_terms）。
     # 这条通路取代了原来的 user 塔向量画像——那条路把所有 like 加权平均成一个向量塞进召回，结果
     # 无法归因、无法调试、也无法向用户解释。拼进 query 文本后，个性化**看得见**：它出现在下面
