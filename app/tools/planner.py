@@ -483,9 +483,6 @@ class PlanOutput(BaseModel):
                 continue
             seen.add(name)
             s.name = name
-            # 槽 id 是机制发的身份（set_session_bundle 发号），模型无权自造——schema 里带
-            # 这个字段只是复用模型（BundleSlot），这里一律清空，防幻觉 id 撞号/冒充既有槽。
-            s.id = ""
             cleaned.append(s)
         self.bundle_slots = cleaned[:MAX_SLOTS] if len(cleaned) >= 2 else []
         if self.slot_mode not in (SLOT_MODE_BUNDLE, SLOT_MODE_PARALLEL):
@@ -661,9 +658,9 @@ async def planner(intent: str) -> PlanOutput:
     # 在「无比价 / 到手价诉求」的轮次提示模型跳过 price_compare / shipping_calc——动机层提示，
     # 不是硬闸（COMPARING 阶段这两个工具仍然可用，用户中途改口还能调）。
     set_session_tasks(plan.tasks)
-    # 套装状态的生命周期跟着品类域走：换域（旅行套装 → 沙发）时旧套装连盘上那份一起清。
+    # 同一轮里重调 planner 且换了域（旅行套装 → 沙发）时旧槽表清掉；跨轮本来就不留（只活一轮）。
     if _domain_switch(get_session_pt(), plan.domains):
-        reset_session_bundle(clear_file=True)
+        reset_session_bundle()
     if plan.bundle_slots:  # validator 已收口成「≥2 槽或空」
         set_session_bundle(plan.bundle_slots, mode=plan.slot_mode)
     # 本轮约束当轮落 P_t —— 短期记忆的机制执行通路（见 _sync_session_pt）。放在币种 / 收货国 /

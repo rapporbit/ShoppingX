@@ -8,6 +8,7 @@
 """
 
 import json
+import re
 from typing import Any
 
 import pytest
@@ -28,28 +29,27 @@ def _mentions(args: dict[str, Any], *words: str) -> bool:
 
 
 async def test_bundle_followup_searches_changed_slot(snap_run: Any, needs_qdrant: None) -> None:
-    """套装续聊（bundle.json 三个槽）：只改洗漱包，检索要落到这一槽上，收尾出清单，套装态不丢。"""
+    """套装续聊（上一轮三个槽；槽表只活一轮，本轮由 planner 按原话重拆）：只改洗漱包，检索要
+    落到这一件上，收尾出清单。"""
     r = await snap_run("洗漱包换成真皮的，其他两样不变", fixture="bundle_travel")
     assert r.names and r.names[-1] == "shopping_summary", r.names
-    slots = json.loads((r.session_dir / "bundle.json").read_text(encoding="utf-8"))["slots"]
-    assert len(slots) >= 2, slots
-    searches = [a for n, a in r.calls if n in {"item_search", "task_dispatch"}]
+    searches = [a for n, a in r.calls if n == "item_search"]
     assert any(_mentions(a, "洗漱", "toiletry", "dopp") for a in searches), r.calls
-    # 洗漱包的卡片不许挂到别的槽下（没盖章 = 空串可以，盖错不行）。反例（2026-09-16）：续聊
-    # planner 重拆槽表从 s1 重新编号，模型沿用历史里的 slot:s2，真皮洗漱包全挂到「收纳袋」。
-    # 槽 id 会跨轮变，这里只按展示名判。
+    # 洗漱包的卡片不许挂到别的槽下（没盖章 = 空串可以，盖错不行）。反例（2026-09-16，槽 id
+    # 时期）：续聊重拆槽表从 s1 重新编号，模型沿用历史里的 slot:s2，真皮洗漱包全挂到「收纳袋」。
     result_path = r.session_dir / "result.json"
     items = json.loads(result_path.read_text(encoding="utf-8")).get("items") or []
     wash = [it for it in items if _mentions(it, "toiletry", "dopp")]
     assert all(not it.get("slot") or "洗漱" in str(it.get("slot")) for it in wash), [
         (it.get("slot"), it.get("title")) for it in wash
     ]
+    # 槽名即身份：模型看得到的工具返回里不许再出现槽 id。
+    for tool_name in ("planner", "item_search", "item_picker"):
+        for text in r.results.get(tool_name, []):
+            assert not re.search(r'"slot"\s*:\s*"s\d+"', text), (tool_name, text[:200])
     # 反例：「其他两样不变」时不该重搜没改的槽。2026-09-15 首跑实测重搜了收纳袋并在清单里换了款。
     untouched = [
-        a
-        for a in searches
-        if a.get("slot") in {"s1", "s3"}
-        or _mentions(a, "packing cube", "收纳", "luggage tag", "行李牌")
+        a for a in searches if _mentions(a, "packing cube", "收纳", "luggage tag", "行李牌")
     ]
     if untouched:
         pytest.xfail(f"「其他两样不变」仍重搜了没改的槽：{untouched}")

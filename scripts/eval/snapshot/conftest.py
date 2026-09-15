@@ -88,7 +88,7 @@ def _extract(context: list[dict]) -> tuple[list[tuple[str, dict[str, Any]]], dic
 def snap_run(request: pytest.FixtureRequest) -> Any:
     """``await snap_run(query, fixture=..., user_id=...)`` → :class:`SnapResult`。
 
-    ``fixture`` 是 ``fixtures/<名>/`` 目录，里面的文件（session.json / bundle.json）原样拷进新会话
+    ``fixture`` 是 ``fixtures/<名>/`` 目录，里面的文件（session.json 等）原样拷进新会话
     目录；本轮工具调用 = 跑完落盘的 context 去掉 fixture 自带的那几条消息。
     """
     from app.agent.orchestrator import ensure_session_dir, run_agent

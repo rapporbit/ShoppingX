@@ -39,12 +39,7 @@ from app.memory.assemble import assemble
 from app.recall import get_recall_client, get_tower_client
 from app.recall.schemas import RecallCandidate
 from app.tools._args import StrListArg
-from app.tools._bundle import (
-    current_slot,
-    ensure_dispatch_slot,
-    note_slot_searched,
-    register_slot,
-)
+from app.tools._bundle import note_slot_searched, register_slot
 from app.tools._candidates import compact_candidates, enrich, register
 from app.tools._diagnostics import report_diagnostics
 from app.tools._shell import tool
@@ -343,25 +338,6 @@ class ItemSearchOutput(BaseModel):
         )
 
 
-def _stamp_slot_id(slot: str) -> str:
-    """本次检索的候选该盖哪个槽 id；空串 = 不盖章。
-
-    槽引用（id / 精确名 / 漂移名）先走 register_slot（全链路唯一解析点，内置懒读回；解析不出
-    的非套装轮 / 野 id / 用户删过的槽 → 空串）。**模型显式传了 slot 却解析不出**时再走
-    ensure_dispatch_slot：主环同轮 batch ``item_search(slot=…)`` 取代派发后，planner 漏拆槽
-    （槽表为空）就只剩这一次机会把「这批属于哪一类」落成真槽，否则一个章都盖不上、某类屠版。
-    继承自派发作用域的 current_slot() 已是稳定 id，不走兜底。
-    """
-    explicit = slot.strip()
-    ref = explicit or current_slot()
-    if not ref:
-        return ""
-    slot_id = register_slot(ref)
-    if not slot_id and explicit:
-        slot_id = ensure_dispatch_slot(explicit)
-    return slot_id
-
-
 @tool
 async def item_search(
     query: str,
@@ -518,14 +494,14 @@ async def item_search(
         filtered_out=filtered_out,
         recall_strategy="+".join(strategy),
     )
-    # 套装槽位盖章：显式 slot 入参优先（主环同轮 batch 的主通路），退回 dispatch 派发经 ContextVar
-    # 传下来的槽 id。盖在 register 之前——登记表存的就是带槽标的全量候选，跨轮落盘 / 读回都带着。
-    # 解析不出 → 不盖章，候选落 keywords 兜底（见 _stamp_slot_id）。
-    slot_id = _stamp_slot_id(slot)
-    if slot_id:
-        note_slot_searched(slot_id)  # 「搜了但没货」与「压根没搜」要分得开，组合报告如实说
+    # 套装槽位盖章：slot 入参经 register_slot 解析成本轮槽表里的规范槽名（没登记的按规则补登，
+    # 见其 docstring）。盖在 register 之前——登记表存的就是带槽标的全量候选。解析不出 → 不盖章，
+    # 候选落 picker 的 keywords 兜底归槽。
+    slot_name = register_slot(slot)
+    if slot_name:
+        note_slot_searched(slot_name)  # 「搜了但没货」与「压根没搜」要分得开，组合报告如实说
         for c in candidates:
-            c.slot = slot_id
+            c.slot = slot_name
     # 登记召回信号到全树检索状态：供 web_search 兜底门判定（仅在召回全空时才放行 web_search）。
     note_item_search(out.total_recall)
     # 把全量候选（含真实 url/image_url）按 item_id 登记到会话：url/image 不再随候选喂模型，

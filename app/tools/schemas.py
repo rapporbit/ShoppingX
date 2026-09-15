@@ -55,10 +55,9 @@ class ItemCandidate(BaseModel):
     url: str = ""
     image_url: str = ""
     score: float = 0.0  # 召回相似度分
-    # 套装槽位**id**（「一套齐」需求专用，见 app.tools._bundle）：这件候选是为哪个子品类槽
-    # 搜的。item_search 经 resolve_slot 解析后盖章（dispatch 的 slot_scope / slot 入参），
-    # bundle 组合优选按它分组；出前端/卡片时经 slot_display 映射回展示名。旧会话读回的
-    # 候选可能还盖着名字章（id 化前的数据），prospective_slot 按名兼容。
+    # 套装槽位名（槽位轮专用，见 app.tools._bundle）：这件候选是为哪个子品类槽搜的。
+    # item_search(slot=…) 经 register_slot 解析成本轮槽表里的规范名后盖章，组合优选按它分组，
+    # 前端卡片按它分组展示。
     # 非套装轮恒为空串（compact_candidates 的空值过滤会自动把它从模型可见投影里丢掉）。
     slot: str = ""
 

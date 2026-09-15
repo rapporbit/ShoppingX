@@ -1,7 +1,7 @@
-"""快照评测（真 LLM）：A3 之后套装轮由主环同轮 batch ``item_search(slot=…)``，不再派 worker。
+"""快照评测（真 LLM）：套装轮由主环同轮 batch ``item_search(slot=…)`` 各槽并发检索。
 
-守三件事：收尾正常不动单；不调 ``task_dispatch``；槽表 ≥2 时至少有一回合同时发出 ≥2 个
-item_search（「同一回合」= session.json 里连续排列的 tool_call 块，框架据此并发）。
+守两件事：收尾正常不动单；槽表 ≥2 时至少有一回合同时发出 ≥2 个 item_search（「同一回合」=
+session.json 里连续排列的 tool_call 块，框架据此并发）。
 """
 
 import json
@@ -38,12 +38,19 @@ def _batches(session_dir: Path) -> list[list[str]]:
     return out
 
 
-def _slots(session_dir: Path) -> list[dict[str, Any]]:
-    p = session_dir / "bundle.json"
-    if not p.exists():
-        return []
-    data = json.loads(p.read_text(encoding="utf-8"))
-    return data.get("slots", []) if isinstance(data, dict) else data
+def _slots(r: Any) -> list[str]:
+    """本轮槽名：planner 结果里的 ``bundle_slots``（槽表只活一轮、不落盘）；planner 没拆槽时
+    退回模型检索时传过的 ``slot``（register_slot 会据此补登并列槽）。"""
+    names: list[str] = []
+    for text in r.results.get("planner", []):
+        try:
+            data = json.loads(text)
+        except ValueError:
+            continue
+        rows = data.get("bundle_slots") if isinstance(data, dict) else None
+        names = [str(s.get("name")) for s in rows or [] if isinstance(s, dict)]
+    passed = {str(a["slot"]) for n, a in r.calls if n == "item_search" and a.get("slot")}
+    return names or sorted(passed)
 
 
 @pytest.mark.parametrize("rep", [1, 2])
@@ -53,18 +60,17 @@ async def test_bundle_turn_batches_item_search(
 ) -> None:
     r = await snap_run(QUERIES[qid])
     batches = _batches(r.session_dir)
-    slots = _slots(r.session_dir)
+    slots = _slots(r)
     widest = max((b.count("item_search") for b in batches), default=0)
     summary = {
         "qid": qid,
         "rep": rep,
         "batches": batches,
-        "slots": [s.get("name") for s in slots],
+        "slots": slots,
         "widest_item_search_batch": widest,
     }
     print("EVAL_BUNDLE " + json.dumps(summary, ensure_ascii=False))
     assert r.names and (r.names[-1] in TERMINAL or r.final_text), r.names
     assert not {"create_order", "cancel_order"} & set(r.names), r.names
-    assert "task_dispatch" not in r.names, r.names
     if len(slots) >= 2 and "item_search" in r.names:
         assert widest >= 2, f"槽表 {len(slots)} 槽但没有同轮 batch item_search：{batches}"

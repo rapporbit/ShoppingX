@@ -293,7 +293,8 @@ QUERIES: list[dict] = [
         ),
     },
     {
-        # 「一套齐」组成已列明：planner 拆槽（evidence 全有）→ 槽位批 fork → 组合优选。
+        # 「一套齐」组成已列明：planner 拆槽（evidence 全有）→ 同轮 batch item_search(slot=…)
+        # → 组合优选。
         # 不该触发 ask_user（用户逐一点名了组成，没什么可确认的）。
         "id": "q21_bundle_listed_slots",
         "bucket": "套装组合",
@@ -305,7 +306,7 @@ QUERIES: list[dict] = [
             "slots": ["行李箱", "旅行收纳袋", "洗漱包"],
             "soft": ["耐用"],
         },
-        "expected_path": ["planner", "task_dispatch", "item_picker", "shopping_summary"],
+        "expected_path": ["planner", "item_search", "item_picker", "shopping_summary"],
         "probe": (
             "P0 清单必须跨品类凑齐三个点名槽位各一件（不许只出单品类清单）、三件合计不超总预算、"
             "不含塑料材质、不编造；P1 组成已列明不该反问用户、讲清预算怎么分（哪槽花钱哪槽省）；"
@@ -326,7 +327,7 @@ QUERIES: list[dict] = [
         "expected_path": [
             "planner",
             "ask_user",
-            "task_dispatch",
+            "item_search",
             "item_picker",
             "shopping_summary",
         ],
@@ -337,7 +338,7 @@ QUERIES: list[dict] = [
         ),
     },
     {
-        # 「多类并列」两类：planner 拆槽 + slot_mode=parallel → 同轮两条 task_dispatch 并行
+        # 「多类并列」两类：planner 拆槽 + slot_mode=parallel → 同轮两条 item_search(slot=…) 并发
         # → picker 每类各给几件（**一类都不许砍**）。与 q21/q22 的对照点：那两条是「一套齐」
         # （配套、共享总预算、可砍可选槽），这条是并列（各买各的、预算是每件上限）。
         "id": "pl01_parallel_two_categories",
@@ -349,7 +350,7 @@ QUERIES: list[dict] = [
             "slots": ["跑鞋", "降噪耳机"],
             "mode": "parallel（两类互不相干，不配套）",
         },
-        "expected_path": ["planner", "task_dispatch", "item_picker", "shopping_summary"],
+        "expected_path": ["planner", "item_search", "item_picker", "shopping_summary"],
         "probe": (
             "P0 清单必须**两类都有**（只出跑鞋或只出耳机即失败）、每件不超 500、不编造；"
             "P1 不该把两类价格加总说成「这一套合计」、不该反问用户要不要凑成一套、"
@@ -357,8 +358,8 @@ QUERIES: list[dict] = [
         ),
     },
     {
-        # 三类并列：真正压「同轮多派」这条路——三条 task_dispatch 该在同一轮里一起发出去，
-        # 而不是一轮派一条串着等（后者功能上也对，只是三倍延迟）。
+        # 三类并列：真正压「同轮多发」这条路——三条 item_search(slot=…) 该在同一轮里一起发出去，
+        # 而不是一轮一条串着等（后者功能上也对，只是三倍延迟）。
         "id": "pl02_parallel_three_categories",
         "bucket": "多类并列",
         "intent": "shopping",
@@ -368,10 +369,10 @@ QUERIES: list[dict] = [
             "slots": ["机械键盘", "降噪耳机", "跑鞋"],
             "mode": "parallel",
         },
-        "expected_path": ["planner", "task_dispatch", "item_picker", "shopping_summary"],
+        "expected_path": ["planner", "item_search", "item_picker", "shopping_summary"],
         "probe": (
             "P0 三类都要有（少一类即失败）、每件不超 800、没找到货的那类如实说而不是拿别的顶；"
-            "P1 三类应在同一轮里并行检索（不该串行派三趟）、不加总价、不说成「一套」；"
+            "P1 三类应在同一轮里并行检索（不该串行搜三趟）、不加总价、不说成「一套」；"
             "P2 按类分段、每类给理由"
         ),
     },
