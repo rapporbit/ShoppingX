@@ -28,10 +28,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from typing import Literal
 
-import numpy as np
 from pydantic import BaseModel
 
 from app.agent.platform_scope import resolve_search_platforms
@@ -41,8 +39,6 @@ from app.harness.retrieval_budget import note_filtered_probe, note_item_search
 from app.memory.assemble import assemble
 from app.recall import get_recall_client, get_tower_client
 from app.recall.schemas import RecallCandidate
-from app.recall.text import tail_category
-from app.recall.towers import TowerClient
 from app.tools._args import StrListArg
 from app.tools._bundle import current_slot, note_slot_searched, register_slot
 from app.tools._candidates import compact_candidates, enrich, register
@@ -61,7 +57,6 @@ MAX_TOP_K: int
 SINGLE_PLATFORM_POOL_K: int
 RENDER_CAP: int
 RELEVANCE_FLOOR: float
-CATEGORY_MATCH_FLOOR: float
 RETRY_MIN_HITS: int
 EXCLUDE_FETCH_BUFFER: int
 PROBE_LIMIT: int
@@ -77,7 +72,7 @@ def _load_params() -> None:
     赋值顺序即源码顺序，故 MAX_TOP_K 能安全地拿 DEFAULT_TOP_K 当默认值。
     """
     global DEFAULT_TOP_K, MAX_TOP_K, SINGLE_PLATFORM_POOL_K, RENDER_CAP
-    global RELEVANCE_FLOOR, CATEGORY_MATCH_FLOOR, RETRY_MIN_HITS, EXCLUDE_FETCH_BUFFER
+    global RELEVANCE_FLOOR, RETRY_MIN_HITS, EXCLUDE_FETCH_BUFFER
     global PROBE_LIMIT
 
     # 召回条数默认值：跨平台 fork 时**每个**子 Agent 都要吃一份这么大的候选 JSON——20 条 ≈ 3.7K token
@@ -124,18 +119,6 @@ def _load_params() -> None:
     # 问题，靠 prompt 的「不编造 / 没货就如实说」诚实兜，不是阈值能治）。可经 env 调。
     RELEVANCE_FLOOR = env_float("RELEVANCE_FLOOR", 0.45)
 
-    # 品类一致性过滤（target_name + expected_category 搭配用）：型号过滤挡不住"配件类商品标题里
-    # 带宿主型号"这种假阳性（如"给 XM5 用的耳机壳""QC45 充电线"——型号 token 对得上，但压根不是
-    # 耳机本体）。这类配件在数据源里的 category 字段本就不属于目标品类（如充电线归在
-    # "Televisions & Video Products"，不在"Headphones & Earbuds"下）——真实复现过：定点调查 Sony
-    # WH-1000XM5 / Bose QC45 时各自召回到一件同型号配件，型号过滤没拦住，误判"库内已找到候选"，
-    # 连带把本该放行的 web_search 兜底也拦死了（见 retrieval_budget.web_search_allowed）。
-    # 用已有的 TowerClient 编码 expected_category 与候选自身 category（tail_category 去掉顶层
-    # 泛词噪声）比余弦相似度，而非再拉一份"配件关键词黑名单"——黑名单枚举不完，品类字段是数据
-    # 自带的干净信号。**诚实标注**：阈值未跑线上真实 embedding 校准（远程模型才有语义度量意义，
-    # 本地 n-gram 回退只在同语言/有公共子串时近似有效），先给个保守初值，可经 env 调。
-    CATEGORY_MATCH_FLOOR = env_float("CATEGORY_MATCH_FLOOR", 0.5)
-
     # 「召回够不够用」的条数判据：少于这么多条就自动摘掉评分门槛重搜一次（见下面的放宽段）。
     # 取 3 而非 0：只召回一两条时模型照样会自己发起一轮重搜，那一轮 Think 的解码开销正是要省掉的。
     RETRY_MIN_HITS = env_int("ITEM_SEARCH_RETRY_MIN_HITS", 3)
@@ -162,72 +145,6 @@ _load_params()
 # 深层防御另有 qdrant_store.search 的 strip().lower() 归一兜底（测试/直连调用方）。
 Platform = Literal["all", "amazon", "walmart", "shein", "lazada", "shopee"]
 
-# 定点型号过滤（target_name 用）：语义召回分不清"库里没货"和"有但不是这个型号"（见 _load_params
-# 里 RELEVANCE_FLOOR 的诚实标注），对定点商品调查这种"要精确型号"的场景，用字符串型号匹配
-# 兜一道——型号号段对不上的直接不算候选，别让 total_recall 假装找到了。
-_TARGET_TOKEN_RE = re.compile(r"[a-z0-9]+")
-_STRIP_RE = re.compile(r"[\s\-]+")
-
-
-def _matches_target_name(title: str, target_name: str) -> bool:
-    """粗粒度型号过滤（不追求完美，只挡最明确的"型号对不上"）：
-    - 目标名解析出「字母+数字混合」token（如 "1000xm5"/"qc45"，区分度最高、单独即可判定）：
-      命中一个就算匹配。
-    - 没有这类 token（型号是纯数字，如 "651"）：退化成"数字 token（长度≥2）+ 品牌/系列词
-      （长度≥3 的纯字母 token）同时出现在标题里"才算匹配——单独数字太容易撞价格/尺寸等噪声。
-    - 两类 token 都解析不出（商品名没有具体型号，纯描述性文本）：不过滤，避免误伤。
-    标题与目标名都先去空格/连字符再比对，兼容 "WH-1000XM5"/"WH1000XM5" 等写法差异。
-
-    **诚实标注局限**：纯字符串匹配，"给 XX 型号用的配件"这类标题会因为同样包含型号词被
-    误判为匹配——比语义召回的「完全不沾边」好得多，但不是精确匹配，别指望它完美。这一类
-    "型号对得上但是配件"的假阳性由 :func:`_category_relevant_mask` 另外兜（见其说明）。
-    """
-    tokens = _TARGET_TOKEN_RE.findall(target_name.lower())
-    norm_title = _STRIP_RE.sub("", title.lower())
-
-    mixed = [
-        t
-        for t in tokens
-        if len(t) >= 3 and any(c.isdigit() for c in t) and any(c.isalpha() for c in t)
-    ]
-    if mixed:
-        return any(t in norm_title for t in mixed)
-
-    digits = [t for t in tokens if t.isdigit() and len(t) >= 2]
-    words = [t for t in tokens if t.isalpha() and len(t) >= 3]
-    if digits and words:
-        return any(d in norm_title for d in digits) and any(w in norm_title for w in words)
-
-    return True
-
-
-async def _category_relevant_mask(
-    tower: TowerClient, expected_category: str, categories: list[str]
-) -> list[bool]:
-    """批量判断候选自身的 category 是否与 ``expected_category`` 语义相符。
-
-    对齐用户点子：与其枚举"配件关键词黑名单"（case/cover/cable/charger/...，枚举不完、
-    换个品类又要重列一份），不如直接比对候选自带的 category 字段——数据里配件类商品本就
-    不会被分进目标品类（如耳机充电线在源数据里是 "Televisions & Video Products"，压根不在
-    "Headphones & Earbuds" 下），这是比标题关键词干净得多的信号。
-
-    没有 category 数据的候选不参与判定（返回 True，不误伤——跟 :func:`_matches_target_name`
-    "解析不出型号就不过滤"同一口径）。一次批量编码（expected_category + 各候选的
-    ``tail_category``），省去逐条网络往返。
-    """
-    idx = [i for i, c in enumerate(categories) if c.strip()]
-    mask = [True] * len(categories)
-    if not idx:
-        return mask
-    texts = [expected_category] + [tail_category(categories[i]) for i in idx]
-    vecs = await tower.encode_texts(texts)
-    expected_vec = vecs[0]
-    for pos, i in enumerate(idx, start=1):
-        # encode_texts 已 L2 归一化，内积即余弦相似度。
-        sim = float(np.dot(expected_vec, vecs[pos]))
-        mask[i] = sim >= CATEGORY_MATCH_FLOOR
-    return mask
-
 
 def _searchable(rc: RecallCandidate) -> str:
     """召回候选的可匹配文本（与 item_picker 的 ``_searchable`` 同口径：标题+品牌+品类，小写）。"""
@@ -239,10 +156,9 @@ def _apply_filters(
     *,
     floor: float,
     brand_exclude: list[str] | None,
-    target_name: str | None,
     exclude_terms: list[str] | None = None,
-) -> tuple[list[RecallCandidate], int, int]:
-    """按语义门槛 + 用户硬约束过滤召回结果，返回 (候选, 型号过滤掉的条数, 记忆排除掉的条数)。
+) -> tuple[list[RecallCandidate], int]:
+    """按语义门槛 + 用户硬约束过滤召回结果，返回 (候选, 记忆排除掉的条数)。
 
     抽成函数是为了能用**不同的 floor 复跑**：召回不足时降档重过滤，不必重新打一次检索。
 
@@ -263,12 +179,7 @@ def _apply_filters(
             rc for rc in relevant if not any(term_hits(kw, _searchable(rc)) for kw in exclude_terms)
         ]
         memory_dropped = before - len(relevant)
-    target_dropped = 0
-    if target_name:
-        before = len(relevant)
-        relevant = [rc for rc in relevant if _matches_target_name(rc.title, target_name)]
-        target_dropped = before - len(relevant)
-    return relevant, target_dropped, memory_dropped
+    return relevant, memory_dropped
 
 
 def _blocked_reason(
@@ -436,24 +347,13 @@ async def item_search(
     price_usd_max: float | None = None,
     min_rating: float | None = None,
     brand_exclude: StrListArg | None = None,
-    target_name: str | None = None,
-    expected_category: str | None = None,
     slot: str = "",
 ) -> ItemSearchOutput:
     """在单个平台检索商品（dense 召回，长期偏好与硬排除已由系统并入）；跨平台用 task_dispatch 并行。
     参数：query 用品类核心词（场景/人群词交给 item_picker 的 prefer）；platform 见
-    <enabled_platforms>；price_usd_max / min_rating / brand_exclude 召回期过滤；定点调查传
-    target_name（商品名/型号，不是 item_id）+ expected_category；top_k / slot 不用传。返回
-    filtered_out = 库里有但被条件挡住（不是候选，如实说被哪个条件挡的）。
+    <enabled_platforms>；price_usd_max / min_rating / brand_exclude 召回期过滤；
+    top_k / slot 不用传。返回 filtered_out = 库里有但被条件挡住（不是候选，如实说被哪个条件挡的）。
     """
-    # target_name 是「商品名 / 型号」，不是 item_id：实测模型会拿已登记候选的 id 当 target_name
-    # 去「核实详情」，型号过滤必然 0 召回、白耗一轮（A0-3 q_backpack 1/3 遍）。登记表命中即拒，
-    # 报错走 state=ERROR，不触发 autopick 重新武装。
-    if target_name and enrich(target_name.strip()) is not None:
-        raise ValueError(
-            f"target_name={target_name!r} 是已登记商品的 item_id，不是商品名/型号；"
-            "该商品信息已在上文候选中，无需再检索，直接基于现有候选继续。"
-        )
     # 个性化：把用户**本轮域内**的 like 偏好原子词拼进检索词（见 memory.assemble.search_terms）。
     # 这条通路取代了原来的 user 塔向量画像——那条路把所有 like 加权平均成一个向量塞进召回，结果
     # 无法归因、无法调试、也无法向用户解释。拼进 query 文本后，个性化**看得见**：它出现在下面
@@ -478,8 +378,6 @@ async def item_search(
         price_usd_max=price_usd_max,
         min_rating=min_rating,
         brand_exclude=brand_exclude,
-        target_name=target_name,
-        expected_category=expected_category,
     )
 
     # 单平台放大召回池（供 picker 精排，不进上下文——渲染仍由 __str__ 的 RENDER_CAP 收敛）；跨平台
@@ -504,11 +402,10 @@ async def item_search(
         price_usd_max=price_usd_max,
         min_rating=min_rating,
     )
-    relevant, target_dropped, memory_dropped = _apply_filters(
+    relevant, memory_dropped = _apply_filters(
         recalled,
         floor=RELEVANCE_FLOOR,
         brand_exclude=brand_exclude,
-        target_name=target_name,
         exclude_terms=mem_exclude,
     )
 
@@ -521,10 +418,9 @@ async def item_search(
     #     明确不要的东西充数；
     #   · RELEVANCE_FLOOR —— 「宁可如实说没找到，也不给跑题货」的 P0 诚实红线（见 prompt 的空召回
     #     硬路径）。它卡光了恰恰说明库里真没有相关商品，此时降档只会把跑题商品捞回来凑数，是幻觉的
-    #     温床——空手而归远好过给一堆不沾边的货；
-    #   · target_name（定点调查）—— 返回错型号比「没找到」更糟。
+    #     温床——空手而归远好过给一堆不沾边的货。
     relaxed = False
-    if len(relevant) < RETRY_MIN_HITS and not target_name and min_rating is not None:
+    if len(relevant) < RETRY_MIN_HITS and min_rating is not None:
         # 评分门槛是 Qdrant 召回阶段的 filter，只能重搜一次才能摘掉（预算照旧硬卡）。
         widened = await asyncio.to_thread(
             recall.search,
@@ -534,36 +430,22 @@ async def item_search(
             price_usd_max=price_usd_max,
             min_rating=None,
         )
-        candidates_wo_rating, dropped_wo_rating, mem_dropped_wo = _apply_filters(
+        candidates_wo_rating, mem_dropped_wo = _apply_filters(
             widened,
             floor=RELEVANCE_FLOOR,  # 相关度红线照旧
             brand_exclude=brand_exclude,
-            target_name=target_name,
             exclude_terms=mem_exclude,  # 记忆硬排除是用户授权的硬约束，放宽时同样不动
         )
         # 真捞到更多才算「放宽过」：评分不是瓶颈时结果不会变，那没必要向模型多报一个 relaxed 标记。
         if len(candidates_wo_rating) > len(relevant):
-            relevant, target_dropped, memory_dropped = (
-                candidates_wo_rating,
-                dropped_wo_rating,
-                mem_dropped_wo,
-            )
+            relevant, memory_dropped = candidates_wo_rating, mem_dropped_wo
             relaxed = True
-    category_dropped = 0
-    if target_name and expected_category and relevant:
-        before = len(relevant)
-        mask = await _category_relevant_mask(
-            tower, expected_category, [rc.category for rc in relevant]
-        )
-        relevant = [rc for rc, keep in zip(relevant, mask, strict=True) if keep]
-        category_dropped = before - len(relevant)
     truncated = len(relevant) > capped_k
 
     # ── 探测召回：命中不足时问一句「库里到底是没这类货，还是有货但被硬条件挡了」 ──
     # 两者在返回体里长得一模一样（total_recall 都很小），模型只能猜，实测常把「都超预算」说成
     # 「没找到」。再打一次**不带 price / rating / 记忆排除**的召回做差集，把被挡的样本如实回给
     # 模型。只在确有硬过滤条件时跑——没有过滤，差集必然为空，那一次查询纯属白花。
-    # 定点调查（target_name）不跑：那时「差集」全是同型号的配件与相似型号，不是「被挡的货」。
     strategy = ["dense"]
     if price_usd_max is not None:
         strategy.append("price_filter")
@@ -573,8 +455,6 @@ async def item_search(
         strategy.append("memory_exclude")
     if brand_exclude:
         strategy.append("brand_exclude")
-    if target_name:
-        strategy.append("target_name")
     filtered_out: list[FilteredOutItem] = []
     has_hard_filter = (
         price_usd_max is not None
@@ -582,7 +462,7 @@ async def item_search(
         or bool(mem_exclude)
         or bool(brand_exclude)
     )
-    if PROBE_LIMIT > 0 and not target_name and has_hard_filter and len(relevant) < capped_k:
+    if PROBE_LIMIT > 0 and has_hard_filter and len(relevant) < capped_k:
         probed = await asyncio.to_thread(recall.search, request_vec, PROBE_LIMIT, search_platforms)
         filtered_out, price_blocked, other_blocked = _probe_filtered_out(
             probed,
@@ -639,10 +519,6 @@ async def item_search(
         search_result += "（首轮召回不足，已自动放宽评分门槛重试；相关度/预算/品牌黑名单不放宽）"
     if memory_dropped:
         search_result += f"（另有 {memory_dropped} 条命中用户硬排除偏好，已在召回阶段过滤）"
-    if target_dropped:
-        search_result += f"（另有 {target_dropped} 条语义相关但型号不符，已排除）"
-    if category_dropped:
-        search_result += f"（另有 {category_dropped} 条型号相符但品类不符，疑似配件，已排除）"
     if filtered_out:
         search_result += f"（探测到库内另有 {len(filtered_out)} 条相关商品被硬条件挡下）"
         # 结构化诊断走侧信道给 harness（result_nudges 据此提示模型别把「被挡」说成「没货」）：

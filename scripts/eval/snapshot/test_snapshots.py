@@ -46,19 +46,6 @@ async def test_bundle_followup_searches_changed_slot(snap_run: Any, needs_qdrant
         pytest.xfail(f"「其他两样不变」仍重搜了没改的槽：{untouched}")
 
 
-async def test_target_compare_uses_target_name(snap_run: Any, needs_qdrant: None) -> None:
-    """定点比较两件具名商品：计划 A3 要求每个比较对象一次 item_search(target_name)。"""
-    r = await snap_run(
-        "帮我比较 Osprey Farpoint 40 和 Cabin Zero Classic 44L 这两个背包，哪个更适合一周出差"
-    )
-    assert r.names and (r.names[-1] in TERMINAL or r.final_text), r.names
-    # 2026-09-15 首跑实测：planner 出 target_refs、主环 batch 两次 item_search(target_name)——
-    # 计划 §3-7「定点调查 0 次」的口径已过时，这里按正常断言守住。
-    targeted = {a["target_name"] for n, a in r.calls if n == "item_search" and a.get("target_name")}
-    assert len(targeted) >= 2, r.calls
-    assert not {"create_order", "cancel_order"} & set(r.names), r.names  # 反例：比较不许动单
-
-
 async def test_my_orders_reads_without_writing(snap_run: Any, seed_order: Any) -> None:
     """「我的订单」：必须 query_order；查单不许顺手动单。"""
     user_id, order_id = await seed_order()

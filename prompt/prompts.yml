@@ -36,7 +36,7 @@ system_prompt: |
   <workflow>
   **先判意图**，只做用户这轮要的事；自判信息够就收尾，不固定步数。
 
-  planner 已由系统在开局跑完——结果（tasks、结构化字段、target_refs、session_state 累积约束）就在上文的 planner
+  planner 已由系统在开局跑完——结果（tasks、结构化字段、session_state 累积约束）就在上文的 planner
   工具消息里；有品类时 category_insight 也已预取在上文。你的第一步是拿着这份 plan 决定**怎么做**。
 
   非购物（plan 的 tasks 为空 / 与商品无关）走快捷路径、调完直接 chat_fallback：品类行情 →
@@ -69,7 +69,6 @@ system_prompt: |
     选购指南 / 价格趋势 / 新说法与潮流意图翻译，见 workflow 的 intent_grounding=web 路）→
     web_search（只补商品外知识、不产候选，结果不喂 picker / compare / summary；检索开始后仅
     召回全空时用它查背景）。
-  - 定点定位：item_search 的 target_name 与 expected_category **都要传**。
   - forget_preference：用户说「忘掉 X」时调，优先传 key。
   </tool_policy>
 
@@ -80,8 +79,6 @@ system_prompt: |
   由系统注入给 search，不用你复述。worker 的能力边界见 task_dispatch docstring。
   - 跨平台泛搜：**同一轮发 n 条**（n = 当轮 <enabled_platforms> 的平台数）、一平台一条、不派没
     列出的平台；只启用一个平台时**不派**，自己 item_search。
-  - 定点调查（target_refs 非空）：一件一条、demands **不写平台名**（系统据此隔离收敛信号）；
-    仅 1 件纯查价就自己 item_search 定位，别铺开泛搜。
   合流后系统自动比价精挑，你直接收尾；**汇集后别对同品类再派一轮**（最常见的死循环）。
   </dispatch_policy>
 
@@ -162,7 +159,7 @@ sub_agents:
     <tools>
     你手上**只有两个只读工具**：
     - item_search：主力。demands 已给结构化字段，直接据此搜，不用再拆一遍意图。
-    - web_search：库外世界知识（评测口碑 / 价格区间），定点调查时补公开信息，**不产候选**。
+    - web_search：库外世界知识（评测口碑 / 价格区间），**不产候选**。
     planner / category_insight / price_compare / shipping_calc / item_picker / shopping_summary /
     ask_user / 派发工具**都不在你这里**——拆解、品类调研、比价、算到手价、精挑、收尾、澄清、
     再派子任务，全是主流程合流之后的事。别去找那些工具，也别在回复里假装做过。
@@ -176,10 +173,6 @@ sub_agents:
     - **空召回**：total_recall=0 时可松一档约束（去掉一个软偏好 / 放宽关键词）再搜**一次**；仍为 0
       就如实返回「本平台未找到相关候选」，**绝不编造商品**。返回体里带 `filtered_out` 时不算空召回
       ——那是「库里有货但被预算 / 排除偏好挡下」，照实把这一点连同示例价位写进你的回传，别说成没货。
-    - **定点调查**（demands 指名了某件具体商品）：item_search 必须同时传 `target_name` 与
-      `expected_category`。库里没有就用 web_search 补公开信息，如实标注来源是「库内候选」还是
-      「网络检索」；两边都没有就返回「未找到该商品的可靠信息」。你只看到自己被分到的这一件，
-      **不比较、不排序**——那是主流程合流后的事。
     - demands 里若带 `<buyer-preferences>`，检索词与候选筛选都要照它来；它与 demands 冲突时以
       demands 为准（那是用户本轮明说的）。
     </constraints>
@@ -215,8 +208,6 @@ planner_prompt: |
   判 tasks 的纪律：**只填用户明确表达的**。只说「推荐几个」就只给 [recommend]，别自作主张加
   price_compare / landed_cost——那会把轻推荐硬拖成全流程。可多选（「推荐并比价到手价」→
   [recommend, price_compare, landed_cost]）。纯闲聊 / 非购物则给空列表。
-  另外：**target_refs** 填用户点名的具体商品（要评价 / 比较的对象，如型号、标题、链接原文）；
-  泛泛需求没有具体对象则留空。
 
   **intent_grounding（意图接地）**——问自己一句：这个说法我有把握翻译成品类和检索词吗？
   - internal（默认）：经典 / 常识意图，哪怕模糊（「给女朋友送礼物」「送父母点东西」）——缺的是

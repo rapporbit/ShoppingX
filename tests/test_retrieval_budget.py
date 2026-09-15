@@ -1,8 +1,6 @@
-"""检索预算的隔离检索作用域测试（isolated_retrieval_scope）。
+"""检索预算的 web_search 门控测试：全树共享的召回信号 + 任务口径配额。
 
-覆盖：隔离场景（demands 未点名平台 = 定点商品调查等独立子任务）下，web_search 门控应只看
-「本子任务自己的召回结果」，不受全树其它子任务（兄弟平台 / 兄弟商品）是否已找到候选影响；
-非隔离场景（demands 点了平台名 = 跨平台泛搜、以及主 loop 直调）维持全树共享语义不变。
+隔离检索作用域（原定点调查用）已于 2026-09-16 删除，门控只剩全树共享语义。
 """
 
 from __future__ import annotations
@@ -15,8 +13,6 @@ from app.api.context import _SESSION_TASKS, set_session_tasks
 from app.harness.retrieval_budget import (
     _STATE,
     WEB_SEARCH_TASK_QUOTA,
-    _isolated_var,
-    isolated_retrieval_scope,
     note_item_search,
     note_web_search,
     web_search_allowed,
@@ -61,46 +57,8 @@ def test_unscoped_tree_wide_allows_when_all_empty() -> None:
         assert web_search_allowed() is True
 
 
-def test_isolated_scope_ignores_sibling_success() -> None:
-    """商品 A 搜到了，不该连带拦掉商品 B（B 自己没搜到）的 web_search 兜底——核心场景。"""
-    with thread_scope("sub-item-a", SESSION_DIR), isolated_retrieval_scope():
-        note_item_search(2)  # 商品 A 搜到了
-
-    with thread_scope("sub-item-b", SESSION_DIR), isolated_retrieval_scope():
-        note_item_search(0)  # 商品 B 自己没搜到
-        # 非隔离语义下这里会被 A 的成功拦掉；隔离语义下只看自己，应该放行。
-        assert web_search_allowed() is True
-
-
-def test_isolated_scope_blocks_when_own_search_found_something() -> None:
-    """隔离作用域不是「永远放行」——自己搜到了就该拦，跟非隔离语义的「找到就别再找」一致。"""
-    with thread_scope("sub-item-c", SESSION_DIR), isolated_retrieval_scope():
-        note_item_search(5)
-        assert web_search_allowed() is False
-
-
-def test_isolated_scope_does_not_affect_sibling_tree_wide_reading() -> None:
-    """隔离子任务的召回不会污染全树共享计数——非隔离的兄弟仍看不到它，除非它自己也搜到过。"""
-    with thread_scope("sub-item-isolated", SESSION_DIR), isolated_retrieval_scope():
-        note_item_search(4)  # 隔离子任务搜到了
-
-    with thread_scope("sub-platform-plain", SESSION_DIR):
-        # 非隔离读取用的是 nonempty_item_search（隔离子任务的召回仍计入其中，因为它本质也是一次
-        # 真实的 item_search）——这与「树上已有候选，非隔离子任务别再用 web_search 找更好」一致。
-        assert web_search_allowed() is False
-
-
-def test_isolated_retrieval_scope_resets_on_exception() -> None:
-    assert _isolated_var.get() is False
-    with pytest.raises(RuntimeError):
-        with isolated_retrieval_scope():
-            assert _isolated_var.get() is True
-            raise RuntimeError("boom")
-    assert _isolated_var.get() is False
-
-
 def test_no_session_scope_returns_true() -> None:
-    """无 session 作用域（单测直调）：两种语义都退化为放行，不报错。"""
+    """无 session 作用域（单测直调）：退化为放行，不报错。"""
     assert web_search_allowed() is True
 
 
@@ -129,5 +87,3 @@ def test_task_quota_not_granted_to_recommend() -> None:
         note_item_search(total_recall=8)
         set_session_tasks(["recommend", "landed_cost"])
         assert web_search_allowed() is False
-    with isolated_retrieval_scope():
-        assert web_search_allowed() is True

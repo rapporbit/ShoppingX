@@ -378,22 +378,6 @@ PARAMS: tuple[Param, ...] = (
         ),
     ),
     Param(
-        key="CATEGORY_MATCH_FLOOR",
-        group="retrieval",
-        label="品类一致性下限",
-        kind="float",
-        default=0.5,
-        minimum=0.0,
-        maximum=1.0,
-        reload=_SEARCH,
-        const="CATEGORY_MATCH_FLOOR",
-        help=(
-            "定点型号调查时挡「配件标题里带宿主型号」的假阳性（如「给 XM5 用的耳机壳」型号对得上但"
-            "不是耳机本体）。"
-        ),
-        warning="诚实标注：阈值未跑线上真实 embedding 校准，是个保守初值。",
-    ),
-    Param(
         key="ITEM_SEARCH_RETRY_MIN_HITS",
         group="retrieval",
         label="触发自动补搜的条数",

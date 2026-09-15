@@ -30,7 +30,6 @@ CONST_MAP: dict[str, tuple[object, str]] = {
     "ITEM_SEARCH_SINGLE_POOL_K": (item_search, "SINGLE_PLATFORM_POOL_K"),
     "ITEM_SEARCH_RENDER_CAP": (item_search, "RENDER_CAP"),
     "RELEVANCE_FLOOR": (item_search, "RELEVANCE_FLOOR"),
-    "CATEGORY_MATCH_FLOOR": (item_search, "CATEGORY_MATCH_FLOOR"),
     "ITEM_SEARCH_RETRY_MIN_HITS": (item_search, "RETRY_MIN_HITS"),
     "ITEM_SEARCH_EXCLUDE_BUFFER": (item_search, "EXCLUDE_FETCH_BUFFER"),
     "ITEM_SEARCH_PROBE_LIMIT": (item_search, "PROBE_LIMIT"),

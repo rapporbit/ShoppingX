@@ -591,23 +591,6 @@ def test_item_picker_output_echoes_full_title_without_pricing_detail() -> None:
     assert rendered["excluded"] == [] and rendered["over_budget"] == ["Y1", "Y2"]
 
 
-async def test_item_search_rejects_registered_item_id_as_target_name(tmp_path: Path) -> None:
-    """target_name 传的是已登记候选的 item_id（模型想「核实详情」）→ 直接报错，不跑召回。
-
-    A0-3 q_backpack 实测：模型拿 picks 的 id 当 target_name 并发搜 2 次，型号过滤必然 0 召回。
-    """
-    import app.tools.item_search as mod
-    from app.tools._candidates import register
-    from app.utils.thread_ctx import thread_scope
-
-    with thread_scope("t-target-id", tmp_path):
-        register([ItemCandidate(item_id="B0C64FNWPH", platform="amazon", title="Casual Daypack")])
-        with pytest.raises(ValueError, match="item_id"):
-            await mod.item_search.ainvoke(
-                {"query": "backpack", "platform": "amazon", "target_name": "B0C64FNWPH"}
-            )
-
-
 async def test_item_picker_emits_items_preview(monkeypatch: pytest.MonkeyPatch) -> None:
     """先出货、后出文案：picker 一定稿就推 items_preview，卡片字段与收尾同构、且已含理由。
 
@@ -1030,218 +1013,6 @@ async def test_item_search_relevance_floor_drops_irrelevant(monkeypatch: Any) ->
         {"query": "canvas travel bag", "platform": "all", "top_k": 5}
     )
     assert empty.total_recall == 0 and empty.candidates == []
-
-
-async def test_item_search_target_name_filters_mismatched_model(monkeypatch: Any) -> None:
-    """定点调查传 target_name 时，语义相关但型号不符的候选不算命中——复现真实 bad case：
-    搜「Sony WH-1000XM5」却召回到完全不同的廉价型号「WH-CH710N」，型号过滤应把它剔除。
-    """
-    import app.tools.item_search as mod
-
-    dim = 32
-    tower = TowerClient(model=None, local_dim=dim)
-    fixtures = [
-        ItemRecord(
-            item_id="XM5",
-            platform="amazon",
-            title="Sony WH-1000XM5 Wireless Noise Canceling Headphones",
-            brand="Sony",
-            price=399.0,
-            rating=4.5,
-            reviews_count=1000,
-            category="headphones",
-            embed_text="Sony WH-1000XM5 Wireless Noise Canceling Headphones",
-        ),
-        ItemRecord(
-            item_id="CH710N",
-            platform="amazon",
-            title="Sony Noise Canceling Headphones WHCH710N Wireless Bluetooth",
-            brand="Sony",
-            price=143.8,
-            rating=4.4,
-            reviews_count=6000,
-            category="headphones",
-            embed_text="Sony Noise Canceling Headphones WHCH710N Wireless Bluetooth",
-        ),
-    ]
-    recall = QdrantRecall(QdrantClient(location=":memory:"))
-    encoded = await tower.encode_texts([r.embed_text for r in fixtures])
-    recall.ensure_collection(dim, recreate=True)
-    recall.upsert(fixtures, np.asarray(encoded, dtype="float32"), start_id=0)
-
-    monkeypatch.setattr(mod, "get_recall_client", lambda: recall)
-    monkeypatch.setattr(mod, "get_tower_client", lambda: tower)
-    # 型号过滤本身要单独测，用极低下限让两条语义候选都先通过 RELEVANCE_FLOOR。
-    monkeypatch.setattr(mod, "RELEVANCE_FLOOR", -1.0)
-
-    out = await mod.item_search.ainvoke(
-        {
-            "query": "Sony WH-1000XM5",
-            "platform": "amazon",
-            "top_k": 5,
-            "target_name": "Sony WH-1000XM5",
-        }
-    )
-    assert [c.item_id for c in out.candidates] == ["XM5"]
-    assert out.total_recall == 1
-
-
-async def test_item_search_target_name_no_model_token_no_filter(monkeypatch: Any) -> None:
-    """target_name 解析不出型号 token（纯描述性文本，无型号数字）时不过滤——回归保护：
-    候选与不传 target_name 时一致，不会误伤没有具体型号的商品名。
-    """
-    import app.tools.item_search as mod
-
-    recall = await _build_tiny_recall()
-    monkeypatch.setattr(mod, "get_recall_client", lambda: recall)
-    monkeypatch.setattr(mod, "get_tower_client", lambda: TowerClient(model=None, local_dim=32))
-    monkeypatch.setattr(mod, "RELEVANCE_FLOOR", 0.45)
-
-    baseline = await mod.item_search.ainvoke(
-        {"query": "canvas travel bag", "platform": "all", "top_k": 5}
-    )
-    with_target = await mod.item_search.ainvoke(
-        {
-            "query": "canvas travel bag",
-            "platform": "all",
-            "top_k": 5,
-            "target_name": "帆布旅行包",
-        }
-    )
-    assert [c.item_id for c in with_target.candidates] == [c.item_id for c in baseline.candidates]
-
-
-async def _build_accessory_recall(dim: int = 32) -> tuple[QdrantRecall, TowerClient]:
-    """定点调查场景常见的真实 bad case：型号 token 对得上，但其中一件是配件而非本体
-    （复现 Bose QC45 调查真机命中的充电线——数据源里配件被分进 "Televisions Video Products"，
-    跟耳机本体的 "Headphones Earbuds Accessories" 完全不是一类）。
-    """
-    tower = TowerClient(model=None, local_dim=dim)
-    fixtures = [
-        ItemRecord(
-            item_id="XM5",
-            platform="amazon",
-            title="Sony WH-1000XM5 Wireless Noise Canceling Headphones",
-            brand="Sony",
-            price=399.0,
-            rating=4.5,
-            reviews_count=1000,
-            category="Headphones Earbuds Accessories",
-            embed_text="Sony WH-1000XM5 Wireless Noise Canceling Headphones",
-        ),
-        ItemRecord(
-            item_id="CABLE",
-            platform="amazon",
-            title="TPLTECH USB-C Charging Cable Cord for Sony WH-1000XM5 Headphones Charger",
-            brand="TPLTECH",
-            price=7.98,
-            rating=4.5,
-            reviews_count=0,
-            category="Televisions Video Products",
-            embed_text="TPLTECH USB-C Charging Cable Cord for Sony WH-1000XM5 Headphones Charger",
-        ),
-    ]
-    recall = QdrantRecall(QdrantClient(location=":memory:"))
-    encoded = await tower.encode_texts([r.embed_text for r in fixtures])
-    recall.ensure_collection(dim, recreate=True)
-    recall.upsert(fixtures, np.asarray(encoded, dtype="float32"), start_id=0)
-    return recall, tower
-
-
-async def test_item_search_expected_category_drops_matching_model_wrong_category(
-    monkeypatch: Any,
-) -> None:
-    """型号过滤挡不住的假阳性：配件标题带宿主型号，靠 expected_category 兜——
-    真实复现过定点调查 Sony WH-1000XM5 / Bose QC45 时各自召回到同型号配件，误判"库内已找到"，
-    连带拦掉了本该放行的 web_search 兜底（见 app.harness.retrieval_budget.web_search_allowed）。
-    """
-    import app.tools.item_search as mod
-
-    recall, tower = await _build_accessory_recall()
-    monkeypatch.setattr(mod, "get_recall_client", lambda: recall)
-    monkeypatch.setattr(mod, "get_tower_client", lambda: tower)
-    monkeypatch.setattr(mod, "RELEVANCE_FLOOR", -1.0)
-    monkeypatch.setattr(mod, "CATEGORY_MATCH_FLOOR", 0.5)
-
-    out = await mod.item_search.ainvoke(
-        {
-            "query": "Sony WH-1000XM5",
-            "platform": "amazon",
-            "top_k": 5,
-            "target_name": "Sony WH-1000XM5",
-            "expected_category": "headphones",
-        }
-    )
-    assert [c.item_id for c in out.candidates] == ["XM5"]
-    assert out.total_recall == 1
-
-
-async def test_item_search_without_expected_category_keeps_old_behavior(
-    monkeypatch: Any,
-) -> None:
-    """不传 expected_category（旧调用方 / 非定点场景）时跳过品类过滤——回归保护：
-    只传 target_name 时，型号相符的配件仍然算命中（跟改动前行为一致），不静默改变旧调用方语义。
-    """
-    import app.tools.item_search as mod
-
-    recall, tower = await _build_accessory_recall()
-    monkeypatch.setattr(mod, "get_recall_client", lambda: recall)
-    monkeypatch.setattr(mod, "get_tower_client", lambda: tower)
-    monkeypatch.setattr(mod, "RELEVANCE_FLOOR", -1.0)
-
-    out = await mod.item_search.ainvoke(
-        {
-            "query": "Sony WH-1000XM5",
-            "platform": "amazon",
-            "top_k": 5,
-            "target_name": "Sony WH-1000XM5",
-        }
-    )
-    assert {c.item_id for c in out.candidates} == {"XM5", "CABLE"}
-
-
-async def test_item_search_expected_category_skips_candidates_missing_category(
-    monkeypatch: Any,
-) -> None:
-    """候选自身没有 category 数据时不过滤（跟型号过滤"解析不出型号就不过滤"同一保守口径），
-    避免数据缺失把真实候选误伤掉。
-    """
-    import app.tools.item_search as mod
-
-    dim = 32
-    tower = TowerClient(model=None, local_dim=dim)
-    fixtures = [
-        ItemRecord(
-            item_id="NOCAT",
-            platform="amazon",
-            title="Sony WH-1000XM5 Wireless Noise Canceling Headphones",
-            brand="Sony",
-            price=399.0,
-            rating=4.5,
-            reviews_count=1000,
-            category="",
-            embed_text="Sony WH-1000XM5 Wireless Noise Canceling Headphones",
-        ),
-    ]
-    recall = QdrantRecall(QdrantClient(location=":memory:"))
-    encoded = await tower.encode_texts([r.embed_text for r in fixtures])
-    recall.ensure_collection(dim, recreate=True)
-    recall.upsert(fixtures, np.asarray(encoded, dtype="float32"), start_id=0)
-
-    monkeypatch.setattr(mod, "get_recall_client", lambda: recall)
-    monkeypatch.setattr(mod, "get_tower_client", lambda: tower)
-    monkeypatch.setattr(mod, "RELEVANCE_FLOOR", -1.0)
-
-    out = await mod.item_search.ainvoke(
-        {
-            "query": "Sony WH-1000XM5",
-            "platform": "amazon",
-            "top_k": 5,
-            "target_name": "Sony WH-1000XM5",
-            "expected_category": "headphones",
-        }
-    )
-    assert [c.item_id for c in out.candidates] == ["NOCAT"]
 
 
 async def test_item_search_orders_by_recall_similarity(monkeypatch: Any) -> None:
@@ -1694,7 +1465,7 @@ async def test_planner_returns_structured(monkeypatch: Any) -> None:
     from app.tools.planner import ExcludeTerm, PlanOutput
 
     # 模型只填原始金额 budget_amount，不填币种 / budget_usd（那三个由系统确定性回填）。
-    # 意图信号 tasks（本轮要做的事）与 target_refs（点名商品）由模型判、系统原样透传。
+    # 意图信号 tasks（本轮要做的事）由模型判、系统原样透传。
     payload = PlanOutput(
         category="旅行收纳",
         budget_amount=300.0,
@@ -1717,7 +1488,6 @@ async def test_planner_returns_structured(monkeypatch: Any) -> None:
     # 这句话没提收货国 → 兜底默认国（assumed=True），照样算，由收尾文案讲明「按寄往中国估算」。
     assert out.tasks == ["recommend", "landed_cost"]
     assert out.dest_country_assumed is True
-    assert out.target_refs == []
 
 
 async def test_planner_raises_on_empty_structured_output(monkeypatch: Any) -> None:
@@ -2456,7 +2226,6 @@ class TestNullIsAbsent:
                 "tasks": ["recommend"],
                 "retrieval": "reuse",
                 "category": "童装",
-                "target_refs": None,
                 "bundle_slots": None,
                 "exclude_terms": None,
                 "soft_dislikes": None,
@@ -2465,7 +2234,6 @@ class TestNullIsAbsent:
             }
         )
         assert plan.bundle_slots == []
-        assert plan.target_refs == []
         assert plan.clear_budget is True  # 非 None 字段不受影响
 
     def test_other_structured_output_schemas_covered(self) -> None:
