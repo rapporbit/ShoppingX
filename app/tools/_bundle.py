@@ -148,7 +148,29 @@ def set_session_bundle(slots: Iterable[BundleSlot], mode: str | None = None) -> 
             s.id = ""
         elif re.fullmatch(r"s\d+", s.id or ""):
             seen_ids.add(s.id)
-    n = _next_id(k, cleaned)
+    # 续聊轮 planner 重拆槽表时新槽一律不带 id（validator 清空）。按名继承上一张表的 id、新号接着
+    # 两张表的最大号往后发——否则从 s1 重新编号，历史里的旧 id（上轮 picker 返回的 slot:s2）会按
+    # 新表解析到另一类上（快照实测：真皮洗漱包卡片挂成「收纳袋」）。没被继承的旧 id 就此退役：
+    # 旧引用解析不出 → 不盖章，比盖错安全。先精确名、再漂移名，免得「收纳袋」抢走「旅行收纳袋」。
+    prev = [p for p in get_session_bundle() if re.fullmatch(r"s\d+", p.id or "")]
+    taken = set(seen_ids)
+    for exact in (True, False):
+        for s in cleaned:
+            if re.fullmatch(r"s\d+", s.id or ""):
+                continue
+            hit = next(
+                (
+                    p
+                    for p in prev
+                    if p.id not in taken
+                    and (p.name == s.name if exact else _match_name(p.name, s.name))
+                ),
+                None,
+            )
+            if hit is not None:
+                s.id = hit.id
+                taken.add(hit.id)
+    n = max(_next_id(k, cleaned), _next_id(k, prev))
     for s in cleaned:
         if not re.fullmatch(r"s\d+", s.id or ""):
             s.id = f"s{n}"

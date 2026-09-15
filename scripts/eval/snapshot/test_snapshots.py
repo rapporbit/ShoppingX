@@ -34,7 +34,16 @@ async def test_bundle_followup_searches_changed_slot(snap_run: Any, needs_qdrant
     slots = json.loads((r.session_dir / "bundle.json").read_text(encoding="utf-8"))["slots"]
     assert len(slots) >= 2, slots
     searches = [a for n, a in r.calls if n in {"item_search", "task_dispatch"}]
-    assert any(a.get("slot") == "s2" or _mentions(a, "洗漱", "toiletry") for a in searches), r.calls
+    assert any(_mentions(a, "洗漱", "toiletry", "dopp") for a in searches), r.calls
+    # 洗漱包的卡片不许挂到别的槽下（没盖章 = 空串可以，盖错不行）。反例（2026-09-16）：续聊
+    # planner 重拆槽表从 s1 重新编号，模型沿用历史里的 slot:s2，真皮洗漱包全挂到「收纳袋」。
+    # 槽 id 会跨轮变，这里只按展示名判。
+    result_path = r.session_dir / "result.json"
+    items = json.loads(result_path.read_text(encoding="utf-8")).get("items") or []
+    wash = [it for it in items if _mentions(it, "toiletry", "dopp")]
+    assert all(not it.get("slot") or "洗漱" in str(it.get("slot")) for it in wash), [
+        (it.get("slot"), it.get("title")) for it in wash
+    ]
     # 反例：「其他两样不变」时不该重搜没改的槽。2026-09-15 首跑实测重搜了收纳袋并在清单里换了款。
     untouched = [
         a
