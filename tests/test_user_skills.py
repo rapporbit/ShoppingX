@@ -106,12 +106,11 @@ async def test_catalog_and_loader_expose_my_skill(client: AsyncClient, tmp_path:
     with thread_scope("t-skill", tmp_path, user_id=uid):
         names = {s.name for s in await UserSkillLoader().list_skills()}
         assert names == {"my/weekend-backpack"}
-        # 框架目录块里有它、正文不在目录块里；worker 依旧拿不到
+        # 框架目录块里有它、正文不在目录块里
         toolkit = await build_toolkit("main")
         block = await toolkit.get_skill_instructions(["basic"])
         assert "<name>my/weekend-backpack</name>" in block
         assert "只比可证实的规格" not in block
-        assert await (await build_toolkit("search")).get_skill_instructions(["basic"]) is None
 
         found = await resolve_selected_skill("my/weekend-backpack")
         assert found is not None and "只比可证实的规格" in found[1]

@@ -1,4 +1,4 @@
-"""自建汇率 MCP server —— SearchAgent 消费的那个「外部 MCP」。
+"""自建汇率 MCP server —— 主 Agent 消费的那个「外部 MCP」（A4 前是 SearchAgent）。
 
     uv run python -m app.mcp.fx_server --port 8766
 
@@ -8,14 +8,13 @@
 毫秒级，正好当稳定对端。（真要接 Tavily：`.env` 里已有 ``TAVILY_API_KEY`` 的环境把
 ``MCP_SEARCH_URL`` 指过去即可，接线是同一套，见 ``app/agent/mcp_registry.py``。）
 
-**为什么给 SearchAgent 挑「汇率」这个能力**：它手上只有 ``item_search`` / ``web_search``，
-拿回来的候选价格是各平台的原币（SGD / MYR / BRL…），而 ``price_compare`` 是 depth==0 专属
-（要跨平台合流后的全局视图才有意义，见 ``tool_registry``）。所以 worker 想在回传摘要里说一句
-「这几件折合美元大概多少」时，本来无路可走。这是**真的补了一块**，不是为了摆一个 MCP。
+**为什么挑「汇率」这个能力**：当初是给只有 ``item_search`` / ``web_search`` 的 SearchAgent
+补一块折算美元的能力；A4 删掉 SearchAgent 后改挂主 Agent，主要价值变成验证「本仓能吃外部
+MCP」这条通路。
 
 **只读**：两个工具都声明 ``readOnlyHint=True``。这不是文档说明——``agentscope.tool.MCPTool``
 读的就是这个 annotation 来定 ``is_read_only``，而 ``is_read_only`` 是 ``PermissionEngine``
-的判据。声明错 = SearchAgent 的「只读组」被破。消费侧另有 ``enable_tools`` 白名单兜第二层。
+的判据。声明错 = 只读边界被破。消费侧另有 ``enable_tools`` 白名单兜第二层。
 """
 
 from __future__ import annotations

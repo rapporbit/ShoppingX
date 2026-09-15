@@ -83,23 +83,3 @@ async def test_formatter_skips_when_prefix_too_short() -> None:
     ]
     formatted = await CacheAwareOpenAIFormatter().format(msgs)
     assert all("cache_control" not in json.dumps(e, default=str) for e in formatted)
-
-
-@pytest.mark.asyncio
-async def test_worker_system_prompt_is_below_cache_threshold() -> None:
-    """worker 的专职 prompt 短于最小缓存写入阈值，所以**不该**被打标记。
-
-    不是缺陷：Anthropic 侧 1024 token 以下本来就写不进缓存，打了也只是白占一个额度；worker 的
-    token 收益来自「prompt 本身短 + 同类 worker 之间前缀逐字相同」。这条测试钉的是**别为了让
-    worker 也有标记而调低阈值**——那会换来一堆写不进去的缓存写入。
-    """
-    from app.agent.prompts import get_worker_system_prompt
-
-    assert count_tokens(get_worker_system_prompt("search")) < MIN_CACHE_PREFIX_TOKENS
-
-    out = await CacheAwareOpenAIFormatter().format([_system(get_worker_system_prompt("search"))])
-    content = out[0]["content"]
-    assert not any(
-        isinstance(b, dict) and "cache_control" in b
-        for b in (content if isinstance(content, list) else [])
-    )

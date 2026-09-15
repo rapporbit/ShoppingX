@@ -3,12 +3,12 @@
 **为什么**：改前主 loop 固定 5 轮（planner → 搜 → price_compare → item_picker → summary），
 其中 price_compare / item_picker 两轮模型只是在「把上一步的结论搬进下一步的入参」——零决策、
 纯解码（每轮 2~3s）。到手价是纯本地计算，精挑的条件（预算 / 排除 / 偏好）planner 早已确定性
-落进会话 P_t，``item_picker`` 无参调用即按 P_t 执行。故把这两步下沉到工具层：检索类工具
-（``item_search`` / ``task_dispatch``）成功返回后**武装**，下一次模型调用前（pre_think，
-即同轮多个并发派发全部合流之后）自动跑一遍，结果以 hint 注入，模型下一步即可 ``shopping_summary``。
+落进会话 P_t，``item_picker`` 无参调用即按 P_t 执行。故把这两步下沉到工具层：``item_search``
+成功返回后**武装**，下一次模型调用前（pre_think，即同轮多个并发检索全部合流之后）自动跑一遍，
+结果以 hint 注入，模型下一步即可 ``shopping_summary``。
 
 **不动的东西**：``price_compare`` / ``item_picker`` 工具本身保留（模型仍可显式调，显式调即
-解除武装）；套装轮（≥2 槽）不自动——它要经 ``ask_user`` 确认组成，入口不动；worker 不自动。
+解除武装）；套装轮（≥2 槽）不自动——它要经 ``ask_user`` 确认组成，入口不动。
 自动执行走与真实工具调用**同一条** post_tool_call 管线（截断 / 收线通告 / schema 断言 / 偏好
 注入），信号（picks 数 / oncat / 阶段机）与模型亲手调完全一致。任何异常都吞掉并解除武装：
 失效方向 = 退回改前的「模型自己调」，不会更差。
@@ -22,7 +22,6 @@ import logging
 import os
 from typing import TYPE_CHECKING, Any
 
-from app.harness.fork_guard import current_fork_depth
 from app.harness.phase_machine import Phase, get_phase_machine
 from app.harness.signals import candidate_count
 
@@ -31,7 +30,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
 logger = logging.getLogger("shoppingx.harness.autopick")
 
-_SEARCH_TOOLS = frozenset({"item_search", "task_dispatch"})
+_SEARCH_TOOLS = frozenset({"item_search"})
 
 
 def autopick_enabled() -> bool:
@@ -45,8 +44,8 @@ def _is_bundle_turn() -> bool:
 
 
 def autopick_applies() -> bool:
-    """本轮是否归自动比价精挑管：开关开 + 主 loop + 非套装轮。收线通告的措辞也看这个。"""
-    return autopick_enabled() and current_fork_depth() == 0 and not _is_bundle_turn()
+    """本轮是否归自动比价精挑管：开关开 + 非套装轮。收线通告的措辞也看这个。"""
+    return autopick_enabled() and not _is_bundle_turn()
 
 
 def arm_on_tool(s: HarnessSession, tool_name: str, tool_args: dict[str, Any]) -> None:

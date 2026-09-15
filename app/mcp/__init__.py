@@ -2,7 +2,7 @@
 
 - :mod:`app.mcp.server` —— **生产侧**：把本仓的只读三工具（``item_search`` / ``price_compare``
   / ``shipping_calc``）暴露成一个 MCP server，供仓外的 Agent / IDE / 别的编排框架消费。
-- :mod:`app.mcp.fx_server` —— **消费侧的对端**：自建汇率 MCP，被 SearchAgent 的 Toolkit 挂进
+- :mod:`app.mcp.fx_server` —— **消费侧的对端**：自建汇率 MCP，被主 Agent 的 Toolkit 挂进
   来（接线在 :mod:`app.agent.mcp_registry`）。挑汇率是因为它零外部依赖（纯静态表，见
   ``app/recall/fx.py``），验的是「本仓能不能吃外部 MCP」这条通路，而不是某个第三方服务今天
   在不在线。

@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Any
 from agentscope.message import Msg
 from pydantic import BaseModel
 
-from app.harness.fork_guard import current_fork_depth
 from app.harness.middleware import harness
 from app.harness.msgs import tool_blocks
 from app.harness.signals import _summarize_call
@@ -52,11 +51,11 @@ async def prefill(session: HarnessSession, agent: Agent) -> None:
     预算）管的是模型的自由发挥，而这次调用是机制自己决定的——让它去过一道为约束模型而设的
     闸，只会平添「机制被自己的护栏拦下」这种荒诞失败。
 
-    降级：worker 不预置（它的活是按 demands 检索，demands 里已带主流程拆好的字段）；planner
-    抛错则回到老路（模型自己决定调 planner，prompt 里那条规则仍在）。预置是快路径不是唯一路径。
+    降级：planner 抛错则回到老路（模型自己决定调 planner，prompt 里那条规则仍在）。预置是快路径
+    不是唯一路径。
     """
     s = session
-    if s.prefilled or current_fork_depth() >= 1 or not s.original_query:
+    if s.prefilled or not s.original_query:
         return
     s.prefilled = True
 

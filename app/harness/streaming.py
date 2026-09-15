@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING
 from agentscope.model import ChatResponse
 
 from app.api import monitor
-from app.harness.fork_guard import current_fork_depth
 from app.harness.token_budget import charge_usage
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -24,10 +23,8 @@ async def stream_summary_delta(chunk: ChatResponse, emitted: int) -> int:
 
     收尾文案改由主模型在工具入参里写之后，原来收尾工具内部那条 summary_delta 流没了；chunk 是
     累积快照、``ToolCallBlock.input`` 在流式期间是累积的原始 JSON 串，从里面抠 summary 即可。
-    只在主 loop 发（worker 无前端连接）；解不出就跳过本 tick，最终产物不受影响。
+    解不出就跳过本 tick，最终产物不受影响。
     """
-    if current_fork_depth() != 0:
-        return emitted
     for block in getattr(chunk, "content", None) or []:
         if getattr(block, "type", None) != "tool_call" or getattr(block, "name", "") != (
             "shopping_summary"

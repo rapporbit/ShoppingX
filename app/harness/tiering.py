@@ -29,16 +29,13 @@ def first_round_tier(ctx: dict[str, Any]) -> str | None:
     条口径的两半：拆成两处的那段时间里，基座被改成 reasoning 而 Hook 还在按「基座是快档」顶
     reasoning，override 成同一个实例，什么都没发生，也没有任何测试会红（审查报告 P0-1）。
 
-    三条豁免各对应一个真会犯的错：
-    - **worker 不加档**：子 Agent 也有自己的 round_number=1，但它只按 demands 搜一个平台，
-      没有编排可言（能力边界靠 Toolkit 发放范围保证，不靠模型强弱）。
-    - **预算降档优先**：调用方只在 ``model_tier`` 仍为空时才问本函数，所以 budget_router 写过
-      lite 就是 lite —— 钱不够的时候，「想清楚」让位于「跑完」。
+    **预算降档优先**：调用方只在 ``model_tier`` 仍为空时才问本函数，所以 budget_router 写过
+    lite 就是 lite —— 钱不够的时候，「想清楚」让位于「跑完」。（曾有「worker 不加档」一条豁免，
+    A4 删子 Agent 后去掉。）
     """
     from app.agent.llm import main_loop_tier_base, main_loop_tier_first
-    from app.harness.fork_guard import current_fork_depth  # 延迟：让测试能 patch 模块属性
 
     tier = main_loop_tier_first()
-    if tier == "same" or ctx.get("round_number") != 1 or current_fork_depth() >= 1:
+    if tier == "same" or ctx.get("round_number") != 1:
         return None
     return None if tier == main_loop_tier_base() else tier

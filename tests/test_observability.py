@@ -1,7 +1,7 @@
 """A 块 · 可观测性的确定性单测：Prometheus metrics + structlog 上下文绑定。
 
 - metrics：工具耗时 / 调用计数累积、fork 计数、断路器状态 gauge、/metrics 端点渲染。
-- structlog：thread_scope / enter_fork 把 thread_id / user_id / fork_depth 绑进日志上下文。
+- structlog：thread_scope 把 thread_id / user_id 绑进日志上下文。
 """
 
 from __future__ import annotations
@@ -39,13 +39,6 @@ def test_record_tool_error_status_separately() -> None:
     metrics.record_tool("unit_probe2", 0.01, "error")
     after = _metric_value("shoppingx_tool_calls_total", {"tool": "unit_probe2", "status": "error"})
     assert after == before + 1
-
-
-def test_inc_fork_counts() -> None:
-    before = _metric_value("shoppingx_fork_total")
-    metrics.inc_fork()
-    metrics.inc_fork()
-    assert _metric_value("shoppingx_fork_total") == before + 2
 
 
 def test_set_task_slots_and_active() -> None:
@@ -97,12 +90,3 @@ def test_thread_scope_binds_log_context() -> None:
         assert ctx.get("user_id") == "u-7"
     # 离开作用域后还原。
     assert "thread_id" not in structlog.contextvars.get_contextvars()
-
-
-def test_enter_fork_binds_depth() -> None:
-    from app.harness.fork_guard import enter_fork
-
-    structlog.contextvars.clear_contextvars()
-    with enter_fork():
-        assert structlog.contextvars.get_contextvars().get("fork_depth") == 1
-    assert "fork_depth" not in structlog.contextvars.get_contextvars()

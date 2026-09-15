@@ -53,10 +53,7 @@ def _as_opt_int(value: object) -> int | None:
         return None
 
 
-# 会往候选池里添货的工具。**只有直搜一个**：``task_dispatch`` 回传的是自然语言总结，
-# 候选本身经登记表传递、不进工具返回文本，所以派发路径下数不出新候选（见 _count_candidates
-# 的「宁可少算不可多算」）。这里曾列过 ``dispatch_tool`` / ``parallel_dispatch_tool`` 两个
-# 名字，都不是真实工具名、永不匹配，2026-09-12 删。
+# 会往候选池里添货的工具。
 _SEARCH_TOOLS = frozenset({"item_search"})
 
 

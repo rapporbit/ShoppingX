@@ -18,7 +18,6 @@ import re
 from app.api import monitor
 from app.api.clarification import clear_waiter, create_pending, register_waiter
 from app.api.context import get_thread_id
-from app.harness.fork_guard import current_fork_depth
 from app.tools._args import StrListArg
 from app.tools._bundle import reconcile_slots_from_reply
 from app.tools._shell import tool
@@ -51,12 +50,6 @@ async def ask_user(
     参数 question；options 答案是有限项时列出（前端可点选）、开放式留空；multi_select
     是否多选；preselected 多选时的默认勾选（只放必备项）。
     """
-    if current_fork_depth() > 0:
-        return (
-            "[子任务无权向用户提问] 你是被派发的单平台子任务，无法直接与用户交互。"
-            "请根据 demands 中已有的信息继续。"
-        )
-
     thread_id = get_thread_id()
     if thread_id is None:
         return "（无活跃会话，跳过澄清）用户未回复，请基于已有信息继续。"

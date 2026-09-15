@@ -33,16 +33,14 @@ from typing import Any
 from app.api import backplane, event_log
 from app.api.connection import ConnectionManager
 from app.api.context import get_session_dir, get_thread_id
-from app.observability import metrics
 
 logger = logging.getLogger("shoppingx.monitor")
 
-# AGUI 七类标准事件 + fork（同质子 Agent 派发）。前端按这些类型分发展示。
+# AGUI 标准事件。前端按这些类型分发展示。（fork 事件随子 Agent 在 A4 删除。）
 EVENT_SESSION_CREATED = "session_created"
 EVENT_ASSISTANT_CALL = "assistant_call"
 EVENT_TOOL_START = "tool_start"
 EVENT_TOOL_END = "tool_end"
-EVENT_FORK = "fork"
 EVENT_CLARIFICATION_REQUEST = "clarification_request"
 EVENT_QUEUE_STATUS = "queue_status"
 EVENT_MEMORY_UPDATED = "memory_updated"
@@ -88,7 +86,6 @@ _ACTIVITY_EVENTS = frozenset(
         EVENT_ASSISTANT_CALL,
         EVENT_TOOL_START,
         EVENT_TOOL_END,
-        EVENT_FORK,
         EVENT_CLARIFICATION_REQUEST,
         EVENT_MEMORY_APPLIED,
     }
@@ -99,8 +96,7 @@ _ACTIVITY_EVENTS = frozenset(
 class ActivityRecorder:
     """一段任务里「Agent 干了什么」的活动流录制器（供收尾持久化、前端回看时还原思考过程）。
 
-    只收与录制起点**同一 thread_id** 的事件：fork 子 Agent 在子 ``thread_scope`` 下产生的内部
-    事件天然被过滤掉，与实时前端「父任务页只显示父 thread 事件」的口径一致（见 ``report_fork``）。
+    只收与录制起点**同一 thread_id** 的事件。
     """
 
     root_thread_id: str | None
@@ -108,8 +104,7 @@ class ActivityRecorder:
 
 
 # 当前任务的活动流录制器（None=不录制，如离线脚本 / 测试）。run_agent 在主 loop 开局
-# 用 begin_activity_capture() 设上，收尾读 recorder.events 落进 turns.json。task-local：
-# fork 子任务 copy_context 拿到同一引用，但子事件因 thread_id 不匹配被滤掉，无并发写竞争。
+# 用 begin_activity_capture() 设上，收尾读 recorder.events 落进 turns.json。task-local。
 _activity_recorder: ContextVar[ActivityRecorder | None] = ContextVar(
     "shoppingx_activity_recorder", default=None
 )
@@ -178,9 +173,7 @@ async def _emit(
     # 持久化进该 thread 的 Redis Stream（D 块），拿到 stream id 回填进 payload —— 前端把它当
     # last_event_id 记住，断线重连时带回来补发缺口。
     #
-    # **只持久化「根 thread」的事件**：子 fork 内部事件的流没人会拿 last_event_id 去回放（前端只连
-    # 根 thread），写了纯属浪费 + 留下没人读的 Stream。判据复用活动流录制的根 thread 口径——
-    # report_fork 的 thread_id 是父=根，照样持久化；子 Agent 内部事件的 thread_id 是子，跳过。
+    # **只持久化「根 thread」的事件**（前端只连根 thread），判据复用活动流录制的根 thread 口径。
     # 无录制上下文（直接调 run_agent 的测试 / 离线）时回退为持久化，有 TTL 兜底。无 thread_id 或
     # Redis 降级时 payload 无 id、退回现状（只直播）。放在直播之前，确保推出去的事件就带 id。
     rec = _activity_recorder.get()
@@ -213,7 +206,7 @@ async def _emit(
         backplane.publish_event(payload)
 
 
-# --- 七类标准事件 + fork 的上报入口 -------------------------------------------
+# --- 标准事件的上报入口 -------------------------------------------------------
 
 
 async def report_session_created(session_dir: Path | None = None) -> None:
@@ -253,9 +246,8 @@ async def report_items_preview(items: list[dict[str, Any]]) -> None:
     price_usd / landed_usd / reason / image_url / url），前端可以用同一个 ProductCards 渲染，
     收尾时再被定稿那批原样覆盖。
 
-    **显式路由到根 thread**：精挑万一发生在 fork 出的子 loop 里（子 thread 没有前端连接，事件会
-    静默丢掉），卡片就永远推不出去。这与 ``report_fork`` 的取舍一致——用户看的是根 thread 那个页面，
-    结果类事件就该送到那里。无录制上下文（离线 / 单测）时退回当前 ContextVar。
+    **显式路由到根 thread**：用户看的是根 thread 那个页面，结果类事件就该送到那里。
+    无录制上下文（离线 / 单测）时退回当前 ContextVar。
     """
     rec = _activity_recorder.get()
     root = rec.root_thread_id if rec is not None and rec.root_thread_id else None
@@ -293,21 +285,6 @@ async def report_confirmation(
         label = f"{action}已{'同意' if status == 'approved' else '拒绝'}"
     await _emit(
         event, label, {"confirmation": confirmation}, thread_id=thread_id or root_thread_id()
-    )
-
-
-async def report_fork(sub_thread_id: str, demands: str) -> None:
-    """主 loop 派发同质子 AgentLoop 时上报（前端显示「派发子任务并行处理」）。
-
-    在进入子 ``thread_scope`` 之前调用，故事件路由到**父 thread** 的连接——用户在父任务
-    页面就能看到「分叉出一个子任务」。子 Agent 内部的事件因其 thread 无前端连接而静默
-    （上下文隔离），这是有意为之。
-    """
-    metrics.inc_fork()  # A 块：fork 派发计数
-    await _emit(
-        EVENT_FORK,
-        "派发子任务并行处理",
-        {"sub_thread_id": sub_thread_id, "demands": _clip(demands)},
     )
 
 

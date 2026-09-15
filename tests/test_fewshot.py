@@ -31,11 +31,9 @@ def test_system_prompt_does_not_inject_fewshot() -> None:
     assert "反例" not in sp
 
 
-def test_main_and_sub_share_same_system_prompt() -> None:
-    # system prompt 纯静态：主与子完全同参（无运行时注入）→ system 段字节相同（同质 fork 硬约束）。
-    main_sp = get_system_prompt()
-    sub_sp = get_system_prompt()  # dispatch_tool 子 Agent 的 fallback 路径
-    assert main_sp == sub_sp
+def test_system_prompt_is_static() -> None:
+    # system prompt 纯静态（无运行时注入）→ 两次取值字节相同，缓存前缀才稳定。
+    assert get_system_prompt() == get_system_prompt()
 
 
 def test_missing_files_degrade_to_placeholder(tmp_path: Path, monkeypatch: Any) -> None:

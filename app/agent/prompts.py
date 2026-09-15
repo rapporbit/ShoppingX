@@ -3,9 +3,7 @@
 System prompt 用 XML 分块，且**纯静态**——不含任何运行时注入位。
 长期偏好 / 近期行为历史 / 会话级 P_t 这些**每轮必变**的运行时上下文一律**不进 system prompt**，
 改由 ``session_io.inject_runtime_context`` 拼进当轮 human message（见该函数的 prompt cache 说明）：
-system prompt 逐字稳定才能成为跨轮 / 跨会话都命中的缓存前缀。主 Agent 与 SearchAgent 各读自己的
-段（``main_agent`` / ``sub_agents.search``），但每段自身逐字稳定，
-同角色跨轮跨会话都命中同一份前缀。
+system prompt 逐字稳定才能成为跨轮 / 跨会话都命中的缓存前缀。
 """
 
 from functools import lru_cache
@@ -47,7 +45,7 @@ def available_versions() -> list[str]:
 
 
 def _merge(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
-    """把叠加层合进基线：顶层键替换，值为 dict 的键（如 ``sub_agents``）做一层递归合并。
+    """把叠加层合进基线：顶层键替换，值为 dict 的键做一层递归合并。
 
     **覆盖的键必须在 base 里已存在**——拼错一个键名（``sytem_prompt``）若被静默接受，那个桶的
     用户就会一直跑在未改动的提示词上，而 A/B 报告照样出数、看起来一切正常。宁可开机就炸。
@@ -152,27 +150,8 @@ def _resolved(version: str | None) -> dict[str, Any]:
     return _load_prompts(active_version())
 
 
-def get_worker_system_prompt(kind: str, version: str | None = None) -> str:
-    """worker 的**专职** system prompt（``sub_agents.search``；TradeAgent 与其 ``trade`` 段已删）。
-
-    批 1 起 worker 不再复用主 prompt：读写切分之后，主 prompt 里的收尾判据、bundle 槽位流程、
-    派发策略对 worker 全是噪声——更糟的是**指挥它去调根本没发给它的工具**（worker 手上没有
-    shopping_summary / task_dispatch），白烧一轮撞 tool-not-found。
-
-    对 prompt cache 的影响是**正的**：worker 不再蹭主 Agent 的前缀，但它自己那段短得多且逐字
-    稳定，同类 worker 之间（跨调用、跨会话）共用同一条前缀。
-
-    批 0 的 ``clone`` 模式不走这里——它的定义就是「与主 Agent 同工具集、同 system prompt」，
-    换 prompt 就不是对照组了（见 :func:`app.agent.agents.build_worker_agent`）。
-    """
-    sub_agents = _resolved(version).get("sub_agents", {})
-    if kind not in sub_agents:
-        raise KeyError(f"prompts.yml 缺少 sub_agents.{kind} 段")
-    return str(sub_agents[kind])
-
-
 def get_system_prompt(version: str | None = None) -> str:
-    """主 / 子 AgentLoop 共用的**纯静态** system prompt（无任何运行时变量，逐字稳定）。
+    """主 AgentLoop 的**纯静态** system prompt（无任何运行时变量，逐字稳定）。
 
     **不注入 few-shot**：当前 system prompt 是 2k 版，为压 token 整段删掉了 ``<examples>``。
     ``app.agent.fewshot`` 模块仍在（评测飞轮的「高分轨迹蒸馏」一腿还用它产出示例），只是不再拼进

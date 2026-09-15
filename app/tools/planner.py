@@ -48,7 +48,6 @@ from app.api.context import (
     set_session_pt,
     set_session_tasks,
 )
-from app.harness.fork_guard import current_fork_depth
 from app.memory.domains import (
     DOMAIN_GLOBAL,
     PrefDomain,
@@ -663,18 +662,15 @@ async def planner(intent: str) -> PlanOutput:
     # 不是硬闸（COMPARING 阶段这两个工具仍然可用，用户中途改口还能调）。
     set_session_tasks(plan.tasks)
     # 套装状态的生命周期跟着品类域走：换域（旅行套装 → 沙发）时旧套装连盘上那份一起清。
-    # 只主 loop 写（depth 0）：子 Agent 本就不该调 planner，真调了也不能让它覆盖主 loop 的套装定义。
-    if current_fork_depth() == 0:
-        if _domain_switch(get_session_pt(), plan.domains):
-            reset_session_bundle(clear_file=True)
-        if plan.bundle_slots:  # validator 已收口成「≥2 槽或空」
-            set_session_bundle(plan.bundle_slots, mode=plan.slot_mode)
+    if _domain_switch(get_session_pt(), plan.domains):
+        reset_session_bundle(clear_file=True)
+    if plan.bundle_slots:  # validator 已收口成「≥2 槽或空」
+        set_session_bundle(plan.bundle_slots, mode=plan.slot_mode)
     # 本轮约束当轮落 P_t —— 短期记忆的机制执行通路（见 _sync_session_pt）。放在币种 / 收货国 /
     # 品类域全部确定性回填**之后**：P_t 要存的是这些回填后的最终值，不是模型的原始猜测。
     _sync_session_pt(plan, intent, dest_stated_now=dest_stated_now)
-    # 约束集变化推给前端偏好面板（可见可纠）。只主 loop 推：子 Agent 的 planner 调用（prompt
-    # 禁、机制上也不该）不该刷新用户面板。无会话（单测直调）时 _sync 没写 P_t，也就不推。
-    if current_fork_depth() == 0 and (pt_now := get_session_pt()) is not None:
+    # 约束集变化推给前端偏好面板（可见可纠）。无会话（单测直调）时 _sync 没写 P_t，也就不推。
+    if (pt_now := get_session_pt()) is not None:
         await monitor.report_session_constraints(pt_now)
     # 给前端「思考过程」展开看的人读摘要：这一步把自然语言意图拆成了哪些结构化字段。
     plan_lines: list[str] = []

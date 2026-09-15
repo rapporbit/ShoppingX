@@ -7,7 +7,6 @@ OpenTelemetry、把多 fork 归并成一棵树，见 ``app/agent/tracing.py``）
 
 **打点位置。**
 - 工具耗时 / 调用数：``HarnessToolAdapter.on_tool_call`` 包住工具执行处（一处覆盖全部工具）。
-- fork 数：``monitor.report_fork``。
 - 运行时 gauge（活跃任务 / 任务槽 / 断路器状态）：在 ``/metrics`` 被 scrape 时即时刷新——
   这些是「当前值」，scrape 那一刻读最准，不必实时维护。
 
@@ -36,8 +35,6 @@ TOOL_DURATION = Histogram(
 )
 # 工具调用计数：status=ok/error，可算错误率。
 TOOL_CALLS = Counter("shoppingx_tool_calls_total", "工具调用次数", ["tool", "status"])
-# fork 子任务派发数。
-FORK_TOTAL = Counter("shoppingx_fork_total", "派发的同质子 Agent 数")
 # 运行时 gauge（scrape 时刷新）。
 ACTIVE_TASKS = Gauge("shoppingx_active_tasks", "当前活跃的主 AgentLoop 任务数")
 TASK_SLOT_ACTIVE = Gauge("shoppingx_task_slots_active", "已占用的任务并发槽数")
@@ -71,11 +68,6 @@ def record_tool(tool: str, duration_seconds: float, status: str) -> None:
     """记一次工具执行的耗时与成败。``status`` 取 ``ok`` / ``error``。"""
     TOOL_DURATION.labels(tool=tool).observe(duration_seconds)
     TOOL_CALLS.labels(tool=tool, status=status).inc()
-
-
-def inc_fork() -> None:
-    """记一次 fork 派发。"""
-    FORK_TOTAL.inc()
 
 
 def record_cache(cache: str, result: str) -> None:

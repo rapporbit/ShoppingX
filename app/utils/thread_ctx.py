@@ -1,7 +1,6 @@
 """``thread_scope``：把 ContextVar 的 set/reset 封装成作用域，离开自动还原。
 
-请求入口与 ``task_dispatch`` 派 worker 时都要写 thread_id / session_dir，手动 set+reset
-重复且易漏 reset。用上下文管理器统一处理：
+请求入口要写 thread_id / session_dir，手动 set+reset 重复且易漏 reset。用上下文管理器统一处理：
 
     async def run_agent(query: str, thread_id: str):
         session_dir = ensure_session_dir(thread_id)

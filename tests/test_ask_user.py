@@ -1,4 +1,4 @@
-"""app/tools/ask_user 工具层测试：fork 拒绝 / 无会话 / 应答 / 超时 / 清理取消 / 任务取消。
+"""app/tools/ask_user 工具层测试：无会话 / 应答 / 超时 / 清理取消 / 任务取消。
 
 与 test_clarification.py 的分工：那边测桥（Future 生命周期），这边测工具语义——
 尤其是「用户在澄清等待中点取消」时任务必须真的死掉，不能被兜底文案吸收。
@@ -9,7 +9,6 @@ import asyncio
 import pytest
 
 from app.api.clarification import cancel_pending, has_pending, resolve_pending
-from app.harness.fork_guard import enter_fork
 from app.tools.ask_user import ask_user
 from app.utils.thread_ctx import thread_scope
 
@@ -32,14 +31,6 @@ async def _wait_pending() -> None:
             return
         await asyncio.sleep(0.01)
     raise AssertionError("ask_user 没有在期限内挂起 pending Future")
-
-
-async def test_fork_depth_rejected(tmp_path):
-    """子 Agent（fork depth>0）调用被拒，不产生 pending。"""
-    with thread_scope(TID, tmp_path), enter_fork():
-        result = await _invoke()
-    assert "子任务无权" in result
-    assert not has_pending(TID)
 
 
 async def test_no_thread_id_skips():

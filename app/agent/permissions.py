@@ -1,8 +1,8 @@
 """写工具的精准放行（批 0 / L3）。
 
 AgentScope 在 ``PermissionMode.DEFAULT`` 下对**非只读工具**一律发 ``RequireUserConfirmEvent``
-把 reply 挂起等人点确认。本仓的写工具（``ask_user`` / ``forget_preference`` / 两个终结工具 /
-``task_dispatch``）是 Agent 自己的工作流零件，不是「要不要让 Agent 动你的磁盘」那类高危动作——
+把 reply 挂起等人点确认。本仓的非只读工具（``ask_user`` / ``forget_preference`` / 两个终结工具 /
+两个交易暂存卡工具）是 Agent 自己的工作流零件，不是「要不要让 Agent 动你的磁盘」那类高危动作——
 每次都弹确认等于让主链路停在半路。
 
 **但不用 ``BYPASS``**：整档关掉权限引擎，等于把将来新加的真写工具一起悄悄放行了，那才是
@@ -33,7 +33,6 @@ DEFAULT_ALLOWED_TOOLS: frozenset[str] = frozenset(
         "forget_preference",  # 删一条长期偏好，用户明说要忘才会被调
         "shopping_summary",  # 终结工具：产清单 + 落会话产物
         "chat_fallback",  # 终结工具：非购物意图兜底
-        "task_dispatch",  # 派 worker，副作用只在本次会话内
         "create_order",  # 只出确认卡，决议走 HTTP（见上）
         "cancel_order",  # 取消前必须先 query_order（sequencing 断言），且只有 CONFIRMED 可取消
     }

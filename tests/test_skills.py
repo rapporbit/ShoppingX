@@ -50,13 +50,9 @@ async def test_main_toolkit_injects_skill_directory() -> None:
     assert "Multiple-Choice Knapsack" not in block
 
 
-async def test_skill_viewer_tool_is_available_to_main_only() -> None:
+async def test_skill_viewer_tool_is_available_to_main() -> None:
     main = await build_toolkit("main")
     assert SKILL_VIEWER_TOOL_NAME in {s["function"]["name"] for s in await main.get_tool_schemas()}
-    toolkit = await build_toolkit("search")
-    names = {s["function"]["name"] for s in await toolkit.get_tool_schemas()}
-    assert SKILL_VIEWER_TOOL_NAME not in names
-    assert await toolkit.get_skill_instructions(["basic"]) is None
 
 
 async def test_skill_viewer_is_whitelisted() -> None:
