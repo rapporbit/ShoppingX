@@ -16,14 +16,11 @@ post_tool_call 置位、在 post_reflect 催），按点切会把它散在 4 个
 不在一页上——**跨文件的顺序契约**集中列在这里，改 priority 前先看：
 
 pre_tool_call（低先执行）：
-    5 terminal_reached · 12 trade_sequence · 15 websearch
-    · 20 phase_check
-    · 25 sequencing · 30 search_authority · 33 token_budget · 35 fork_budget
-    · 45 retrieval_charge · 48 tool_breaker
-  - search_authority(30) 读 item_search_calls 的**自增前**值，自增在 retrieval_charge(45)——
-    挪了顺序，
-    子 Agent 的「恰好放行一次」塌成「放行 0 次」。
-  - token_budget(33) 必须早于 fork_budget(35)：fork 闸 charge 即扣槽。
+    5 terminal_reached · 12 trade_sequence · 20 phase_check · 25 sequencing
+    · 30 spend_gate（token → fork） · 45 search_gate（websearch → authority → charge）
+    · 48 tool_breaker
+  - spend_gate 的 token→fork、search_gate 的 authority→charge 两条顺序契约在各自函数体内，
+    理由见 budget.py 模块头。
   - tool_breaker(48) 必须最后：allow() 有副作用。
 
 post_tool_call：

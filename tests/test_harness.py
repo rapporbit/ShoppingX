@@ -261,7 +261,6 @@ class TestStepValidator:
         assert result is None
 
 
-
 # ============================================================
 # Drift Detector
 # ============================================================
@@ -986,7 +985,6 @@ class TestAssertionWiring:
         assert any("[顺序问题]" in c for c in contents), f"断言未转成纠正提示: {contents}"
 
 
-
 class TestDriftWiring:
     """漂移检测四类信号的真实触发路径。"""
 
@@ -1580,7 +1578,13 @@ class TestGateOrderingContracts:
 
         setup_harness()
         prio = {n: p for _, n, p in harness.list_hooks("pre_tool_call")}
-        assert prio["search_authority_gate"] < prio["retrieval_charge_gate"]
+        assert prio["spend_gate"] < prio["search_gate"] < prio["tool_breaker_gate"]
+        import inspect
+
+        from app.harness.hooks import budget
+
+        body = inspect.getsource(budget.check_search)
+        assert body.index("check_search_authority") < body.index("charge_retrieval")
 
     async def test_sub_search_cap_admits_exactly_cap_calls(self) -> None:
         """行为契约：子 Agent 的 item_search **恰好**放行 SUB_ITEM_SEARCH_CAP 次。
@@ -1608,12 +1612,13 @@ class TestGateOrderingContracts:
         """token_budget_gate 必须早于 fork_budget_gate：fork 闸 charge 即扣槽（parallel 槽
         只有 1 个），预算拒绝若发生在扣槽之后，被拒的尝试会烧掉唯一的并行额度、还连带触发
         postfork 直搜拦截。"""
-        from app.harness.middleware import harness
-        from app.harness.setup import setup_harness
 
-        setup_harness()
-        prio = {n: p for _, n, p in harness.list_hooks("pre_tool_call")}
-        assert prio["token_budget_gate"] < prio["fork_budget_gate"]
+        import inspect
+
+        from app.harness.hooks import budget
+
+        body = inspect.getsource(budget.check_spend)
+        assert body.index("check_token_budget") < body.index("check_fork_budget")
 
 
 # ============================================================
