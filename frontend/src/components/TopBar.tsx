@@ -22,6 +22,8 @@ const STATUS_TEXT: Record<TaskStatus, string> = {
 
 type TopBarProps = {
   title: string;
+  // 标题 = 第一轮 query；那条气泡还在视野里时藏起来，免得同屏重复（由 App 按滚动位置判定）。
+  titleHidden?: boolean;
   status: TaskStatus;
   // 展示用的是**用户名**，不是 user_id：后者是一串随机 hex，取首字母只会得到两个乱码字符。
   username: string;
@@ -99,6 +101,7 @@ function AvatarMenu({
 
 export function TopBar({
   title,
+  titleHidden = false,
   status,
   username,
   platformCount,
@@ -114,7 +117,11 @@ export function TopBar({
         <button className="nav-toggle" onClick={onOpenNav} aria-label="打开会话栏">
           <Menu size={20} strokeWidth={1.75} />
         </button>
-        <span className="title-text" title={title}>
+        <span
+          className={`title-text ${titleHidden ? "is-hidden" : ""}`}
+          title={title}
+          aria-hidden={titleHidden}
+        >
           {title}
         </span>
         <Tooltip content={STATUS_TEXT[status]}>

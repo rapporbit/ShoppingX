@@ -1,15 +1,15 @@
 /* ShoppingX 前端 —— 布局借鉴参考项目 Globex（窄侧栏 + 居中对话流 + 悬浮输入框），
    视觉语言是自己的：克制的单色系。
-   规则：全站没有饱和色，只有暖白 / 石灰 / 炭黑四个明度档 + 一处暖灰做「选中 / 用户气泡」；
-   主按钮是炭黑不是彩色；线用发丝线，阴影几乎不用，圆角收到 6~8px；标题衬线加字距。
+   规则：全站没有饱和色，纯白底 + 浅灰 / 炭黑几个明度档 + 一处暖灰做「选中 / 用户气泡」；
+   主按钮是炭黑不是彩色；线用发丝线，阴影几乎不用，圆角收到 6~8px；字体用系统默认，标题只加字距。
    状态色（等待 / 出错）也压成沙色 / 砖红，只求能分辨、不求醒目。配色全在这组变量里。
    组件底座：弹层 / 菜单 / 下拉 / 提示 / 开关走 Radix（无头，样式在文末「基础组件」段），动效走 motion，
    轻提示走 sonner，图标走 lucide-react（旧名字在 components/icons.tsx 里做了薄壳）。 */
 
 :root {
-  --bg: #f6f5f2; /* 暖白底 */
-  --rail: #efeeea; /* 侧栏：比底深一档的石灰，不带色相 */
-  --surface: #fdfcfa;
+  --bg: #ffffff; /* 纯白底 */
+  --rail: #ffffff; /* 侧栏同底色，靠右侧发丝线分隔 */
+  --surface: #ffffff;
   --surface-soft: #f1f0ec;
   --surface-softer: #f7f6f3;
   --border: #e5e3de; /* 发丝线 */
@@ -30,9 +30,9 @@
   --danger: #9e4a3c; /* 砖红，压暗 */
   --danger-soft: #f3e9e6;
 
-  --serif: "Iowan Old Style", "Baskerville", "Songti SC", "STSong", "Noto Serif SC", serif;
-  --sans: "Avenir Next", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
-    "Microsoft YaHei", sans-serif;
+  /* 系统默认字体：标题与正文同一套，不再单配衬线。 */
+  --sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
 
   /* 阴影分层：sm 给悬浮态的卡片 / 胶囊，md 给浮层菜单，lg 给弹窗与输入框，xl 给全屏弹窗。
      全是同色低透明度的多层叠加，不用单层大模糊——单层在暖白底上会发灰发脏。 */
@@ -151,7 +151,6 @@ button:disabled {
   border-radius: 6px;
 }
 .sidebar-brand {
-  font-family: var(--serif);
   font-weight: 600;
   font-size: 18px;
   letter-spacing: 0.02em;
@@ -341,7 +340,6 @@ button:disabled {
   min-width: 0;
 }
 .title-text {
-  font-family: var(--serif);
   font-size: 16px;
   font-weight: 500;
   letter-spacing: 0.02em;
@@ -350,6 +348,11 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 52vw;
+  transition: opacity 0.18s;
+}
+/* 第一轮用户气泡还在视野里时藏起来（同一句话不在同屏出现两次），滚走后淡入。 */
+.title-text.is-hidden {
+  opacity: 0;
 }
 .status-dot {
   width: 8px;
@@ -463,7 +466,6 @@ button:disabled {
   margin-bottom: 18px;
 }
 .welcome h1 {
-  font-family: var(--serif);
   font-size: 30px;
   font-weight: 500;
   letter-spacing: 0.02em;
@@ -956,9 +958,6 @@ button:disabled {
 }
 
 /* ============================ 最终清单 ============================ */
-.final {
-  background: var(--surface);
-}
 .markdown {
   line-height: 1.7;
   color: var(--text);
@@ -1257,9 +1256,10 @@ button:disabled {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+/* 图区 4:3：1:1 时一张卡大半是图，一屏看不到选购理由与按钮。商品图 object-fit: contain 留白边不裁切。 */
 .card-thumb {
   position: relative;
-  aspect-ratio: 1 / 1;
+  aspect-ratio: 4 / 3;
   display: grid;
   place-items: center;
   overflow: hidden;
@@ -1362,8 +1362,21 @@ button:disabled {
 
 /* ============================ 底部输入 ============================ */
 .composer {
+  position: relative;
+  z-index: 1;
   flex-shrink: 0;
   padding: 6px 22px 16px;
+}
+/* 对话流滚到输入框底下时渐隐，而不是被一刀切断。挂在输入框上沿往上伸，不挡点击。 */
+.composer::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  height: 32px;
+  background: linear-gradient(to bottom, rgba(255, 255, 255, 0), var(--bg));
+  pointer-events: none;
 }
 /* 输入框：半透明 + 背景模糊的「玻璃」，浮在对话流上方；聚焦时边框收深、阴影抬高。 */
 .composer-box {
@@ -2822,7 +2835,6 @@ button:disabled {
 
 .landing-title {
   margin: 0 0 20px;
-  font-family: var(--serif);
   font-size: 46px;
   font-weight: 500;
   line-height: 1.3;
@@ -4422,7 +4434,6 @@ button:disabled {
   margin-bottom: 14px;
 }
 .panel-host.page .drawer-title {
-  font-family: var(--serif);
   font-size: 22px;
   font-weight: 500;
   letter-spacing: 0.02em;
@@ -4486,7 +4497,6 @@ button:disabled {
   align-items: baseline;
   gap: 8px;
   margin: 6px 0 12px;
-  font-family: var(--serif);
   font-size: 18px;
   letter-spacing: 0.02em;
 }
