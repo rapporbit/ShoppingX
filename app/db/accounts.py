@@ -51,6 +51,21 @@ async def create_user(db: AsyncSession, username: str, password: str) -> User:
     return user
 
 
+async def ensure_dev_admin(db: AsyncSession, username: str, password: str) -> bool:
+    """本地调试的默认管理员：不存在就建，已存在不动（**不重置密码**），返回是否新建。
+
+    只由启动流程在配了 ``DEV_ADMIN_USERNAME`` / ``DEV_ADMIN_PASSWORD`` 时调用，线上不配即不建。
+    """
+    stmt = select(User.id).where(User.username == username)
+    if (await db.execute(stmt)).scalar_one_or_none() is not None:
+        return False
+    try:
+        await create_user(db, username, password)
+    except ValueError:  # 多进程同时起服，另一边先建了——结果一样，不算错
+        return False
+    return True
+
+
 async def authenticate(db: AsyncSession, username: str, password: str) -> User | None:
     """校验用户名 + 密码，通过返回 User，否则 None（调用方一律回同一句错误，见模块 docstring）。"""
     user = (await db.execute(select(User).where(User.username == username))).scalar_one_or_none()

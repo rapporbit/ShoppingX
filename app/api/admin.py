@@ -30,10 +30,19 @@ logger = logging.getLogger("shoppingx.admin")
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
+def dev_admin_username() -> str:
+    """本地调试默认管理员的用户名；``DEV_ADMIN_USERNAME`` / ``DEV_ADMIN_PASSWORD`` 都配才算数。"""
+    name = env_str("DEV_ADMIN_USERNAME", "")
+    return name if name and env_str("DEV_ADMIN_PASSWORD", "") else ""
+
+
 def admin_usernames() -> set[str]:
-    """白名单（``ADMIN_USERNAMES``，逗号分隔）。空 = 没有任何管理员，后台整体关闭。"""
+    """白名单（``ADMIN_USERNAMES``，逗号分隔）+ 本地默认管理员。空 = 没有管理员，后台整体关闭。"""
     raw = env_str("ADMIN_USERNAMES", "")
-    return {name.strip() for name in raw.split(",") if name.strip()}
+    names = {name.strip() for name in raw.split(",") if name.strip()}
+    if dev := dev_admin_username():
+        names.add(dev)
+    return names
 
 
 async def require_admin(

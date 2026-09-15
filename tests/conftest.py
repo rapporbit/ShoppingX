@@ -48,6 +48,13 @@ os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
 # 自己起进程 + monkeypatch 这个变量（见 tests/test_mcp.py），别靠环境碰巧配着。
 os.environ.setdefault("MCP_SEARCH_URL", "")
 
+# 鉴权默认关、本地默认管理员清空：开发者 .env 为本地调试开了 AUTH_ENABLED=true + DEV_ADMIN_* 时，
+# 按「鉴权关闭」写的用例（test_history 等）会整片 401。要验鉴权 / 账户的用例自己 monkeypatch 打开
+# （test_accounts、test_auth、test_dev_admin 就是这么做的）。
+os.environ.setdefault("AUTH_ENABLED", "false")
+os.environ.setdefault("DEV_ADMIN_USERNAME", "")
+os.environ.setdefault("DEV_ADMIN_PASSWORD", "")
+
 # M16：账户库钉到临时文件，且**强制覆盖**（不是 setdefault）——单测会真的写库（注册用户、认领
 # 会话），若落到开发者的 var/globex.db 上，跑一遍 pytest 就往真实账户表里塞一堆测试用户。每次
 # pytest 启动先删掉旧的临时库，保证从空表开始（用例间的隔离则靠各自用不同用户名）。
