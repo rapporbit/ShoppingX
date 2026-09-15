@@ -3,6 +3,8 @@
     post_tool_call   5  content_filter    L3：外部来源工具返回里的提示词注入
     post_tool_call  10  truncate_result   过长结果按 token 预算截断
                                           （**必须早于任何追加提示的 Hook**）
+    post_tool_call  15  content_fence     外部来源工具返回包进 <external_content> 围栏
+                                          （晚于截断、早于追加提示）
     on_session_end  10  final_answer_audit 先把 Harness 内部控制文案从最终回复里剔掉（去噪），
                                            再做 L4 密钥 / 内网地址 / 服务器路径脱敏
                                            （曾是 output_guard(10) + output_audit(20) 两个 hook）
@@ -28,7 +30,11 @@ from app.harness.sentinels import (
 from app.harness.state import guard_of
 from app.harness.truncation import truncate_tool_result
 from app.observability import metrics
-from app.security.content_filter import EXTERNAL_SOURCE_TOOLS, sanitize_tool_output
+from app.security.content_filter import (
+    EXTERNAL_SOURCE_TOOLS,
+    fence_tool_output,
+    sanitize_tool_output,
+)
 from app.security.output_guard import audit_output
 
 logger = logging.getLogger("shoppingx.harness.safety")
@@ -54,6 +60,27 @@ async def filter_tool_output(context: dict[str, Any]) -> dict[str, Any] | None:
     metrics.record_security_event("prompt_injection_filtered")
     logger.warning("L3 内容过滤：%s 的返回命中 %d 处疑似注入，已替换", tool_name, hits)
     context["tool_result"] = cleaned
+    return context
+
+
+@harness_hook("post_tool_call", name="content_fence", priority=15)
+async def fence_external_output(context: dict[str, Any]) -> dict[str, Any] | None:
+    """外部来源工具的返回包进固定标签围栏，模型据此把里面当数据、不当指令。
+
+    priority 15 夹在两者之间：晚于 ``truncate_result``(10)——先截再包，收尾标签才不会被截掉；
+    早于 ``transition_notice``(19) / ``result_nudges``(20)——Harness 自己的提示贴在围栏外，
+    不和不可信文本混在一起。
+    """
+    tool_name = context.get("tool_name", "")
+    if tool_name not in EXTERNAL_SOURCE_TOOLS:
+        return None
+    result = context.get("tool_result")
+    if not isinstance(result, str) or not result:
+        return None
+    fenced = fence_tool_output(tool_name, result)
+    if fenced == result:
+        return None
+    context["tool_result"] = fenced
     return context
 
 

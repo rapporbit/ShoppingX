@@ -23,6 +23,28 @@ from app.utils.retry import call_with_retry
 
 _TAVILY_URL = "https://api.tavily.com/search"
 
+# 返回截断：web_search 结果原样进主 loop 上下文，是最大的外部文本口子。实测（2026-09-15，5 条样本）
+# basic 深度每条 content 86~1482 字符，长的是几段正文用 [...] 拼成、封顶约 1500。上限定得略高于
+# 正常值——正常结果不截，只防 advanced 深度 / raw_content / 换搜索源时的异常长文。
+# 最坏 = max_results 上限 10 × 单条 1500 = 总上限 15000。
+_CONTENT_MAX_CHARS = env_int("WEB_SEARCH_CONTENT_MAX_CHARS", 1500)
+_TOTAL_MAX_CHARS = env_int("WEB_SEARCH_TOTAL_MAX_CHARS", 15000)
+_TRUNCATED_MARK = " [truncated]"
+
+
+def _clip_contents(contents: list[str]) -> list[str]:
+    """逐条截到单条上限，同时整批累计不超总上限；超出的条目 content 置空（标题 / url 保留）。"""
+    clipped: list[str] = []
+    remaining = _TOTAL_MAX_CHARS
+    for text in contents:
+        limit = min(_CONTENT_MAX_CHARS, max(remaining, 0))
+        if len(text) > limit:
+            text = text[:limit] + _TRUNCATED_MARK if limit > 0 else ""
+        remaining -= min(len(text), limit)
+        clipped.append(text)
+    return clipped
+
+
 # 韧性（B 块）：Tavily 外呼的断路器（模块级单例——web_search 是函数工具，主/子 Agent 共用）。
 # 连续失败到阈值即熔断，OPEN 期直接走降级 note、不再每次干等 20s 超时。
 _breaker = CircuitBreaker(
@@ -52,8 +74,7 @@ class WebSearchOutput(BaseModel):
 
 @tool
 async def web_search(query: str, max_results: int = 5) -> WebSearchOutput:
-    """查公网外部事实（评测/口碑/趋势/新说法翻译成品类词）；不产候选。参数 query、max_results。
-    """
+    """查公网外部事实（评测/口碑/趋势/新说法翻译成品类词）；不产候选。参数 query、max_results。"""
     await monitor.report_tool_start("web_search", query=query)
     api_key = os.environ.get("TAVILY_API_KEY", "").strip()
     if not api_key:
@@ -84,14 +105,16 @@ async def web_search(query: str, max_results: int = 5) -> WebSearchOutput:
 
         # 断路器包「含重试的远程调用」：OPEN 期抛 CircuitOpenError，退避只兜瞬时抖动（超时/5xx）。
         data = await _breaker.call(lambda: call_with_retry(_do))
+        raw = data.get("results", [])
+        contents = _clip_contents([r.get("content", "") or "" for r in raw])
         results = [
             WebResult(
                 title=r.get("title", ""),
                 url=r.get("url", ""),
-                content=r.get("content", ""),
+                content=content,
                 score=float(r.get("score", 0.0)),
             )
-            for r in data.get("results", [])
+            for r, content in zip(raw, contents, strict=True)
         ]
         out = WebSearchOutput(query=query, results=results, answer=data.get("answer", "") or "")
     except Exception as e:  # 外部依赖失败（或已熔断）不该崩主 loop，转成可读 note + 标降级
