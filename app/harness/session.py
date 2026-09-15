@@ -1,8 +1,8 @@
 """HarnessSession：一次 AgentLoop 的控制面状态，被 Agent 适配器与 Tool 适配器**共享**。
 
 AgentScope 把模型钩子与工具钩子拆成 ``MiddlewareBase`` 与 ``ToolMiddlewareBase`` 两个类，状态必须
-外提到这里——否则 pre_tool_call 攒的断言流不到 post_reflect 的 ``assertion_handler`` 手里。
-三条接力通道：inject（Hook 注入 → 下一次 pre_think）/ assertions（工具边界 → 本轮 post_reflect）
+外提到这里——否则 pre_tool_call 里 Hook 注入的提示流不到下一次 pre_think 手里。
+三条接力通道：inject（Hook 注入 → 下一次 pre_think）/ retry_nudge（post_reflect → 重发模型）
 / GuardState（各闸的 per-loop 计数）。``collect_call_signals`` 把一次工具调用的真实返回折成阶段信号
 并更新 session（不从全局状态反推）。
 """
@@ -28,8 +28,8 @@ class HarnessSession:
     """一次 AgentLoop 的控制面状态，被 Agent 适配器与 Tool 适配器**共享**。
 
     AgentScope 把模型钩子与工具钩子拆成了 ``MiddlewareBase`` 与 ``ToolMiddlewareBase`` 两个类，
-    于是状态必须外提到这里——否则 pre_tool_call 攒的断言就流不到 post_reflect 的
-    ``assertion_handler`` 手里，三条接力通道（inject / assertions / retry_nudge）一条都不能少。
+    于是状态必须外提到这里——否则 pre_tool_call 里注入的提示就流不到下一次 pre_think 手里，
+    三条接力通道（inject / retry_nudge / GuardState）一条都不能少。
     """
 
     def __init__(
@@ -52,7 +52,6 @@ class HarnessSession:
         # 接力通道 1：Hook 产出的注入消息 → 下一次 pre_think 消费
         self.pending_inject: list[dict[str, str]] = []
         # 接力通道 2：pre/post_tool_call 攒的断言失败 → 本轮 post_reflect 消费
-        self.pending_assertions: list[dict[str, Any]] = []
         # 接力通道 3：GuardState（上面的 self.guard）
         self.last_total_tokens = 0
         self.planner_done = False
@@ -86,9 +85,6 @@ class HarnessSession:
         inject = ctx.get("inject_messages")
         if inject:
             self.pending_inject.extend(inject)
-        failed = ctx.get("assertions_failed")
-        if failed:
-            self.pending_assertions.extend(failed)
 
     def consume_inject(self) -> list[Msg]:
         if not self.pending_inject:

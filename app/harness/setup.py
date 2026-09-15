@@ -29,7 +29,6 @@ def setup_harness() -> None:
     import app.harness.hooks.safety  # noqa: F401  白名单 / 深度断言 / 内容过滤 / 截断 / 输出审核与脱敏
     import app.harness.hooks.sequencing  # noqa: F401  工具前置条件：软断言 + 取消前必先查单硬拒
     import app.harness.hooks.termination  # noqa: F401  终结硬停 / 终结置位 / 终结纪律 / liveness 看门狗
-    import app.harness.hooks.validation  # noqa: F401  Schema 断言 + 断言失败汇总纠正
     from app.harness.middleware import harness
 
     hooks = harness.list_hooks()

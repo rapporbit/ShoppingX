@@ -4,8 +4,7 @@
                         （硬，无逃生门）
     termination.py      终结：终结硬停闸 + 置位 + 终结纪律重发 + liveness 看门狗
     budget.py           预算：检索 / fork / token 三类额度闸 + 预算档位路由
-    sequencing.py       工具前置条件：PREREQUISITES 一张表（软警告）+ 取消前必先查单（硬拒）
-    validation.py       单步断言：Schema 断言 + 断言失败汇总纠正
+    sequencing.py       工具前置条件：PREREQUISITES 一张表（软警告直接注入）+ 取消前必先查单（硬拒）
     repetition.py       重复调用：LoopDetector 提示 + 同参数回放 + 工具熔断
     progress.py         检索进度机：复位 / 转移 / 回退 / 补搜 / 收线通告 / 收尾资格（不是权限机）
     drift.py            Silent Drift 漂移检测 + 结果信号追踪
@@ -29,13 +28,13 @@ pre_tool_call（低先执行）：
 
 post_tool_call：
     5 tool_breaker_record · 5 content_filter · 10 truncate_result
-    · 19 transition_notice · 20 result_nudges · 30 mark_terminal · 40 schema_assertion
+    · 19 transition_notice · 20 result_nudges · 30 mark_terminal
     · 50 preference_inject · 50 drift_result_tracker
   - truncate_result(10) 必须早于所有追加提示的钩子（19 / 20），否则刚贴的提示被截掉。
-  - schema_assertion(40) 用 raw_decode 容忍 19 / 20 缀在尾部的通告。
+  - drift_result_tracker(50) 用 raw_decode 容忍 19 / 20 缀在尾部的通告。
 
 pre_think：5 liveness_watchdog · 20 budget_router。（上下文压缩交框架 compress_context，无 Hook。）
-post_reflect：15 assertion_handler · 20 drift_detector · 39 refine_backfill · 40 phase_transition
+post_reflect：20 drift_detector · 39 refine_backfill · 40 phase_transition
     · 41 phase_rollback · 60 terminal_enforcer。
 on_session_start：10 phase_init。
 on_session_end：10 output_guard · 20 output_audit · 90 strategy_feedback。

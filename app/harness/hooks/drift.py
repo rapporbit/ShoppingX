@@ -389,7 +389,7 @@ def _is_empty_result(result_text: str) -> bool:
     # raw_decode 而不是 loads：本 hook 在 priority 50，前面的 transition_notice(19) /
     # result_nudges(20) 已往结果尾部贴了通告；loads 会因 Extra data 抛错、退回文本特征而判
     # 「非空」——贴尾巴的恰是薄池 / 空池场景（filtered_out 证据、循环提示、worker 预算批注），
-    # 「连续空结果」信号在最该报的地方归零。validation.check_schema 同一坑、同一解法。
+    # 「连续空结果」信号在最该报的地方归零。
     try:
         data, _ = json.JSONDecoder().raw_decode(result_text.lstrip())
     except (ValueError, TypeError):
