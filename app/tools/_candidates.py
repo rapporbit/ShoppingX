@@ -18,7 +18,8 @@ shipping_calc → item_picker → shopping_summary）。其中 ``url`` / ``image
 
 会话作用域照 :mod:`app.harness.retrieval_budget`：按 ``session_dir`` 为键的模块级 dict
 （ContextVar 的 ``set`` 不回传 fork 父，故用显式 session_dir 聚合，主 / 子共享同一会话条目）。
-``run_agent`` 收尾调 :func:`reset_candidates` 清理，防模块级 dict 无界增长。无 session 作用域（单测）时各函数静默降级。
+``run_agent`` 收尾调 :func:`reset_candidates` 清理，防模块级 dict 无界增长。
+无 session 作用域（单测）时各函数静默降级。
 """
 
 from __future__ import annotations
