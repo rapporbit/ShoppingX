@@ -73,13 +73,12 @@ system_prompt: |
   </tool_policy>
 
   <dispatch_policy>
-  task_dispatch(demands, subagent_type) 把一个子任务交给专职子 Agent：它看不到你的上下文，隔离
-  自跑后只回传结论。**单干优先**——满足「能并行 / 要隔离 / 链够深」任一条才派，否则自己做。
-  派发时把已拿到的 planner / category_insight 结论写进 demands（它读不到你的历史）；买家长期偏好
-  由系统注入给 search，不用你复述。worker 的能力边界见 task_dispatch docstring。
-  - 跨平台泛搜：**同一轮发 n 条**（n = 当轮 <enabled_platforms> 的平台数）、一平台一条、不派没
-    列出的平台；只启用一个平台时**不派**，自己 item_search。
-  合流后系统自动比价精挑，你直接收尾；**汇集后别对同品类再派一轮**（最常见的死循环）。
+  并行靠**同一轮发多个工具调用**（框架并发执行），不用派子 Agent：
+  - 跨平台泛搜：同一轮发 n 条 item_search（n = 当轮 <enabled_platforms> 的平台数）、一平台一条、
+    不搜没列出的平台。多槽位按 bundle-planning skill，一槽一条 item_search(slot=槽名)。
+  - task_dispatch(demands, subagent_type) 把子任务交给看不到你上下文的子 Agent，**只在单条子任务
+    自身要 ≥3 跳工具调用时才派**；demands 写全 planner / category_insight 结论（偏好由系统注入）。
+  合流后系统自动比价精挑，你直接收尾；**汇集后别对同品类再搜一轮**（最常见的死循环）。
   </dispatch_policy>
 
   <trade_policy>

@@ -282,6 +282,28 @@ def test_dispatch_marker_registers_slot_when_planner_missed_it() -> None:
         reset_session_bundle(clear_file=True)
 
 
+def test_item_search_slot_arg_registers_slots_without_dispatch() -> None:
+    """A3：主环同轮 batch item_search(slot=…) 取代派发。planner 漏拆槽时显式 slot 也要补登成
+    并列槽；两槽齐了即是套装轮（autopick 让位）；dispatch 通路传下来的 id 照常解析。"""
+    from app.harness.autopick import _is_bundle_turn
+    from app.tools._bundle import get_session_bundle
+    from app.tools.item_search import _stamp_slot_id
+
+    with thread_scope("t-par-13", Path(tempfile.mkdtemp())):
+        assert _stamp_slot_id("") == ""  # 普通轮不传 slot：不建槽
+        assert get_session_bundle() == []
+        s1 = _stamp_slot_id("跑鞋")
+        s2 = _stamp_slot_id("降噪耳机")
+        assert s1 and s2 and s1 != s2
+        assert get_session_mode() == SLOT_MODE_PARALLEL
+        assert _is_bundle_turn()
+        assert _stamp_slot_id(s1) == s1  # id 引用走 register_slot 解析
+        assert _stamp_slot_id("跑鞋") == s1  # 同名不重复建
+        assert _stamp_slot_id("s9") == ""  # 幻觉 id 不建
+        assert len(get_session_bundle()) == 2
+        reset_session_bundle(clear_file=True)
+
+
 def test_dispatch_fallback_ignores_hallucinated_id_refs() -> None:
     """模型幻觉出的 s9 不代表用户要买一个叫「s9」的东西——纯 id 形状一律不建槽。"""
     from app.tools._bundle import ensure_dispatch_slot, get_session_bundle
