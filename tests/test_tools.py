@@ -571,21 +571,41 @@ def test_item_search_output_collapses_known_candidates() -> None:
     assert "already_in_pool" not in _json.loads(str(out2))
 
 
-def test_item_picker_output_truncates_title_echo() -> None:
-    """picks 回显标题截短成 handle（完整标题模型在检索结果里已看过；下游按 id hydrate）。"""
+def test_item_picker_output_echoes_full_title_without_pricing_detail() -> None:
+    """picks 回显完整标题（picks 来自整池，模型未必在检索渲染里见过全名）；到手价只留
+    landed_usd，运费 / 关税 / 重量不带；excluded / over_budget 是必填字段照带。"""
     import json as _json
 
     from app.tools.item_picker import ItemPickerOutput
 
     long_title = "Meike 35mm F1.7 Large Aperture Manual Focus Prime Fixed Lens " * 4
-    out = ItemPickerOutput(
-        picks=[ItemCandidate(item_id="X1", platform="a", title=long_title, price_usd=9.9)],
-        excluded=[],
-        over_budget=[],
-    )
+    c = ItemCandidate(item_id="X1", platform="a", title=long_title, price_usd=9.9)
+    c.shipping_usd, c.duty_usd, c.landed_usd, c.weight_kg = 8.0, 1.2, 19.1, 0.5
+    out = ItemPickerOutput(picks=[c], excluded=[], over_budget=["Y1", "Y2"])
     rendered = _json.loads(str(out))
-    assert len(rendered["picks"][0]["title"]) <= 61  # 60 + 省略号
-    assert rendered["picks"][0]["title"].endswith("…")
+    row = rendered["picks"][0]
+    assert row["title"] == long_title
+    assert row["landed_usd"] == 19.1
+    for absent in ("shipping_usd", "duty_usd", "weight_kg"):
+        assert absent not in row
+    assert rendered["excluded"] == [] and rendered["over_budget"] == ["Y1", "Y2"]
+
+
+async def test_item_search_rejects_registered_item_id_as_target_name(tmp_path: Path) -> None:
+    """target_name 传的是已登记候选的 item_id（模型想「核实详情」）→ 直接报错，不跑召回。
+
+    A0-3 q_backpack 实测：模型拿 picks 的 id 当 target_name 并发搜 2 次，型号过滤必然 0 召回。
+    """
+    import app.tools.item_search as mod
+    from app.tools._candidates import register
+    from app.utils.thread_ctx import thread_scope
+
+    with thread_scope("t-target-id", tmp_path):
+        register([ItemCandidate(item_id="B0C64FNWPH", platform="amazon", title="Casual Daypack")])
+        with pytest.raises(ValueError, match="item_id"):
+            await mod.item_search.ainvoke(
+                {"query": "backpack", "platform": "amazon", "target_name": "B0C64FNWPH"}
+            )
 
 
 async def test_item_picker_emits_items_preview(monkeypatch: pytest.MonkeyPatch) -> None:

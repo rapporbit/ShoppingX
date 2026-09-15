@@ -32,7 +32,7 @@ def test_to_text_uses_compact_projection_when_defined() -> None:
     assert "url" not in pick and "image_url" not in pick  # 前端字段不喂模型
     assert "shipping_usd" not in pick  # 未填充的 null 不烧 token
     assert pick["pick_reason"] == "最便宜" and pick["item_id"] == "A1"  # 决策要用的留着
-    assert len(pick["title"]) < 100  # 回显标题截短
+    assert pick["title"] == "t" * 100  # picks 来自整池、模型未必见过全名，回显不截标题（A0-3）
 
 
 def test_to_text_falls_back_to_full_json_without_projection() -> None:
