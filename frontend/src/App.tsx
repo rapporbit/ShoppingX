@@ -546,6 +546,8 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
                               compared={compareIds}
                               onDetail={setDetailOf}
                               onCompare={toggleCompare}
+                              onOrder={setOrderIntentOf}
+                              busy={running || waiting}
                             />
                           )}
 
