@@ -275,7 +275,7 @@ class TestAdapterWiring:
         monkeypatch.setattr(mr, "current_tier", lambda: Tier.LITE)
         # 档位名 → 模型对象的解析归适配器；这里替掉解析结果，验「Hook 判的档真的传到了调用上」。
         monkeypatch.setattr(
-            adapter_mod, "_resolve_model_tier", lambda tier: sentinel if tier == "lite" else None
+            adapter_mod, "resolve_model_tier", lambda tier: sentinel if tier == "lite" else None
         )
 
         seen: list[Any] = []
