@@ -4,7 +4,6 @@
 
 | hook_point | 落点 | 为什么是这里 |
 |---|---|---|
-| ``on_session_start`` | orchestrator 进入时手动跑 | 会话级，不属于任何一次 reply |
 | ``pre_think`` | ``on_model_call`` 前 | **只有这里拿得到 messages**（``on_reasoning`` 的
   input_kwargs 只有 tool_choice），而 pre_think 的四个 hook 全都要改 messages / 换模型 |
 | ``post_reflect`` | ``on_reasoning`` 后 | 此刻本轮 assistant 消息已落进 ``agent.state.context``，

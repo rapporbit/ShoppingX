@@ -2,15 +2,15 @@
 写工具的保护在权限引擎 / 确认卡 / 幂等键 / 顺序断言四道防线（见 ``app/agent/permissions.py``），
 这里唯一的硬拒是 shopping_summary 的收尾资格。
 
-    on_session_start 10  phase_init          复位到 PLANNING
-                                             （续聊复用 thread 时上一轮可能停在 CONCLUDING）
     pre_tool_call    20  phase_check         收尾资格底线：无候选 / 本轮没精挑 → 不许出清单
     post_tool_call   19  transition_notice   收线通告缀在触发转移的工具结果尾部
                                              （post_reflect 注入晚一轮）
-    post_reflect     39  refine_backfill     薄复用 / 污染 / 硬淘汰杀池 → 授权补搜
-    post_reflect     40  phase_transition    按候选登记表 / picks 数推进阶段
-    post_reflect     41  phase_rollback      COMPARING 连续 2 轮无进展 → 回 SEARCHING
-                                             并发一次补搜授权
+    post_reflect     40  phase_step          三步固定顺序：补搜判定（薄复用 / 污染 / 硬淘汰杀池
+                                             → 退回 SEARCHING）→ 按候选 / picks 推进 → COMPARING
+                                             连续 2 轮无进展回退（曾是 39/40/41 三个 hook）
+
+阶段机复位到 PLANNING 不在这里：``orchestrator.run_agent`` 开局与其它会话级 ContextVar 一起
+``fresh_phase_machine()``（曾是 on_session_start 的 phase_init hook）。
 
 转移信号由适配器从可靠数据源（工具名 + 候选登记表，见 ``signals.py``）填入 context，不 grep 文本。
 阶段推进会重置漂移的「连续」类计数器（``_reset_drift_counters``），``blacklist_violations`` 不重置。
@@ -24,8 +24,7 @@ from typing import Any
 from app.api.context import get_session_tasks
 from app.harness.autopick import autopick_applies
 from app.harness.middleware import HookRejectSignal, harness_hook
-from app.harness.phase_machine import Phase, get_phase_machine, set_phase_machine
-from app.harness.phase_machine import PhaseStateMachine as _PSM
+from app.harness.phase_machine import Phase, get_phase_machine
 from app.harness.retrieval_budget import (
     budget_relax_due,
 )
@@ -33,22 +32,6 @@ from app.harness.signals import candidate_count
 from app.harness.state import GuardState
 
 logger = logging.getLogger("shoppingx.harness.progress")
-
-
-@harness_hook("on_session_start", name="phase_init", priority=10)
-async def init_phase_machine(context: dict[str, Any]) -> dict[str, Any] | None:
-    """会话开始：把阶段机复位到 PLANNING。
-
-    续聊复用同一 thread 时，ContextVar 里可能还留着上一轮跑到 CONCLUDING 的阶段机——不复位的话
-    新一轮开局就只剩 shopping_summary 可用。
-    """
-    machine = get_phase_machine()
-    if machine is None:
-        set_phase_machine(_PSM())
-    elif machine.phase is not Phase.PLANNING:
-        machine.reset()
-        logger.info("会话开始：阶段机复位到 planning")
-    return None
 
 
 _ROLLBACK_THRESHOLD = 2
@@ -70,11 +53,10 @@ def _reset_drift_counters(context: dict[str, Any]) -> None:
     state.consecutive_severe = 0
 
 
-@harness_hook("post_reflect", name="phase_transition", priority=40, main_only=True)
 async def try_phase_transition(context: dict[str, Any]) -> dict[str, Any] | None:
     """根据当前执行状态判断是否触发阶段转移。仅 depth 0 生效。
 
-    priority=40 排在 drift_detector（20）之后：本轮漂移判定基于「转移前」的计数器，判完再重置。
+    在 drift_detector（20）之后：本轮漂移判定基于「转移前」的计数器，判完再重置。
     """
 
     machine = get_phase_machine()
@@ -181,7 +163,6 @@ def _budget_relax_notice_due(
     )
 
 
-@harness_hook("post_reflect", name="refine_backfill", priority=39, main_only=True)
 async def check_refine_backfill(context: dict[str, Any]) -> dict[str, Any] | None:
     """精挑后候选池被判「该补」→ 退回 SEARCHING 补搜一次（每轮最多一次）。
 
@@ -194,9 +175,9 @@ async def check_refine_backfill(context: dict[str, Any]) -> dict[str, Any] | Non
     触发即写补搜闩 :data:`BACKFILL_LATCH`：既表达「已经在补搜了」的真实语义，也让本闸只触发
     一次——否则补搜回来若仍不足 3 件，会无限回退重搜。
 
-    **priority=39，必须先于 phase_transition(40)**：40 见 picks>0 就把阶段推进 CONCLUDING，
-    本钩子的 ``phase == COMPARING`` 前置条件随即失效。先判补搜、后判转移：补搜火了阶段退回
-    SEARCHING，40 的 COMPARING 分支自然不再触发。
+    **必须先于 try_phase_transition**（phase_step 内的固定顺序）：转移见 picks>0 就把阶段推进
+    CONCLUDING，本函数的 ``phase == COMPARING`` 前置条件随即失效。先判补搜、后判转移：补搜火了
+    阶段退回 SEARCHING，转移的 COMPARING 分支自然不再触发。
     """
     machine = get_phase_machine()
     if machine is None or machine.phase != Phase.COMPARING:
@@ -222,7 +203,7 @@ async def check_refine_backfill(context: dict[str, Any]) -> dict[str, Any] | Non
         return None
 
     # 补搜闩先于回退写。回退本身连同状态回收（同轮闭锁 / 进展计数清零 / 收线通告重武装 /
-    # 直搜解锁）全在 regress 事务里——曾经散在这里手抄、40 号钩子同轮吞回退，见
+    # 直搜解锁）全在 regress 事务里——曾经散在这里手抄、转移步同轮吞回退，见
     # PhaseStateMachine.regress 的 docstring。
     if guard is not None:
         guard.notified_transitions.add(BACKFILL_LATCH)
@@ -249,7 +230,6 @@ async def check_refine_backfill(context: dict[str, Any]) -> dict[str, Any] | Non
     return context
 
 
-@harness_hook("post_reflect", name="phase_rollback", priority=41, main_only=True)
 async def check_phase_rollback(context: dict[str, Any]) -> dict[str, Any] | None:
     """COMPARING 里 item_picker 精挑不出东西时回退到 SEARCHING：扩大搜索范围。
 
@@ -287,6 +267,16 @@ async def check_phase_rollback(context: dict[str, Any]) -> dict[str, Any] | None
             }
         )
     return context
+
+
+@harness_hook("post_reflect", name="phase_step", priority=40, main_only=True)
+async def step_phase(context: dict[str, Any]) -> dict[str, Any] | None:
+    """一轮 post_reflect 的阶段机三步，顺序固定：补搜判定 → 推进 → 无进展回退。"""
+    changed = False
+    for step in (check_refine_backfill, try_phase_transition, check_phase_rollback):
+        if await step(context) is not None:
+            changed = True
+    return context if changed else None
 
 
 # ── 阶段收线通告：缀在**触发转移的工具结果**尾部（post_tool_call）─────────────────────

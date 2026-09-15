@@ -6,7 +6,7 @@
     budget.py           预算：检索 / fork / token 三类额度闸 + 预算档位路由
     sequencing.py       工具前置条件：PREREQUISITES 一张表（软警告直接注入）+ 取消前必先查单（硬拒）
     repetition.py       重复调用：LoopDetector 提示 + 同参数回放 + 工具熔断
-    progress.py         检索进度机：复位 / 转移 / 回退 / 补搜 / 收线通告 / 收尾资格（不是权限机）
+    progress.py         检索进度机：转移 / 回退 / 补搜 / 收线通告 / 收尾资格（不是权限机）
     drift.py            Silent Drift 漂移检测 + 结果信号追踪
     context_shaping.py  塑形上下文：压缩 + 偏好注入 + 成功策略注入 / 结账
 
@@ -31,9 +31,7 @@ post_tool_call：
   - drift_result_tracker(50) 用 raw_decode 容忍 19 / 20 缀在尾部的通告。
 
 pre_think：5 liveness_watchdog · 20 budget_router。（上下文压缩交框架 compress_context，无 Hook。）
-post_reflect：20 drift_detector · 39 refine_backfill · 40 phase_transition
-    · 41 phase_rollback · 60 terminal_enforcer。
-on_session_start：10 phase_init。
+post_reflect：20 drift_detector · 40 phase_step（补搜 → 推进 → 回退） · 60 terminal_enforcer。
 on_session_end：10 output_guard · 20 output_audit · 90 strategy_feedback。
 on_system_prompt（装配期）：50 system_prompt_append（策略块 + 交易状态块）。
 

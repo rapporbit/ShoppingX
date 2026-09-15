@@ -57,9 +57,8 @@ from app.api.context import (
 )
 from app.db.quota import remaining_usd
 from app.harness.budgets import fork_budget_scope, fork_concurrency_scope
-from app.harness.middleware import harness
 from app.harness.msgs import iter_tool_results
-from app.harness.phase_machine import reset_phase_machine
+from app.harness.phase_machine import fresh_phase_machine, reset_phase_machine
 from app.harness.retrieval_budget import reset_tree as reset_retrieval_tree
 from app.harness.setup import setup_harness
 from app.harness.token_budget import budget_status, set_task_cap, tree_snapshot
@@ -319,14 +318,8 @@ async def run_agent(
         reset_session_domains()
         reset_session_tasks()
         set_original_query(query)
-
-        # on_session_start 是**会话级**的，不属于任何一次 reply，所以由 orchestrator 手动跑
-        # （L4 的落点表里唯一没挂进框架钩子的那个）。
+        fresh_phase_machine()  # 会话级复位，与上面几个 reset 同列（曾是 on_session_start hook）
         setup_harness()  # 幂等
-        await harness.run(
-            "on_session_start",
-            {"query": query, "thread_id": thread_id, "user_id": user_id},
-        )
 
         begin_learned_prefs()
 
