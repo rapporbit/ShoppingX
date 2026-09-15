@@ -29,9 +29,9 @@ from pydantic import BaseModel, BeforeValidator, Field, model_validator
 from app.agent.invoke import call_structured, to_msgs
 from app.agent.llm import get_fast_llm
 from app.agent.prompts import get_shopping_summary_prompt
-from app.agent.token_budget import charge_usage
 from app.api import monitor
 from app.api.context import get_dest_country, is_dest_country_assumed
+from app.harness.token_budget import charge_usage
 from app.tools._args import StrListArg, coerce_stringified_list, drop_none_values
 from app.tools._bundle import (
     SLOT_MODE_PARALLEL,

@@ -100,7 +100,7 @@ def test_thread_scope_binds_log_context() -> None:
 
 
 def test_enter_fork_binds_depth() -> None:
-    from app.agent.fork_guard import enter_fork
+    from app.harness.fork_guard import enter_fork
 
     structlog.contextvars.clear_contextvars()
     with enter_fork():

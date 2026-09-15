@@ -23,8 +23,8 @@ from agentscope.message import Msg, TextBlock
 from agentscope.tool import ToolChoice
 from pydantic import BaseModel
 
-from app.agent.token_budget import charge_usage
 from app.harness.msgs import text_of
+from app.harness.token_budget import charge_usage
 
 logger = logging.getLogger("shoppingx.invoke")
 

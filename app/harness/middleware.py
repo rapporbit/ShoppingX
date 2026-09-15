@@ -23,7 +23,7 @@ from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from app.agent.fork_guard import current_fork_depth
+from app.harness.fork_guard import current_fork_depth
 from app.observability import metrics
 
 logger = logging.getLogger("shoppingx.harness")

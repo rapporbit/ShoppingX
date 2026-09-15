@@ -87,7 +87,7 @@ def test_later_rounds_stay_on_base(_boost_on: None) -> None:
 
 def test_worker_first_round_not_boosted(_boost_on: None, monkeypatch: pytest.MonkeyPatch) -> None:
     """worker 也有自己的 round_number=1，但它只按 demands 搜一个平台，没有编排可言。"""
-    monkeypatch.setattr("app.agent.fork_guard.current_fork_depth", lambda: 1)
+    monkeypatch.setattr("app.harness.fork_guard.current_fork_depth", lambda: 1)
     assert adapter._first_round_tier(_ctx(1)) is None
 
 

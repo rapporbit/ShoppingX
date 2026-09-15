@@ -16,11 +16,11 @@ import logging
 import time
 from typing import Any
 
-from app.agent.fork_guard import current_fork_depth
 from app.harness.budgets import (
     MAX_TERMINAL_NUDGE_RETRIES,
     TERMINAL_TOOLS,
 )
+from app.harness.fork_guard import current_fork_depth
 from app.harness.middleware import HookRejectSignal, harness_hook
 from app.harness.msgs import system_message
 from app.harness.sentinels import (

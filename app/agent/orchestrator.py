@@ -32,15 +32,12 @@ from app.agent.agents import build_main_agent
 from app.agent.events import pump_events
 from app.agent.limits import MAIN_AGENT_TIMEOUT_SEC
 from app.agent.platform_scope import platform_scope
-from app.agent.retrieval_budget import reset_tree as reset_retrieval_tree
 from app.agent.session_io import (
     charge_quota,
     inject_runtime_context,
     write_session_artifacts,
 )
 from app.agent.skills import render_selected_skill, resolve_selected_skill
-from app.agent.token_budget import budget_status, set_task_cap, tree_snapshot
-from app.agent.token_budget import reset_tree as reset_token_tree
 from app.agent.tracing import current_trace_id, turn_span
 from app.agent.usage import summarize_usage
 from app.api import monitor
@@ -63,7 +60,10 @@ from app.harness.budgets import fork_budget_scope, fork_concurrency_scope
 from app.harness.middleware import harness
 from app.harness.msgs import iter_tool_results
 from app.harness.phase_machine import reset_phase_machine
+from app.harness.retrieval_budget import reset_tree as reset_retrieval_tree
 from app.harness.setup import setup_harness
+from app.harness.token_budget import budget_status, set_task_cap, tree_snapshot
+from app.harness.token_budget import reset_tree as reset_token_tree
 from app.memory.curator import curate_turn
 from app.memory.history import append_turn
 from app.memory.injector import build_history_block, record_search_history

@@ -17,11 +17,11 @@ import logging
 from contextvars import ContextVar
 from typing import Any
 
-from app.agent.fork_guard import current_fork_depth
 from app.api.context import get_thread_id, get_user_id
 from app.harness.budgets import (
     TERMINAL_TOOLS,
 )
+from app.harness.fork_guard import current_fork_depth
 from app.harness.middleware import harness_hook
 from app.memory.injector import PREF_EMPTY, build_preference_block
 from app.memory.strategies import get_strategy_store, render_strategy_block, strategies_for_query

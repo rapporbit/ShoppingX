@@ -23,12 +23,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.agent.fork_guard import (  # noqa: E402
+from app.agent.tool_registry import build_toolkit  # noqa: E402
+from app.harness.fork_guard import (  # noqa: E402
     MAX_FORK_DEPTH,
     ForkLimitExceeded,
     enter_fork,
 )
-from app.agent.tool_registry import build_toolkit  # noqa: E402
 from app.harness.loop_detector import LoopDetector  # noqa: E402
 from app.harness.truncation import truncate_tool_result  # noqa: E402
 

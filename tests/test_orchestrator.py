@@ -459,7 +459,7 @@ async def test_task_dispatch_turns_worker_failure_into_tool_result(
 async def test_task_dispatch_depth_limited(monkeypatch: pytest.MonkeyPatch) -> None:
     """深度上限：worker 内部再派发要被拒（批 1 起还会由「worker 没有这只工具」结构性兜住）。"""
     from app.agent.dispatch_tool import task_dispatch
-    from app.agent.fork_guard import enter_fork
+    from app.harness.fork_guard import enter_fork
 
     with enter_fork():
         chunk = await task_dispatch("再派一层", "search")

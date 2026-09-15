@@ -21,14 +21,14 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from app.agent.retrieval_budget import (
-    budget_relax_due,
-)
 from app.api.context import get_session_tasks
 from app.harness.autopick import autopick_applies
 from app.harness.middleware import HookRejectSignal, harness_hook
 from app.harness.phase_machine import Phase, get_phase_machine, set_phase_machine
 from app.harness.phase_machine import PhaseStateMachine as _PSM
+from app.harness.retrieval_budget import (
+    budget_relax_due,
+)
 from app.harness.signals import candidate_count
 from app.harness.state import GuardState
 

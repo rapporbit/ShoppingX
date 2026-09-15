@@ -1,6 +1,6 @@
 """用户级 **credit 配额**：每个用户每天能烧掉多少 LLM 成本，到顶就不给发新任务。
 
-**它和 token_budget 是两把不同的闸，必须同时存在。** ``app/agent/token_budget.py`` 管的是**一次
+**它和 token_budget 是两把不同的闸，必须同时存在。** ``app/harness/token_budget.py`` 管的是**一次
 任务**（一棵 fork 树）不许烧过 ``TOKEN_BUDGET_USD``——它防的是「单条 query 把 Agent 带进无底洞」。
 但那把闸对「同一个人连发一百条 query」完全无感：每条都合规，加起来照样把账单打穿。本模块管的正是
 后者——**跨会话、跨进程重启的累计**，故必须落库（:class:`app.db.models.UsageLedger`），不能像
@@ -145,7 +145,7 @@ async def get_quota(db: AsyncSession, user_id: str | None) -> QuotaStatus:
 async def remaining_usd(user_id: str | None) -> float | None:
     """当前周期剩余额度（美元）；不设闸 / 无身份返回 ``None``（调用方据此不加任何限制）。
 
-    给任务入口与 :mod:`app.agent.token_budget` 用：本次任务的成本上限会被压到「不超过今日剩余」，
+    给任务入口与 :mod:`app.harness.token_budget` 用：本次任务的成本上限会被压到「不超过今日剩余」，
     这样即便入口放行了最后一次任务，它也只能透支到额度用尽为止，不会整整多烧一个单任务预算。
     """
     if not quota_enabled() or not user_id:

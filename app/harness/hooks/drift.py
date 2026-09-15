@@ -212,7 +212,7 @@ def _force_conclude_phase() -> None:
     收尾、一边不许收尾。推进 CONCLUDING 同时也让遥测如实反映「已进入收尾」。
     """
     try:
-        from app.agent.fork_guard import current_fork_depth
+        from app.harness.fork_guard import current_fork_depth
         from app.harness.phase_machine import Phase, get_phase_machine
 
         if current_fork_depth() >= 1:

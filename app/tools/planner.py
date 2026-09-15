@@ -34,7 +34,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.agent.fork_guard import current_fork_depth
 from app.agent.invoke import call_structured
 from app.agent.llm import get_planner_llm
 from app.agent.prompts import get_planner_prompt
@@ -49,6 +48,7 @@ from app.api.context import (
     set_session_pt,
     set_session_tasks,
 )
+from app.harness.fork_guard import current_fork_depth
 from app.memory.domains import (
     DOMAIN_GLOBAL,
     PrefDomain,

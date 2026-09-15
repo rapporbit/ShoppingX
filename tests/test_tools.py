@@ -1133,7 +1133,7 @@ async def test_item_search_expected_category_drops_matching_model_wrong_category
 ) -> None:
     """型号过滤挡不住的假阳性：配件标题带宿主型号，靠 expected_category 兜——
     真实复现过定点调查 Sony WH-1000XM5 / Bose QC45 时各自召回到同型号配件，误判"库内已找到"，
-    连带拦掉了本该放行的 web_search 兜底（见 app.agent.retrieval_budget.web_search_allowed）。
+    连带拦掉了本该放行的 web_search 兜底（见 app.harness.retrieval_budget.web_search_allowed）。
     """
     import app.tools.item_search as mod
 

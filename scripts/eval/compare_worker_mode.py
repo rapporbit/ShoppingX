@@ -33,11 +33,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from run_rubric import _load_queries, _reset_thread  # noqa: E402
 
-from app.agent.fork_guard import current_fork_depth  # noqa: E402
 from app.agent.orchestrator import run_agent  # noqa: E402
 from app.agent.tracing import flush_traces  # noqa: E402
 from app.eval.rubric import RubricResult, evaluate  # noqa: E402
 from app.eval.trace import extract_tool_calls  # noqa: E402
+from app.harness.fork_guard import current_fork_depth  # noqa: E402
 from app.harness.middleware import harness_hook  # noqa: E402
 
 # 六条对照 query：**三条会真派发**（两条多类并列 + 一条套装槽位批）、一条长链到手价（单干）、

@@ -11,7 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from app.agent.retrieval_budget import (
+from app.api.context import _SESSION_TASKS, set_session_tasks
+from app.harness.retrieval_budget import (
     _STATE,
     WEB_SEARCH_TASK_QUOTA,
     _isolated_var,
@@ -20,7 +21,6 @@ from app.agent.retrieval_budget import (
     note_web_search,
     web_search_allowed,
 )
-from app.api.context import _SESSION_TASKS, set_session_tasks
 from app.utils.thread_ctx import thread_scope
 
 SESSION_DIR = Path("/tmp/shoppingx-test-retrieval-budget-session")

@@ -16,9 +16,9 @@ shipping_calc → item_picker → shopping_summary）。其中 ``url`` / ``image
     ``item_id`` 登记到会话作用域；shopping_summary 收尾时按 ``item_id`` 回填卡片的 url/image。url
     不再需要穿过模型——丢没丢、改没改都不影响卡片（item_id 被模型改写时仍降级为空，与原行为一致）。
 
-会话作用域照 :mod:`app.agent.retrieval_budget`：按 ``session_dir`` 为键的模块级 dict（ContextVar 的
-``set`` 不回传 fork 父，故用显式 session_dir 聚合，主 / 子共享同一会话条目）。``run_agent`` 收尾调
-:func:`reset_candidates` 清理，防模块级 dict 无界增长。无 session 作用域（单测）时各函数静默降级。
+会话作用域照 :mod:`app.harness.retrieval_budget`：按 ``session_dir`` 为键的模块级 dict
+（ContextVar 的 ``set`` 不回传 fork 父，故用显式 session_dir 聚合，主 / 子共享同一会话条目）。
+``run_agent`` 收尾调 :func:`reset_candidates` 清理，防模块级 dict 无界增长。无 session 作用域（单测）时各函数静默降级。
 """
 
 from __future__ import annotations

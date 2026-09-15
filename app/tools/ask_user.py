@@ -15,10 +15,10 @@ import asyncio
 import logging
 import re
 
-from app.agent.fork_guard import current_fork_depth
 from app.api import monitor
 from app.api.clarification import clear_waiter, create_pending, register_waiter
 from app.api.context import get_thread_id
+from app.harness.fork_guard import current_fork_depth
 from app.tools._args import StrListArg
 from app.tools._bundle import reconcile_slots_from_reply
 from app.tools._shell import tool

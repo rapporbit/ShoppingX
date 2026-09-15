@@ -43,7 +43,7 @@ import logging
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
-from app.agent.token_budget import remaining_ratio
+from app.harness.token_budget import remaining_ratio
 from app.utils.env import env_float
 
 if TYPE_CHECKING:

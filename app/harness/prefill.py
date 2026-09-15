@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 from agentscope.message import Msg
 from pydantic import BaseModel
 
-from app.agent.fork_guard import current_fork_depth
+from app.harness.fork_guard import current_fork_depth
 from app.harness.middleware import harness
 from app.harness.msgs import tool_blocks
 from app.harness.signals import _summarize_call
