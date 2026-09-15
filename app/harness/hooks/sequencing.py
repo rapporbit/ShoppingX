@@ -2,8 +2,8 @@
 
     pre_tool_call   12  trade_sequence_gate   cancel_order 前必须 query_order 过——**硬拒**
                                               （写操作代价不对称）
-    pre_tool_call   25  sequencing_assertion  其余前置只警告
-                                              （记入 assertions_failed，由 validation 汇总注入）
+    pre_tool_call   25  sequencing_assertion  其余前置只警告（直接注入一条 [顺序问题] 系统提示，
+                                              下次模型调用前生效）
 
 读路径不硬拒：有些场景确实要跳步（用户直接给了候选）；候选消费者以「登记表有候选」为真实前置。
 """
@@ -26,7 +26,7 @@ logger = logging.getLogger("shoppingx.harness.sequencing")
 async def check_trade_sequence(context: dict[str, Any]) -> dict[str, Any] | None:
     """取消订单前必须先查单——**硬拒**，不是警告。
 
-    与 `step_validator` 的 sequencing 软断言是一对：那条给的是「通常应该先…」的提醒，对读操作
+    与下方 sequencing 软断言是一对：那条给的是「通常应该先…」的提醒，对读操作
     够用；取消不是读操作。模型最典型的错法是从用户一句「把上次那单取消了」里直接编一个订单号
     调 cancel_order——编出来的号大概率不存在（那还好，会失败），但也可能**恰好命中另一张真单**。
 
@@ -86,12 +86,12 @@ async def check_sequencing(context: dict[str, Any]) -> dict[str, Any] | None:
     if tool_name in _CANDIDATE_CONSUMERS and candidate_count() > 0:
         return None
 
-    context.setdefault("assertions_failed", []).append(
+    context.setdefault("inject_messages", []).append(
         {
-            "type": "sequencing",
-            "tool": tool_name,
-            "reason": (
-                f"{tool_name} 通常在 {' 或 '.join(prerequisites)} 之后调用，但它们都还没执行过"
+            "role": "system",
+            "content": (
+                f"[顺序问题] {tool_name} 通常在 {' 或 '.join(prerequisites)} 之后调用，"
+                "但它们都还没执行过"
             ),
         }
     )

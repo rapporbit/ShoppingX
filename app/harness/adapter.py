@@ -232,9 +232,6 @@ class HarnessAgentAdapter(MiddlewareBase):
         ctx["offcat_count"] = s.last_offcat
         ctx["excluded_count"] = s.last_excluded
         ctx["over_budget_count"] = s.last_over_budget
-        if s.pending_assertions:
-            ctx["assertions_failed"] = list(s.pending_assertions)
-            s.pending_assertions.clear()
 
         ctx = await harness.run("post_reflect", ctx)
         # 补搜闸宣判「这池子不够用」后，污染批不再算「本轮已搜到货」。

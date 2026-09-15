@@ -234,7 +234,7 @@ class TestPhaseStateMachine:
 
 
 class TestStepValidator:
-    """三类单步断言。"""
+    """顺序断言（schema 断言 2026-09-15 删，投影一致性改由 test_render_projection.py 钉死）。"""
 
     @pytest.mark.asyncio
     async def test_sequencing_warns_missing_prereq(self) -> None:
@@ -243,8 +243,7 @@ class TestStepValidator:
         ctx = {"tool_name": "shopping_summary", "called_tools": {"item_search"}}
         result = await check_sequencing(ctx)
         assert result is not None
-        failures = result.get("assertions_failed", [])
-        assert any(f["type"] == "sequencing" for f in failures)
+        assert any("[顺序问题]" in m["content"] for m in result.get("inject_messages", []))
 
     @pytest.mark.asyncio
     async def test_sequencing_passes_when_prereqs_met(self) -> None:
@@ -252,9 +251,7 @@ class TestStepValidator:
 
         ctx = {"tool_name": "shopping_summary", "called_tools": {"item_picker", "item_search"}}
         result = await check_sequencing(ctx)
-        # 无 assertions_failed
-        if result is not None:
-            assert not result.get("assertions_failed", [])
+        assert result is None or not result.get("inject_messages")
 
     @pytest.mark.asyncio
     async def test_sequencing_skips_unknown_tool(self) -> None:
@@ -263,84 +260,6 @@ class TestStepValidator:
         result = await check_sequencing({"tool_name": "web_search", "called_tools": set()})
         assert result is None
 
-    @pytest.mark.asyncio
-    async def test_schema_assertion_catches_invalid_json(self) -> None:
-        from app.harness.hooks.validation import check_schema
-
-        ctx = {"tool_name": "item_search", "tool_result": '{"invalid json'}
-        result = await check_schema(ctx)
-        # 非 JSON 不一定是错（有些工具返回纯文本）
-        assert result is None or not result.get("assertions_failed")
-
-    @pytest.mark.asyncio
-    async def test_schema_assertion_valid_result(self) -> None:
-        import json
-
-        from app.harness.hooks.validation import check_schema
-
-        good = json.dumps(
-            {
-                "platform": "amazon",
-                "candidates": [],
-                "total_recall": 0,
-                "truncated": False,
-            }
-        )
-        ctx = {"tool_name": "item_search", "tool_result": good}
-        result = await check_schema(ctx)
-        if result is not None:
-            assert not result.get("assertions_failed", [])
-
-    @staticmethod
-    def _single_platform_render(platform: str = "amazon") -> str:
-        """单平台渲染投影：候选按渲染契约省略 platform（顶层已写，见 ItemSearchOutput.__str__）。"""
-        import json
-
-        return json.dumps(
-            {
-                "platform": platform,
-                "total_recall": 1,
-                "truncated": False,
-                "candidates": [
-                    {
-                        "item_id": "B0C9LS7339",
-                        "title": "Samsung 充电器",
-                        "price_usd": 16.05,
-                        "rating": 4.8,
-                        "category": "Cell Phones",
-                    }
-                ],
-            },
-            ensure_ascii=False,
-        )
-
-    @pytest.mark.asyncio
-    async def test_schema_assertion_accepts_single_platform_render(self) -> None:
-        """渲染契约省略候选级 platform 不是格式错误——曾每次单平台检索必假阳性（eval q05）。"""
-        from app.harness.hooks.validation import check_schema
-
-        ctx = {"tool_name": "item_search", "tool_result": self._single_platform_render()}
-        result = await check_schema(ctx)
-        assert not (result or {}).get("assertions_failed")
-
-    @pytest.mark.asyncio
-    async def test_schema_assertion_survives_appended_notice(self) -> None:
-        """先跑的 Hook 在结果尾部贴通告（[阶段推进] 等）后断言仍在岗——曾因 Extra data 静默跳过。"""
-        from app.harness.hooks.validation import check_schema
-
-        bogus = '{"bogus": 1}\n\n[阶段推进] 候选已入池，检索阶段就此收线。'
-        ctx = {"tool_name": "item_search", "tool_result": bogus}
-        result = await check_schema(ctx)
-        assert result is not None and result.get("assertions_failed"), "附言不该让断言失明"
-
-    @pytest.mark.asyncio
-    async def test_schema_assertion_still_requires_platform_when_merged(self) -> None:
-        """platform="all" 合流时候选必须逐条带 platform——缺了是真错，不回填。"""
-        from app.harness.hooks.validation import check_schema
-
-        ctx = {"tool_name": "item_search", "tool_result": self._single_platform_render("all")}
-        result = await check_schema(ctx)
-        assert result is not None and result.get("assertions_failed")
 
 
 # ============================================================
@@ -695,11 +614,9 @@ class TestGlobalHarnessSetup:
         hooks = harness.list_hooks()
         names = {name for _, name, _ in hooks}
         expected = {
-            "schema_assertion",
             "sequencing_assertion",
             "drift_detector",
             "drift_result_tracker",
-            "assertion_handler",
             "phase_check",
             "phase_transition",
             "phase_rollback",
@@ -1056,33 +973,18 @@ class TestTradeTurnIsTerminal:
 
 
 class TestAssertionWiring:
-    """三类断言 → post_reflect 的 assertion_handler → inject_messages 的完整链路。"""
+    """顺序断言 → inject_messages 的链路。"""
 
     @pytest.mark.asyncio
     async def test_sequencing_assertion_reaches_model(self, clean_phase) -> None:
-        """顺序断言在 pre_tool_call 产生，必须能流到 post_reflect 并变成注入提示。"""
+        """顺序断言在 pre_tool_call 产生，必须被接力通道接住变成注入提示。"""
         set_phase_machine(PhaseStateMachine(Phase.COMPARING))
         mw = _mw()
         # item_picker 的前置是 item_search，此处未调过 → 触发 sequencing 断言
         await _run_tool(mw, "item_picker", {"query": "旅行三件套"})
-        assert mw.pending_assertions, "sequencing 断言未被中间件接住"
-
-        await _run_model(mw)
         contents = [m["content"] for m in mw.pending_inject]
         assert any("[顺序问题]" in c for c in contents), f"断言未转成纠正提示: {contents}"
-        assert not mw.pending_assertions, "断言消费后应清空"
 
-    @pytest.mark.asyncio
-    async def test_schema_assertion_reaches_model(self, clean_phase) -> None:
-        """schema 断言在 post_tool_call 产生，同样要能流到 post_reflect。"""
-        set_phase_machine(PhaseStateMachine(Phase.SEARCHING))
-        mw = _mw()
-        # 合法 JSON 但不符合 ItemSearchOutput → ValidationError
-        await _run_tool(mw, "item_search", {"query": "旅行三件套"}, result='{"bogus": 1}')
-        assert mw.pending_assertions, "schema 断言未被中间件接住"
-
-        await _run_model(mw)
-        assert any("[格式问题]" in m["content"] for m in mw.pending_inject)
 
 
 class TestDriftWiring:
@@ -1475,7 +1377,7 @@ class TestSequencingAnyOf:
 
         ctx = {"tool_name": "item_picker", "called_tools": {"task_dispatch"}}
         result = await check_sequencing(ctx)
-        assert result is None or not result.get("assertions_failed")
+        assert result is None or not result.get("inject_messages")
 
     @pytest.mark.asyncio
     async def test_candidates_in_registry_satisfy_prereq(self, monkeypatch) -> None:
@@ -1485,7 +1387,7 @@ class TestSequencingAnyOf:
         monkeypatch.setattr(sv, "candidate_count", lambda: 12)
         ctx = {"tool_name": "item_picker", "called_tools": set()}
         result = await sv.check_sequencing(ctx)
-        assert result is None or not result.get("assertions_failed")
+        assert result is None or not result.get("inject_messages")
 
     @pytest.mark.asyncio
     async def test_no_retrieval_at_all_still_warns(self, monkeypatch) -> None:
@@ -1494,7 +1396,7 @@ class TestSequencingAnyOf:
         monkeypatch.setattr(sv, "candidate_count", lambda: 0)
         ctx = {"tool_name": "item_picker", "called_tools": {"planner"}}
         result = await sv.check_sequencing(ctx)
-        assert result["assertions_failed"][0]["type"] == "sequencing"
+        assert "[顺序问题]" in result["inject_messages"][0]["content"]
 
 
 # ============================================================

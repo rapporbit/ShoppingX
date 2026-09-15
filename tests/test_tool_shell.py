@@ -82,7 +82,7 @@ async def test_success_returns_json_and_schema_metadata() -> None:
     resp = await _run(to_function_tool(_probe, is_read_only=True), names=["a", "b"], n=3)
     assert resp.state == ToolResultState.SUCCESS
     assert json.loads(_text(resp)) == {"got": ["a", "b"], "n": 3}
-    # metadata 里的 schema 名是 harness schema_assertion 与前端 tool_end 的依据
+    # metadata 里的 schema 名是前端 tool_end 的依据
     assert resp.metadata["schema"] == "_Out"
 
 
