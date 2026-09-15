@@ -69,6 +69,7 @@ from app.api import (
     monitor,
     skills,
 )
+from app.api.admin import dev_admin_username
 from app.api.auth import (
     auth_enabled,
     create_access_token,
@@ -86,7 +87,7 @@ from app.api.concurrency import (
     task_queue,
 )
 from app.config import store as config_store
-from app.db.accounts import assert_owner, claim_thread
+from app.db.accounts import MIN_PASSWORD_LEN, assert_owner, claim_thread, ensure_dev_admin
 from app.db.quota import disabled_status as _disabled_quota
 from app.db.quota import get_quota, quota_enabled
 from app.db.session import init_db, session_factory
@@ -193,6 +194,19 @@ async def lifespan(_app: FastAPI):
     await config_store.load_into_memory()
     if auth_enabled():
         logger.info("JWT 鉴权已开启：user_id 一律取 token 的 sub，忽略前端传入")
+        # 本地调试默认管理员（DEV_ADMIN_USERNAME/PASSWORD 都配才建）：省掉每次重建库都要注册一遍。
+        if dev_admin := dev_admin_username():
+            password = os.getenv("DEV_ADMIN_PASSWORD", "")
+            if len(password) < MIN_PASSWORD_LEN:
+                logger.warning("DEV_ADMIN_PASSWORD 短于 %d 位，跳过建默认管理员", MIN_PASSWORD_LEN)
+            else:
+                async with session_factory()() as db:
+                    created = await ensure_dev_admin(db, dev_admin, password)
+                logger.warning(
+                    "本地默认管理员 %s %s——线上 .env 务必不配 DEV_ADMIN_*",
+                    dev_admin,
+                    "已新建" if created else "已存在",
+                )
         if dev_token_enabled():
             logger.warning("开发态发证口 /api/auth/token 已开启（AUTH_DEV_TOKEN）——生产务必关闭")
     else:
