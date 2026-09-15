@@ -22,7 +22,7 @@ import logging
 import os
 from typing import TYPE_CHECKING, Any
 
-from app.agent.fork_guard import current_fork_depth
+from app.harness.fork_guard import current_fork_depth
 from app.harness.phase_machine import Phase, get_phase_machine
 from app.harness.signals import candidate_count
 

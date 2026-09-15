@@ -10,7 +10,7 @@
 import pytest
 
 from app.agent.dispatch_tool import _run_worker
-from app.agent.fork_guard import (
+from app.harness.fork_guard import (
     MAX_FORK_DEPTH,
     ForkLimitExceeded,
     current_fork_depth,

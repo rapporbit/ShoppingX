@@ -20,10 +20,10 @@ import json
 import logging
 from typing import Any
 
-from app.agent.fork_guard import current_fork_depth
 from app.harness.budgets import (
     SUB_ITEM_SEARCH_CAP,
 )
+from app.harness.fork_guard import current_fork_depth
 from app.harness.middleware import HookRejectSignal, harness_hook
 from app.harness.sentinels import (
     SUMMARY_NUDGE,

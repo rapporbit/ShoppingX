@@ -36,10 +36,9 @@ from agentscope.tool import ToolMiddlewareBase
 from agentscope.tool._response import ToolChunk, ToolResultState
 from pydantic import ValidationError
 
-from app.agent.fork_guard import current_fork_depth
-from app.agent.token_budget import charge_usage
 from app.api import monitor
 from app.harness.autopick import maybe_autopick
+from app.harness.fork_guard import current_fork_depth
 from app.harness.middleware import harness
 from app.harness.msgs import block_text, terminal_summary, text_of
 from app.harness.phase_machine import get_phase_machine
@@ -49,6 +48,7 @@ from app.harness.signals import (
     _observe_tool,
     _summarize_call,
 )
+from app.harness.token_budget import charge_usage
 
 if TYPE_CHECKING:  # pragma: no cover
     from agentscope.agent import Agent
@@ -83,8 +83,8 @@ def _first_round_tier(ctx: dict[str, Any]) -> str | None:
     - **预算降档优先**：调用方只在 ``model_tier`` 仍为空时才问本函数，所以 budget_router 写过
       lite 就是 lite —— 钱不够的时候，「想清楚」让位于「跑完」。
     """
-    from app.agent.fork_guard import current_fork_depth
     from app.agent.llm import main_loop_tier_base, main_loop_tier_first
+    from app.harness.fork_guard import current_fork_depth
 
     tier = main_loop_tier_first()
     if tier == "same" or ctx.get("round_number") != 1 or current_fork_depth() >= 1:

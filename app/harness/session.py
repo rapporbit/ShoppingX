@@ -15,10 +15,10 @@ from typing import Any
 
 from agentscope.message import Msg, TextBlock
 
-from app.agent.token_budget import tree_snapshot
 from app.harness.hooks.drift import DriftState
 from app.harness.signals import _SEARCH_TOOLS, _as_opt_int, _count_candidates, _count_picks
 from app.harness.state import GuardState
+from app.harness.token_budget import tree_snapshot
 from app.tools._diagnostics import consume_diagnostics
 
 logger = logging.getLogger("shoppingx.harness.session")

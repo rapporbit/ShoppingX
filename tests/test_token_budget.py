@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from app.agent import token_budget as tb
+from app.harness import token_budget as tb
 from app.utils.thread_ctx import thread_scope
 
 

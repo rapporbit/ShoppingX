@@ -15,7 +15,7 @@
 **数据源要看清楚**：``Msg.usage`` 是**每条消息**一份，而一次 reply（一整轮，含十几次模型调用）
 在这里只落成**一条** assistant 消息——直接数消息就会得到「model_calls 恒为 1」这种废指标，
 而且 carried / cache_read 只反映最后一次调用。所以真实口径要从**记账树**取
-（:func:`app.agent.token_budget.tree_snapshot`，那里每次调用都入过一次账），消息侧只用来补
+（:func:`app.harness.token_budget.tree_snapshot`，那里每次调用都入过一次账），消息侧只用来补
 ``peak``（树只累加、不留单次极值）。传 ``tree`` 就走这条真实口径。
 """
 

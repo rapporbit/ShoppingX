@@ -19,11 +19,11 @@ import logging
 import re
 from typing import Any
 
-from app.agent.fork_guard import current_fork_depth
 from app.harness.budgets import (
     DEPTH0_ONLY_TOOLS,
     MAIN_ONLY_CONTEXT_TOOLS,
 )
+from app.harness.fork_guard import current_fork_depth
 from app.harness.middleware import harness_hook
 from app.harness.sentinels import (
     INTERNAL_MARKERS,

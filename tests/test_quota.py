@@ -114,7 +114,7 @@ async def test_remaining_usd_caps_task_budget(monkeypatch: Any, tmp_path: Any) -
 
     没有这一压，剩余只够 $0.01 的用户照样能起一趟烧满 $0.50 的任务：入口闸放行了，之后就没人管。
     """
-    from app.agent import token_budget
+    from app.harness import token_budget
     from app.utils.thread_ctx import thread_scope
 
     monkeypatch.setenv("TOKEN_BUDGET_USD", "0.50")

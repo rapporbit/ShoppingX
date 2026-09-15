@@ -231,7 +231,7 @@ def budget_cap_usd() -> float:
 
 
 def remaining_ratio() -> float:
-    """预算剩余比例（0.0 ~ 1.0）——模型路由降级的唯一输入（见 :mod:`app.agent.model_router`）。
+    """预算剩余比例（0.0 ~ 1.0）——模型路由降级的唯一输入（见 :mod:`app.harness.model_router`）。
 
     无 session 作用域（单测 / 离线脚本）或预算上限 <=0（不设闸）一律返回 ``1.0``——「没配预算」
     必须等价于「预算充裕」，否则降级会在所有单测里凭空触发。

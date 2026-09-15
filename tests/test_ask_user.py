@@ -8,8 +8,8 @@ import asyncio
 
 import pytest
 
-from app.agent.fork_guard import enter_fork
 from app.api.clarification import cancel_pending, has_pending, resolve_pending
+from app.harness.fork_guard import enter_fork
 from app.tools.ask_user import ask_user
 from app.utils.thread_ctx import thread_scope
 

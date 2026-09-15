@@ -35,9 +35,9 @@ import numpy as np
 from pydantic import BaseModel
 
 from app.agent.platform_scope import resolve_search_platforms
-from app.agent.retrieval_budget import note_filtered_probe, note_item_search
 from app.api import monitor
 from app.api.context import get_user_id
+from app.harness.retrieval_budget import note_filtered_probe, note_item_search
 from app.memory.assemble import assemble
 from app.recall import get_recall_client, get_tower_client
 from app.recall.schemas import RecallCandidate
@@ -284,7 +284,7 @@ def _blocked_reason(
     **判定顺序是刻意的**：先结构性排除（品牌黑名单 / 排除词 / 评分），最后才判价格。一条既踩
     排除词又超预算的货，若报成「超预算」，会让上游得出「放宽预算就能买到」的错结论——放宽了它
     照样被排除词杀。所以第二个返回值（``price_only``）只在**其余条件都不沾**时才为真，
-    :func:`app.agent.retrieval_budget.budget_relax_due` 的「只差预算」判据全靠它干净。
+    :func:`app.harness.retrieval_budget.budget_relax_due` 的「只差预算」判据全靠它干净。
 
     ``price_usd`` 缺失（历史索引里出现过，见 price-usd-filter-empty-bug）不判超预算：拿不到价格
     就不敢说它超没超，宁可不报——报错原因比不报更坏。

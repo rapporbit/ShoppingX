@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 from qdrant_client import QdrantClient
 
-from app.agent.retrieval_budget import budget_relax_due, note_filtered_probe
+from app.harness.retrieval_budget import budget_relax_due, note_filtered_probe
 from app.recall.qdrant_store import QdrantRecall
 from app.recall.schemas import ItemRecord
 from app.recall.towers import TowerClient

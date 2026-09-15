@@ -418,7 +418,7 @@ class TestPhaseHooks:
         白名单禁令为什么撤见 docs/decisions/0001-阶段白名单降级为遥测.md——这条测试就是
         那个决定的执法者，它变红意味着白名单被人加回来了。
         """
-        from app.agent.fork_guard import _fork_depth
+        from app.harness.fork_guard import _fork_depth
         from app.harness.hooks.progress import check_phase_permission
 
         token = _fork_depth.set(0)
@@ -439,7 +439,7 @@ class TestPhaseHooks:
         在主 loop 里真的会被拒**——否则「worker 里没被拒」可能只是因为压根没构造出拒绝条件，
         测试恒绿（写这条时就先踩了一次：摘掉 main_only 它照样绿）。
         """
-        from app.agent.fork_guard import _fork_depth
+        from app.harness.fork_guard import _fork_depth
         from app.harness.setup import setup_harness
 
         setup_harness()  # 注册表里得真有这个 hook，否则 run() 是空转
@@ -505,8 +505,8 @@ class TestPhaseHooks:
     @pytest.mark.asyncio
     async def test_prefill_skipped_in_worker(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """worker 不预置：它的活是按 demands 检索，demands 里已带主流程拆好的字段。"""
-        from app.agent.fork_guard import _fork_depth
         from app.harness.adapter import HarnessAgentAdapter
+        from app.harness.fork_guard import _fork_depth
 
         token = _fork_depth.set(1)
         try:
@@ -617,7 +617,7 @@ class TestPhaseHooks:
 
     @pytest.mark.asyncio
     async def test_phase_transition_on_planner(self) -> None:
-        from app.agent.fork_guard import _fork_depth
+        from app.harness.fork_guard import _fork_depth
         from app.harness.hooks.progress import try_phase_transition
 
         token = _fork_depth.set(0)
@@ -636,7 +636,7 @@ class TestPhaseHooks:
         """转移本体不再经 inject 发通告——inject 通道晚一轮（perf-audit-r3 实测模型在读到
         通告前就已决定再搜）。「检索收线」通告改由 transition_notice 缀在工具结果尾部
         （见 test_tool_memo.py 的 TestTransitionNotices），这里只验证状态机推进。"""
-        from app.agent.fork_guard import _fork_depth
+        from app.harness.fork_guard import _fork_depth
         from app.harness.hooks.progress import try_phase_transition
 
         token = _fork_depth.set(0)
@@ -654,7 +654,7 @@ class TestPhaseHooks:
 
     @pytest.mark.asyncio
     async def test_phase_rollback(self) -> None:
-        from app.agent.fork_guard import _fork_depth
+        from app.harness.fork_guard import _fork_depth
         from app.harness.hooks.progress import check_phase_rollback
 
         token = _fork_depth.set(0)
@@ -1667,8 +1667,8 @@ class TestGateOrderingContracts:
         上面的 priority 测试钉的是钩子顺序；这条钉「自增住在 45 号闸里」——谁把
         ``guard.item_search_calls += 1`` 挪进 30 号闸内部（顺序不变、优先级测试照绿），
         cap 次就塌成 cap-1 次，本测试当场红。"""
-        from app.agent.fork_guard import enter_fork
         from app.harness.budgets import SUB_ITEM_SEARCH_CAP
+        from app.harness.fork_guard import enter_fork
         from app.harness.hooks import budget as tool_gates
         from app.harness.state import GuardState
 
@@ -1961,7 +1961,7 @@ class TestWatchdog:
     async def test_first_call_opens_clock(self) -> None:
         import time
 
-        from app.agent.fork_guard import _fork_depth
+        from app.harness.fork_guard import _fork_depth
         from app.harness.hooks.termination import check_liveness
         from app.harness.state import GuardState
 
@@ -1978,7 +1978,7 @@ class TestWatchdog:
     async def test_stall_injects_converge_notice(self) -> None:
         import time
 
-        from app.agent.fork_guard import _fork_depth
+        from app.harness.fork_guard import _fork_depth
         from app.harness.hooks.termination import WATCHDOG_STALL_SEC, check_liveness
         from app.harness.state import GuardState
 
@@ -2000,7 +2000,7 @@ class TestWatchdog:
     async def test_hard_stop_after_grace(self) -> None:
         import time
 
-        from app.agent.fork_guard import _fork_depth
+        from app.harness.fork_guard import _fork_depth
         from app.harness.hooks.termination import (
             WATCHDOG_GRACE_SEC,
             WATCHDOG_STALL_SEC,
@@ -2025,7 +2025,7 @@ class TestWatchdog:
     async def test_progress_disarms_nudge(self) -> None:
         import time
 
-        from app.agent.fork_guard import _fork_depth
+        from app.harness.fork_guard import _fork_depth
         from app.harness.hooks.termination import check_liveness
         from app.harness.state import GuardState
 
@@ -2050,7 +2050,7 @@ class TestWatchdog:
         """
         import time
 
-        from app.agent.fork_guard import _fork_depth
+        from app.harness.fork_guard import _fork_depth
         from app.harness.setup import setup_harness
         from app.harness.state import GuardState
 
@@ -2132,8 +2132,8 @@ class TestUnifiedGateEscape:
     async def test_sub_search_cap_is_not_escapable(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """子 Agent 搜索上限是安全闸（fork 安全层），模型再坚持也不放行。"""
         import app.harness.hooks.budget as tg
-        from app.agent.fork_guard import _fork_depth
         from app.harness.budgets import SUB_ITEM_SEARCH_CAP
+        from app.harness.fork_guard import _fork_depth
         from app.harness.state import GuardState
 
         token = _fork_depth.set(1)

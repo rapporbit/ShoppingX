@@ -12,11 +12,11 @@ from typing import Any
 
 import pytest
 
-from app.agent import model_router as mr
-from app.agent import token_budget as tb
-from app.agent.model_router import Tier
+from app.harness import model_router as mr
+from app.harness import token_budget as tb
 from app.harness.hooks.budget import check_token_budget, route_by_budget
 from app.harness.middleware import HookRejectSignal
+from app.harness.model_router import Tier
 from app.harness.state import GuardState
 from app.tools.schemas import ItemCandidate
 from app.utils.thread_ctx import thread_scope

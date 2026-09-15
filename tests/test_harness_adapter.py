@@ -16,10 +16,10 @@ from agentscope.model import ChatResponse, ChatUsage, OpenAIChatModel
 from agentscope.tool import FunctionTool, Toolkit
 from agentscope.tool._response import ToolChunk, ToolResultState
 
-from app.agent.token_budget import reset_tree, tree_snapshot
 from app.harness import adapter as adapter_mod
 from app.harness.adapter import HarnessAgentAdapter, HarnessSession, HarnessToolAdapter
 from app.harness.middleware import HarnessMiddleware, HookRejectSignal
+from app.harness.token_budget import reset_tree, tree_snapshot
 from app.utils.thread_ctx import thread_scope
 
 EXEC_LOG: list[str] = []
