@@ -1,6 +1,6 @@
 """Harness 的钩子，按**关切**分文件：一个文件 = 一个关切 = 它在各 hook 点上的全部钩子。
 
-    safety.py           安全底线：白名单 / 深度断言 / 内容过滤 / 截断 / 输出审核与脱敏
+    safety.py           安全底线：内容过滤 / 截断 / 输出审核与脱敏
                         （硬，无逃生门）
     termination.py      终结：终结硬停闸 + 置位 + 终结纪律重发 + liveness 看门狗
     budget.py           预算：检索 / fork / token 三类额度闸 + 预算档位路由
@@ -17,7 +17,7 @@ post_tool_call 置位、在 post_reflect 催），按点切会把它散在 4 个
 不在一页上——**跨文件的顺序契约**集中列在这里，改 priority 前先看：
 
 pre_tool_call（低先执行）：
-    1 tool_whitelist · 5 terminal_reached · 10 depth · 12 trade_sequence · 15 websearch
+    5 terminal_reached · 12 trade_sequence · 15 websearch
     · 20 phase_check
     · 25 sequencing · 27 tool_memo_replay · 30 search_authority · 33 token_budget · 35 fork_budget
     · 45 retrieval_charge · 48 tool_breaker

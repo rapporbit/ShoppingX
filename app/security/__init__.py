@@ -17,7 +17,8 @@ RAG 品类卡片                  知识库生产管线被污染，恶意指令�
     用户输入
       → L2 边界声明（prompt/prompts.yml 的 <security_boundary>，模型层「约定」）
       → 模型 Think，产出 tool_call
-      → L1 工具白名单（:mod:`~app.security.tool_whitelist`，pre_tool_call 拦非法工具名）
+      → L1 工具白名单（:mod:`~app.security.tool_whitelist`：装配层断言，
+        见 tests/test_toolkit_scope.py；运行时由 Toolkit 拒绝未注册工具名）
       → 工具执行，返回结果
       → L3 返回内容过滤（:mod:`~app.security.content_filter`，post_tool_call 洗掉注入指令）
       → 模型 Observe / Reflect，产出最终回答

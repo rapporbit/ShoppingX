@@ -120,8 +120,8 @@ TOOLS_BY_NAME: dict[str, FunctionTool] = {t.name: t for t in TOOLS}
 # 结构性保证，比 fork_guard 的计数守卫更硬——计数守卫拦的是次数，这个拦的是可能性。
 #
 # **为什么只有两个**（对齐手册 §7.1 那张表的刻意偏离）：手册照 refdocs 给的是五个
-# （+ category_insight / price_compare / shipping_calc），但本仓早有一道 ``depth_gate``
-# 把这三个划为 depth==0 专属，理由至今成立：
+# （+ category_insight / price_compare / shipping_calc），但本仓把这三个划为 depth==0 专属
+# （``budgets.DEPTH0_ONLY_TOOLS``，由 tests/test_toolkit_scope.py 钉死），理由至今成立：
 #   · price_compare 要的是**跨平台合流后的全局视图**——只搜了一个平台的 worker 拿不出别家数据，
 #     它在那里比价，比的是个寂寞；
 #   · category_insight 平台无关、主流程跑一次结果就写进 demands，N 个 worker 各跑一遍纯属重复解码；
