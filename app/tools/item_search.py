@@ -10,9 +10,8 @@ filter 维度：platform + price_usd_max + min_rating（Qdrant Range）+ brand_e
 精排**——候选的二次质量把关交给下游 item_picker（按用户偏好精挑）。这样每次检索少一次 rerank
 网络往返，跨平台 fork 放大时收益明显。
 
-**单平台**：一次只搜一个平台。跨平台并行检索由主 loop 同轮多派 ``task_dispatch``（每条 demands
-一个平台、由框架批并发）来完成（派发三件事之「能并行」），本工具不自己循环多平台——把
-「要不要并行」的决策权留给主 loop 的派发判断。
+**单平台**：一次只搜一个平台。跨平台 / 多槽位并行检索由主 loop 同轮多发本工具（一平台或一槽
+一条、由框架批并发）来完成，本工具不自己循环多平台——把「要不要并行」的决策权留给主 loop。
 
 **个性化改走「拼进检索词」，不再走 user 塔向量画像**（Mmem）：本工具把用户本轮域内的 like
 偏好原子词并进 query 文本再编码。原来那条路（把所有 like 加权平均成一个 user 向量、按 β 融进
@@ -40,7 +39,12 @@ from app.memory.assemble import assemble
 from app.recall import get_recall_client, get_tower_client
 from app.recall.schemas import RecallCandidate
 from app.tools._args import StrListArg
-from app.tools._bundle import current_slot, note_slot_searched, register_slot
+from app.tools._bundle import (
+    current_slot,
+    ensure_dispatch_slot,
+    note_slot_searched,
+    register_slot,
+)
 from app.tools._candidates import compact_candidates, enrich, register
 from app.tools._diagnostics import report_diagnostics
 from app.tools._shell import tool
@@ -339,6 +343,25 @@ class ItemSearchOutput(BaseModel):
         )
 
 
+def _stamp_slot_id(slot: str) -> str:
+    """本次检索的候选该盖哪个槽 id；空串 = 不盖章。
+
+    槽引用（id / 精确名 / 漂移名）先走 register_slot（全链路唯一解析点，内置懒读回；解析不出
+    的非套装轮 / 野 id / 用户删过的槽 → 空串）。**模型显式传了 slot 却解析不出**时再走
+    ensure_dispatch_slot：主环同轮 batch ``item_search(slot=…)`` 取代派发后，planner 漏拆槽
+    （槽表为空）就只剩这一次机会把「这批属于哪一类」落成真槽，否则一个章都盖不上、某类屠版。
+    继承自派发作用域的 current_slot() 已是稳定 id，不走兜底。
+    """
+    explicit = slot.strip()
+    ref = explicit or current_slot()
+    if not ref:
+        return ""
+    slot_id = register_slot(ref)
+    if not slot_id and explicit:
+        slot_id = ensure_dispatch_slot(explicit)
+    return slot_id
+
+
 @tool
 async def item_search(
     query: str,
@@ -349,10 +372,11 @@ async def item_search(
     brand_exclude: StrListArg | None = None,
     slot: str = "",
 ) -> ItemSearchOutput:
-    """在单个平台检索商品（dense 召回，长期偏好与硬排除已由系统并入）；跨平台用 task_dispatch 并行。
+    """在单个平台检索商品（dense 召回，长期偏好与硬排除已由系统并入）；跨平台同轮多发、一平台一条。
     参数：query 用品类核心词（场景/人群词交给 item_picker 的 prefer）；platform 见
-    <enabled_platforms>；price_usd_max / min_rating / brand_exclude 召回期过滤；
-    top_k / slot 不用传。返回 filtered_out = 库里有但被条件挡住（不是候选，如实说被哪个条件挡的）。
+    <enabled_platforms>；price_usd_max / min_rating / brand_exclude 召回期过滤；top_k 不用传；
+    slot 只在多槽位轮传槽名（一槽一条、同轮发）。
+    返回 filtered_out = 库里有但被条件挡住（不是候选，如实说被哪个条件挡的）。
     """
     # 个性化：把用户**本轮域内**的 like 偏好原子词拼进检索词（见 memory.assemble.search_terms）。
     # 这条通路取代了原来的 user 塔向量画像——那条路把所有 like 加权平均成一个向量塞进召回，结果
@@ -494,19 +518,14 @@ async def item_search(
         filtered_out=filtered_out,
         recall_strategy="+".join(strategy),
     )
-    # 套装槽位盖章：显式入参优先（用户确认后新加的槽走这条），退回 dispatch 派发时从 demand
-    # 确定性解析并经 ContextVar 传下来的槽名（机制主通路，不依赖子 Agent 转述）。盖在 register
-    # 之前——登记表存的就是带槽标的全量候选，跨轮落盘 / 读回都带着。
-    slot_ref = slot.strip() or current_slot()
-    if slot_ref:
-        # 槽引用（id / 精确名 / 漂移名）→ 稳定槽 id：全链路唯一解析点（_bundle.register_slot，
-        # 内置懒读回；确属新品类时补登发号）。解析不出（非套装轮 / 野 id / 用户删过的槽）
-        # → 空串，不盖章——候选落 keywords 兜底，绝不让模型的字符串自成一档身份。
-        slot_id = register_slot(slot_ref)
-        if slot_id:
-            note_slot_searched(slot_id)  # 「搜了但没货」与「压根没派」要分得开，组合报告如实说
-            for c in candidates:
-                c.slot = slot_id
+    # 套装槽位盖章：显式 slot 入参优先（主环同轮 batch 的主通路），退回 dispatch 派发经 ContextVar
+    # 传下来的槽 id。盖在 register 之前——登记表存的就是带槽标的全量候选，跨轮落盘 / 读回都带着。
+    # 解析不出 → 不盖章，候选落 keywords 兜底（见 _stamp_slot_id）。
+    slot_id = _stamp_slot_id(slot)
+    if slot_id:
+        note_slot_searched(slot_id)  # 「搜了但没货」与「压根没搜」要分得开，组合报告如实说
+        for c in candidates:
+            c.slot = slot_id
     # 登记召回信号到全树检索状态：供 web_search 兜底门判定（仅在召回全空时才放行 web_search）。
     note_item_search(out.total_recall)
     # 把全量候选（含真实 url/image_url）按 item_id 登记到会话：url/image 不再随候选喂模型，

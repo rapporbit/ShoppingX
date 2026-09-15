@@ -4,7 +4,7 @@
 其中 price_compare / item_picker 两轮模型只是在「把上一步的结论搬进下一步的入参」——零决策、
 纯解码（每轮 2~3s）。到手价是纯本地计算，精挑的条件（预算 / 排除 / 偏好）planner 早已确定性
 落进会话 P_t，``item_picker`` 无参调用即按 P_t 执行。故把这两步下沉到工具层：检索类工具
-（``item_search`` / ``task_dispatch(search)``）成功返回后**武装**，下一次模型调用前（pre_think，
+（``item_search`` / ``task_dispatch``）成功返回后**武装**，下一次模型调用前（pre_think，
 即同轮多个并发派发全部合流之后）自动跑一遍，结果以 hint 注入，模型下一步即可 ``shopping_summary``。
 
 **不动的东西**：``price_compare`` / ``item_picker`` 工具本身保留（模型仍可显式调，显式调即
@@ -55,8 +55,6 @@ def arm_on_tool(s: HarnessSession, tool_name: str, tool_args: dict[str, Any]) ->
         s.autopick_armed = False
         return
     if tool_name not in _SEARCH_TOOLS:
-        return
-    if tool_name == "task_dispatch" and tool_args.get("subagent_type") != "search":
         return
     s.autopick_armed = True
 
