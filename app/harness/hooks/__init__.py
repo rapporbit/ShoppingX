@@ -41,7 +41,7 @@ post_reflect：15 assertion_handler · 20 drift_detector · 39 refine_backfill �
     · 41 phase_rollback · 60 terminal_enforcer。
 on_session_start：10 phase_init。
 on_session_end：10 output_guard · 20 output_audit · 90 strategy_feedback。
-on_system_prompt（装配期）：50 strategy_inject · 60 trade_state_inject。
+on_system_prompt（装配期）：50 system_prompt_append（策略块 + 交易状态块）。
 
 注册与执行见 ``app/harness/middleware.py``；各钩子在 AgentScope 上的落点见
 ``app/harness/adapter.py``。

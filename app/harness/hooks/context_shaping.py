@@ -1,8 +1,8 @@
 """塑形模型看到的上下文：偏好注入 / 成功策略注入与结账。
 
-    on_system_prompt 50  strategy_inject     装配期按用户原话匹配在役策略，追加 <learned_strategies>
-    on_system_prompt 60  trade_state_inject  装配期把待决议确认卡 + 本会话订单追加成 <trade_state>
-                                             （只给主 Agent）
+    on_system_prompt 50  system_prompt_append 装配期给主 Agent 追加两段：按用户原话匹配的在役策略
+                                              <learned_strategies>、待决议确认卡 + 本会话订单
+                                              <trade_state>（曾是两个 hook，2026-09-15 合一）
     post_tool_call   50  preference_inject   planner 判出域后注入域内长期偏好
                                              （worker 由 task_dispatch 注入）
     on_session_end   90  strategy_feedback   给本轮注入过的策略结账：命中回血、连续失败淘汰
@@ -74,11 +74,8 @@ def injected_strategy_keys() -> tuple[str, ...]:
     return _injected.get()
 
 
-@harness_hook("on_system_prompt", name="strategy_inject", priority=50)
-async def inject_strategies(context: dict[str, Any]) -> dict[str, Any] | None:
-    """按本轮 query 匹配在役策略，追加进 system prompt 末尾。"""
-    if context.get("role") != "main":
-        return None
+async def _strategy_block(context: dict[str, Any]) -> str | None:
+    """按本轮 query 匹配在役策略 → <learned_strategies> 块。每轮必写注入清单（哪怕空）。"""
     query = str(context.get("query") or "")
     matched = await strategies_for_query(query)
     _injected.set(tuple(s.dedup_key for s in matched))
@@ -86,8 +83,7 @@ async def inject_strategies(context: dict[str, Any]) -> dict[str, Any] | None:
     if not block:
         return None  # 一条都没匹配上 → 不塞空占位（省 token，也别给模型噪声）
     logger.info("注入 %d 条成功策略：%s", len(matched), ", ".join(s.dedup_key for s in matched))
-    context.setdefault("append", []).append(block)
-    return context
+    return block
 
 
 def render_trade_state_block(state: dict[str, Any]) -> str:
@@ -113,12 +109,9 @@ def render_trade_state_block(state: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-@harness_hook("on_system_prompt", name="trade_state_inject", priority=60)
-async def inject_trade_state(context: dict[str, Any]) -> dict[str, Any] | None:
-    """主 loop 装配期注入交易状态。未登录 / 无会话 / 库不可用时静默跳过——注入是锦上添花，
+async def _trade_state_block() -> str | None:
+    """交易状态 → <trade_state> 块。未登录 / 无会话 / 库不可用时静默跳过——注入是锦上添花，
     不能让一次读库失败把整轮任务拖死。"""
-    if context.get("role") != "main":
-        return None
     user_id, thread_id = get_user_id(), get_thread_id()
     if not user_id or not thread_id:
         return None
@@ -129,10 +122,18 @@ async def inject_trade_state(context: dict[str, Any]) -> dict[str, Any] | None:
     except Exception:  # noqa: BLE001
         logger.warning("读取交易状态失败，本轮不注入 <trade_state>", exc_info=True)
         return None
-    block = render_trade_state_block(state)
-    if not block:
+    return render_trade_state_block(state) or None
+
+
+@harness_hook("on_system_prompt", name="system_prompt_append", priority=50)
+async def append_system_prompt_blocks(context: dict[str, Any]) -> dict[str, Any] | None:
+    """主 loop 装配期往 system prompt 末尾追加：先策略块、后交易状态块（顺序即渲染顺序）。"""
+    if context.get("role") != "main":
         return None
-    context.setdefault("append", []).append(block)
+    blocks = [b for b in (await _strategy_block(context), await _trade_state_block()) if b]
+    if not blocks:
+        return None
+    context.setdefault("append", []).extend(blocks)
     return context
 
 
