@@ -57,7 +57,7 @@ PREREQUISITES: dict[str, list[str]] = {
     "price_compare": ["item_search", "task_dispatch"],
     "shipping_calc": ["price_compare"],
     "item_picker": ["item_search", "task_dispatch"],
-    # 取消前先查单。这里是**软**断言（注入一条警告），硬闸在 tool_gates.trade_sequence_gate：
+    # 取消前先查单。这里是**软**断言（注入一条警告），硬闸在本文件上方的 trade_sequence_gate：
     # 写操作的代价不对称，光警告拦不住一个已经打算取消的模型。
     "cancel_order": ["query_order"],
 }

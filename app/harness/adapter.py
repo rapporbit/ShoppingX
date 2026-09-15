@@ -1,6 +1,6 @@
 """把 Harness 的 hook_point 接到 AgentScope 的中间件面。
 
-落点选择（探针实测钉死，见 scratchpad probe_hooks）：
+落点选择（用探针脚本逐个 hook 实测后钉死；探针脚本未入库）：
 
 | hook_point | 落点 | 为什么是这里 |
 |---|---|---|
