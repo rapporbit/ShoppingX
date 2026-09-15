@@ -1,6 +1,6 @@
 import { memo, useMemo, useState } from "react";
 import type { ProductItem } from "../types";
-import { Check, ExternalLink, Globe, Heart, Search } from "lucide-react";
+import { Check, Globe, Heart, Search } from "lucide-react";
 import { Tooltip } from "./ui/Tooltip";
 import { platformName, shownPrice, splitReasons } from "./productText";
 
@@ -78,6 +78,8 @@ const Card = memo(function Card({
   onSimilar,
   onDetail,
   onCompare,
+  onOrder,
+  busy,
 }: {
   item: ProductItem;
   index?: number;
@@ -87,59 +89,43 @@ const Card = memo(function Card({
   onSimilar: (item: ProductItem) => void;
   onDetail: (item: ProductItem) => void;
   onCompare: (item: ProductItem) => void;
+  onOrder: (item: ProductItem) => void;
+  busy: boolean;
 }) {
   const reasons = splitReasons(item.reason);
 
-  // 有商品页 URL 才让整卡可点：渲染成新标签页打开的链接（外站，带 noreferrer）。无 URL 退化为
-  // 普通 article（不可点）——离线数据偶有缺链，宁可不可点也不给死链。
-  const href = item.url?.trim();
-  const Wrapper = href ? "a" : "article";
-  const linkProps = href
-    ? { href, target: "_blank" as const, rel: "noreferrer noopener" }
-    : {};
-
-  // 整卡是 <a>：卡内的按钮必须自己吃掉点击，否则点它会顺带跳到外站商品页。
-  const toggleFavorite = (e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    onFavorite(item, favorited);
-  };
-
+  // 整卡点开站内详情，不直接跳外站：一滑手就离开对话，对比 / 下单都得回来重找。
+  // 「在平台查看」的外链收进详情弹窗里。卡内按钮必须自己吃掉点击，否则会顺带打开详情。
   const stop = (fn: () => void) => (e: React.MouseEvent) => {
-    e.preventDefault();
     e.stopPropagation();
     fn();
   };
 
-  const openSimilar = (e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    onSimilar(item);
-  };
-
   return (
-    <Wrapper
-      className={`product-card ${href ? "clickable" : ""}`}
+    <article
+      className="product-card clickable"
       style={staggerStyle(index)}
-      {...linkProps}
+      role="button"
+      tabIndex={0}
+      onClick={() => onDetail(item)}
+      onKeyDown={(e) => {
+        if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) {
+          e.preventDefault();
+          onDetail(item);
+        }
+      }}
     >
       <Tooltip content={favorited ? "取消收藏" : "收藏"}>
         <button
           className={`card-fav ${favorited ? "on" : ""}`}
           aria-pressed={favorited}
           aria-label={favorited ? "取消收藏" : "收藏"}
-          onClick={toggleFavorite}
+          onClick={stop(() => onFavorite(item, favorited))}
         >
-          <Heart size={14} strokeWidth={1.75} fill={favorited ? "currentColor" : "none"} />
+          <Heart size={15} strokeWidth={1.75} fill={favorited ? "currentColor" : "none"} />
         </button>
       </Tooltip>
       <Thumb item={item} />
-      {href && (
-        <span className="card-visit" aria-hidden>
-          <ExternalLink size={12} strokeWidth={2} />
-          在 {platformName(item.platform)} 查看
-        </span>
-      )}
       <div className="card-body">
         {/* 顶行：品牌 + 评分。评分只给分不给评价数（数据集评价数恒为 0，显示「(0)」等于说零评价）；
             两者都没有就整行不渲染，标题顶上去。 */}
@@ -182,12 +168,7 @@ const Card = memo(function Card({
           )
         )}
 
-        {/* 只标平台，不加「官方 ✅ 认证」那类背书：商品来自离线数据集，没有任何一方为它背书。 */}
-        <div className="card-supplier">
-          <Globe size={13} strokeWidth={1.75} />
-          <span className="supplier-name">{platformName(item.platform)}</span>
-        </div>
-
+        {/* 平台只在图区左上角标一次（Thumb 里），不再单开一行重复。 */}
         {reasons.length > 0 && (
           <div className="card-match">
             <div className="match-head">
@@ -202,12 +183,17 @@ const Card = memo(function Card({
           </div>
         )}
 
-        {/* 卡内动作：详情 / 对比 / 搜同款。整卡是 <a>，三个按钮都得自己吃掉点击。
+        {/* 卡内动作：去下单（主）/ 对比 / 搜同款。详情不再单占一个按钮——点整卡就是详情。
+            去下单与详情弹窗同一条路（填收件信息 → Agent 出确认卡），任务跑着时发不出话，置灰。
             搜同款是一次纯向量近邻检索（不过 Agent、不烧 LLM），结果在右侧抽屉里给。 */}
         <div className="card-actions">
-          <Tooltip content="看大图与全部理由">
-            <button className="card-similar" onClick={stop(() => onDetail(item))}>
-              详情
+          <Tooltip content={busy ? "等这一轮跑完再下单" : "填写收件信息，让 Agent 先出确认卡"}>
+            <button
+              className="card-order"
+              disabled={busy}
+              onClick={stop(() => onOrder(item))}
+            >
+              去下单
             </button>
           </Tooltip>
           <Tooltip content={compared ? "移出对比" : "加入对比（最多 4 件）"}>
@@ -220,14 +206,14 @@ const Card = memo(function Card({
             </button>
           </Tooltip>
           <Tooltip content="按商品向量找相似商品（不经 Agent）">
-            <button className="card-similar" onClick={openSimilar}>
+            <button className="card-similar" onClick={stop(() => onSimilar(item))}>
               <Search size={13} strokeWidth={1.75} />
               搜同款
             </button>
           </Tooltip>
         </div>
       </div>
-    </Wrapper>
+    </article>
   );
 });
 
@@ -245,6 +231,8 @@ function BundleGroups({
   onSimilar,
   onDetail,
   onCompare,
+  onOrder,
+  busy,
 }: {
   items: ProductItem[];
   favorited: Set<string>;
@@ -253,6 +241,8 @@ function BundleGroups({
   onSimilar: (item: ProductItem) => void;
   onDetail: (item: ProductItem) => void;
   onCompare: (item: ProductItem) => void;
+  onOrder: (item: ProductItem) => void;
+  busy: boolean;
 }) {
   // 保序分组：槽的顺序 = 后端组合优选给出的顺序（essential 在前），不重排。
   const groups: { slot: string; items: ProductItem[] }[] = [];
@@ -292,6 +282,8 @@ function BundleGroups({
                 onSimilar={onSimilar}
                 onDetail={onDetail}
                 onCompare={onCompare}
+                onOrder={onOrder}
+                busy={busy}
               />
             </div>
           ))}
@@ -327,6 +319,8 @@ function BundleGroups({
                   onSimilar={onSimilar}
                   onDetail={onDetail}
                   onCompare={onCompare}
+                  onOrder={onOrder}
+                  busy={busy}
                 />
               ))}
             </div>
@@ -353,6 +347,8 @@ export function ProductCards({
   onSimilar,
   onDetail,
   onCompare,
+  onOrder,
+  busy,
 }: {
   items: ProductItem[];
   favorited: Set<string>;
@@ -361,6 +357,8 @@ export function ProductCards({
   onSimilar: (item: ProductItem) => void;
   onDetail: (item: ProductItem) => void;
   onCompare: (item: ProductItem) => void;
+  onOrder: (item: ProductItem) => void;
+  busy: boolean;
 }) {
   const [active, setActive] = useState<string>("all");
 
@@ -381,8 +379,10 @@ export function ProductCards({
         compared={compared}
         onFavorite={onFavorite}
         onSimilar={onSimilar}
-                onDetail={onDetail}
-                onCompare={onCompare}
+        onDetail={onDetail}
+        onCompare={onCompare}
+        onOrder={onOrder}
+        busy={busy}
       />
     );
   }
@@ -433,6 +433,8 @@ export function ProductCards({
             onSimilar={onSimilar}
             onDetail={onDetail}
             onCompare={onCompare}
+            onOrder={onOrder}
+            busy={busy}
           />
         ))}
       </div>

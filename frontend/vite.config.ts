@@ -7,6 +7,8 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   server: {
+    // 钉死 IPv4：不写 host 时 vite 绑 localhost，macOS 上 Node 解析成 ::1，127.0.0.1 就连不上。
+    host: "127.0.0.1",
     port: 5173,
     proxy: {
       "/api": { target: "http://127.0.0.1:8000", changeOrigin: true },
