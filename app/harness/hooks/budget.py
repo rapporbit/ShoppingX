@@ -1,17 +1,18 @@
 """预算：把「再找找更好的」这个动机用额度兜死，prompt 只当辅助。
 
-    pre_think       20  budget_router         按全树成本定档：换模型 / 注入 hint / FALLBACK 不调 LLM
-    pre_tool_call   15  websearch_gate        有候选就不该拿 web_search 找更好（效率闸，带逃生门）
-    pre_tool_call   30  search_authority_gate 子搜够 / 主 loop fork 后直搜 → 拦（**读自增前计数**）
-    pre_tool_call   33  token_budget_gate     minimal 档收走成本放大器（**必须早于 35**）
-    pre_tool_call   35  fork_budget_gate      task_dispatch 次数上限，charge 即扣槽
-    pre_tool_call   45  retrieval_charge_gate 检索计数自增（**必须晚于 30**）；越线软收敛 / 硬挡
+    pre_think       20  budget_router  按全树成本定档：换模型 / 注入 hint / FALLBACK 不调 LLM
+    pre_tool_call   30  spend_gate     token 档位 → fork 预算：minimal 档收走成本放大器；
+                                       task_dispatch 次数上限，charge 即扣槽
+    pre_tool_call   45  search_gate    web_search 用途门 → item_search 授权 → 检索计数自增 / 越线
+                                       软收敛 / 硬挡
 
-**顺序契约（易碎，勿动）**：``search_authority``(30) 读的是 ``item_search_calls`` 的自增前值，自增在
-``retrieval_charge``(45)；谁把自增挪到 30 之前，子 Agent 的「恰好放行一次」就塌成「放行 0 次」。
-``token_budget``(33) 必须早于 ``fork_budget``(35)：fork 闸 charge 即扣槽，反过来 minimal 档下
-一次被拒的
-fork 会先烧掉唯一的并行额度。
+两个 hook 各由几个判定函数**按固定顺序**串成（曾是 5 个 hook 靠 priority 排序，2026-09-15 合并）：
+
+- ``spend_gate``：``check_token_budget`` 必须先于 ``check_fork_budget``——fork 闸 charge 即扣槽，
+  反过来 minimal 档下一次被拒的 fork 会先烧掉唯一的并行额度。
+- ``search_gate``：``check_search_authority`` 读的是 ``item_search_calls`` 的**自增前**值，自增在
+  ``charge_retrieval``；谁把自增挪到前面，子 Agent 的「恰好放行一次」就塌成「放行 0 次」。
+- spend 在 search 之前：预算拒绝是事实闸，不该先给被拒的调用记一次检索。
 
 **效率闸 vs 安全闸**（逃生门见 ``middleware._try_escape``）：依据推定的（websearch、postfork 直搜）
 声明 ``escape_key``，连拒 2 次放行；依据事实的（子搜上限 / token / fork / 检索预算）永远硬拒。
@@ -61,7 +62,6 @@ from app.tools._bundle import resolve_slot
 logger = logging.getLogger("shoppingx.harness.budget")
 
 
-@harness_hook("pre_tool_call", name="websearch_gate", priority=15)
 async def check_websearch(context: dict[str, Any]) -> dict[str, Any] | None:
     """web_search 门控：独立知识查询 / 任务口径配额 / 购物流程空召回时放行；其余有候选就拦。
 
@@ -80,14 +80,13 @@ async def check_websearch(context: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-@harness_hook("pre_tool_call", name="search_authority_gate", priority=30)
 async def check_search_authority(context: dict[str, Any]) -> dict[str, Any] | None:
     """item_search 的「耗尽夺权」硬闸：搜够了就真拦下（不靠模型自觉）。
 
     - 子（depth≥1）本平台 item_search 已达 ``SUB_ITEM_SEARCH_CAP`` → ``SUB_SEARCH_EXHAUSTED``。
     - 主 loop（depth==0）已跑过并行 fork → ``MAIN_POSTFORK_SEARCH_DENIED``（fork 即检索阶段）。
 
-    读的是 ``item_search_calls`` 的**自增前**值——自增在 ``retrieval_charge``(priority 45)。
+    读的是 ``item_search_calls`` 的**自增前**值——自增在 ``charge_retrieval``。
     """
     if context.get("tool_name") != "item_search":
         return None
@@ -132,11 +131,10 @@ async def check_search_authority(context: dict[str, Any]) -> dict[str, Any] | No
     return None
 
 
-@harness_hook("pre_tool_call", name="token_budget_gate", priority=33)
 async def check_token_budget(context: dict[str, Any]) -> dict[str, Any] | None:
     """预算档位到 minimal 即收走成本放大器工具，只留收尾链。
 
-    **priority=33，必须早于 fork_budget_gate(35)**：fork 闸的 charge 即扣槽（parallel 槽只有
+    **必须早于 check_fork_budget**：fork 闸的 charge 即扣槽（parallel 槽只有
     1 个），本闸若排在它之后，minimal 档下模型发起的 fork 会先被扣槽、再被本闸拒绝——被拒的
     尝试烧掉唯一的并行额度，还连带触发 postfork 直搜拦截。预算判定是纯读取（current_tier），
     放到 charge 前零代价。
@@ -156,7 +154,6 @@ async def check_token_budget(context: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-@harness_hook("pre_tool_call", name="fork_budget_gate", priority=35)
 async def check_fork_budget(context: dict[str, Any]) -> dict[str, Any] | None:
     """对 fork 元工具计入树级 fork 预算；耗尽即硬挡。无树作用域则放行。"""
     tool_name = context.get("tool_name", "")
@@ -171,7 +168,6 @@ async def check_fork_budget(context: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-@harness_hook("pre_tool_call", name="retrieval_charge_gate", priority=45)
 async def charge_retrieval(context: dict[str, Any]) -> dict[str, Any] | None:
     """对「商品检索」工具计数，越预算则软收敛 / 硬挡。
 
@@ -191,10 +187,10 @@ async def charge_retrieval(context: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     if tool_name == "item_search":
-        # 顺序契约：此自增必须排在 search_authority_gate(30) 之后。
+        # 顺序契约：此自增必须排在 check_search_authority 之后。
         guard.item_search_calls += 1
     elif tool_name == "web_search":
-        # 同一顺序契约：websearch_gate(15) 读自增前值判任务口径配额（已完成 < 配额即放行）。
+        # 同一顺序契约：check_websearch 读自增前值判任务口径配额（已完成 < 配额即放行）。
         note_web_search()
 
     tree = charge_tree_retrieval()  # None=无 session 作用域
@@ -211,6 +207,21 @@ async def charge_retrieval(context: dict[str, Any]) -> dict[str, Any] | None:
         logger.info("检索预算软越线（%d/%d），追加强制收敛指令", count, cap)
         return context
     raise HookRejectSignal(retrieval_exhausted(count), raw=True)
+
+
+@harness_hook("pre_tool_call", name="spend_gate", priority=30)
+async def check_spend(context: dict[str, Any]) -> dict[str, Any] | None:
+    """token 档位 → fork 预算（顺序契约见模块头）。"""
+    await check_token_budget(context)
+    return await check_fork_budget(context)
+
+
+@harness_hook("pre_tool_call", name="search_gate", priority=45)
+async def check_search(context: dict[str, Any]) -> dict[str, Any] | None:
+    """web_search 用途门 → item_search 授权（读自增前计数）→ 检索计数与越线处理。"""
+    await check_websearch(context)
+    await check_search_authority(context)
+    return await charge_retrieval(context)
 
 
 @harness_hook("pre_think", name="budget_router", priority=20)
