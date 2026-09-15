@@ -1035,6 +1035,25 @@ class TestTradeTurnIsTerminal:
         out = await enforce_terminal(nudged)
         assert out is not None and out.get("retry_nudge")
 
+    async def test_synthesized_fallback_gets_no_terminal_nudge(self, clean_phase) -> None:
+        """预算 FALLBACK / 看门狗硬停由适配器合成收尾并置 terminal_reached，不经终结工具。
+
+        合成回复后 post_reflect 照跑（on_model_call 在 on_reasoning 内层）；只认 called_tools
+        会催重发，on_reply 吞 ReplyEnd 再合成同一段，空转到 max_iters。
+        """
+        from app.harness.hooks.termination import enforce_terminal
+
+        guard = _mw().guard
+        guard.terminal_reached = True
+        ctx = {
+            "_guard": guard,
+            "called_tools": set(),
+            "response_has_tool_calls": False,
+            "response_ai_message": object(),
+        }
+        assert await enforce_terminal(ctx) is None
+        assert guard.terminal_nudge_retries == 0
+
 
 class TestAssertionWiring:
     """三类断言 → post_reflect 的 assertion_handler → inject_messages 的完整链路。"""
@@ -2223,3 +2242,8 @@ class TestDetectionLayerLanguageBridge:
         assert not _is_empty_result('{"platform": "amazon", "total_recall": 8, "candidates": []}')
         # 非 JSON 的文本工具（web_search）退回特征词
         assert _is_empty_result("未找到相关结果")
+        # 前置 hook（transition_notice / result_nudges）已在尾部贴通告：仍按 JSON 判，不退回文本
+        empty = '{"platform": "amazon", "total_recall": 0, "candidates": []}'
+        assert _is_empty_result(empty + "\n\n[系统提示] 库里其实还有 3 件相关商品")
+        full = '{"platform": "amazon", "total_recall": 5, "candidates": [{"item_id": "a"}]}'
+        assert not _is_empty_result(full + "\n\n[阶段推进] 候选已入池，0 条也别再搜")
