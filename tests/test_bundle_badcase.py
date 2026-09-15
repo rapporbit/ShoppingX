@@ -39,7 +39,7 @@ def _session(name: str, slots: list[BundleSlot]):
         try:
             yield
         finally:
-            reset_session_bundle(clear_file=True)
+            reset_session_bundle()
 
 
 def _slot(name: str, *, essential: bool = True, kw: list[str] | None = None) -> BundleSlot:

@@ -11,18 +11,19 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from app.tools._bundle import (
+    SLOT_MODE_BUNDLE,
+    SLOT_MODE_PARALLEL,
     BundleSlot,
     combine_bundle,
-    detect_slot,
     get_session_bundle,
+    get_session_mode,
     note_slot_searched,
     reconcile_slots_from_reply,
     register_slot,
     reset_session_bundle,
+    searched_slots,
     set_session_bundle,
-    slot_scope,
 )
-from app.tools._bundle import current_slot as get_current_slot
 from app.tools.schemas import ItemCandidate
 from app.utils.thread_ctx import thread_scope
 
@@ -35,7 +36,7 @@ def _bundle_session(name: str, slots: list[BundleSlot]):
         try:
             yield
         finally:
-            reset_session_bundle(clear_file=True)
+            reset_session_bundle()
 
 
 def _slot(name: str, *, essential: bool = True, keywords: list[str] | None = None) -> BundleSlot:
@@ -152,61 +153,47 @@ def test_combine_keyword_fallback_assigns_untagged() -> None:
 
 
 # --------------------------------------------------------------------------
-# 槽位状态与 demand 打标
+# 槽位状态（只活一轮、槽名即身份）
 # --------------------------------------------------------------------------
-def test_detect_slot_marker_beats_name_and_unknown_names_pass() -> None:
-    with _bundle_session("t-bundle-6", [_slot("床品"), _slot("台灯")]):
-        # 「套装槽位：X」标记优先——原文透传（新槽名交给 item_search 的 register_slot 统一解析）。
-        assert detect_slot("套装槽位：床垫。搜 memory foam mattress，预算内") == "床垫"
-        lamp_id = next(s.id for s in get_session_bundle() if s.name == "台灯")
-        assert detect_slot("为台灯这个槽找一盏护眼灯") == lamp_id  # 已登记槽名匹配 → 返回 id
-        assert detect_slot("在 amazon 搜无线鼠标") is None  # 非套装 demand
-    assert detect_slot("为台灯这个槽找一盏护眼灯") is None  # 无会话作用域 → 不打标
-
-
-def test_slot_scope_and_register_and_searched() -> None:
-    assert get_current_slot() == ""
-    with slot_scope("床品"):
-        assert get_current_slot() == "床品"
-    assert get_current_slot() == ""
+def test_register_slot_creates_and_records_searched() -> None:
     with thread_scope("t-bundle-7", Path(tempfile.mkdtemp())):
-        register_slot("床垫")  # 套装未激活 → no-op，不给非套装轮开「模型自造槽」的口子
-        assert get_session_bundle() == []
+        assert register_slot("") == ""
+        assert register_slot("床垫") == "床垫"  # 槽表为空：模型按类传了 slot → 登记并列槽
+        assert get_session_mode() == SLOT_MODE_PARALLEL
+        reset_session_bundle()
         set_session_bundle([_slot("床品"), _slot("台灯")])
-        register_slot("床垫")  # 激活后补登（用户确认新增），essential 兜底为 True
-        names = [s.name for s in get_session_bundle()]
-        assert names == ["床品", "台灯", "床垫"]
-        note_slot_searched("床品")
-        reset_session_bundle(clear_file=True)
-        assert get_session_bundle() == []
+        assert register_slot("床垫") == "床垫"  # 槽表非空：补登（用户确认新增）
+        assert [s.name for s in get_session_bundle()] == ["床品", "台灯", "床垫"]
+        assert get_session_bundle()[-1].essential
+        note_slot_searched("护眼台灯")  # 漂移名按规范名入账
+        assert searched_slots() == {"台灯"}
+        reset_session_bundle()
+        assert get_session_bundle() == [] and searched_slots() == set()
 
 
-def test_register_slot_resolves_drift_to_stable_id() -> None:
+def test_register_slot_resolves_drift_to_canonical_name() -> None:
     """线上 badcase 75aa84：planner 登记「旅行背包」，检索时模型飘成「旅行背包/双肩包」——
-    精确判重会补登一个同品类重复槽（两个 essential 包槽 → 组合优选各配一件）。
-    id 化后：任意引用（id / 精确名 / 漂移名）都解析到同一个稳定 id，不再有新槽诞生。"""
+    精确判重会补登一个同品类重复槽（两个 essential 包槽 → 组合优选各配一件）。漂移名一律
+    解析回登记表里的规范名，不再有新槽诞生。"""
     with _bundle_session("t-bundle-drift", [_slot("旅行背包"), _slot("旅行收纳袋")]):
-        bag_id = next(s.id for s in get_session_bundle() if s.name == "旅行背包")
-        assert register_slot("旅行背包/双肩包") == bag_id  # 新名包含已有槽名 → 归并
-        assert register_slot("背包") == bag_id  # 反向包含也归并
-        assert register_slot("旅行背包") == bag_id  # 精确名
-        assert register_slot(bag_id) == bag_id  # id 直引
-        names = [s.name for s in get_session_bundle()]
-        assert names == ["旅行背包", "旅行收纳袋"]  # 没有新槽诞生
-        assert register_slot("s99") == ""  # 野 id 不创建叫「s99」的幻觉槽
-        new_id = register_slot("旅行洗漱包")  # 真新槽照常补登、机制发号
-        assert new_id and get_session_bundle()[-1].name == "旅行洗漱包"
-        assert get_session_bundle()[-1].id == new_id
+        assert register_slot("旅行背包/双肩包") == "旅行背包"  # 新名包含已有槽名 → 归并
+        assert register_slot("背包") == "旅行背包"  # 反向包含也归并
+        assert register_slot("旅行背包") == "旅行背包"
+        assert [s.name for s in get_session_bundle()] == ["旅行背包", "旅行收纳袋"]
+        assert register_slot("s2") == ""  # 老会话历史里的槽 id 不当新品类建槽
+        assert register_slot("旅行洗漱包") == "旅行洗漱包"  # 真新槽照常补登
+        assert get_session_bundle()[-1].name == "旅行洗漱包"
 
 
-def test_bundle_persists_and_lazy_reloads() -> None:
-    """内存清掉（run_agent 收尾）后按 session_dir 从 bundle.json 懒读回——续聊轮追问要用。"""
+def test_slot_table_lives_one_turn() -> None:
+    """槽表不落盘：run_agent 收尾 reset 后下一轮看不到上一轮的槽，会话目录也不留文件。"""
     sd = Path(tempfile.mkdtemp())
     with thread_scope("t-bundle-8", sd):
-        set_session_bundle([_slot("床品"), _slot("台灯")])
-        reset_session_bundle()  # 只清内存，文件留着
-        assert [s.name for s in get_session_bundle()] == ["床品", "台灯"]
-        reset_session_bundle(clear_file=True)
+        set_session_bundle([_slot("床品"), _slot("台灯")], mode=SLOT_MODE_PARALLEL)
+        reset_session_bundle()
+        assert get_session_bundle() == []
+        assert get_session_mode() == SLOT_MODE_BUNDLE
+    assert list(sd.iterdir()) == []
 
 
 # --------------------------------------------------------------------------
@@ -265,45 +252,29 @@ async def test_picker_writes_slot_back_even_for_untagged_picks() -> None:
         _slot("旅行收纳袋", keywords=["packing cubes"], essential=False),
     ]
     with _bundle_session("t-bundle-10", slots):
-        table = {s.name: s.id for s in get_session_bundle()}
         out = await item_picker.ainvoke(
             {"candidates": [c.model_dump() for c in cands], "budget_usd": 70.0}
         )
     assert out.bundle is not None
     by_id = {c.item_id: c for c in out.picks}
-    # 定稿的每一件都带**槽 id**章，谁也不掉「其他」；名字章（OLD1）也被归一成 id。
-    assert all(c.slot in set(table.values()) for c in out.picks)
+    # 定稿的每一件都带槽名章，谁也不掉「其他」。
+    assert all(c.slot in {"旅行背包", "旅行收纳袋"} for c in out.picks)
     bag = by_id.get("NEW1") or by_id.get("OLD1")  # 包槽必有一件入选
-    assert bag is not None and bag.slot == table["旅行背包"]
+    assert bag is not None and bag.slot == "旅行背包"
     if "NEW1" in by_id:  # 兜底归槽的那件必须带上归槽结果
-        assert by_id["NEW1"].slot == table["旅行背包"]
+        assert by_id["NEW1"].slot == "旅行背包"
 
 
 # --------------------------------------------------------------------------
-# id 化审计回归：续聊轮懒读回 / declined 落盘
+# 组成确认：删掉的槽本轮不复活
 # --------------------------------------------------------------------------
-def test_slot_resolution_survives_continuation_turn() -> None:
-    """审计 bug①：run_agent 收尾只清内存，续聊轮第一跳（item_search 直搜）就可能撞上
-    register_slot——解析必须内置懒读回，否则漂移归并/补登在续聊轮静默失效。"""
-    sd = Path(tempfile.mkdtemp())
-    with thread_scope("t-bundle-cont", sd):
-        set_session_bundle([_slot("旅行背包"), _slot("旅行收纳袋")])
-        bag_id = get_session_bundle()[0].id
-        reset_session_bundle()  # 只清内存（run_agent 收尾形态），bundle.json 留着
-        assert register_slot("旅行背包/双肩包") == bag_id  # 漂移归并在续聊轮第一跳就生效
-        reset_session_bundle(clear_file=True)
-
-
-def test_declined_slot_persists_and_blocks_drifted_resurrection() -> None:
-    """审计 bug③：declined 随 bundle.json 落盘；续聊轮清内存后，被删槽的精确名与
-    漂移变体（「台灯」→「护眼台灯」）都复活不了。"""
-    sd = Path(tempfile.mkdtemp())
-    with thread_scope("t-bundle-declined", sd):
+def test_declined_slot_blocks_drifted_resurrection() -> None:
+    """用户在组成确认里删掉的槽，本轮里精确名与漂移变体（「台灯」→「护眼台灯」）都复活不了。"""
+    with thread_scope("t-bundle-declined", Path(tempfile.mkdtemp())):
         set_session_bundle([_slot("书包"), _slot("文具"), _slot("台灯")])
         removed = reconcile_slots_from_reply("就要书包和文具", offered=["书包", "文具", "台灯"])
         assert removed == ["台灯"]
-        reset_session_bundle()  # 续聊轮：内存清空，全靠盘上那份
         assert register_slot("护眼台灯") == ""  # 漂移变体不复活
         assert register_slot("台灯") == ""  # 精确名同样不复活
         assert [s.name for s in get_session_bundle()] == ["书包", "文具"]
-        reset_session_bundle(clear_file=True)
+        reset_session_bundle()
