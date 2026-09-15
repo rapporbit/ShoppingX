@@ -335,6 +335,13 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
         : prefsOpen
           ? "preferences"
           : null;
+  // 面板是整页视图，开着时对话区被 CSS 藏起来；新建 / 切换对话必须先关面板，否则点了看不到任何变化。
+  const closePanels = () => {
+    setFavsOpen(false);
+    setOrdersOpen(false);
+    setSkillsOpen(false);
+    setPrefsOpen(false);
+  };
 
   return (
     <div className="app">
@@ -344,10 +351,12 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
         open={navOpen}
         onNewChat={() => {
           newConversation();
+          closePanels();
           setNavOpen(false);
         }}
         onSelectConversation={(id) => {
           selectConversation(id);
+          closePanels();
           setNavOpen(false);
         }}
         onDeleteConversation={deleteConversation}
