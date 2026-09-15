@@ -119,3 +119,5 @@ testpaths = ["tests"]
 # app 不作为 wheel 安装（[tool.uv] package=false），让 pytest 把项目根加入 sys.path。
 pythonpath = ["."]
 addopts = "-ra"
+# llm = 真调模型的快照评测（scripts/eval/snapshot/，花钱），默认 testpaths 不收集，手动 -m llm 跑。
+markers = ["llm: 真调 LLM API 的快照评测，跑前先报耗时与花费"]
