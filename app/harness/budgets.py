@@ -1,7 +1,7 @@
 """fork 预算 / 并发闸 / 各类受限工具集与上限常量（Feedforward / Computational）。
 
 这些是「弱模型的职责边界与死循环动机必须用机制兜」的落点——prompt 只当辅助。各闸的实际拦截
-发生在 ``app/harness/hooks/tool_gates.py`` 的 pre_tool_call Hook 里，本模块只提供状态与常量。
+发生在 ``app/harness/hooks/budget.py`` 的 pre_tool_call Hook 里，本模块只提供状态与常量。
 """
 
 from __future__ import annotations
