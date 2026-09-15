@@ -4,7 +4,7 @@
 
 口径：
 - 断言只判**机制可观测的结果**（工具名序列、工具入参、落盘状态、确认记录），不判文案；
-- 「计划要求、现状未做到」的用 ``pytest.xfail`` 记录缺口（A3 定点调查、来源校验），不算回归。
+- 「计划要求、现状未做到」的用 ``pytest.xfail`` 记录缺口（续聊重搜没改的槽、来源校验），不算回归。
 """
 
 import json
@@ -12,7 +12,11 @@ from typing import Any
 
 import pytest
 
-pytestmark = pytest.mark.llm
+# 共用 session 级事件循环：embedding / reranker 等异步客户端是模块级缓存的，默认一条用例一个新循环
+# 时，上一条建的客户端绑在已关闭的旧循环上，下一条首次检索报 ``Event loop is closed``（首跑两遍
+# 聊天路各中 1 次，单跑 0 次）。必须写在模块 pytestmark：pytest-asyncio 1.4 在 pytest_generate_tests
+# 阶段就读 loop_scope，conftest 里 collection_modifyitems 补的 marker 来不及生效。
+pytestmark = [pytest.mark.llm, pytest.mark.asyncio(loop_scope="session")]
 
 TERMINAL = {"shopping_summary", "chat_fallback", "create_order", "cancel_order"}
 UNSEEN_CATALOG_ID = "B0C64FNWPH"  # 商品库里真实存在的背包；新会话里从没展示过
@@ -31,6 +35,15 @@ async def test_bundle_followup_searches_changed_slot(snap_run: Any, needs_qdrant
     assert len(slots) >= 2, slots
     searches = [a for n, a in r.calls if n in {"item_search", "task_dispatch"}]
     assert any(a.get("slot") == "s2" or _mentions(a, "洗漱", "toiletry") for a in searches), r.calls
+    # 反例：「其他两样不变」时不该重搜没改的槽。2026-09-15 首跑实测重搜了收纳袋并在清单里换了款。
+    untouched = [
+        a
+        for a in searches
+        if a.get("slot") in {"s1", "s3"}
+        or _mentions(a, "packing cube", "收纳", "luggage tag", "行李牌")
+    ]
+    if untouched:
+        pytest.xfail(f"「其他两样不变」仍重搜了没改的槽：{untouched}")
 
 
 async def test_target_compare_uses_target_name(snap_run: Any, needs_qdrant: None) -> None:
@@ -39,9 +52,11 @@ async def test_target_compare_uses_target_name(snap_run: Any, needs_qdrant: None
         "帮我比较 Osprey Farpoint 40 和 Cabin Zero Classic 44L 这两个背包，哪个更适合一周出差"
     )
     assert r.names and (r.names[-1] in TERMINAL or r.final_text), r.names
-    targeted = [a for n, a in r.calls if n == "item_search" and a.get("target_name")]
-    if len(targeted) < 2:
-        pytest.xfail(f"A3 未接通：target_name 定点调查 {len(targeted)} 次；序列 {r.names}")
+    # 2026-09-15 首跑实测：planner 出 target_refs、主环 batch 两次 item_search(target_name)——
+    # 计划 §3-7「定点调查 0 次」的口径已过时，这里按正常断言守住。
+    targeted = {a["target_name"] for n, a in r.calls if n == "item_search" and a.get("target_name")}
+    assert len(targeted) >= 2, r.calls
+    assert not {"create_order", "cancel_order"} & set(r.names), r.names  # 反例：比较不许动单
 
 
 async def test_my_orders_reads_without_writing(snap_run: Any, seed_order: Any) -> None:
