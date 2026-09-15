@@ -85,6 +85,11 @@ async def enforce_terminal(context: dict[str, Any]) -> dict[str, Any] | None:
     called: set[str] = context.get("called_tools", set())
     if called & TERMINAL_TOOLS:
         return None  # 本轮已调过终结工具，这是它之后的自然收尾文字，正常放行
+    if guard.terminal_reached:
+        # 适配器合成的收尾（预算 FALLBACK 档 / 看门狗硬停）不经工具、但已置位 terminal_reached。
+        # AgentScope 里 on_model_call 在 on_reasoning 内层，合成回复后 post_reflect 照跑——
+        # 这里若只认 called_tools 就会催重发，on_reply 吞 ReplyEnd 再合成同一段，空转到 max_iters。
+        return None
 
     guard.terminal_nudge_retries += 1
     context["retry_nudge"] = TERMINAL_TOOL_NUDGE

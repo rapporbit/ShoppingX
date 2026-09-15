@@ -169,8 +169,9 @@ class HarnessAgentAdapter(MiddlewareBase):
         ctx = await harness.run("pre_think", ctx)
 
         # 预算 fallback 档：连一次 LLM 调用都付不起了，直接把规则兜底的回答当模型输出返回。
-        # 无 tool_call → loop 自然终止。**刻意绕过 post_reflect**：终结纪律 Hook 会因为
-        # 「没调终结工具就想收尾」要求重发，可预算正是为此耗尽的，再发一次纯属把最后的钱烧掉。
+        # 无 tool_call → loop 自然终止。post_reflect **仍会跑**（on_model_call 在 on_reasoning
+        # 内层），靠这里置的 terminal_reached 让终结纪律 Hook 放行——否则它会因「没调终结工具
+        # 就想收尾」要求重发，on_reply 吞 ReplyEnd 再合成同一段，空转到 max_iters。
         fallback = ctx.get("fallback_answer")
         if isinstance(fallback, str) and fallback:
             s.guard.terminal_reached = True

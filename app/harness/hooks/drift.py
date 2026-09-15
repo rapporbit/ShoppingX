@@ -386,8 +386,12 @@ def _is_empty_result(result_text: str) -> bool:
     轮数成「连续空」，三轮就够触发「严重偏离→强制收尾」；② 序列化格式一改，信号静默死。
     判空以 ``total_recall`` 为准：candidates 为空但总召回 > 0 是「被约束筛光」，方向没错，
     不算探索发散。"""
+    # raw_decode 而不是 loads：本 hook 在 priority 50，前面的 transition_notice(19) /
+    # result_nudges(20) 已往结果尾部贴了通告；loads 会因 Extra data 抛错、退回文本特征而判
+    # 「非空」——贴尾巴的恰是薄池 / 空池场景（filtered_out 证据、循环提示、worker 预算批注），
+    # 「连续空结果」信号在最该报的地方归零。validation.check_schema 同一坑、同一解法。
     try:
-        data = json.loads(result_text)
+        data, _ = json.JSONDecoder().raw_decode(result_text.lstrip())
     except (ValueError, TypeError):
         data = None
     if isinstance(data, dict) and "candidates" in data:
