@@ -62,9 +62,8 @@ def test_only_search_gets_mcp(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MCP_SEARCH_URL", "http://127.0.0.1:1/mcp")
     assert MCP_ROLES == frozenset({"search"})
     assert len(mcp_clients("search")) == 1
-    for role in ("main", "trade"):
-        assert mcp_clients(role) == []
-        assert mcp_tool_names(role) == []
+    assert mcp_clients("main") == []
+    assert mcp_tool_names("main") == []
 
 
 def test_enable_tools_whitelist_is_declarative(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -199,12 +198,12 @@ async def test_unknown_currency_comes_back_as_data_not_protocol_error(
     assert "USD" in payload["supported"]
 
 
-async def test_main_and_trade_toolkits_have_no_mcp_tools(
+async def test_main_toolkit_has_no_mcp_tools(
     fx_server: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """发放范围（第①根支柱）：URL 配着也一样，main / trade 的 Toolkit 里根本没有这个 client。"""
+    """发放范围（第①根支柱）：URL 配着也一样，main 的 Toolkit 里根本没有这个 client。"""
     monkeypatch.setenv("MCP_SEARCH_URL", fx_server)
-    for role in ("main", "trade"):
+    for role in ("main",):
         toolkit = await build_toolkit(role)
         available = await toolkit._get_available_tools(["basic"])
         assert not any(rt.tool.is_mcp for rt in available.values()), role

@@ -6,9 +6,10 @@
 之间的三条接力通道全靠共享的 session 传（见 ``app/harness/adapter.py``），错配就是 worker
 的断言流进主 loop、或者两个并发 worker 互相污染循环检测。
 
-**批 1 起是 Supervisor-Workers**：主 Agent 持全部业务工具、**单干优先**；worker 按读写属性切成
-两种，边界靠三样结构性保证（Toolkit 发放范围 / ``is_read_only`` 标记 / ``PermissionEngine``
-精准放行），不靠提示词劝退。SearchAgent 手上根本没有写工具，TradeAgent 手上根本没有检索工具。
+**批 1 起是 Supervisor-Workers**：主 Agent 持全部业务工具（含交易工具）、**单干优先**；worker
+只剩 SearchAgent（只读），边界靠三样结构性保证（Toolkit 发放范围 / ``is_read_only`` 标记 /
+``PermissionEngine`` 精准放行），不靠提示词劝退——它手上根本没有写工具。TradeAgent 已删（A1）：
+交易工具只出确认卡，主 Agent 自己调。
 
 ``WORKER_MODE=clone`` 保留批 0 的同质克隆形态（同工具集、同 system prompt，只隔离 thread /
 上下文 / 控制面状态），用途只有一个：在**同一运行时、同一批 query** 上量出两种结构的差异，
@@ -22,7 +23,7 @@ from agentscope.agent import Agent, ReActConfig
 from agentscope.middleware import MiddlewareBase
 from agentscope.state import AgentState
 
-from app.agent.limits import MAIN_MAX_ITERS, TRADE_MAX_ITERS, WORKER_MAX_ITERS
+from app.agent.limits import MAIN_MAX_ITERS, WORKER_MAX_ITERS
 from app.agent.llm import get_model_config, get_tier_llm, main_loop_tier_base, worker_tier
 from app.agent.permissions import allow_tools
 from app.agent.prompts import get_system_prompt, get_worker_system_prompt
@@ -143,12 +144,10 @@ async def build_main_agent(
 
 
 async def build_worker_agent(kind: str = "search") -> Agent:
-    """装配一个 worker（``search`` 只读 / ``trade`` 写）。
+    """装配一个 worker（只剩 ``search`` 只读一种，TradeAgent 已在 A1 删除）。
 
-    ``split``（默认）：``kind`` 决定三件事——**拿得到哪些工具**（``tool_registry._ROLE_TOOLS``，
-    这是读写边界的结构性保证）、**哪段 system prompt**、**几轮上限**。SearchAgent 的 Toolkit 里
-    根本没有写工具，TradeAgent 的 Toolkit 里根本没有检索工具（所以「买第 2 个」的候选定位必须由
-    主 Agent 在 demands 里给定 item_id）。
+    ``split``（默认）：``kind`` 决定两件事——**拿得到哪些工具**（``tool_registry._ROLE_TOOLS``，
+    这是读写边界的结构性保证）与**哪段 system prompt**。SearchAgent 的 Toolkit 里根本没有写工具。
 
     ``clone``：批 0 的过渡形态，worker = 主 Agent 的完整克隆（全集工具 + 同一段 system prompt），
     只在 thread / 上下文 / 控制面状态上隔离。留着是为了在同一运行时、同一批 query 上量出两种
@@ -168,7 +167,7 @@ async def build_worker_agent(kind: str = "search") -> Agent:
     agent, _ = await _assemble(
         name=f"shoppingx-{kind}",
         role=kind,
-        max_iters=TRADE_MAX_ITERS if kind == "trade" else WORKER_MAX_ITERS,
+        max_iters=WORKER_MAX_ITERS,
         tier=worker_tier(),
         system_prompt=get_worker_system_prompt(kind),
     )

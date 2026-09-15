@@ -30,11 +30,9 @@ MAIN_MAX_ITERS = env_int("MAIN_AGENT_MAX_ITERATIONS", 30)
 # ── worker（派发安全四层之①②）──
 SUB_AGENT_TIMEOUT_SEC = env_int("SUB_AGENT_TIMEOUT_SEC", 90)
 
-# worker 的迭代上限，**按 kind 分档**：检索子任务要留出「召回跑题换一次词重搜」的余量；
-# 交易子任务是查→改两跳的确定性动作（query_order → cancel_order），4 轮还收不住说明它在
-# 里面乱试，早掐比让它继续试更安全（写工具的每一次试都在改真实状态）。
+# worker（SearchAgent）的迭代上限：检索子任务要留出「召回跑题换一次词重搜」的余量。
+# TradeAgent 与它的 TRADE_AGENT_MAX_ITERATIONS 已在 A1 删除，交易工具由主 loop 直接调。
 WORKER_MAX_ITERS = env_int("SUB_AGENT_MAX_ITERATIONS", 6)
-TRADE_MAX_ITERS = env_int("TRADE_AGENT_MAX_ITERATIONS", 4)
 
 # ── 派发深度（派发安全四层之③）──
 # 1 = 主 loop 可以派 worker，worker 不能再派。这条**在结构上已经由 Toolkit 发放范围保证**

@@ -53,11 +53,10 @@ async def test_main_toolkit_injects_skill_directory() -> None:
 async def test_skill_viewer_tool_is_available_to_main_only() -> None:
     main = await build_toolkit("main")
     assert SKILL_VIEWER_TOOL_NAME in {s["function"]["name"] for s in await main.get_tool_schemas()}
-    for role in ("search", "trade"):
-        toolkit = await build_toolkit(role)
-        names = {s["function"]["name"] for s in await toolkit.get_tool_schemas()}
-        assert SKILL_VIEWER_TOOL_NAME not in names
-        assert await toolkit.get_skill_instructions(["basic"]) is None
+    toolkit = await build_toolkit("search")
+    names = {s["function"]["name"] for s in await toolkit.get_tool_schemas()}
+    assert SKILL_VIEWER_TOOL_NAME not in names
+    assert await toolkit.get_skill_instructions(["basic"]) is None
 
 
 async def test_skill_viewer_is_whitelisted() -> None:
@@ -74,8 +73,7 @@ def test_disabled_by_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_workers_never_get_skills() -> None:
-    for role in ("search", "trade"):
-        assert skill_loaders(role) == []
+    assert skill_loaders("search") == []
 
 
 async def test_strategy_block_precedes_skill_block_in_final_prompt() -> None:

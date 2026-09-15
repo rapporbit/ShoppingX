@@ -130,29 +130,18 @@ TOOLS_BY_NAME: dict[str, FunctionTool] = {t.name: t for t in TOOLS}
 # 取交集后 SearchAgent 就是「搜货 + 查库外事实」这两件事——这也正是它现在实际在做的全部。
 _SEARCH_TOOLS = frozenset({"item_search", "web_search"})
 
-# 交易工具。``query_order`` 是只读的（也标了 is_read_only），但它跟着写工具一起发给 TradeAgent：
-# 「取消前必须先查」这条顺序约束，得让同一个 Agent 两件事都做得了才成立。
-_TRADE_TOOLS = frozenset({"create_order", "query_order", "cancel_order"})
-
+# 交易工具（create_order / query_order / cancel_order）只在 main 手上。TradeAgent 已删（A1）：
+# 440 个会话派发 0 次，而交易工具只出确认卡、决议只走 HTTP，模型侧没有会动钱的写操作，
+# 单独起一个写 worker 不守任何边界。「取消前先查单」由 trade_sequence_gate 在主 loop 里硬拦。
 _ROLE_TOOLS: dict[str, frozenset[str] | None] = {
     "main": None,  # None = 全集
     "search": _SEARCH_TOOLS,
-    "trade": _TRADE_TOOLS,
 }
 
 # 自检：search 拿到的必须全是只读工具。读写边界的三根支柱（发放范围 / is_read_only 标记 /
 # PermissionEngine）里，前两根在这里对齐——漏标一个只读，或往 search 集合里塞进一个写工具，
 # 都在 import 期就炸，而不是等线上某轮 worker 偷偷写了状态。
 assert _SEARCH_TOOLS <= _READ_ONLY_TOOLS, sorted(_SEARCH_TOOLS - _READ_ONLY_TOOLS)
-
-
-def trade_tools_ready() -> bool:
-    """交易域是否已就绪（7.2 落地后为真）。派发入口据此决定 ``trade`` 能不能派。
-
-    判据是「TradeAgent 的工具集非空」而不是某个开关变量：工具还没建出来的时候，派过去就是一个
-    零工具的 Agent 空转一轮再超时——那种失败模式对用户表现为「卡了 90 秒然后说不知道」。
-    """
-    return bool(_TRADE_TOOLS)
 
 
 async def build_toolkit(

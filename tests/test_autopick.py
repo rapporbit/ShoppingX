@@ -34,8 +34,6 @@ def test_arm_on_tool_rules() -> None:
     assert s.autopick_armed
     arm_on_tool(s, "item_picker", {})
     assert not s.autopick_armed  # 模型显式精挑 → 解除
-    arm_on_tool(s, "task_dispatch", {"subagent_type": "trade"})
-    assert not s.autopick_armed  # 交易派发不武装
     arm_on_tool(s, "task_dispatch", {"subagent_type": "search"})
     assert s.autopick_armed
 

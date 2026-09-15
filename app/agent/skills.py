@@ -13,7 +13,7 @@ prompt」的唯一理由——后者是每轮都付钱。**description 因此是
 **发放范围（与 ``tool_registry`` 同一套思路）**：skill 只发给 ``main``。三个 skill 讲的都是主
 Agent 的活——到手价口径、槽位规划、图搜流程；SearchAgent 手上只有 ``item_search`` /
 ``web_search`` 与一条收窄过的 demands，读了也没有对应的工具去执行，只会白白多一个 ``Skill``
-工具和三行描述。TradeAgent 同理。**发放范围不是提示词劝退**，这里少给一份，worker 的
+工具和三行描述。**发放范围不是提示词劝退**，这里少给一份，worker 的
 Toolkit 里就根本没有那个入口。
 
 **与批 4-2 的 ``on_system_prompt`` 钩子怎么相处**（口径，改这里前先读）：两者拼在 system

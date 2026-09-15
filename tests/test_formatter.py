@@ -95,8 +95,7 @@ async def test_worker_system_prompt_is_below_cache_threshold() -> None:
     """
     from app.agent.prompts import get_worker_system_prompt
 
-    for kind in ("search", "trade"):
-        assert count_tokens(get_worker_system_prompt(kind)) < MIN_CACHE_PREFIX_TOKENS
+    assert count_tokens(get_worker_system_prompt("search")) < MIN_CACHE_PREFIX_TOKENS
 
     out = await CacheAwareOpenAIFormatter().format([_system(get_worker_system_prompt("search"))])
     content = out[0]["content"]

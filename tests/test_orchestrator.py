@@ -488,30 +488,21 @@ async def test_task_dispatch_returns_worker_text(monkeypatch: pytest.MonkeyPatch
     assert chunk.metadata["subagent_type"] == "search"
 
 
-async def test_trade_worker_has_only_trade_tools() -> None:
-    """TradeAgent 的另一半边界：它**没有检索工具**。
+async def test_trade_tools_are_main_only() -> None:
+    """TradeAgent 已删（A1）：交易工具只在主 Agent 手上，trade 角色不再存在。"""
+    from app.agent.tool_registry import build_toolkit
 
-    这不是洁癖——正因为它搜不了，「买清单里第 2 个」的候选定位才必须由主 Agent 在 demands 里翻成
-    具体 item_id。给它 item_search，它就会自己去搜一件「差不多的」，然后下单下错东西。
-    """
-    from app.agent.tool_registry import build_toolkit, trade_tools_ready
-
-    assert trade_tools_ready(), "交易域已落地，派发入口的未就绪拒派分支应当失效"
-    trade = await build_toolkit("trade")
-    names = {s["function"]["name"] for s in await trade.get_tool_schemas()}
-    assert names == {"create_order", "query_order", "cancel_order"}
-    for forbidden in ("item_search", "item_picker", "shopping_summary", "task_dispatch"):
-        assert await trade.get_tool(forbidden) is None, forbidden
+    main = await build_toolkit("main")
+    names = {s["function"]["name"] for s in await main.get_tool_schemas()}
+    assert {"create_order", "query_order", "cancel_order"} <= names
+    with pytest.raises(ValueError, match="未知角色"):
+        await build_toolkit("trade")
 
 
-async def test_buyer_preferences_injected_for_search_not_trade(
+async def test_buyer_preferences_injected_for_search(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """偏好由**服务端**注入，且只给 SearchAgent。
-
-    TradeAgent 不注入：偏好影响不了「下哪一单」（那由主 Agent 给定的 item_id 决定），给了只是
-    一份可能被转述进订单参数的噪声。
-    """
+    """偏好由**服务端**注入给 SearchAgent。"""
     from app.agent import dispatch_tool as dt
     from app.agent.platform_scope import platform_scope
 
