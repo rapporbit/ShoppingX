@@ -5,7 +5,18 @@
 //
 // 这里只讲**本项目真的做得到**的三件事，不吹跨平台实时比价（数据是快照，见 SiteFooter 的声明）。
 // 落地页吹的每一句，用户 30 秒后就会在结果页里对账——吹过了头，反而坐实了 demo 感。
+import { motion } from "motion/react";
 import { SiteFooter } from "./SiteFooter";
+
+// 首屏元素按序浮现（标题 → 副标 → CTA），特性卡随后错峰进场；只在挂载时放一次。
+const RISE = {
+  hidden: { opacity: 0, y: 16 },
+  show: { opacity: 1, y: 0, transition: { type: "spring", stiffness: 320, damping: 30 } },
+} as const;
+const STAGGER = (delay = 0) => ({
+  hidden: {},
+  show: { transition: { staggerChildren: 0.09, delayChildren: delay } },
+});
 
 const FEATURES = [
   {
@@ -45,30 +56,42 @@ export function Landing({ onStart }: { onStart: () => void }) {
         </button>
       </header>
 
-      <section className="landing-hero">
-        <h1 className="landing-title">
+      <motion.section className="landing-hero" initial="hidden" animate="show" variants={STAGGER()}>
+        <motion.h1 className="landing-title" variants={RISE}>
           把「想买点什么」交给它，
           <br />
           你只管挑。
-        </h1>
-        <p className="landing-sub">
+        </motion.h1>
+        <motion.p className="landing-sub" variants={RISE}>
           说一句话，ShoppingX 替你跨平台找货、算到手价（含税含运）、按你的偏好精挑，
           最后给一份写清了「为什么是它」的清单。
-        </p>
-        <button className="landing-cta" onClick={onStart}>
+        </motion.p>
+        <motion.button
+          className="landing-cta"
+          onClick={onStart}
+          variants={RISE}
+          whileTap={{ scale: 0.97 }}
+        >
           免费开始
-        </button>
-        <p className="landing-cta-note">注册即用，无需绑卡</p>
-      </section>
+        </motion.button>
+        <motion.p className="landing-cta-note" variants={RISE}>
+          注册即用，无需绑卡
+        </motion.p>
+      </motion.section>
 
-      <section className="landing-features">
+      <motion.section
+        className="landing-features"
+        initial="hidden"
+        animate="show"
+        variants={STAGGER(0.35)}
+      >
         {FEATURES.map((f) => (
-          <div className="landing-card" key={f.title}>
+          <motion.div className="landing-card" key={f.title} variants={RISE}>
             <h3>{f.title}</h3>
             <p>{f.body}</p>
-          </div>
+          </motion.div>
         ))}
-      </section>
+      </motion.section>
 
       <section className="landing-steps">
         <h2 className="landing-h2">怎么用</h2>

@@ -15,8 +15,8 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       <TooltipProvider delayDuration={350} skipDelayDuration={200}>
         <App />
         <Toaster
-          position="bottom-center"
-          offset={96}
+          position="top-center"
+          offset={16}
           gap={8}
           duration={2400}
           visibleToasts={3}

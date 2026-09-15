@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { fetchSimilar } from "../api";
 import type { ProductItem } from "../types";
-import { CloseIcon, ExternalLinkIcon } from "./icons";
+import { ExternalLink, ScanSearch } from "lucide-react";
+import { Sheet } from "./ui/Sheet";
 
 // 「搜同款」抽屉（右侧滑出，与收藏 / 偏好共用一套外壳）。
 //
@@ -38,101 +39,97 @@ export function SimilarDrawer({ source, onClose }: SimilarDrawerProps) {
   const open = Boolean(source);
 
   return (
-    <>
-      <div className={`drawer-scrim ${open ? "show" : ""}`} onClick={onClose} />
-      {/* 比收藏/偏好抽屉宽得多：这里是「看图辨同款」的场景，460px 一列塞不下能看清的图。 */}
-      <aside className={`drawer drawer-similar ${open ? "open" : ""}`} aria-hidden={!open}>
-        <div className="drawer-head">
-          <div className="drawer-title">
-            <span className="fav-glyph">⌕</span>
-            相似商品
-          </div>
-          <div className="drawer-tools">
-            <button className="icon-btn" onClick={onClose} title="关闭">
-              <CloseIcon width={18} height={18} />
-            </button>
-          </div>
-        </div>
-
-        {source && (
-          <div className="similar-source">
-            {source.image_url && (
-              <img
-                className="similar-source-thumb"
-                src={source.image_url}
-                alt={source.title}
-                referrerPolicy="no-referrer"
-              />
-            )}
-            <div className="similar-source-main">
-              <div className="similar-source-label">以此为准</div>
-              <div className="similar-source-title" title={source.title}>
-                {source.title}
-              </div>
-              <div className="similar-source-note">
-                按商品向量在召回库里找的近邻，<b>没有</b>经过 Agent 挑选，价格是货价（未含税运）。
-              </div>
+    <Sheet
+      open={open}
+      title="相似商品"
+      icon={<ScanSearch size={18} strokeWidth={1.75} />}
+      className="sheet-similar"
+      onClose={onClose}
+    >
+      {source && (
+        <div className="similar-source">
+          {source.image_url && (
+            <img
+              className="similar-source-thumb"
+              src={source.image_url}
+              alt={source.title}
+              referrerPolicy="no-referrer"
+            />
+          )}
+          <div className="similar-source-main">
+            <div className="similar-source-label">以此为准</div>
+            <div className="similar-source-title" title={source.title}>
+              {source.title}
+            </div>
+            <div className="similar-source-note">
+              按商品向量在召回库里找的近邻，<b>没有</b>经过 Agent 挑选，价格是货价（未含税运）。
             </div>
           </div>
-        )}
+        </div>
+      )}
 
-        {loading ? (
-          <div className="drawer-empty">正在找相似商品…</div>
-        ) : items.length === 0 ? (
-          <div className="drawer-empty">
-            没找到相似商品——这件商品可能不在当前召回库里（比如换过库的老收藏）。
-          </div>
-        ) : (
-          // 两列网格、上图下文：同款靠「看图」辨认，图必须够大——列表行里那种 44px 缩略图
-          // 只能看出个色块。整卡可点（有 url 时）直接开商品页，不再单独放一个跳转小图标。
-          <ul className="similar-grid">
-            {items.map((it) => {
-              const Wrapper = it.url ? "a" : "div";
-              const linkProps = it.url
-                ? { href: it.url, target: "_blank" as const, rel: "noreferrer noopener" }
-                : {};
-              return (
-                <li key={it.item_id}>
-                  <Wrapper className={`similar-card ${it.url ? "clickable" : ""}`} {...linkProps}>
-                    <div className="similar-thumb">
-                      {it.image_url ? (
-                        <img
-                          src={it.image_url}
-                          alt={it.title}
-                          loading="lazy"
-                          referrerPolicy="no-referrer"
-                        />
-                      ) : (
-                        <span aria-hidden>🛍️</span>
+      {loading ? (
+        <div className="drawer-empty">正在找相似商品…</div>
+      ) : items.length === 0 ? (
+        <div className="drawer-empty">
+          没找到相似商品——这件商品可能不在当前召回库里（比如换过库的老收藏）。
+        </div>
+      ) : (
+        // 两列网格、上图下文：同款靠「看图」辨认，图必须够大——列表行里那种 44px 缩略图
+        // 只能看出个色块。整卡可点（有 url 时）直接开商品页，不再单独放一个跳转小图标。
+        <ul className="similar-grid">
+          {items.map((it) => {
+            const Wrapper = it.url ? "a" : "div";
+            const linkProps = it.url
+              ? {
+                  href: it.url,
+                  target: "_blank" as const,
+                  rel: "noreferrer noopener",
+                }
+              : {};
+            return (
+              <li key={it.item_id}>
+                <Wrapper className={`similar-card ${it.url ? "clickable" : ""}`} {...linkProps}>
+                  <div className="similar-thumb">
+                    {it.image_url ? (
+                      <img
+                        src={it.image_url}
+                        alt={it.title}
+                        loading="lazy"
+                        referrerPolicy="no-referrer"
+                      />
+                    ) : (
+                      <span aria-hidden>🛍️</span>
+                    )}
+                    {typeof it.score === "number" && (
+                      <span className="similar-score">相似度 {it.score.toFixed(2)}</span>
+                    )}
+                  </div>
+                  <div className="similar-body">
+                    <div className="similar-title" title={it.title}>
+                      {it.title}
+                    </div>
+                    <div className="similar-meta">
+                      <span className="similar-price">
+                        {typeof it.price_usd === "number"
+                          ? `$${it.price_usd.toFixed(2)}`
+                          : "价格未知"}
+                      </span>
+                      {typeof it.price_usd === "number" && (
+                        <span className="similar-price-label">货价</span>
                       )}
-                      {typeof it.score === "number" && (
-                        <span className="similar-score">相似度 {it.score.toFixed(2)}</span>
+                      <span className="similar-platform">{it.platform}</span>
+                      {it.url && (
+                        <ExternalLink size={13} strokeWidth={1.75} className="similar-go" />
                       )}
                     </div>
-                    <div className="similar-body">
-                      <div className="similar-title" title={it.title}>
-                        {it.title}
-                      </div>
-                      <div className="similar-meta">
-                        <span className="similar-price">
-                          {typeof it.price_usd === "number"
-                            ? `$${it.price_usd.toFixed(2)}`
-                            : "价格未知"}
-                        </span>
-                        {typeof it.price_usd === "number" && (
-                          <span className="similar-price-label">货价</span>
-                        )}
-                        <span className="similar-platform">{it.platform}</span>
-                        {it.url && <ExternalLinkIcon width={13} height={13} className="similar-go" />}
-                      </div>
-                    </div>
-                  </Wrapper>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </aside>
-    </>
+                  </div>
+                </Wrapper>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </Sheet>
   );
 }
