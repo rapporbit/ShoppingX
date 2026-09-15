@@ -379,8 +379,8 @@ class HarnessToolAdapter(ToolMiddlewareBase):
             # raw=True 的哨兵原样回模型（本就是写给模型的完整指令）；否则加前缀标明来源。
             content = reason if ctx.get("_reject_raw") else f"[Harness 拒绝] {reason}"
             # 被闸拦下的调用同样喂 LoopDetector：模型换着参数硬撞同一道闸时，拒绝路径不计数
-            # 就是循环检测的盲区。回放路径（tool_memo）已自己喂过，跳过防双记。
-            if not ctx.get("_detector_fed") and s.guard.detector.record(tool_name):
+            # 就是循环检测的盲区。
+            if s.guard.detector.record(tool_name):
                 content += f"\n\n[系统提示] {s.guard.detector.nudge_message(tool_name)}"
             yield ToolChunk(
                 content=[TextBlock(type="text", text=content)],

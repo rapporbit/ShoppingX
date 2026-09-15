@@ -1,7 +1,7 @@
-"""同参数重复调用回放（tool_memo）+ 阶段转移通告补边（picks_ready / tasks 提示）。
+"""阶段转移通告补边（picks_ready / tasks 提示）。
 
-对应延迟审计第三轮的三处残留浪费：静默转移让模型撞阶段哨兵白耗一轮、同参数重复检索真执行、
-无比价诉求的轮次照跑 price_compare / shipping_calc。
+对应延迟审计第三轮的残留浪费：静默转移让模型撞阶段哨兵白耗一轮、无比价诉求的轮次照跑
+price_compare / shipping_calc。（同文件曾有 tool_memo 回放测试，随该 hook 2026-09-15 一起删。）
 """
 
 from pathlib import Path
@@ -10,8 +10,6 @@ import pytest
 
 from app.api.context import set_session_tasks
 from app.harness.hooks.progress import append_transition_notice
-from app.harness.hooks.repetition import record_tool_result, replay_duplicate_call
-from app.harness.middleware import HookRejectSignal
 from app.harness.phase_machine import (
     Phase,
     PhaseStateMachine,
@@ -23,71 +21,6 @@ from app.utils.thread_ctx import thread_scope
 
 pytestmark = pytest.mark.anyio
 
-_ARGS = {"platform": "amazon", "query": "camping cookware"}
-_RESULT = '{"candidates": [{"item_id": "B01"}]}'
-
-
-async def _record(guard: GuardState, name: str = "item_search", args: dict | None = None) -> None:
-    ctx = {"_guard": guard, "tool_name": name, "tool_args": args or dict(_ARGS)}
-    ctx["tool_result"] = _RESULT
-    await record_tool_result(ctx)
-
-
-class TestToolMemo:
-    async def test_same_args_replayed_without_execution(self) -> None:
-        """已成功执行过的 (tool, args) 再调 → 回放缓存结果 + 提示，不真执行。"""
-        guard = GuardState()
-        await _record(guard)
-        with pytest.raises(HookRejectSignal) as ei:
-            await replay_duplicate_call(
-                {"_guard": guard, "tool_name": "item_search", "tool_args": dict(_ARGS)}
-            )
-        assert _RESULT in ei.value.reason  # 回放的是当时的完整结果
-        assert "复用" in ei.value.reason  # 且明说未重新执行、别再原样重试
-        assert ei.value.raw
-
-    async def test_arg_order_insensitive(self) -> None:
-        """指纹按 sort_keys 序列化——参数顺序不同不该骗过回放。"""
-        guard = GuardState()
-        await _record(guard, args={"query": "camping cookware", "platform": "amazon"})
-        with pytest.raises(HookRejectSignal):
-            await replay_duplicate_call(
-                {"_guard": guard, "tool_name": "item_search", "tool_args": dict(_ARGS)}
-            )
-
-    async def test_different_args_not_replayed(self) -> None:
-        guard = GuardState()
-        await _record(guard)
-        assert (
-            await replay_duplicate_call(
-                {"_guard": guard, "tool_name": "item_search", "tool_args": {"query": "别的"}}
-            )
-            is None
-        )
-
-    async def test_non_idempotent_tool_not_cached(self) -> None:
-        """planner / item_picker 有副作用或依赖轮内可变状态，不进回放缓存。"""
-        guard = GuardState()
-        await _record(guard, name="planner", args={"intent": "买锅"})
-        assert (
-            await replay_duplicate_call(
-                {"_guard": guard, "tool_name": "planner", "tool_args": {"intent": "买锅"}}
-            )
-            is None
-        )
-
-    async def test_replays_feed_loop_detector(self) -> None:
-        """回放不走 post_tool_call，LoopDetector 必须在回放路径手动喂——刷到阈值要给打转提示。"""
-        guard = GuardState()
-        await _record(guard)
-        reasons: list[str] = []
-        for _ in range(guard.loop_threshold):
-            with pytest.raises(HookRejectSignal) as ei:
-                await replay_duplicate_call(
-                    {"_guard": guard, "tool_name": "item_search", "tool_args": dict(_ARGS)}
-                )
-            reasons.append(ei.value.reason)
-        assert "重复调用" in reasons[-1]  # 第 threshold 次回放附上换思路 / 收尾提示
 
 
 class TestTransitionNotices:

@@ -54,10 +54,6 @@ class GuardState:
     #: 上一次生效的预算档位（main/lite/minimal/fallback）。只为「降档时上报一次 metric」去重——
     #: 一个 20 轮的任务不去重会把 minimal 记 15 次，降级率统计直接失真。
     last_tier: str = "main"
-    #: 幂等工具的结果回放缓存：(tool, args) 指纹 → 该次调用模型实际看到的结果（截断后）。
-    #: 同参数重复调用直接回放、不再真执行（见 hooks/tool_memo.py）。per-loop 生命周期——
-    #: 主 Agent 每轮 run_agent 新建实例即自动失效，不存在跨轮陈旧回放。
-    tool_result_cache: dict[str, str] = field(default_factory=dict)
     #: 已发过的阶段收线通告（"search_close" / "picks_close" / "reuse_skip"）——同一通告一个 loop
     #: 只发一次，免得并行两条 item_search 都非空时结果尾部重复两遍。回退 / 补搜时由
     #: phase_rollback / refine_backfill 摘掉 "search_close" 重新武装（新一轮检索需要重新收线）。

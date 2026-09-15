@@ -635,7 +635,7 @@ class TestPhaseHooks:
     async def test_phase_transition_to_comparing_is_silent(self) -> None:
         """转移本体不再经 inject 发通告——inject 通道晚一轮（perf-audit-r3 实测模型在读到
         通告前就已决定再搜）。「检索收线」通告改由 transition_notice 缀在工具结果尾部
-        （见 test_tool_memo.py 的 TestTransitionNotices），这里只验证状态机推进。"""
+        （见 test_transition_notice.py），这里只验证状态机推进。"""
         from app.harness.fork_guard import _fork_depth
         from app.harness.hooks.progress import try_phase_transition
 
