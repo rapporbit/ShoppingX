@@ -282,6 +282,25 @@ def test_dispatch_marker_registers_slot_when_planner_missed_it() -> None:
         reset_session_bundle(clear_file=True)
 
 
+def test_replanned_slots_keep_ids_by_name_and_never_reuse_retired_ids() -> None:
+    """续聊轮 planner 重拆槽表（新槽不带 id）：同名 / 漂移名沿用旧 id，新槽接着最大号发，被
+    拿掉的槽 id 退役。反例（快照实测）：重新从 s1 编号后，历史里的 s2（洗漱包）解析成收纳袋，
+    真皮洗漱包卡片全挂到「收纳袋」下。"""
+    from app.tools._bundle import get_session_bundle, resolve_slot
+
+    with thread_scope("t-par-14", Path(tempfile.mkdtemp())):
+        set_session_bundle(
+            [_slot("旅行收纳袋"), _slot("洗漱包"), _slot("行李牌")], mode=SLOT_MODE_BUNDLE
+        )
+        assert [s.id for s in get_session_bundle()] == ["s1", "s2", "s3"]
+        set_session_bundle([_slot("洗漱包"), _slot("收纳袋"), _slot("鞋袋")])
+        ids = {s.name: s.id for s in get_session_bundle()}
+        assert ids == {"洗漱包": "s2", "收纳袋": "s1", "鞋袋": "s4"}
+        assert resolve_slot("s2").name == "洗漱包"  # type: ignore[union-attr]
+        assert resolve_slot("s3") is None  # 行李牌退役，旧引用不盖章也不错盖
+        reset_session_bundle(clear_file=True)
+
+
 def test_item_search_slot_arg_registers_slots_without_dispatch() -> None:
     """A3：主环同轮 batch item_search(slot=…) 取代派发。planner 漏拆槽时显式 slot 也要补登成
     并列槽；两槽齐了即是套装轮（autopick 让位）；dispatch 通路传下来的 id 照常解析。"""
