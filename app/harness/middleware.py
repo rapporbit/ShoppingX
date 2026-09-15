@@ -5,8 +5,10 @@
     on_system_prompt → pre_think → pre_tool_call → post_tool_call → post_reflect → on_session_end
 
 （曾有 ``on_session_start``：唯一的钩子 phase_init 2026-09-15 挪回 orchestrator 的会话级
-reset 同列后，空 hook 点一并删。）``on_system_prompt`` 与其余五个不同：它是**装配期**的（``agents._assemble`` 拼 system prompt 时
-跑一次），不属于任何一次模型 / 工具调用。放在这里而不是「注入一条 system 消息」，是因为策略这类
+reset 同列后，空 hook 点一并删。）
+
+``on_system_prompt`` 与其余五个不同：它是**装配期**的（``agents._assemble`` 拼 system prompt
+时跑一次），不属于任何一次模型 / 工具调用。放在这里而不是「注入一条 system 消息」，是因为策略这类
 内容要在**每一轮**都对模型有效，而消息注入只影响它被塞进去的那一轮；而且 system 段是缓存前缀
 所在，把内容拼进它的末尾比每轮多发一条消息更省 token。
 
