@@ -48,6 +48,8 @@ from app.harness.signals import (
     _observe_tool,
     _summarize_call,
 )
+from app.harness.streaming import charge_stream
+from app.harness.tiering import first_round_tier, resolve_model_tier
 from app.harness.token_budget import charge_usage
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -55,41 +57,6 @@ if TYPE_CHECKING:  # pragma: no cover
     from agentscope.tool import ToolBase
 
 logger = logging.getLogger("shoppingx.harness.adapter")
-
-
-def _resolve_model_tier(tier: Any) -> Any | None:
-    """档位名 → 本运行时的模型对象。空档位 = 不换模型（用装配期那个基座）。
-
-    延迟导入 ``llm``：本模块在 Agent 装配前就被 import，模块级拉模型工厂会把 ``.env`` 的读取
-    时机提前到 import 期，测试里 monkeypatch 环境变量就来不及了。
-    """
-    if not tier:
-        return None
-    from app.agent.llm import get_tier_llm
-
-    return get_tier_llm(str(tier))
-
-
-def _first_round_tier(ctx: dict[str, Any]) -> str | None:
-    """主 loop 第一轮该不该加档 —— 返回档位名，不加返回 ``None``。
-
-    原为独立 Hook（``hooks/reasoning_boost``）。收进适配器是因为它与**装配期选的基座**是同一
-    条口径的两半：拆成两处的那段时间里，基座被改成 reasoning 而 Hook 还在按「基座是快档」顶
-    reasoning，override 成同一个实例，什么都没发生，也没有任何测试会红（审查报告 P0-1）。
-
-    三条豁免各对应一个真会犯的错：
-    - **worker 不加档**：子 Agent 也有自己的 round_number=1，但它只按 demands 搜一个平台，
-      没有编排可言（能力边界靠 Toolkit 发放范围保证，不靠模型强弱）。
-    - **预算降档优先**：调用方只在 ``model_tier`` 仍为空时才问本函数，所以 budget_router 写过
-      lite 就是 lite —— 钱不够的时候，「想清楚」让位于「跑完」。
-    """
-    from app.agent.llm import main_loop_tier_base, main_loop_tier_first
-    from app.harness.fork_guard import current_fork_depth
-
-    tier = main_loop_tier_first()
-    if tier == "same" or ctx.get("round_number") != 1 or current_fork_depth() >= 1:
-        return None
-    return None if tier == main_loop_tier_base() else tier
 
 
 # ``_text_of`` / ``_block_text`` 的实现在 ``harness.msgs``（消息形态的知识只住那一个文件）。
@@ -135,32 +102,6 @@ def _persist_injections(agent: Agent, injected: list[Msg] | None) -> None:
     ]
     if blocks:
         agent.state.append_context(agent.name, blocks)
-
-
-async def _stream_summary_delta(chunk: ChatResponse, emitted: int) -> int:
-    """主模型流式吐 ``shopping_summary`` 入参时，把 summary 的累计文本推给前端（round3 刀 1）。
-
-    收尾文案改由主模型在工具入参里写之后，原来收尾工具内部那条 summary_delta 流没了；chunk 是
-    累积快照、``ToolCallBlock.input`` 在流式期间是累积的原始 JSON 串，从里面抠 summary 即可。
-    只在主 loop 发（worker 无前端连接）；解不出就跳过本 tick，最终产物不受影响。
-    """
-    if current_fork_depth() != 0:
-        return emitted
-    for block in getattr(chunk, "content", None) or []:
-        if getattr(block, "type", None) != "tool_call" or getattr(block, "name", "") != (
-            "shopping_summary"
-        ):
-            continue
-        raw = getattr(block, "input", None)
-        if not isinstance(raw, str):
-            continue
-        from app.tools.shopping_summary import _DELTA_MIN_CHARS, _partial_summary
-
-        text = _partial_summary(raw)
-        if len(text) >= emitted + _DELTA_MIN_CHARS:
-            await monitor.report_summary_delta(text)
-            return len(text)
-    return emitted
 
 
 def _last_assistant(agent: Agent) -> Msg | None:
@@ -240,39 +181,18 @@ class HarnessAgentAdapter(MiddlewareBase):
         # 换档（预算降 lite / 第一轮加档）：Hook 只给**档位名**，模型对象在这里解析——
         # 这是「Hook 决策、适配器落地」的落点，也是档位→模型解析的**唯一**一处。
         # 顺序即优先级：Hook（budget_router）写过档就照它的来，没写才轮到第一轮加档。
-        tier = ctx.get("model_tier") or _first_round_tier(ctx)
-        model = _resolve_model_tier(tier)
+        tier = ctx.get("model_tier") or first_round_tier(ctx)
+        model = resolve_model_tier(tier)
         if model is not None:
             input_kwargs["current_model"] = model
 
         model_name = getattr(input_kwargs.get("current_model") or agent.model, "model", "")
         res = await next_handler(**input_kwargs)
         if hasattr(res, "__aiter__"):
-            return self._charge_stream(res, str(model_name))
+            return charge_stream(res, str(model_name), s)
         charge_usage(str(model_name), getattr(res, "usage", None))
         s.track_token_delta()
         return res
-
-    async def _charge_stream(
-        self, stream: AsyncGenerator[ChatResponse, None], model_name: str
-    ) -> AsyncGenerator[ChatResponse, None]:
-        """转发流式响应，并在流结束时把这次调用的用量计进全树。
-
-        **只认最后一个 chunk 的 usage**：chunk 是累积快照（基类把增量攒好再吐），逐个入账
-        会把同一次调用重复计上十几遍。放 finally 是因为半路取消时 token 也已真实花掉——
-        少算的账会让预算闸和用户 credit 配额一起失真。AgentScope 没有「一次模型调用结束」的
-        钩子，入账只能接在这里。
-        """
-        last: ChatResponse | None = None
-        emitted = 0
-        try:
-            async for chunk in stream:
-                last = chunk
-                emitted = await _stream_summary_delta(chunk, emitted)
-                yield chunk
-        finally:
-            charge_usage(model_name, getattr(last, "usage", None))
-            self._s.track_token_delta()
 
     # 框架自带的摘要压缩（``on_compress_context``）**不接管**：超阈值时由框架写 continuation
     # summary 进 ``state.summary``，随 session.json 一起持久化。本仓不再做 block 级视图压缩。

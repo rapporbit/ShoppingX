@@ -10,9 +10,9 @@ import pytest
 from agentscope.message import ToolCallBlock
 from agentscope.model import ChatResponse
 
-import app.harness.adapter as adapter_mod
 import app.tools.shopping_summary as mod
 from app.api import monitor
+from app.harness import streaming
 from app.tools.schemas import ItemCandidate
 
 
@@ -77,10 +77,10 @@ async def test_stream_summary_delta_from_tool_call_args(monkeypatch: pytest.Monk
     partial = '{"summary": "这几件都对上你说的防泼水和 16 寸'
     chunk = ChatResponse(content=[ToolCallBlock(type="tool_call", id="t1", name="shopping_summary",
                                                 input=partial)], is_last=False)
-    emitted = await adapter_mod._stream_summary_delta(chunk, 0)
+    emitted = await streaming.stream_summary_delta(chunk, 0)
     assert sent == ["这几件都对上你说的防泼水和 16 寸"] and emitted == len(sent[0])
     # 没长够 _DELTA_MIN_CHARS 不重发；别的工具不发。
-    assert await adapter_mod._stream_summary_delta(chunk, emitted) == emitted
+    assert await streaming.stream_summary_delta(chunk, emitted) == emitted
     other = ChatResponse(content=[ToolCallBlock(type="tool_call", id="t2", name="item_search",
                                                 input='{"summary": "not me, long enough text"}')], is_last=False)
-    assert await adapter_mod._stream_summary_delta(other, 0) == 0 and len(sent) == 1
+    assert await streaming.stream_summary_delta(other, 0) == 0 and len(sent) == 1

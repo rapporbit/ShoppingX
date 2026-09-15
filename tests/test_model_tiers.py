@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from app.agent import llm
-from app.harness import adapter
+from app.harness import tiering
 
 
 @pytest.fixture(autouse=True)
@@ -43,8 +43,8 @@ def test_defaults_are_all_fast_no_thinking() -> None:
 
 def test_same_means_no_switch_at_all() -> None:
     """``same`` 下第一轮也不换档——全程就是基座那一档，一次 override 都不发生。"""
-    assert adapter._first_round_tier(_ctx(1)) is None
-    assert adapter._first_round_tier(_ctx(2)) is None
+    assert tiering.first_round_tier(_ctx(1)) is None
+    assert tiering.first_round_tier(_ctx(2)) is None
 
 
 def test_tier_names_map_to_distinct_factories(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -76,24 +76,24 @@ def _boost_on(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_first_round_gets_boosted(_boost_on: None) -> None:
-    assert adapter._first_round_tier(_ctx(1)) == "reasoning"
+    assert tiering.first_round_tier(_ctx(1)) == "reasoning"
 
 
 def test_later_rounds_stay_on_base(_boost_on: None) -> None:
     """第 2 轮起回基座档——这条一旦失守，主 loop 每轮都在付 thinking 解码。"""
     for rnd in (2, 3, 7):
-        assert adapter._first_round_tier(_ctx(rnd)) is None
+        assert tiering.first_round_tier(_ctx(rnd)) is None
 
 
 def test_worker_first_round_not_boosted(_boost_on: None, monkeypatch: pytest.MonkeyPatch) -> None:
     """worker 也有自己的 round_number=1，但它只按 demands 搜一个平台，没有编排可言。"""
     monkeypatch.setattr("app.harness.fork_guard.current_fork_depth", lambda: 1)
-    assert adapter._first_round_tier(_ctx(1)) is None
+    assert tiering.first_round_tier(_ctx(1)) is None
 
 
 def test_first_round_boosted(_boost_on: None) -> None:
     """主 loop 首轮照常加档（planner 预置降级也不影响——每轮都检索，没有「复用轮」豁免）。"""
-    assert adapter._first_round_tier(_ctx(1)) == "reasoning"
+    assert tiering.first_round_tier(_ctx(1)) == "reasoning"
 
 
 def test_boost_is_noop_when_base_already_equals_first(
@@ -105,7 +105,7 @@ def test_boost_is_noop_when_base_already_equals_first(
     看着在换档其实什么都没发生，还掩盖了「每轮都开思考」的口径倒退。
     """
     monkeypatch.setenv("MAIN_LOOP_TIER_BASE", "reasoning")
-    assert adapter._first_round_tier(_ctx(1)) is None
+    assert tiering.first_round_tier(_ctx(1)) is None
 
 
 def test_budget_downgrade_wins_over_boost(_boost_on: None) -> None:
@@ -115,4 +115,4 @@ def test_budget_downgrade_wins_over_boost(_boost_on: None) -> None:
     写过档就轮不到加档。这里直接按那条表达式验一遍。
     """
     ctx = {**_ctx(1), "model_tier": "lite"}
-    assert (ctx.get("model_tier") or adapter._first_round_tier(ctx)) == "lite"
+    assert (ctx.get("model_tier") or tiering.first_round_tier(ctx)) == "lite"
