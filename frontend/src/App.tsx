@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { toast } from "sonner";
 import {
@@ -325,6 +325,23 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
   const hasConversation = turns.length > 0;
   // 会话标题取第一轮 query（整段对话的「主题」），多轮续聊也不跳来跳去。
   const title = turns[0]?.query || "ShoppingX 跨境购物 Agent";
+  // 标题就是第一轮 query：那条用户气泡还在视野里时，顶栏再写一遍就是同屏重复；滚走了才在顶栏出现。
+  const conversationRef = useRef<HTMLElement>(null);
+  const firstQueryRef = useRef<HTMLDivElement>(null);
+  const [firstQueryVisible, setFirstQueryVisible] = useState(true);
+  const firstTurnId = turns[0]?.id;
+  useEffect(() => {
+    const el = firstQueryRef.current;
+    if (!el) {
+      setFirstQueryVisible(true);
+      return;
+    }
+    const io = new IntersectionObserver(([entry]) => setFirstQueryVisible(entry.isIntersecting), {
+      root: conversationRef.current,
+    });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [firstTurnId]);
 
   const activePanel: SidebarPanel | null = favsOpen
     ? "favorites"
@@ -380,6 +397,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
       <div className={`workspace ${activePanel ? "paged" : ""}`}>
         <TopBar
           title={title}
+          titleHidden={hasConversation && firstQueryVisible}
           status={status}
           username={session.username}
           platformCount={platforms.length}
@@ -428,7 +446,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
           />
         </div>
 
-        <main className="conversation">
+        <main className="conversation" ref={conversationRef}>
           <div className="conversation-inner">
             {!hasConversation ? (
               <motion.section
@@ -472,7 +490,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
                   return (
                     <div key={turn.id} className="turn">
                       <div className="msg-row user">
-                        <div className="user-msg">
+                        <div className="user-msg" ref={idx === 0 ? firstQueryRef : undefined}>
                           {/* 参考图在气泡上方：它是这句话的宾语（「找这个同款」里的「这个」），
                               读的顺序应当是先看到图、再看到那句话。 */}
                           {turn.images.length > 0 && (
