@@ -126,8 +126,7 @@ class TestHarnessMiddleware:
             h.register("invalid_point", "x", noop)
 
     def test_hook_points_complete(self) -> None:
-        assert len(HOOK_POINTS) == 7
-        assert "on_session_start" in HOOK_POINTS
+        assert len(HOOK_POINTS) == 6
         assert "on_session_end" in HOOK_POINTS
         # 批 4-2 加的装配期钩子：不属于任何一次模型 / 工具调用，跑在 agents._assemble 里。
         assert "on_system_prompt" in HOOK_POINTS
@@ -617,8 +616,7 @@ class TestGlobalHarnessSetup:
             "drift_detector",
             "drift_result_tracker",
             "phase_check",
-            "phase_transition",
-            "phase_rollback",
+            "phase_step",
         }
         assert expected.issubset(names), f"Missing hooks: {expected - names}"
 

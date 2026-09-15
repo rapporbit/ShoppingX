@@ -1,6 +1,6 @@
 """L3 验收：AgentScope 主链路（orchestrator / events / permissions / task_dispatch）。
 
-**测的是接缝，不是业务**——工具行为、harness 的 36 个 hook、记忆判定各有自己的测试文件。
+**测的是接缝，不是业务**——工具行为、harness 的各 hook、记忆判定各有自己的测试文件。
 这里守的是迁移最容易悄悄摔的四处：
 
 1. 收尾取的是**流出去的那条 Msg**（已过输出审核），不是 ``state.context`` 里的原文；

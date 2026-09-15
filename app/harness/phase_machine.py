@@ -155,3 +155,16 @@ def set_phase_machine(machine: PhaseStateMachine) -> None:
 
 def reset_phase_machine() -> None:
     _current_phase_machine.set(None)
+
+
+def fresh_phase_machine() -> None:
+    """会话开始：把阶段机复位到 PLANNING（曾是 on_session_start 的 phase_init hook）。
+
+    续聊复用同一 thread 时，ContextVar 里可能还留着上一轮跑到 CONCLUDING 的阶段机——不复位的话
+    新一轮开局就只剩 shopping_summary 可用。
+    """
+    machine = get_phase_machine()
+    if machine is None:
+        set_phase_machine(PhaseStateMachine())
+    elif machine.phase is not Phase.PLANNING:
+        machine.reset()
