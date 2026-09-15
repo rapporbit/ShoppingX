@@ -1,10 +1,7 @@
-"""重复调用：三种「模型在打转」的机制性止损。
+"""重复调用：两种「模型在打转」的机制性止损。
 
-    pre_tool_call   27  tool_memo_replay     同参数幂等只读工具 → 回放上次结果，不执行
-                                             （回放先于预算计数）
     pre_tool_call   48  tool_breaker_gate    工具级熔断（**必须是最后一道**：allow() 有副作用）
     post_tool_call   5  tool_breaker_record  记成功 / 失败
-    post_tool_call  15  tool_memo_record     记本轮成功执行过的 (tool, args) → 结果
     post_tool_call  20  result_nudges        LoopDetector 滑窗计数
                                              + 按优先级追加**至多一条**系统提示
 
@@ -12,11 +9,15 @@
 > 子搜「预算可见」批注
 > item_picker 收尾提示 > 循环提示。收尾排在循环之前：精选已就绪时催收尾比催换思路更对。
 ``result_nudges`` 必须晚于 ``safety.truncate_result``(10)，否则刚贴上的提示会被截掉。
+
+这里曾有 tool_memo_replay / tool_memo_record 一对（同参数幂等工具回放上次结果、不真执行）。
+2026-09-15 删：round3 后普通轮只跑 1 次 item_search，autopick 不走 pre_tool_call，回放几乎命不中；
+而它是绕过 post_tool_call 的旁路（要自己喂 LoopDetector、缓存要避开尾部通告），复杂度不抵收益。
+同参重复由 LoopDetector 提示 + 检索预算硬挡兜底。
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
@@ -118,74 +119,6 @@ async def append_nudges(context: dict[str, Any]) -> dict[str, Any] | None:
 
     context["tool_result"] = result + suffix
     return context
-
-
-# 幂等只读工具：同参数在一轮任务内重复执行不产生任何新信息。
-_MEMO_TOOLS = frozenset(
-    {"item_search", "web_search", "category_insight", "price_compare", "shipping_calc"}
-)
-
-
-def _memo_key(tool_name: str, args: Any) -> str | None:
-    """(tool, args) 的稳定指纹。args 序列化失败（理论不会，模型产出即 JSON）返回 None 不回放。"""
-    try:
-        return f"{tool_name}:{json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)}"
-    except (TypeError, ValueError):
-        return None
-
-
-@harness_hook("pre_tool_call", name="tool_memo_replay", priority=27)
-async def replay_duplicate_call(context: dict[str, Any]) -> dict[str, Any] | None:
-    """同参数重复调用 → 回放缓存结果，不真执行。
-
-    priority=27：在阶段门（20）/ 顺序断言（25）之后——治理优先于省钱，越权调用照旧吃阶段
-    哨兵；在检索计数（30/45）与熔断（48）之前——回放不占预算、不碰熔断窗。
-    """
-    guard = guard_of(context)
-    tool_name = context.get("tool_name", "")
-    if guard is None or tool_name not in _MEMO_TOOLS:
-        return None
-    key = _memo_key(tool_name, context.get("tool_args"))
-    if key is None:
-        return None
-    cached = guard.tool_result_cache.get(key)
-    if cached is None:
-        return None
-
-    # 回放轮次照样喂 LoopDetector（正常路径由 result_nudges 喂，回放不走 post_tool_call）——
-    # 模型盯着同一调用反复刷时，打转提示不能因为「都被回放了」而失明。置 _detector_fed
-    # 告知适配器的拒绝路径别再喂一次（其余闸拒绝由适配器统一喂，见 awrap_tool_call）。
-    context["_detector_fed"] = True
-    looping = guard.detector.record(tool_name)
-    note = (
-        f"\n\n[Harness 提示] 本次调用与本轮此前一次 {tool_name} 的参数完全相同，"
-        "已直接复用当时的结果（工具未重新执行）。相同参数不会带来新信息："
-        "如需补充请更换参数，否则请基于已有结果进入下一步。"
-    )
-    if looping:
-        note += f" {guard.detector.nudge_message(tool_name)}"
-    logger.info("回放重复调用 %s（参数指纹命中，未执行）", tool_name)
-    raise HookRejectSignal(cached + note, raw=True)
-
-
-@harness_hook("post_tool_call", name="tool_memo_record", priority=15)
-async def record_tool_result(context: dict[str, Any]) -> dict[str, Any] | None:
-    """把成功执行的幂等工具结果记进回放缓存。
-
-    priority=15：在截断（10）之后——缓存的就是模型实际看到的版本，回放不会把被截掉的
-    大结果又灌回上下文；在分级提示（20）之前——收敛 / 打转 nudge 是针对「当时那次调用」的
-    附言，不该跟着结果一起被回放。
-    """
-    guard = guard_of(context)
-    tool_name = context.get("tool_name", "")
-    if guard is None or tool_name not in _MEMO_TOOLS:
-        return None
-    key = _memo_key(tool_name, context.get("tool_args"))
-    result = context.get("tool_result")
-    if key is None or not isinstance(result, str) or not result:
-        return None
-    guard.tool_result_cache[key] = result
-    return None
 
 
 TOOL_BREAKER_ENABLED = env_bool("HARNESS_TOOL_BREAKER", True)

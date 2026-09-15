@@ -19,18 +19,16 @@ post_tool_call 置位、在 post_reflect 催），按点切会把它散在 4 个
 pre_tool_call（低先执行）：
     5 terminal_reached · 12 trade_sequence · 15 websearch
     · 20 phase_check
-    · 25 sequencing · 27 tool_memo_replay · 30 search_authority · 33 token_budget · 35 fork_budget
+    · 25 sequencing · 30 search_authority · 33 token_budget · 35 fork_budget
     · 45 retrieval_charge · 48 tool_breaker
   - search_authority(30) 读 item_search_calls 的**自增前**值，自增在 retrieval_charge(45)——
     挪了顺序，
     子 Agent 的「恰好放行一次」塌成「放行 0 次」。
   - token_budget(33) 必须早于 fork_budget(35)：fork 闸 charge 即扣槽。
-  - tool_memo_replay(27) 早于 retrieval_charge(45)：回放不是真实检索，不该扣预算；
-    但晚于 phase_check(20)。
   - tool_breaker(48) 必须最后：allow() 有副作用。
 
 post_tool_call：
-    5 tool_breaker_record · 5 content_filter · 10 truncate_result · 15 tool_memo_record
+    5 tool_breaker_record · 5 content_filter · 10 truncate_result
     · 19 transition_notice · 20 result_nudges · 30 mark_terminal · 40 schema_assertion
     · 50 preference_inject · 50 drift_result_tracker
   - truncate_result(10) 必须早于所有追加提示的钩子（19 / 20），否则刚贴的提示被截掉。
