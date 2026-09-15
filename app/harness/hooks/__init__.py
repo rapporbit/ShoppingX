@@ -32,7 +32,7 @@ post_tool_call：
 
 pre_think：5 liveness_watchdog · 20 budget_router。（上下文压缩交框架 compress_context，无 Hook。）
 post_reflect：20 drift_detector · 40 phase_step（补搜 → 推进 → 回退） · 60 terminal_enforcer。
-on_session_end：10 output_guard · 20 output_audit · 90 strategy_feedback。
+on_session_end：10 final_answer_audit（去噪 → 脱敏） · 90 strategy_feedback。
 on_system_prompt（装配期）：50 system_prompt_append（策略块 + 交易状态块）。
 
 注册与执行见 ``app/harness/middleware.py``；各钩子在 AgentScope 上的落点见

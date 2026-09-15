@@ -3,8 +3,9 @@
     post_tool_call   5  content_filter    L3：外部来源工具返回里的提示词注入
     post_tool_call  10  truncate_result   过长结果按 token 预算截断
                                           （**必须早于任何追加提示的 Hook**）
-    on_session_end  10  output_guard      把 Harness 内部控制文案从最终回复里剔掉
-    on_session_end  20  output_audit      L4：密钥 / 内网地址 / 服务器路径脱敏（先去噪、再脱敏）
+    on_session_end  10  final_answer_audit 先把 Harness 内部控制文案从最终回复里剔掉（去噪），
+                                           再做 L4 密钥 / 内网地址 / 服务器路径脱敏
+                                           （曾是 output_guard(10) + output_audit(20) 两个 hook）
 
 这里曾有两道 pre_tool_call 断言（tool_whitelist / depth_gate），2026-09-15 删：工具名不在 Toolkit
 里框架就不执行，worker 的 Toolkit 里根本没有主 loop 专属工具——两条都是 301 会话零触发的运行时
@@ -56,12 +57,11 @@ async def filter_tool_output(context: dict[str, Any]) -> dict[str, Any] | None:
     return context
 
 
-@harness_hook("on_session_end", name="output_audit", priority=20)
 async def audit_final_answer(context: dict[str, Any]) -> dict[str, Any] | None:
     """L4：最终回答里的密钥 / 内网地址 / 服务器路径 → 脱敏后再推给用户。
 
-    在 ``session_hooks.audit_final_output``（priority 10，洗 Harness 内部控制文案）之后跑：
-    先去噪、再脱敏。改写走 ``context["final_answer"]``，由 ``run_agent()`` 消费。
+    在 ``audit_final_output``（洗 Harness 内部控制文案）之后跑：先去噪、再脱敏。
+    改写走 ``context["final_answer"]``，由 ``run_agent()`` 消费。
     """
     final = context.get("final_answer")
     if not isinstance(final, str) or not final:
@@ -103,7 +103,6 @@ _MARKER_LINE = re.compile(
 )
 
 
-@harness_hook("on_session_end", name="output_guard", priority=10)
 async def audit_final_output(context: dict[str, Any]) -> dict[str, Any] | None:
     """输出审核：把内部控制文案从面向用户的最终回复里剔掉。
 
@@ -121,3 +120,11 @@ async def audit_final_output(context: dict[str, Any]) -> dict[str, Any] | None:
     logger.warning("输出审核：最终回复含内部控制文案，已清洗 %d 字符", len(final) - len(cleaned))
     context["final_answer"] = cleaned or final  # 全被清空则宁可回原文，不给用户空白
     return context
+
+
+@harness_hook("on_session_end", name="final_answer_audit", priority=10)
+async def audit_final(context: dict[str, Any]) -> dict[str, Any] | None:
+    """最终回复审核，顺序固定：先去噪（内部控制文案）、再脱敏（密钥 / 内网地址 / 路径）。"""
+    guarded = await audit_final_output(context)
+    audited = await audit_final_answer(context)
+    return context if (guarded or audited) else None
