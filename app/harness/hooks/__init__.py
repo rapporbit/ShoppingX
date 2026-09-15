@@ -24,11 +24,13 @@ pre_tool_call（低先执行）：
   - tool_breaker(48) 必须最后：allow() 有副作用。
 
 post_tool_call：
-    5 tool_breaker_record · 5 content_filter · 10 truncate_result
+    5 tool_breaker_record · 5 content_filter · 10 truncate_result · 15 content_fence
     · 19 transition_notice · 20 result_nudges · 30 mark_terminal
     · 50 preference_inject · 50 drift_result_tracker
   - truncate_result(10) 必须早于所有追加提示的钩子（19 / 20），否则刚贴的提示被截掉。
-  - drift_result_tracker(50) 用 raw_decode 容忍 19 / 20 缀在尾部的通告。
+  - content_fence(15) 晚于截断（收尾标签不被截）、早于 19 / 20（Harness 提示留在围栏外）。
+  - drift_result_tracker(50) 先剥围栏开头标签，再用 raw_decode 容忍收尾标签
+    和 19 / 20 缀在尾部的通告。
 
 pre_think：5 liveness_watchdog · 20 budget_router。（上下文压缩交框架 compress_context，无 Hook。）
 post_reflect：20 drift_detector · 40 phase_step（补搜 → 推进 → 回退） · 60 terminal_enforcer。

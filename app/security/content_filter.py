@@ -67,6 +67,35 @@ _DANGEROUS_PATTERNS: tuple[str, ...] = (
 _COMPILED = tuple(re.compile(p, re.MULTILINE) for p in _DANGEROUS_PATTERNS)
 
 
+# 围栏：外部来源工具的返回整段包进固定标签，让模型分清「待评估的数据」与「给我的指令」。
+# 清洗（上面的正则）只挡已知句式，围栏兜的是没见过的句式。
+# 标签名固定、不随工具变，prompt 里只认这一个。
+FENCE_TAG = "external_content"
+_FENCE_TAG_RE = re.compile(r"(?i)<\s*/?\s*" + FENCE_TAG + r"\b[^>]*>")
+_FENCE_OPEN_RE = re.compile(r"^\s*<" + FENCE_TAG + r' source="[a-z_]+">\n')
+# 正文里伪造的围栏标签替换成它；同样不含引号 / 反斜杠，保证 JSON 仍合法。
+FENCE_TAG_PLACEHOLDER = "[已过滤:伪造围栏标签]"
+
+
+def fence_tool_output(tool_name: str, text: str) -> str:
+    """把工具返回包进 ``<external_content source="…">`` 围栏；正文里伪造的同名标签先替换掉。
+
+    已经包过的原样返回（幂等）——工具原始返回是 JSON，以 ``{`` 开头，不会被误认成已包过。
+    """
+    if _FENCE_OPEN_RE.match(text):
+        return text
+    inner = _FENCE_TAG_RE.sub(FENCE_TAG_PLACEHOLDER, text)
+    return f'<{FENCE_TAG} source="{tool_name}">\n{inner}\n</{FENCE_TAG}>'
+
+
+def strip_fence_open(text: str) -> str:
+    """剥掉开头的围栏标签，供要按 JSON 解析工具返回的下游用。
+
+    尾部收尾标签不剥，由调用方的 ``raw_decode`` 容忍。
+    """
+    return _FENCE_OPEN_RE.sub("", text, count=1)
+
+
 def sanitize_tool_output(text: str) -> tuple[str, int]:
     """洗掉 ``text`` 里疑似提示注入的片段，返回 ``(清洗后文本, 命中次数)``。
 
