@@ -1,4 +1,5 @@
 import { DOMAIN_HINTS, DOMAIN_LABELS, DOMAIN_ORDER } from "../domains";
+import { Select } from "./ui/Select";
 import type { PrefDomain, PrefDraft } from "../types";
 
 // 一条偏好的**结构化编辑卡**——添加（LLM 解析出的草稿）与修改（已有条目）共用。
@@ -56,37 +57,36 @@ export function PreferenceEditor({
       />
 
       <div className="pref-editor-row">
-        <select
+        <Select
+          ariaLabel="想要还是不要"
           value={draft.polarity}
           // 转成「想要」时把 blocking 清掉：硬淘汰只对 dislike 生效（后端 dislike_exclude_terms
           // 先按 polarity 过滤），留着一个不生效的 true 只会误导用户。
-          onChange={(e) => {
-            const polarity = e.target.value as PrefDraft["polarity"];
+          onChange={(v) => {
+            const polarity = v as PrefDraft["polarity"];
             set({ polarity, blocking: polarity === "dislike" && draft.blocking });
           }}
-        >
-          <option value="like">❤️ 想要</option>
-          <option value="dislike">🚫 不要</option>
-        </select>
-        <select value={draft.category} onChange={(e) => set({ category: e.target.value })}>
-          {CATEGORIES.map((c) => (
-            <option key={c} value={c}>
-              {CATEGORY_CN[c] ?? c}
-            </option>
-          ))}
-        </select>
-        <select
+          options={[
+            { value: "like", label: "想要" },
+            { value: "dislike", label: "不要" },
+          ]}
+        />
+        <Select
+          ariaLabel="偏好类别"
+          value={draft.category}
+          onChange={(v) => set({ category: v })}
+          options={CATEGORIES.map((c) => ({ value: c, label: CATEGORY_CN[c] ?? c }))}
+        />
+        <Select
+          ariaLabel="生效范围"
           className="pref-editor-domain"
           value={draft.domain}
-          onChange={(e) => set({ domain: e.target.value as PrefDomain })}
-        >
-          {DOMAIN_ORDER.map((d) => (
-            <option key={d} value={d}>
-              {DOMAIN_LABELS[d]}
-              {DOMAIN_HINTS[d] ? `（${DOMAIN_HINTS[d]}）` : ""}
-            </option>
-          ))}
-        </select>
+          onChange={(v) => set({ domain: v as PrefDomain })}
+          options={DOMAIN_ORDER.map((d) => ({
+            value: d,
+            label: `${DOMAIN_LABELS[d]}${DOMAIN_HINTS[d] ? `（${DOMAIN_HINTS[d]}）` : ""}`,
+          }))}
+        />
       </div>
 
       {/* 硬淘汰授权。分量配得上后果：勾上意味着这类商品**再也不会出现在结果里**，而且被删掉了

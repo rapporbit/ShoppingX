@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { motion } from "motion/react";
+import { toast } from "sonner";
 import {
   addFavorite,
   fetchFavorites,
@@ -30,7 +32,7 @@ import { AdminDrawer } from "./components/AdminDrawer";
 import { Sidebar, type SidebarPanel } from "./components/Sidebar";
 import { InputBar } from "./components/InputBar";
 import { TopBar } from "./components/TopBar";
-import { SparkleIcon } from "./components/icons";
+import { Sparkles } from "lucide-react";
 import { Landing } from "./components/Landing";
 import { Legal, type LegalPage } from "./components/Legal";
 import { Login } from "./components/Login";
@@ -168,6 +170,12 @@ const SAMPLES = [
   "健身房要用的一套：背包 + 蓝牙耳机 + 运动鞋，预算 1000 内",
 ];
 
+// 首屏各元素共用的浮现动效（父级 staggerChildren 控制先后）。
+const WELCOME_ITEM = {
+  hidden: { opacity: 0, y: 12 },
+  show: { opacity: 1, y: 0, transition: { type: "spring", stiffness: 380, damping: 32 } },
+} as const;
+
 function Workspace({ session, onLogout }: { session: Session; onLogout: () => void }) {
   const userId = session.userId; // 唯一身份来源：后端 token 里的 sub
   const {
@@ -263,8 +271,17 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
       setFavorites((cur) =>
         undo ? cur.filter((f) => f.item_id !== item.item_id) : [item, ...cur],
       );
-      if (undo) await removeFavorite(userId, item.item_id);
-      else await addFavorite(userId, item);
+      try {
+        if (undo) await removeFavorite(userId, item.item_id);
+        else await addFavorite(userId, item);
+        toast(undo ? "已取消收藏" : "已加入收藏");
+      } catch {
+        // 请求失败就把乐观更新翻回去，并说一声——静默失败等于骗用户「收藏了」。
+        setFavorites((cur) =>
+          undo ? [item, ...cur] : cur.filter((f) => f.item_id !== item.item_id),
+        );
+        toast.error(undo ? "取消收藏失败，请重试" : "收藏失败，请重试");
+      }
     },
     [userId],
   );
@@ -405,29 +422,37 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
         <main className="conversation">
           <div className="conversation-inner">
             {!hasConversation ? (
-              <section className="welcome">
-                <div className="welcome-mark">
-                  <SparkleIcon width={26} height={26} />
-                </div>
-                <h1>今天想淘点什么？</h1>
-                <p>
+              <motion.section
+                className="welcome"
+                initial="hidden"
+                animate="show"
+                variants={{ show: { transition: { staggerChildren: 0.07, delayChildren: 0.05 } } }}
+              >
+                {/* 首屏元素按序浮现：标记 → 标题 → 说明 → 四个示例，各晚 70ms。 */}
+                <motion.div className="welcome-mark" variants={WELCOME_ITEM}>
+                  <Sparkles size={26} strokeWidth={1.5} />
+                </motion.div>
+                <motion.h1 variants={WELCOME_ITEM}>今天想淘点什么？</motion.h1>
+                <motion.p variants={WELCOME_ITEM}>
                   用一句话说清预算、品类和偏好，ShoppingX 会跨平台并行检索、比价、算到手价，给你一份带选购理由的清单。
-                </p>
+                </motion.p>
                 <div className="welcome-samples">
                   {/* 额度耗尽时一并禁掉示例：输入框已经锁了，还留着能点的入口，点下去只会打一次
                       注定 402 的请求，再把这一轮标红——用户白挨一个错误。 */}
                   {SAMPLES.map((s) => (
-                    <button
+                    <motion.button
                       key={s}
                       className="sample-chip"
                       disabled={quotaExhausted}
                       onClick={() => startTask(s, userId)}
+                      variants={WELCOME_ITEM}
+                      whileTap={{ scale: 0.985 }}
                     >
                       {s}
-                    </button>
+                    </motion.button>
                   ))}
                 </div>
-              </section>
+              </motion.section>
             ) : (
               <section className="thread">
                 {turns.map((turn, idx) => {

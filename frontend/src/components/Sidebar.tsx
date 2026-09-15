@@ -1,5 +1,7 @@
-import { CloseIcon, ComposeIcon, HeartIcon, ListIcon, SparkleIcon } from "./icons";
+import { AnimatePresence, motion } from "motion/react";
+import { Heart, ListOrdered, SquarePen, Sparkles, X } from "lucide-react";
 import type { SessionMeta } from "../types";
+import { Tooltip } from "./ui/Tooltip";
 
 // 左侧栏：品牌 → 「新建对话」 → 主导航（收藏 / 订单 / Skill / 长期偏好）→ 历史对话列表。
 // 主导航从顶栏搬下来：这四个都是「我的东西」，放侧栏才是导航，堆顶栏像调试面板。
@@ -24,13 +26,13 @@ const NAV: { id: SidebarPanel; label: string; icon: JSX.Element; title: string }
   {
     id: "favorites",
     label: "收藏",
-    icon: <HeartIcon width={17} height={17} />,
+    icon: <Heart size={17} strokeWidth={1.75} />,
     title: "我收藏的商品（收藏多了会轻微影响精挑排序）",
   },
   {
     id: "orders",
     label: "订单",
-    icon: <ListIcon width={17} height={17} />,
+    icon: <ListOrdered size={17} strokeWidth={1.75} />,
     title: "我的订单（模拟交易，无支付与物流）",
   },
   {
@@ -42,7 +44,7 @@ const NAV: { id: SidebarPanel; label: string; icon: JSX.Element; title: string }
   {
     id: "preferences",
     label: "长期偏好",
-    icon: <SparkleIcon width={17} height={17} />,
+    icon: <Sparkles size={17} strokeWidth={1.75} />,
     title: "长期偏好：会注入提示词，显式改变推荐",
   },
 ];
@@ -70,24 +72,32 @@ export function Sidebar({
       </div>
 
       <button className="new-chat-btn" onClick={onNewChat}>
-        <ComposeIcon width={18} height={18} />
+        <SquarePen size={17} strokeWidth={1.75} />
         新建对话
       </button>
 
       <div className="sidebar-nav">
         {NAV.map((item) => (
-          <button
-            key={item.id}
-            className={`sidebar-nav-item ${activePanel === item.id ? "active" : ""}`}
-            onClick={() => onOpenPanel(item.id)}
-            title={item.title}
-          >
-            {item.icon}
-            <span>{item.label}</span>
-            {item.id === "favorites" && favoriteCount > 0 && (
-              <span className="nav-count">{favoriteCount}</span>
-            )}
-          </button>
+          <Tooltip key={item.id} content={item.title} side="right">
+            <button
+              className={`sidebar-nav-item ${activePanel === item.id ? "active" : ""}`}
+              onClick={() => onOpenPanel(item.id)}
+            >
+              {/* 选中底色是一块会在四项之间滑动的 pill（motion layoutId），不是各自闪一下。 */}
+              {activePanel === item.id && (
+                <motion.span
+                  className="sidebar-nav-pill"
+                  layoutId="sidebar-nav-pill"
+                  transition={{ type: "spring", stiffness: 520, damping: 40 }}
+                />
+              )}
+              {item.icon}
+              <span>{item.label}</span>
+              {item.id === "favorites" && favoriteCount > 0 && (
+                <span className="nav-count">{favoriteCount}</span>
+              )}
+            </button>
+          </Tooltip>
         ))}
       </div>
 
@@ -97,28 +107,35 @@ export function Sidebar({
           <p className="history-empty">还没有对话记录</p>
         ) : (
           <ul className="history-list">
-            {sessions.map((s) => (
-              <li
-                key={s.threadId}
-                className={`history-item ${s.threadId === activeThreadId ? "active" : ""}`}
-                onClick={() => onSelectConversation(s.threadId)}
-                title={s.title}
-              >
-                <span className="history-item-title">{s.title}</span>
-                {/* 删除用 span 而非 button：避免按钮套按钮的非法嵌套；stopPropagation 防误触发切换 */}
-                <span
-                  className="history-del"
-                  role="button"
-                  aria-label="删除该对话"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDeleteConversation(s.threadId);
-                  }}
+            <AnimatePresence initial={false}>
+              {sessions.map((s) => (
+                <motion.li
+                  key={s.threadId}
+                  layout
+                  initial={{ opacity: 0, x: -8 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: -8, transition: { duration: 0.14 } }}
+                  transition={{ type: "spring", stiffness: 500, damping: 40 }}
+                  className={`history-item ${s.threadId === activeThreadId ? "active" : ""}`}
+                  onClick={() => onSelectConversation(s.threadId)}
+                  title={s.title}
                 >
-                  <CloseIcon width={14} height={14} />
-                </span>
-              </li>
-            ))}
+                  <span className="history-item-title">{s.title}</span>
+                  {/* 删除用 span 而非 button：避免按钮套按钮的非法嵌套；stopPropagation 防误触发切换 */}
+                  <span
+                    className="history-del"
+                    role="button"
+                    aria-label="删除该对话"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDeleteConversation(s.threadId);
+                    }}
+                  >
+                    <X size={14} strokeWidth={1.75} />
+                  </span>
+                </motion.li>
+              ))}
+            </AnimatePresence>
           </ul>
         )}
       </div>

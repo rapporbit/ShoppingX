@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import { Globe, LogOut, Menu, SlidersHorizontal } from "lucide-react";
 import { formatResetAt, type Quota } from "../api";
 import type { TaskStatus } from "../hooks/useShoppingXTask";
-import { BoltIcon, GlobeIcon, MenuIcon } from "./icons";
+import { Tooltip } from "./ui/Tooltip";
 
 // 顶栏只放「本轮 / 本次会话」相关的东西：左侧当前会话标题 + 运行状态点；右侧 credit 条、检索平台数、
 // 头像。收藏 / 订单 / Skill / 长期偏好是「我的东西」，属于导航，已下沉到侧栏；退出和后台收进头像菜单——
@@ -50,78 +51,49 @@ function QuotaMeter({ quota }: { quota: Quota }) {
     ? `今日 credit 已用完（${formatResetAt(quota.reset_at)} 重置）`
     : `今日已用 ${quota.used_credits} / ${quota.limit_credits} credits，${formatResetAt(quota.reset_at)} 重置`;
   return (
-    <div className={`quota-meter quota-${level}`} title={title}>
-      <div className="quota-bar">
-        <div className="quota-fill" style={{ width: `${pct}%` }} />
+    <Tooltip content={title}>
+      <div className={`quota-meter quota-${level}`} tabIndex={-1}>
+        <div className="quota-bar">
+          <div className="quota-fill" style={{ width: `${pct}%` }} />
+        </div>
+        <span className="quota-text">
+          {quota.remaining_credits.toLocaleString()} <span className="quota-unit">credits</span>
+        </span>
       </div>
-      <span className="quota-text">
-        {quota.remaining_credits.toLocaleString()} <span className="quota-unit">credits</span>
-      </span>
-    </div>
+    </Tooltip>
   );
 }
 
-// 头像下拉：用户名 / 后台管理（仅管理员）/ 退出。点外面或按 Esc 关。
+// 头像下拉：用户名 / 后台管理（仅管理员）/ 退出。Radix DropdownMenu 管点外关闭、Esc、方向键与焦点回落。
 function AvatarMenu({
   username,
   onOpenAdmin,
   onLogout,
 }: Pick<TopBarProps, "username" | "onOpenAdmin" | "onLogout">) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
   return (
-    <div className="avatar-wrap" ref={ref}>
-      <button
-        className="avatar"
-        title={username}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-      >
-        {initials(username)}
-      </button>
-      {open && (
-        <div className="avatar-menu" role="menu">
-          <div className="avatar-menu-name">{username}</div>
+    <DropdownMenu.Root modal={false}>
+      <DropdownMenu.Trigger asChild>
+        <button className="avatar" aria-label={`账户菜单：${username}`}>
+          {initials(username)}
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content className="menu" align="end" sideOffset={8} collisionPadding={8}>
+          <DropdownMenu.Label className="menu-label">{username}</DropdownMenu.Label>
+          <DropdownMenu.Separator className="menu-sep" />
           {onOpenAdmin && (
-            <button
-              role="menuitem"
-              onClick={() => {
-                setOpen(false);
-                onOpenAdmin();
-              }}
-            >
-              <BoltIcon width={16} height={16} />
+            <DropdownMenu.Item className="menu-item" onSelect={onOpenAdmin}>
+              <SlidersHorizontal size={15} strokeWidth={1.75} />
               后台管理
-            </button>
+            </DropdownMenu.Item>
           )}
-          <button
-            role="menuitem"
-            onClick={() => {
-              setOpen(false);
-              onLogout();
-            }}
-          >
+          <DropdownMenu.Item className="menu-item danger" onSelect={onLogout}>
+            <LogOut size={15} strokeWidth={1.75} />
             退出登录
-          </button>
-        </div>
-      )}
-    </div>
+          </DropdownMenu.Item>
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
   );
 }
 
@@ -140,26 +112,26 @@ export function TopBar({
     <header className="topbar">
       <div className="topbar-title">
         <button className="nav-toggle" onClick={onOpenNav} aria-label="打开会话栏">
-          <MenuIcon width={20} height={20} />
+          <Menu size={20} strokeWidth={1.75} />
         </button>
         <span className="title-text" title={title}>
           {title}
         </span>
-        <span className={`status-dot status-${status}`} title={STATUS_TEXT[status]} />
+        <Tooltip content={STATUS_TEXT[status]}>
+          <span className={`status-dot status-${status}`} tabIndex={-1} />
+        </Tooltip>
       </div>
 
       <div className="topbar-actions">
         {quota?.enabled && <QuotaMeter quota={quota} />}
         {/* 平台入口常驻顶栏并显示已启用个数：跨平台并行检索是本项目最贵的一步，用户该随时看得见
             自己开着几个平台，而不是点进设置才知道。 */}
-        <button
-          className="ghost-btn"
-          onClick={onOpenSettings}
-          title="检索平台设置（默认只搜 Amazon）"
-        >
-          <GlobeIcon width={18} height={18} />
-          <span>{platformCount > 1 ? `${platformCount} 个平台` : "单平台"}</span>
-        </button>
+        <Tooltip content="检索平台设置（默认只搜 Amazon）">
+          <button className="ghost-btn" onClick={onOpenSettings}>
+            <Globe size={17} strokeWidth={1.75} />
+            <span>{platformCount > 1 ? `${platformCount} 个平台` : "单平台"}</span>
+          </button>
+        </Tooltip>
         <AvatarMenu username={username} onOpenAdmin={onOpenAdmin} onLogout={onLogout} />
       </div>
     </header>

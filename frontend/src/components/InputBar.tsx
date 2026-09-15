@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { SkillCatalogItem } from "../types";
-import { ArrowUp, ImageIcon, StopIcon } from "./icons";
+import { AnimatePresence, motion } from "motion/react";
+import { ArrowUp, ImagePlus, Square } from "lucide-react";
+import { Tooltip } from "./ui/Tooltip";
 
 // 只有**独立词首**的 / 才算命令（行首或空格后）：https:// 、路径中间、「3/4」这类比例写法保持普通文字。
 // 只在光标停在命令末尾时弹菜单——命令必须是文本末尾这一段。
@@ -170,7 +172,7 @@ export function InputBar({
       >
         {dragging && (
           <div className="composer-drop-hint">
-            <ImageIcon width={18} height={18} />
+            <ImagePlus size={18} strokeWidth={1.75} />
             <span>松手，用这张图找同款</span>
           </div>
         )}
@@ -279,32 +281,52 @@ export function InputBar({
           />
           {/* 澄清轮不给传图：那一轮是在回答 Agent 的提问，不是发起新检索 */}
           {!waiting && (
-            <button
-              className={`attach-btn ${images.length ? "has-images" : ""}`}
-              onClick={() => fileInputRef.current?.click()}
-              disabled={running || blocked}
-              title="上传参考图找同类相似品（也可直接粘贴截图或拖进来）"
-            >
-              <ImageIcon width={16} height={16} />
-              <span>
-                {images.length ? `参考图 ${images.length}/${MAX_IMAGES}` : "图搜同款"}
-              </span>
-            </button>
+            <Tooltip content="上传参考图找同类相似品（也可直接粘贴截图或拖进来）">
+              <button
+                className={`attach-btn ${images.length ? "has-images" : ""}`}
+                onClick={() => fileInputRef.current?.click()}
+                disabled={running || blocked}
+              >
+                <ImagePlus size={16} strokeWidth={1.75} />
+                <span>
+                  {images.length ? `参考图 ${images.length}/${MAX_IMAGES}` : "图搜同款"}
+                </span>
+              </button>
+            </Tooltip>
           )}
-          {running ? (
-            <button className="send-btn stop" onClick={onCancel} title="停止">
-              <StopIcon width={16} height={16} />
-            </button>
-          ) : (
-            <button
-              className={`send-btn ${canSend ? "ready" : ""} ${waiting ? "is-clarify" : ""}`}
-              onClick={submit}
-              disabled={!canSend}
-              title={waiting ? "回复" : "发送"}
-            >
-              <ArrowUp width={18} height={18} />
-            </button>
-          )}
+          {/* 发送 / 停止是同一个位置上的两态：切换时用 motion 做一次缩放淡入，别硬跳。 */}
+          <AnimatePresence mode="wait" initial={false}>
+            {running ? (
+              <motion.button
+                key="stop"
+                className="send-btn stop"
+                onClick={onCancel}
+                aria-label="停止"
+                initial={{ scale: 0.6, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.6, opacity: 0 }}
+                transition={{ type: "spring", stiffness: 600, damping: 32 }}
+                whileTap={{ scale: 0.92 }}
+              >
+                <Square size={13} strokeWidth={2.5} fill="currentColor" />
+              </motion.button>
+            ) : (
+              <motion.button
+                key="send"
+                className={`send-btn ${canSend ? "ready" : ""} ${waiting ? "is-clarify" : ""}`}
+                onClick={submit}
+                disabled={!canSend}
+                aria-label={waiting ? "回复" : "发送"}
+                initial={{ scale: 0.6, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.6, opacity: 0 }}
+                transition={{ type: "spring", stiffness: 600, damping: 32 }}
+                whileTap={canSend ? { scale: 0.92 } : undefined}
+              >
+                <ArrowUp size={18} strokeWidth={2.25} />
+              </motion.button>
+            )}
+          </AnimatePresence>
         </div>
       </div>
       <p className="composer-hint">ShoppingX 跨境购物 Agent · 结果由模型与离线数据生成，仅供参考</p>

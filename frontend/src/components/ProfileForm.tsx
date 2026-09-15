@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Select } from "./ui/Select";
 import { updateProfile } from "../api";
 import type { Preference } from "../types";
 
@@ -82,13 +83,12 @@ export function ProfileForm({ userId, prefs, onSaved }: ProfileFormProps) {
       <div className="pref-section-hint">这两项影响关税和预算过滤，建议自己设定，别让 Agent 猜。</div>
       <div className="profile-row">
         <label htmlFor="pf-country">常用收货地</label>
-        <select id="pf-country" value={country} onChange={(e) => setCountry(e.target.value)}>
-          {COUNTRIES.map(([code, name]) => (
-            <option key={code} value={code}>
-              {name}
-            </option>
-          ))}
-        </select>
+        <Select
+          ariaLabel="常用收货地"
+          value={country}
+          onChange={setCountry}
+          options={COUNTRIES.map(([code, name]) => ({ value: code, label: name }))}
+        />
       </div>
       <div className="profile-row">
         <label htmlFor="pf-budget">预算上限</label>
