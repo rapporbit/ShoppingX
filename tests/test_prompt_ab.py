@@ -113,22 +113,22 @@ def test_overlay_string_patch_only_touches_the_anchored_sentence(
 
 
 def test_overlay_merges_one_level_and_keeps_rest(tmp_path: Any, monkeypatch: Any) -> None:
-    """只写改动的子键：``sub_agents.search`` 换掉，其余键原样继承。"""
+    """只写改动的子键：``nested.a`` 换掉，同层其余子键与其它顶层键原样继承。"""
     import app.agent.prompts as prompts_mod
 
     versions_dir = tmp_path / "versions"
     versions_dir.mkdir()
     (versions_dir / "1.1.0.yml").write_text(
-        "base: prompts.yml\noverrides:\n  sub_agents:\n    search: 新的检索员提示词\n",
+        "base: prompts.yml\noverrides:\n  nested:\n    a: 新的\n",
         encoding="utf-8",
     )
+    base = {"system_prompt": "sp", "nested": {"a": "旧的", "b": "留着"}}
     monkeypatch.setattr(prompts_mod, "_VERSIONS_DIR", versions_dir)
+    monkeypatch.setattr(prompts_mod, "_load_base_prompts", lambda: base)
     _load_prompts.cache_clear()
-    base = _load_base_prompts()
     merged = _load_prompts("1.1.0")
-    assert merged["sub_agents"]["search"] == "新的检索员提示词"
-    assert merged["sub_agents"].keys() == base["sub_agents"].keys()
-    assert merged["system_prompt"] == base["system_prompt"]
+    assert merged["nested"] == {"a": "新的", "b": "留着"}
+    assert merged["system_prompt"] == "sp"
     _load_prompts.cache_clear()
 
 

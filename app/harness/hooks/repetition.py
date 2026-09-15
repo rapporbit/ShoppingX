@@ -6,7 +6,6 @@
                                              + 按优先级追加**至多一条**系统提示
 
 **提示优先级链**（互斥）：越树检索「强制收敛」 > item_search 的 filtered_out 证据
-> 子搜「预算可见」批注
 > item_picker 收尾提示 > 循环提示。收尾排在循环之前：精选已就绪时催收尾比催换思路更对。
 ``result_nudges`` 必须晚于 ``safety.truncate_result``(10)，否则刚贴上的提示会被截掉。
 
@@ -21,30 +20,18 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from app.harness.budgets import (
-    SUB_ITEM_SEARCH_CAP,
-)
-from app.harness.fork_guard import current_fork_depth
 from app.harness.middleware import HookRejectSignal, harness_hook
 from app.harness.sentinels import (
     SUMMARY_NUDGE,
     converge_directive,
-    sub_search_budget_note,
     tool_breaker_open,
 )
-from app.harness.state import GuardState, guard_of
+from app.harness.state import guard_of
 from app.utils import shared_breaker
 from app.utils.circuit_breaker import CircuitBreaker
 from app.utils.env import env_bool, env_int
 
 logger = logging.getLogger("shoppingx.harness.repetition")
-
-
-def _budget_note(guard: GuardState, tool_name: str) -> str | None:
-    """「预算可见」批注：只对子（depth≥1）的 item_search 给；主 loop 由全树预算的强制收敛管。"""
-    if tool_name != "item_search" or current_fork_depth() < 1:
-        return None
-    return sub_search_budget_note(guard.item_search_calls, SUB_ITEM_SEARCH_CAP)
 
 
 def _filtered_out_note(context: dict[str, Any], tool_name: str) -> str | None:
@@ -97,18 +84,13 @@ async def append_nudges(context: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     converge_count = context.get("converge_count")
-    budget_note = _budget_note(guard, tool_name)
-
     filtered_note = _filtered_out_note(context, tool_name)
 
     if converge_count is not None:
         suffix = "\n\n[系统提示] " + converge_directive(converge_count)
     elif filtered_note is not None:
-        # **排在检索预算批注之前**：批注是节流动机（少搜一次），本条是诚实证据（别把「有货但
-        # 超预算」说成「没货」）——丢了它直接踩 P0，丢了批注只多花一次检索。
+        # 诚实证据（别把「有货但超预算」说成「没货」）——丢了它直接踩 P0。
         suffix = "\n\n[系统提示] " + filtered_note
-    elif budget_note is not None:
-        suffix = "\n\n[系统提示] " + budget_note
     elif tool_name == "item_picker":
         suffix = "\n\n" + SUMMARY_NUDGE
     elif looped:

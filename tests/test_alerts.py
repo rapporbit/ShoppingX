@@ -61,15 +61,6 @@ def test_every_rule_targets_a_real_tool() -> None:
     assert not unknown, f"这些规则指向不存在的工具，永远不会告警：{sorted(unknown)}"
 
 
-def test_dispatch_meta_tool_is_covered() -> None:
-    """派发元工具必须有规则：一次派发 = 一整棵子 AgentLoop，是全链路最花时间的那段。
-
-    它没有规则也不会报错，只会安静地永远不告警——最贵的路径反而没人盯着。
-    """
-    ruled = {r.tool for r in alerts.DEFAULT_RULES}
-    assert "task_dispatch" in ruled
-
-
 # ---------- 分位数 ----------
 def test_percentile_nearest_rank() -> None:
     assert alerts.percentile([], 0.95) == 0.0

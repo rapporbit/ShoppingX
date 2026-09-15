@@ -44,19 +44,13 @@ async def check_trade_sequence(context: dict[str, Any]) -> dict[str, Any] | None
 # ---------- Sequencing Assertion ----------
 
 # 工具名 → 前置工具候选列表，**满足其一即可**（不是全部都要）。
-#
-# 检索的前置必须把 fork 通路算进去：本项目跨平台检索的主路径是 dispatch_tool /
-# parallel_dispatch_tool 派子 Agent 去 item_search，主 loop 自己从头到尾可能一次 item_search
-# 都没调过。只认 item_search 会让「fork 检索 → item_picker」这条正常链路每次都被误报顺序错误。
 PREREQUISITES: dict[str, list[str]] = {
     # 「搜完直接收尾」（round3 刀 2）是合法序列：自动比价精挑（harness.autopick）走
     # after_tool_success 同一条管线，item_picker 照样进 called_tools，这条前置自然满足。
     "shopping_summary": ["item_picker"],
-    # 派发工具名 L8 已统一成 task_dispatch。这里曾留着 dispatch_tool / parallel_dispatch_tool
-    # 两个死名字——工具名对不上等于那条路径永不满足，「派发过所以有候选」的前置白写。
-    "price_compare": ["item_search", "task_dispatch"],
+    "price_compare": ["item_search"],
     "shipping_calc": ["price_compare"],
-    "item_picker": ["item_search", "task_dispatch"],
+    "item_picker": ["item_search"],
     # 取消前先查单。这里是**软**断言（注入一条警告），硬闸在本文件上方的 trade_sequence_gate：
     # 写操作的代价不对称，光警告拦不住一个已经打算取消的模型。
     "cancel_order": ["query_order"],

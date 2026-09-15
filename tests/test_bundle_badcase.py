@@ -7,7 +7,7 @@
    贴纸 own 0.30~0.60 vs 真笔袋 0.055，任何阈值要么放垃圾要么杀真品）+ summary 的 slot
    off-intent LLM 兜底（drop_pick_from_report 同步报缺）；
 ③ 总价混加裸价与到手价却声称「含税到手价」（bare_price 口径保险丝 + cost_item 补算）；
-④ 同批并行补搜被逃生门按到达顺序放行一半（按槽授权 + 批次原子化，见 test_harness 扩展）。
+④ 同批并行补搜被逃生门按到达顺序放行一半（批次原子化；按槽授权随 postfork 闸在 A4 删除）。
 """
 
 from __future__ import annotations
@@ -240,69 +240,9 @@ def test_cost_item_backfills_landed_deterministically() -> None:
 
 
 # --------------------------------------------------------------------------
-# ④ postfork 闸：套装按槽授权（每槽一次），批内到达顺序不再决定谁被拦
+# ④ 逃生门批次原子化：批内到达顺序不再决定谁被拦
 # --------------------------------------------------------------------------
 import pytest  # noqa: E402
-
-
-@pytest.mark.asyncio
-async def test_slot_backfill_grant_passes_once_per_slot(monkeypatch) -> None:
-    from types import SimpleNamespace
-
-    import app.harness.hooks.budget as tg
-    from app.harness.middleware import HarnessMiddleware
-    from app.harness.state import GuardState
-
-    monkeypatch.setattr(tg, "get_fork_budget", lambda: SimpleNamespace(dispatched=True))
-    monkeypatch.setattr(tg, "candidate_count", lambda: 58)  # 池非空（badcase 形态）
-    guard = GuardState()
-    mw = HarnessMiddleware()
-    mw.register("pre_tool_call", "search_authority_gate", tg.check_search_authority, priority=30)
-
-    async def _call(args: dict) -> bool:
-        out = await mw.run(
-            "pre_tool_call", {"tool_name": "item_search", "tool_args": args, "_guard": guard}
-        )
-        return not out.get("_rejected")
-
-    grant_slots = [_slot("书包", kw=["backpack"]), _slot("水杯", kw=["water bottle"])]
-    with _session("t-grant-1", grant_slots):
-        # 同批 4 个并行补搜（badcase 形态：书包/水杯/生活用品/文具）——已登记槽全放行，
-        # 未登记槽名与无 slot 的直搜照拦，且不再受到达顺序影响。
-        assert await _call({"slot": "书包", "query": "college backpack"}) is True
-        assert await _call({"slot": "水杯", "query": "water bottle"}) is True
-        assert await _call({"slot": "生活用品", "query": "caddy"}) is False  # 未登记槽不授权
-        assert await _call({"query": "just better stuff"}) is False  # 无 slot 的「找更好」照拦
-        assert await _call({"slot": "水杯", "query": "flask again"}) is False  # 每槽仅 1 次
-
-
-@pytest.mark.asyncio
-async def test_slot_backfill_grant_resolves_drifted_refs(monkeypatch) -> None:
-    """id 化审计 bug②回归：闸与盖章共用 resolve_slot——模型传漂移槽名（「旅行背包/双肩包」）
-    照样解析到已登记槽放行；额度按稳定 id 记账，同一槽换个写法不给第二次。"""
-    from types import SimpleNamespace
-
-    import app.harness.hooks.budget as tg
-    from app.harness.middleware import HarnessMiddleware
-    from app.harness.state import GuardState
-
-    monkeypatch.setattr(tg, "get_fork_budget", lambda: SimpleNamespace(dispatched=True))
-    monkeypatch.setattr(tg, "candidate_count", lambda: 40)
-    guard = GuardState()
-    mw = HarnessMiddleware()
-    mw.register("pre_tool_call", "search_authority_gate", tg.check_search_authority, priority=30)
-
-    async def _call(args: dict) -> bool:
-        out = await mw.run(
-            "pre_tool_call", {"tool_name": "item_search", "tool_args": args, "_guard": guard}
-        )
-        return not out.get("_rejected")
-
-    with _session("t-grant-2", [_slot("旅行背包", kw=["travel backpack"]), _slot("水杯")]):
-        bag_id = next(s.id for s in get_session_bundle() if s.name == "旅行背包")
-        assert await _call({"slot": "旅行背包/双肩包", "query": "big backpack"}) is True
-        assert await _call({"slot": bag_id, "query": "backpack again"}) is False  # 同槽 id 不二次
-        assert await _call({"slot": "背包", "query": "third try"}) is False  # 同槽另一漂移写法同样
 
 
 @pytest.mark.asyncio
@@ -322,29 +262,6 @@ async def test_escape_door_is_batch_atomic(monkeypatch) -> None:
         out = await mw.run("pre_tool_call", {"tool_name": "web_search", "_guard": guard})
         assert out.get("_rejected")  # 同批全拦，无一逃生
     assert guard.gate_reject_counts["websearch_gate:web_search"] == 1  # 一批=一次坚持
-
-
-# --------------------------------------------------------------------------
-# ⑤ dispatch 槽位派发的确定性摘要（内心独白不再泄漏给主 loop）
-# --------------------------------------------------------------------------
-def test_slot_digest_replaces_subagent_narration() -> None:
-    from app.agent.dispatch_tool import _slot_digest
-    from app.tools._candidates import register, reset_candidates
-
-    with thread_scope("t-digest-1", Path(tempfile.mkdtemp())):
-        register(
-            [
-                _c("BAG1", "Bookbag Large Capacity Lightweight School Backpack", 19.98, "书包"),
-                _c("BAG2", "College Backpack With USB Port", 24.99, "书包"),
-            ]
-        )
-        try:
-            digest = _slot_digest("书包")
-            assert digest is not None
-            assert "书包" in digest and "2 件" in digest and "$19.98" in digest
-            assert _slot_digest("水杯") is None  # 该槽零候选入库 → 保留子 Agent 原文
-        finally:
-            reset_candidates()
 
 
 # --------------------------------------------------------------------------

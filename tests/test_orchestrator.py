@@ -1,12 +1,11 @@
-"""L3 验收：AgentScope 主链路（orchestrator / events / permissions / task_dispatch）。
+"""L3 验收：AgentScope 主链路（orchestrator / events / permissions）。
 
 **测的是接缝，不是业务**——工具行为、harness 的各 hook、记忆判定各有自己的测试文件。
-这里守的是迁移最容易悄悄摔的四处：
+这里守的是迁移最容易悄悄摔的三处：
 
 1. 收尾取的是**流出去的那条 Msg**（已过输出审核），不是 ``state.context`` 里的原文；
 2. 续聊唯一一条腿：有 ``session.json`` 就恢复它，没有就空开局；
-3. 写工具是**精准放行**的——没进放行表的工具照样要用户确认（不能靠 BYPASS 一档全开）；
-4. ``task_dispatch`` 把子任务的失败转成工具结果，而不是让主 loop 崩。
+3. 写工具是**精准放行**的——没进放行表的工具照样要用户确认（不能靠 BYPASS 一档全开）。
 """
 
 from pathlib import Path
@@ -418,76 +417,6 @@ async def test_allow_tools_is_precise_and_idempotent() -> None:
     assert decision.behavior == PermissionBehavior.ASK
 
 
-# ---------- task_dispatch：派发安全四层 ----------
-
-
-def _chunk_text(chunk: Any) -> str:
-    return "".join(b.get("text", "") if isinstance(b, dict) else b.text for b in chunk.content)
-
-
-async def test_task_dispatch_rejects_platform_user_did_not_enable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """用户没勾的平台不派——派出去也是空军（语料 99.75% 在 amazon）。"""
-    from app.agent.dispatch_tool import task_dispatch
-    from app.agent.platform_scope import platform_scope
-
-    with platform_scope(["amazon"]):
-        chunk = await task_dispatch("在 shopee 上找一个帆布旅行包，预算 300", "search")
-    assert chunk.state == ToolResultState.ERROR
-    assert "未启用 shopee" in _chunk_text(chunk)
-
-
-async def test_task_dispatch_turns_worker_failure_into_tool_result(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """worker 炸了要变成一条工具结果，不能把主 loop 一起带走。"""
-    import app.agent.dispatch_tool as dt
-    from app.agent.platform_scope import platform_scope
-
-    async def _boom(_kind: str = "search") -> Any:
-        raise RuntimeError("worker 起不来")
-
-    monkeypatch.setattr("app.agent.agents.build_worker_agent", _boom)
-    with platform_scope(["amazon"]):
-        chunk = await dt.task_dispatch("在 amazon 上找帆布旅行包", "search")
-    assert chunk.state == ToolResultState.ERROR
-    text = _chunk_text(chunk)
-    assert "[task_dispatch 错误] RuntimeError" in text and "worker 起不来" in text
-
-
-async def test_task_dispatch_depth_limited(monkeypatch: pytest.MonkeyPatch) -> None:
-    """深度上限：worker 内部再派发要被拒（批 1 起还会由「worker 没有这只工具」结构性兜住）。"""
-    from app.agent.dispatch_tool import task_dispatch
-    from app.harness.fork_guard import enter_fork
-
-    with enter_fork():
-        chunk = await task_dispatch("再派一层", "search")
-    assert chunk.state == ToolResultState.ERROR
-    assert "深度已达上限" in _chunk_text(chunk)
-
-
-async def test_task_dispatch_returns_worker_text(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.agent import dispatch_tool as dt
-    from app.agent.platform_scope import platform_scope
-
-    class _Worker:
-        async def reply(self, _msg: Any) -> Msg:
-            return Msg(
-                name="w", role="assistant", content=[TextBlock(type="text", text="找到 3 件")]
-            )
-
-    async def _build(_kind: str = "search") -> Any:
-        return _Worker()
-
-    monkeypatch.setattr("app.agent.agents.build_worker_agent", _build)
-    with platform_scope(["amazon"]):
-        chunk = await dt.task_dispatch("在 amazon 上找帆布旅行包", "search")
-    assert chunk.state == ToolResultState.SUCCESS
-    assert _chunk_text(chunk) == "找到 3 件"
-    assert chunk.metadata["subagent_type"] == "search"
-
-
 async def test_trade_tools_are_main_only() -> None:
     """TradeAgent 已删（A1）：交易工具只在主 Agent 手上，trade 角色不再存在。"""
     from app.agent.tool_registry import build_toolkit
@@ -497,39 +426,6 @@ async def test_trade_tools_are_main_only() -> None:
     assert {"create_order", "query_order", "cancel_order"} <= names
     with pytest.raises(ValueError, match="未知角色"):
         await build_toolkit("trade")
-
-
-async def test_buyer_preferences_injected_for_search(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """偏好由**服务端**注入给 SearchAgent。"""
-    from app.agent import dispatch_tool as dt
-    from app.agent.platform_scope import platform_scope
-
-    seen: list[str] = []
-
-    class _Worker:
-        async def reply(self, msg: Any) -> Msg:
-            seen.append(msg.get_text_content() or "")
-            return Msg(name="w", role="assistant", content=[TextBlock(type="text", text="ok")])
-
-    async def _build(_kind: str = "search") -> Any:
-        return _Worker()
-
-    monkeypatch.setattr("app.agent.agents.build_worker_agent", _build)
-    monkeypatch.setattr(dt, "get_user_id", lambda: "u1")
-    monkeypatch.setattr(dt, "build_preference_block", _fake_pref_block)
-    with platform_scope(["amazon"]):
-        await dt.task_dispatch("在 amazon 上找帆布旅行包", "search")
-    assert "<buyer-preferences>" in seen[0] and "不要塑料" in seen[0]
-    assert seen[0].endswith("在 amazon 上找帆布旅行包")  # 偏好在前、子任务在后
-
-
-async def _fake_pref_block(_user_id: str, *_a: Any, **_kw: Any) -> str:
-    return "- [material.no_plastic] 不要塑料（材质，排斥）"
-
-
-# ---------- 装配：一 loop 一份控制面 ----------
 
 
 def _fake_model() -> Any:
@@ -573,7 +469,7 @@ async def test_assembly_binds_one_session_per_loop(monkeypatch: pytest.MonkeyPat
     # 装配期拿的是**基座档**（默认 fast，关思考）。这条端到端钉住 P0-1 的另一半：档位表说
     # 一套、装配拿另一套时，上面那批单测（只验档位表本身）是不会红的。
     assert tiers == ["fast"]
-    names = ["planner", "item_search", "task_dispatch", "shopping_summary"]
+    names = ["planner", "item_search", "create_order", "shopping_summary"]
     tools = [await agent.toolkit.get_tool(n) for n in names]
     assert all(t is not None for t in tools)
     for tool in tools:
@@ -581,7 +477,7 @@ async def test_assembly_binds_one_session_per_loop(monkeypatch: pytest.MonkeyPat
         assert len(adapters) == 1
         assert adapters[0]._s is session
     # 写工具已放行（不靠 BYPASS 整档关引擎）
-    assert "task_dispatch" in agent.state.permission_context.allow_rules
+    assert "create_order" in agent.state.permission_context.allow_rules
 
     # 第二次装配必须是另一套：共享工具实例 = 共享控制面状态。
     agent2, session2 = await ag.build_main_agent()

@@ -47,7 +47,6 @@ def test_registry_complete() -> None:
         "shopping_summary",
         "ask_user",
         "forget_preference",
-        "task_dispatch",
     ]:
         assert expected in names, f"{expected} 未注册"
     # 无重名（重名会让 Toolkit 里出现歧义工具）。

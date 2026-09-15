@@ -25,7 +25,7 @@ from app.security.tool_whitelist import allowed_tools, validate_tool_call
 class TestToolWhitelist:
     def test_registered_tool_allowed(self) -> None:
         assert validate_tool_call("item_search")
-        assert validate_tool_call("task_dispatch")
+        assert validate_tool_call("shopping_summary")
 
     def test_hallucinated_tool_rejected(self) -> None:
         assert not validate_tool_call("rm_database")

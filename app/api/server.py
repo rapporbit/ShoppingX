@@ -186,7 +186,7 @@ async def lifespan(_app: FastAPI):
     并起 RT 告警的后台轮询 task——``/metrics`` 是被动的（Prometheus 不来拉就没人知道 P95 涨了），
     告警器是主动的那一半。shutdown 时 cancel 并等它退出，不留悬挂 task。
     """
-    configure_logging()  # A 块：启用 structlog（带 thread_id/user_id/fork_depth 上下文）
+    configure_logging()  # A 块：启用 structlog（带 thread_id/user_id 上下文）
     validate_auth_config()  # 开了鉴权却没配密钥 → 启动即 fail-fast，不拖到每请求 500
     await init_db()  # M16：建 users / threads 两张表（幂等，已存在则跳过）
     # 后台管理页面改过的参数：库 → env → 各模块 _load_params()。必须在预热与建 agent 之前，

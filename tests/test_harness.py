@@ -188,8 +188,8 @@ class TestPhaseStateMachine:
         assert m.phase == Phase.COMPARING
 
     def test_regress_recovers_context_state(self) -> None:
-        """状态回收是回退语义的一部分，由本体一次做完：进展计数清零 + 收线通告重武装 +
-        直搜解锁一次——散在钩子里手抄、漏一处即静默失效的三件套，现在漏不掉。"""
+        """状态回收是回退语义的一部分，由本体一次做完：进展计数清零 + 收线通告重武装——
+        散在钩子里手抄、漏一处即静默失效，现在漏不掉。"""
         from app.harness.state import GuardState
 
         guard = GuardState()
@@ -200,7 +200,6 @@ class TestPhaseStateMachine:
         assert ctx["total_candidates"] == 0
         assert ctx["reset_fresh_candidates"] is True
         assert "search_close" not in guard.notified_transitions
-        assert guard.postfork_search_grants == 1
 
     def test_no_progress_counter(self) -> None:
         m = PhaseStateMachine()
@@ -335,48 +334,12 @@ class TestPhaseHooks:
         白名单禁令为什么撤见 docs/decisions/0001-阶段白名单降级为遥测.md——这条测试就是
         那个决定的执法者，它变红意味着白名单被人加回来了。
         """
-        from app.harness.fork_guard import _fork_depth
         from app.harness.hooks.progress import check_phase_permission
 
-        token = _fork_depth.set(0)
         set_phase_machine(PhaseStateMachine())  # PLANNING
         try:
             for tool in ("item_search", "price_compare", "web_search", "item_picker"):
                 assert await check_phase_permission({"tool_name": tool}) is None
-        finally:
-            _fork_depth.reset(token)
-            reset_phase_machine()
-
-    @pytest.mark.asyncio
-    async def test_phase_check_skips_sub_agents(self) -> None:
-        """worker 里整个 hook 不跑。
-
-        **必须走 harness.run 而不是直调函数**：跳过的判定自 B3 起由注册表统一做
-        （``main_only=True``），直调等于绕开被测的那段逻辑。而且必须**先证明同一份 context
-        在主 loop 里真的会被拒**——否则「worker 里没被拒」可能只是因为压根没构造出拒绝条件，
-        测试恒绿（写这条时就先踩了一次：摘掉 main_only 它照样绿）。
-        """
-        from app.harness.fork_guard import _fork_depth
-        from app.harness.setup import setup_harness
-
-        setup_harness()  # 注册表里得真有这个 hook，否则 run() 是空转
-        set_phase_machine(PhaseStateMachine())
-        try:
-            # 候选池为空 + 阶段 PLANNING：主 loop 里 phase_check 必拒
-            token = _fork_depth.set(0)
-            try:
-                main_ctx = await harness.run("pre_tool_call", {"tool_name": "shopping_summary"})
-            finally:
-                _fork_depth.reset(token)
-            assert main_ctx.get("_rejected"), "对照组失效：主 loop 都没拒，下面那半句证明不了什么"
-            assert main_ctx.get("_rejected_by") == "phase_check"
-
-            token = _fork_depth.set(1)
-            try:
-                sub_ctx = await harness.run("pre_tool_call", {"tool_name": "shopping_summary"})
-            finally:
-                _fork_depth.reset(token)
-            assert not sub_ctx.get("_rejected")  # 子 Agent 的权限由发放范围管，本闸不管
         finally:
             reset_phase_machine()
 
@@ -418,22 +381,6 @@ class TestPhaseHooks:
         # 入参是 JSON 字符串（框架的形态）——当 dict 用会让轨迹渲染成 planner()、评测看不到入参
         assert isinstance(blocks[0].input, str) and "旅行收纳袋" in blocks[0].input
         assert blocks[1].id == blocks[0].id  # 两块必须对得上，否则模型看到无主的结果
-
-    @pytest.mark.asyncio
-    async def test_prefill_skipped_in_worker(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """worker 不预置：它的活是按 demands 检索，demands 里已带主流程拆好的字段。"""
-        from app.harness.adapter import HarnessAgentAdapter
-        from app.harness.fork_guard import _fork_depth
-
-        token = _fork_depth.set(1)
-        try:
-            session = _mw("在 amazon 搜收纳袋")
-            agent = _StubAgent()
-            await HarnessAgentAdapter(session)._prefill(agent)
-            assert not session.planner_done
-            assert agent.state.context == []
-        finally:
-            _fork_depth.reset(token)
 
     @pytest.mark.asyncio
     async def test_prefill_degrades_on_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -534,10 +481,8 @@ class TestPhaseHooks:
 
     @pytest.mark.asyncio
     async def test_phase_transition_on_planner(self) -> None:
-        from app.harness.fork_guard import _fork_depth
         from app.harness.hooks.progress import try_phase_transition
 
-        token = _fork_depth.set(0)
         m = PhaseStateMachine()
         set_phase_machine(m)
         try:
@@ -545,7 +490,6 @@ class TestPhaseHooks:
             await try_phase_transition(ctx)
             assert m.phase == Phase.SEARCHING
         finally:
-            _fork_depth.reset(token)
             reset_phase_machine()
 
     @pytest.mark.asyncio
@@ -553,10 +497,8 @@ class TestPhaseHooks:
         """转移本体不再经 inject 发通告——inject 通道晚一轮（perf-audit-r3 实测模型在读到
         通告前就已决定再搜）。「检索收线」通告改由 transition_notice 缀在工具结果尾部
         （见 test_transition_notice.py），这里只验证状态机推进。"""
-        from app.harness.fork_guard import _fork_depth
         from app.harness.hooks.progress import try_phase_transition
 
-        token = _fork_depth.set(0)
         m = PhaseStateMachine()
         m.try_transition("planner_output_ready")  # 先推进到 SEARCHING
         set_phase_machine(m)
@@ -566,15 +508,12 @@ class TestPhaseHooks:
             assert m.phase == Phase.COMPARING
             assert not ctx.get("inject_messages")
         finally:
-            _fork_depth.reset(token)
             reset_phase_machine()
 
     @pytest.mark.asyncio
     async def test_phase_rollback(self) -> None:
-        from app.harness.fork_guard import _fork_depth
         from app.harness.hooks.progress import check_phase_rollback
 
-        token = _fork_depth.set(0)
         m = PhaseStateMachine()
         m.try_transition("planner_output_ready")
         m.try_transition("candidates_available")
@@ -593,7 +532,6 @@ class TestPhaseHooks:
             assert m.phase == Phase.SEARCHING
             assert any("回退" in msg["content"] for msg in result.get("inject_messages", []))
         finally:
-            _fork_depth.reset(token)
             reset_phase_machine()
 
 
@@ -1364,16 +1302,7 @@ class TestRollbackRequiresPickerAttempt:
 
 
 class TestSequencingAnyOf:
-    """顺序断言：满足任一前置即可，且必须认 fork 检索通路。"""
-
-    @pytest.mark.asyncio
-    async def test_fork_retrieval_satisfies_item_picker_prereq(self) -> None:
-        """候选由 task_dispatch 的子 Agent 检索而来 → 不该报顺序错误。"""
-        from app.harness.hooks.sequencing import check_sequencing
-
-        ctx = {"tool_name": "item_picker", "called_tools": {"task_dispatch"}}
-        result = await check_sequencing(ctx)
-        assert result is None or not result.get("inject_messages")
+    """顺序断言：满足任一前置即可。"""
 
     @pytest.mark.asyncio
     async def test_candidates_in_registry_satisfy_prereq(self, monkeypatch) -> None:
@@ -1566,58 +1495,6 @@ class TestGateOrderingContracts:
         gates = sorted(harness.list_hooks("pre_tool_call"), key=lambda t: t[2])
         assert gates[-1][1] == "tool_breaker_gate", f"熔断闸不是最后一道: {[g[1] for g in gates]}"
 
-    def test_search_authority_runs_before_retrieval_charge(self) -> None:
-        """search_authority 读的是 item_search 自增前的计数，自增在 retrieval_charge。
-
-        谁把自增前移，子 Agent 的「恰好放行一次」会塌成「放行 0 次」。
-        """
-        from app.harness.middleware import harness
-        from app.harness.setup import setup_harness
-
-        setup_harness()
-        prio = {n: p for _, n, p in harness.list_hooks("pre_tool_call")}
-        assert prio["spend_gate"] < prio["search_gate"] < prio["tool_breaker_gate"]
-        import inspect
-
-        from app.harness.hooks import budget
-
-        body = inspect.getsource(budget.check_search)
-        assert body.index("check_search_authority") < body.index("charge_retrieval")
-
-    async def test_sub_search_cap_admits_exactly_cap_calls(self) -> None:
-        """行为契约：子 Agent 的 item_search **恰好**放行 SUB_ITEM_SEARCH_CAP 次。
-
-        上面的 priority 测试钉的是钩子顺序；这条钉「自增住在 45 号闸里」——谁把
-        ``guard.item_search_calls += 1`` 挪进 30 号闸内部（顺序不变、优先级测试照绿），
-        cap 次就塌成 cap-1 次，本测试当场红。"""
-        from app.harness.budgets import SUB_ITEM_SEARCH_CAP
-        from app.harness.fork_guard import enter_fork
-        from app.harness.hooks import budget as tool_gates
-        from app.harness.state import GuardState
-
-        guard = GuardState()
-        with enter_fork():
-            for _ in range(SUB_ITEM_SEARCH_CAP):
-                ctx: dict = {"_guard": guard, "tool_name": "item_search", "tool_args": {}}
-                assert await tool_gates.check_search_authority(ctx) is None
-                await tool_gates.charge_retrieval(ctx)
-            with pytest.raises(HookRejectSignal):
-                await tool_gates.check_search_authority(
-                    {"_guard": guard, "tool_name": "item_search", "tool_args": {}}
-                )
-
-    def test_token_budget_runs_before_fork_charge(self) -> None:
-        """token_budget_gate 必须早于 fork_budget_gate：fork 闸 charge 即扣槽（parallel 槽
-        只有 1 个），预算拒绝若发生在扣槽之后，被拒的尝试会烧掉唯一的并行额度、还连带触发
-        postfork 直搜拦截。"""
-
-        import inspect
-
-        from app.harness.hooks import budget
-
-        body = inspect.getsource(budget.check_spend)
-        assert body.index("check_token_budget") < body.index("check_fork_budget")
-
 
 # ============================================================
 # 偏好注入：planner 之后，且只给域内的
@@ -1676,75 +1553,6 @@ class TestPreferenceInject:
         """planner 以外的工具不触发注入——域还没产生，注入了就是跨域全量。"""
         text = await _run_inject_hook("item_search", "footwear")
         assert text == ""
-
-
-# ============================================================
-# postfork 闸的结果感知解锁：棘轮闸的两个出口（空池 / 回退授权）
-# ============================================================
-
-
-@pytest.mark.asyncio
-class TestPostforkGateRelease:
-    """并行 fork 跑过后，item_search 不再是无条件永久拦截。"""
-
-    def _ctx(self, guard=None) -> dict:
-        from app.harness.state import GuardState
-
-        return {"_guard": guard or GuardState(), "tool_name": "item_search", "tool_args": {}}
-
-    async def test_empty_pool_releases_gate(self) -> None:
-        """整轮 fork 失败/全空时候选池为空——「候选已汇集」不成立，直搜是仅剩的补救通路。"""
-        from app.harness.budgets import fork_budget_scope
-        from app.harness.hooks.budget import check_search_authority
-
-        with fork_budget_scope() as budget:
-            budget.charge("task_dispatch")
-            assert await check_search_authority(self._ctx()) is None
-
-    async def test_nonempty_pool_still_denied(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """正常情形（fork 后候选在池）维持原语义：直搜拦下，逼模型走比价/精挑/收尾。"""
-        from app.harness.budgets import fork_budget_scope
-        from app.harness.hooks import budget as tool_gates
-
-        monkeypatch.setattr(tool_gates, "candidate_count", lambda: 5)
-        with fork_budget_scope() as budget:
-            budget.charge("task_dispatch")
-            with pytest.raises(HookRejectSignal):
-                await tool_gates.check_search_authority(self._ctx())
-
-    async def test_rollback_grant_allows_exactly_once(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from app.harness.budgets import fork_budget_scope
-        from app.harness.hooks import budget as tool_gates
-        from app.harness.state import GuardState
-
-        monkeypatch.setattr(tool_gates, "candidate_count", lambda: 5)
-        guard = GuardState()
-        guard.postfork_search_grants = 1
-        with fork_budget_scope() as budget:
-            budget.charge("task_dispatch")
-            assert await tool_gates.check_search_authority(self._ctx(guard)) is None
-            with pytest.raises(HookRejectSignal):
-                await tool_gates.check_search_authority(self._ctx(guard))
-
-    async def test_phase_rollback_issues_grant(self) -> None:
-        """回退到 SEARCHING 的同时必须发补搜授权——否则初搜走过并行 fork 时，注入的
-        「调整搜索条件重新检索」会撞 postfork 哨兵，回退腿在集成链路里是死的。"""
-        from app.harness.hooks.progress import check_phase_rollback
-        from app.harness.state import GuardState
-
-        machine = PhaseStateMachine(initial=Phase.COMPARING)
-        set_phase_machine(machine)
-        try:
-            guard = GuardState()
-            ctx = {"_guard": guard, "picker_attempted": True, "picks_count": 0}
-            await check_phase_rollback(ctx)
-            await check_phase_rollback(ctx)
-            assert machine.phase is Phase.SEARCHING
-            assert guard.postfork_search_grants == 1
-        finally:
-            reset_phase_machine()
 
 
 # ============================================================
@@ -1849,8 +1657,6 @@ class TestInternalMarkersCoverage:
         texts += [
             sentinels.converge_directive(9),
             sentinels.retrieval_exhausted(10),
-            sentinels.sub_search_budget_note(0, 1),
-            sentinels.sub_search_budget_note(1, 1),
             sentinels.tool_breaker_open("item_search"),
         ]
         assert texts, "哨兵常量一个都没扫到——扫描逻辑坏了"
@@ -1885,46 +1691,35 @@ class TestWatchdog:
     async def test_first_call_opens_clock(self) -> None:
         import time
 
-        from app.harness.fork_guard import _fork_depth
         from app.harness.hooks.termination import check_liveness
         from app.harness.state import GuardState
 
-        token = _fork_depth.set(0)
         guard = GuardState()
-        try:
-            assert await check_liveness(self._ctx(guard)) is None
-            assert guard.last_progress_at > 0
-            assert abs(guard.last_progress_at - time.monotonic()) < 1
-        finally:
-            _fork_depth.reset(token)
+        assert await check_liveness(self._ctx(guard)) is None
+        assert guard.last_progress_at > 0
+        assert abs(guard.last_progress_at - time.monotonic()) < 1
 
     @pytest.mark.asyncio
     async def test_stall_injects_converge_notice(self) -> None:
         import time
 
-        from app.harness.fork_guard import _fork_depth
         from app.harness.hooks.termination import WATCHDOG_STALL_SEC, check_liveness
         from app.harness.state import GuardState
 
-        token = _fork_depth.set(0)
         guard = GuardState()
         guard.last_progress_at = time.monotonic() - WATCHDOG_STALL_SEC - 5
         ctx = self._ctx(guard)
-        try:
-            result = await check_liveness(ctx)
-            assert result is not None
-            assert len(ctx["messages"]) == 1
-            assert "看门狗" in ctx["messages"][0].get_text_content()
-            assert guard.watchdog_nudged_at > 0
-            assert "fallback_answer" not in ctx  # 第一级只提醒，不硬停
-        finally:
-            _fork_depth.reset(token)
+        result = await check_liveness(ctx)
+        assert result is not None
+        assert len(ctx["messages"]) == 1
+        assert "看门狗" in ctx["messages"][0].get_text_content()
+        assert guard.watchdog_nudged_at > 0
+        assert "fallback_answer" not in ctx  # 第一级只提醒，不硬停
 
     @pytest.mark.asyncio
     async def test_hard_stop_after_grace(self) -> None:
         import time
 
-        from app.harness.fork_guard import _fork_depth
         from app.harness.hooks.termination import (
             WATCHDOG_GRACE_SEC,
             WATCHDOG_STALL_SEC,
@@ -1932,73 +1727,29 @@ class TestWatchdog:
         )
         from app.harness.state import GuardState
 
-        token = _fork_depth.set(0)
         guard = GuardState()
         now = time.monotonic()
         guard.last_progress_at = now - WATCHDOG_STALL_SEC - WATCHDOG_GRACE_SEC - 10
         guard.watchdog_nudged_at = now - WATCHDOG_GRACE_SEC - 1
         ctx = self._ctx(guard)
-        try:
-            result = await check_liveness(ctx)
-            assert result is not None
-            assert "先停在这里" in ctx["fallback_answer"]
-        finally:
-            _fork_depth.reset(token)
+        result = await check_liveness(ctx)
+        assert result is not None
+        assert "先停在这里" in ctx["fallback_answer"]
 
     @pytest.mark.asyncio
     async def test_progress_disarms_nudge(self) -> None:
         import time
 
-        from app.harness.fork_guard import _fork_depth
         from app.harness.hooks.termination import check_liveness
         from app.harness.state import GuardState
 
-        token = _fork_depth.set(0)
         guard = GuardState()
         guard.last_progress_at = time.monotonic()  # 刚有过真实进展
         guard.watchdog_nudged_at = time.monotonic() - 100  # 旧的武装应被解除
         ctx = self._ctx(guard)
-        try:
-            assert await check_liveness(ctx) is None
-            assert guard.watchdog_nudged_at == 0.0
-            assert "fallback_answer" not in ctx
-        finally:
-            _fork_depth.reset(token)
-
-    @pytest.mark.asyncio
-    async def test_skips_sub_agents(self) -> None:
-        """worker 里看门狗整个不跑。
-
-        走 harness.run（跳过由注册表裁决，B3），并先跑一遍主 loop 的对照——同一份停滞状态在
-        depth=0 下必须真的武装看门狗，否则「worker 里没动静」证明不了任何事。
-        """
-        import time
-
-        from app.harness.fork_guard import _fork_depth
-        from app.harness.setup import setup_harness
-        from app.harness.state import GuardState
-
-        setup_harness()
-        stalled = time.monotonic() - 999
-
-        token = _fork_depth.set(0)
-        try:
-            main_guard = GuardState()
-            main_guard.last_progress_at = stalled
-            await harness.run("pre_think", self._ctx(main_guard))
-        finally:
-            _fork_depth.reset(token)
-        assert main_guard.watchdog_nudged_at != 0.0, "对照组失效：主 loop 里看门狗都没武装"
-
-        token = _fork_depth.set(1)
-        try:
-            sub_guard = GuardState()
-            sub_guard.last_progress_at = stalled
-            ctx = await harness.run("pre_think", self._ctx(sub_guard))
-        finally:
-            _fork_depth.reset(token)
+        assert await check_liveness(ctx) is None
+        assert guard.watchdog_nudged_at == 0.0
         assert "fallback_answer" not in ctx
-        assert sub_guard.watchdog_nudged_at == 0.0
 
 
 # ============================================================
@@ -2007,7 +1758,7 @@ class TestWatchdog:
 
 
 class TestUnifiedGateEscape:
-    """效率闸（websearch / postfork）连拒 2 次后放行；安全闸（子搜上限）无 escape_key 永不放行。"""
+    """效率闸（websearch）连拒 2 次后放行；安全闸无 escape_key 永不放行。"""
 
     @pytest.mark.asyncio
     async def test_websearch_gate_escape(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2027,52 +1778,6 @@ class TestUnifiedGateEscape:
         guard.think_step += 1
         out = await mw.run("pre_tool_call", {"tool_name": "web_search", "_guard": guard})
         assert not out.get("_rejected")  # 第 3 轮逃生放行（检索预算另有兜底）
-
-    @pytest.mark.asyncio
-    async def test_postfork_search_gate_escape(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from types import SimpleNamespace
-
-        import app.harness.hooks.budget as tg
-        from app.harness.state import GuardState
-
-        monkeypatch.setattr(tg, "get_fork_budget", lambda: SimpleNamespace(dispatched=True))
-        monkeypatch.setattr(tg, "candidate_count", lambda: 5)
-        guard = GuardState()
-        guard.notified_transitions.add("search_close")
-        mw = HarnessMiddleware()
-        mw.register(
-            "pre_tool_call", "search_authority_gate", tg.check_search_authority, priority=30
-        )
-        for _ in range(2):
-            guard.think_step += 1  # 同 websearch 测试：连拒按模型决策轮计，须推进轮次
-            out = await mw.run("pre_tool_call", {"tool_name": "item_search", "_guard": guard})
-            assert out.get("_rejected")
-        guard.think_step += 1
-        out = await mw.run("pre_tool_call", {"tool_name": "item_search", "_guard": guard})
-        assert not out.get("_rejected")  # 第 3 轮逃生放行
-        assert "search_close" not in guard.notified_transitions  # 收线通告已重新武装
-
-    @pytest.mark.asyncio
-    async def test_sub_search_cap_is_not_escapable(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """子 Agent 搜索上限是安全闸（fork 安全层），模型再坚持也不放行。"""
-        import app.harness.hooks.budget as tg
-        from app.harness.budgets import SUB_ITEM_SEARCH_CAP
-        from app.harness.fork_guard import _fork_depth
-        from app.harness.state import GuardState
-
-        token = _fork_depth.set(1)
-        guard = GuardState()
-        guard.item_search_calls = SUB_ITEM_SEARCH_CAP
-        mw = HarnessMiddleware()
-        mw.register(
-            "pre_tool_call", "search_authority_gate", tg.check_search_authority, priority=30
-        )
-        try:
-            for _ in range(5):
-                out = await mw.run("pre_tool_call", {"tool_name": "item_search", "_guard": guard})
-                assert out.get("_rejected")
-        finally:
-            _fork_depth.reset(token)
 
     @pytest.mark.asyncio
     async def test_gate_events_metric(self, monkeypatch: pytest.MonkeyPatch) -> None:

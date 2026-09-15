@@ -33,17 +33,8 @@ class GuardState:
     detector: LoopDetector = field(init=False)
     #: per-instance 检索计数（无 session 作用域时的回退口径）
     retrieval_count: int = 0
-    #: per-instance item_search 计数（子 loop 夺权 + 「预算可见」批注的计数源）
+    #: per-instance item_search 计数
     item_search_calls: int = 0
-    #: postfork 补搜授权：phase_rollback 回退到 SEARCHING 时 +1，search_authority_gate 消费。
-    #: postfork 闸是单向棘轮（并行 fork 跑过即永久拦主 loop 直搜），这是它唯一的回退出口——
-    #: 否则阶段机指路「重新检索」而闸拦死，回退腿在集成链路里是死的。
-    postfork_search_grants: int = 0
-    #: 套装轮按槽补搜授权的消费记录：每个已登记槽位有 1 次穿过 postfork 闸直搜的额度
-    #: （item_search 带 slot= 即消费）。「fork 即检索阶段结束」对 bundle 按槽补搜不成立——
-    #: 没有这条正规出口时，同批并行补搜会被逃生门按到达顺序放行一半（线上 badcase 4c0ac682：
-    #: 恰好拦掉唯一没真货的水杯槽）。检索总量预算（retrieval_charge）照常兜底。
-    slot_backfill_used: set[str] = field(default_factory=set)
     #: 主 loop 本轮是否已调过终结工具（终结硬停闸用）
     terminal_reached: bool = False
     #: 本次模型调用内已因「纯文字收尾」重发过几次（上限 MAX_TERMINAL_NUDGE_RETRIES）。

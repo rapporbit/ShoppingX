@@ -1,45 +1,33 @@
-"""主 Agent / worker 的装配（批 0 / L3）。
+"""主 Agent 的装配（批 0 / L3）。
 
 一次 AgentLoop 需要三样东西各建一份、彼此对应：**一个 ``HarnessSession``**（控制面状态）、
 **一份 Toolkit**（工具实例上挂着那个 session 的工具适配器）、**一个 Agent**（模型适配器也拿
 同一个 session）。三者绑成一套是硬要求：AgentScope 把模型钩子与工具钩子拆成了两个类，它们
-之间的三条接力通道全靠共享的 session 传（见 ``app/harness/adapter.py``），错配就是 worker
-的断言流进主 loop、或者两个并发 worker 互相污染循环检测。
+之间的三条接力通道全靠共享的 session 传（见 ``app/harness/adapter.py``）。
 
-**批 1 起是 Supervisor-Workers**：主 Agent 持全部业务工具（含交易工具）、**单干优先**；worker
-只剩 SearchAgent（只读），边界靠三样结构性保证（Toolkit 发放范围 / ``is_read_only`` 标记 /
-``PermissionEngine`` 精准放行），不靠提示词劝退——它手上根本没有写工具。TradeAgent 已删（A1）：
-交易工具只出确认卡，主 Agent 自己调。
-
-``WORKER_MODE=clone`` 保留批 0 的同质克隆形态（同工具集、同 system prompt，只隔离 thread /
-上下文 / 控制面状态），用途只有一个：在**同一运行时、同一批 query** 上量出两种结构的差异，
-作 Q13「为什么不用同质 fork」的同框架对照基准。
+**A4 起是单环**：一个模型一个 loop，持全部业务工具；并行靠同一轮发多个工具调用（框架并发执行）。
+做过 Supervisor-Workers（批 1）与同质 fork（批 0），440 个会话实测派发全是单跳壳后删掉，
+数据留在 ``docs/milestones/``。
 """
 
-import os
 from collections.abc import Sequence
 
 from agentscope.agent import Agent, ReActConfig
 from agentscope.middleware import MiddlewareBase
 from agentscope.state import AgentState
 
-from app.agent.limits import MAIN_MAX_ITERS, WORKER_MAX_ITERS
-from app.agent.llm import get_model_config, get_tier_llm, main_loop_tier_base, worker_tier
+from app.agent.limits import MAIN_MAX_ITERS
+from app.agent.llm import get_model_config, get_tier_llm, main_loop_tier_base
 from app.agent.permissions import allow_tools
-from app.agent.prompts import get_system_prompt, get_worker_system_prompt
+from app.agent.prompts import get_system_prompt
 from app.agent.tool_registry import build_toolkit
 from app.agent.tracing import tracing_middlewares
 from app.harness.adapter import HarnessAgentAdapter, HarnessSession, HarnessToolAdapter
 from app.harness.middleware import harness
 from app.harness.setup import setup_harness
 
-# 三个迭代上限的定义与理由在 ``app.agent.limits``（防失控的上限全在那一页）。这里按本名引入，
+# 迭代上限的定义与理由在 ``app.agent.limits``（防失控的上限全在那一页）。这里按本名引入，
 # 消费点仍是本模块的名字——``monkeypatch.setattr(agents, "MAIN_MAX_ITERS", 2)`` 照旧有效。
-
-# ``split`` = 读写切分（批 1 起的默认）；``clone`` = worker 是主 Agent 的完整克隆（批 0 的
-# 过渡形态）。开关留着不是为了「以后可能要用」，而是为了能在**同一运行时、同一批 query**
-# 上量出两种结构的差异——否则「Supervisor-Workers 比同质 fork 好」就只是一句话。
-WORKER_MODE = os.environ.get("WORKER_MODE", "split")
 
 
 async def _run_system_prompt_hooks(prompt: str, *, role: str, query: str) -> str:
@@ -52,7 +40,7 @@ async def _run_system_prompt_hooks(prompt: str, *, role: str, query: str) -> str
 
     追加内容按注册顺序（priority 升序）拼接，所以同一批策略每轮渲染出的字节完全一致。
     """
-    setup_harness()  # 幂等；worker 装配时主 loop 早已初始化过，这里只兜离线脚本 / 单测
+    setup_harness()  # 幂等；服务启动时已初始化过，这里只兜离线脚本 / 单测
     ctx = await harness.run(
         "on_system_prompt", {"role": role, "query": query, "system_prompt": prompt, "append": []}
     )
@@ -69,7 +57,6 @@ async def _assemble(
     image_paths: Sequence[str] = (),
     state: AgentState | None = None,
     tier: str,
-    system_prompt: str | None = None,
 ) -> tuple[Agent, HarnessSession]:
     """按「一个 session + 一份 Toolkit + 一个 Agent」装一套，返回 Agent 与它的 session。
 
@@ -77,8 +64,9 @@ async def _assemble(
     context / permission / tool 上下文一并接上（见 orchestrator 的 session.json）。
     """
     session = HarnessSession(original_query=original_query, image_paths=image_paths)
-    base_prompt = system_prompt or get_system_prompt()
-    base_prompt = await _run_system_prompt_hooks(base_prompt, role=role, query=original_query)
+    base_prompt = await _run_system_prompt_hooks(
+        get_system_prompt(), role=role, query=original_query
+    )
     # 工具适配器挂在**工具实例**上，所以工具实例不能跨 loop 复用 —— build_toolkit 每次按需
     # 重建一批壳（壳很薄，底下的实现函数与 schema 仍是同一份，见 tool_registry）。
     toolkit = await build_toolkit(role, tool_middlewares=[HarnessToolAdapter(session)])
@@ -87,7 +75,7 @@ async def _assemble(
     allow_tools(agent_state)
     # 观测：框架原生的 ``TracingMiddleware`` 打标准 GenAI 语义属性，Langfuse（本身是 OTEL SDK
     # 包装）的 span 过滤器按 ``gen_ai.*`` 放行 —— 两头自动对上，不需要胶水（见 tracing.py 尾部）。
-    # 未启用观测时返回空表，主 + worker 一视同仁：trace 里不会出现「有的轮有、有的轮没有」的空洞。
+    # 未启用观测时返回空表：trace 里不会出现「有的轮有、有的轮没有」的空洞。
     # 顺序上放在控制面**后面**：适配器改写 messages / 换档发生在前，trace 记的是真正发出去的那份。
     middlewares: list[MiddlewareBase] = [HarnessAgentAdapter(session), *tracing_middlewares()]
     agent = Agent(
@@ -95,11 +83,9 @@ async def _assemble(
         # system prompt 在**装配期**定稿（``on_system_prompt`` 钩子跑完就不再动）→ 一次任务内
         # 跨轮字节稳定、可命中 prompt cache；钩子唯一允许的动作是往**末尾**追加，前面那段
         # （role / workflow / tool_policy / …）逐字不变，所以缓存前缀照常从头命中。
-        # 主 Agent 用主 prompt；split 模式的 worker 用自己那段专职 prompt（同类 worker 之间
-        # 共用一条前缀），clone 模式的 worker 仍与主 Agent 逐字相同——那是对照组的定义。
         system_prompt=base_prompt,
         # 模型分层只换「档位」，工具集与 prompt 不动。取值由 llm.py 的档位策略表统一给
-        # （``MAIN_LOOP_TIER_BASE`` / ``WORKER_TIER``），装配处不再自己判断该用哪档——这正是
+        # （``MAIN_LOOP_TIER_BASE``），装配处不再自己判断该用哪档——这正是
         # P0-1 的教训：装配写死一档、Hook 假设另一档，两边都不会报错。
         model=get_tier_llm(tier),
         toolkit=toolkit,
@@ -120,7 +106,7 @@ async def build_main_agent(
     image_paths: Sequence[str] = (),
     state: AgentState | None = None,
 ) -> tuple[Agent, HarnessSession]:
-    """装配主 Agent（Supervisor）。
+    """装配主 Agent。
 
     ``original_query`` 是**未经 LLM 转述**的本轮用户原文，交给控制面当漂移检测与语义断言的
     对齐基准（见 harness 的 drift_detector）——不是给模型看的，模型看的是 orchestrator 拼的
@@ -129,7 +115,7 @@ async def build_main_agent(
 
     基座档由 ``MAIN_LOOP_TIER_BASE`` 决定（默认 fast，关思考）：第 2 轮起决策空间已被阶段机与
     候选 id 化夹死，thinking token 买不到东西。第 1 轮是全链路唯一没被机制锁死的决策（购物还是
-    闲聊、先拆解还是先查品类、自己干还是派 worker），由 ``MAIN_LOOP_TIER_FIRST`` 单独加档，
+    闲聊、先拆解还是先查品类），由 ``MAIN_LOOP_TIER_FIRST`` 单独加档，
     落点在 ``HarnessAgentAdapter.on_model_call``。
     """
     return await _assemble(
@@ -141,34 +127,3 @@ async def build_main_agent(
         state=state,
         tier=main_loop_tier_base(),
     )
-
-
-async def build_worker_agent(kind: str = "search") -> Agent:
-    """装配一个 worker（只剩 ``search`` 只读一种，TradeAgent 已在 A1 删除）。
-
-    ``split``（默认）：``kind`` 决定两件事——**拿得到哪些工具**（``tool_registry._ROLE_TOOLS``，
-    这是读写边界的结构性保证）与**哪段 system prompt**。SearchAgent 的 Toolkit 里根本没有写工具。
-
-    ``clone``：批 0 的过渡形态，worker = 主 Agent 的完整克隆（全集工具 + 同一段 system prompt），
-    只在 thread / 上下文 / 控制面状态上隔离。留着是为了在同一运行时、同一批 query 上量出两种
-    结构的差异（Q13 的同框架对照基准），**不是**为了将来还要用。
-
-    只回 Agent 不回 session：worker 的控制面状态是它自己的私事，派发方（``_run_worker``）
-    只关心最终那条回复。
-    """
-    if WORKER_MODE == "clone":
-        agent, _ = await _assemble(
-            name=f"shoppingx-{kind}",
-            role="main",
-            max_iters=WORKER_MAX_ITERS,
-            tier=worker_tier(),
-        )
-        return agent
-    agent, _ = await _assemble(
-        name=f"shoppingx-{kind}",
-        role=kind,
-        max_iters=WORKER_MAX_ITERS,
-        tier=worker_tier(),
-        system_prompt=get_worker_system_prompt(kind),
-    )
-    return agent

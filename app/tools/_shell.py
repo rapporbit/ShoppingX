@@ -212,9 +212,9 @@ def to_function_tool(
 
     Args:
         shell: ``@tool`` 声明出来的工具对象。
-        is_read_only: 只读标记。**这是权限边界的依据**——SearchAgent 靠它与 ``PermissionEngine``
-            做结构性拦截，不是靠提示词劝退，所以不能凭感觉标。
-        is_concurrency_safe: 能否被同轮并发调用（``task_dispatch`` 要 True）。
+        is_read_only: 只读标记。**这是权限边界的依据**——``PermissionEngine`` 靠它做结构性拦截，
+            不是靠提示词劝退，所以不能凭感觉标。
+        is_concurrency_safe: 能否被同轮并发调用（``item_search`` 批检索要 True）。
         middlewares: 挂在这只工具上的中间件（harness 的工具适配器走这里）。**它持有 per-loop
             的状态**，所以带中间件的工具实例不能跨 loop 复用——见 ``tool_registry._make_tools``。
     """

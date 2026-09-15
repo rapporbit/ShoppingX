@@ -10,7 +10,7 @@
 - 漏放一个 API Key：真出事。
 
 所以只脱三类**确定无害可删**的东西：密钥格式的字符串、内部服务地址、服务器绝对路径。工具名不脱
-（``dispatch_tool`` 这个名字对攻击者毫无价值，模型偶尔提到它也不构成泄露）；``item_id`` / 商品编号
+（``item_picker`` 这类名字对攻击者毫无价值，模型偶尔提到它也不构成泄露）；``item_id`` / 商品编号
 不脱（同 ``session_hooks`` 里既有的取向：宁可漏放也不误杀）。
 
 与 :mod:`app.harness.hooks.safety` 的 ``output_guard`` Hook 的分工：那个洗的是 **Harness

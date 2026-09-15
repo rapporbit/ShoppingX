@@ -5,7 +5,6 @@
 - 重连场景按对象身份注销，不误删新连接
 - 推送失败的死连接被自动摘除
 - monitor.report_* 产出统一结构事件、按序经连接推出
-- dispatch fork 时向【父】thread 上报 fork 事件
 """
 
 from __future__ import annotations
@@ -15,7 +14,6 @@ from typing import Any
 
 import pytest
 
-from app.agent.dispatch_tool import _run_worker
 from app.api import monitor
 from app.api.connection import ConnectionManager
 from app.utils.thread_ctx import thread_scope
@@ -130,7 +128,7 @@ async def test_monitor_emits_structured_event_in_order() -> None:
 
 # ---------- 活动流录制：供历史回看还原「思考过程」 ----------
 async def test_activity_capture_records_thought_events_only() -> None:
-    # begin_activity_capture 攒思考过程事件（session_created / assistant_call / tool_* / fork），
+    # begin_activity_capture 攒思考过程事件（session_created / assistant_call / tool_*），
     # 但**不**收终结类（task_result）——那是状态信号、商品卡走 items 另存，回看不画思考行。
     mgr = ConnectionManager()
     monitor.set_connection_manager(mgr)
@@ -191,39 +189,6 @@ async def test_long_text_is_clipped() -> None:
     answer = ws.sent[0]["data"]["final_answer"]
     assert answer.endswith("…[truncated]")
     assert len(answer) < 5000
-
-
-# ---------- fork 事件路由到父 thread ----------
-async def test_fork_event_reported_to_parent_thread() -> None:
-    mgr = ConnectionManager()
-    monitor.set_connection_manager(mgr)
-    parent_ws = FakeWebSocket()
-    await mgr.connect(parent_ws, "parent")
-
-    # 让 worker 一建就失败——无所谓，我们只验证「fork 事件在子任务真正跑起来之前已发给父 thread」。
-    import app.agent.agents as agents_mod
-
-    async def boom(_kind: str) -> Any:
-        raise RuntimeError("不必真的起 worker")
-
-    original = agents_mod.build_worker_agent
-    agents_mod.build_worker_agent = boom
-    try:
-        with thread_scope("parent", Path("/tmp/parent")):
-            result = await _run_worker("去 amazon 搜帐篷", "search")
-    finally:
-        agents_mod.build_worker_agent = original
-        monitor.set_connection_manager(ConnectionManager())
-
-    # 子任务失败与否都该返回字符串（派发容错），不抛。
-    assert isinstance(result, str)
-    fork_events = [m for m in parent_ws.sent if m["event"] == "fork"]
-    assert len(fork_events) == 1
-    data = fork_events[0]["data"]
-    assert data["demands"] == "去 amazon 搜帐篷"
-    assert data["sub_thread_id"].startswith("search-")
-    # 事件落在父 thread 的连接上（不是子 thread）。
-    assert fork_events[0]["thread_id"] == "parent"
 
 
 @pytest.mark.parametrize(
