@@ -1,14 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { domainLabel } from "../domains";
 import type { AguiEvent } from "../types";
-import {
-  CheckCircleIcon,
-  ChevronRight,
-  ErrorCircleIcon,
-  ForkIcon,
-  SparkleIcon,
-  SpinnerIcon,
-} from "./icons";
+import { CheckCircle2, ChevronRight, GitFork, Loader2, Sparkles, XCircle } from "lucide-react";
 
 // 「思考过程」活动流 —— 结构与动效对齐 Accio 的 thought-process 组件：
 //   · 运行中标题是一行会扫光的渐变文字（.shimmer-text），实时显示当前在做什么
@@ -74,11 +67,11 @@ function buildSteps(events: AguiEvent[]): Step[] {
 }
 
 const STEP_ICON = {
-  running: SpinnerIcon,
-  done: CheckCircleIcon,
-  error: ErrorCircleIcon,
-  fork: ForkIcon,
-  info: SparkleIcon,
+  running: Loader2,
+  done: CheckCircle2,
+  error: XCircle,
+  fork: GitFork,
+  info: Sparkles,
 } as const;
 
 // 运行中标题：优先播报最后一个还在跑的工具，否则退回「正在思考」。
@@ -148,7 +141,7 @@ function StepRow({ step }: { step: Step }) {
     return (
       <div className="step-row">
         <div className="step-head" style={{ cursor: "default" }}>
-          <SpinnerIcon width={14} height={14} className="step-icon running" />
+          <Loader2 size={14} strokeWidth={2} className="step-icon running" />
           <span className="step-label">
             排队中：前面还有 {ahead} 个任务{eta > 0 ? `，预计等待约 ${eta} 秒` : ""}
           </span>
@@ -178,11 +171,11 @@ function StepRow({ step }: { step: Step }) {
         disabled={!expandable}
         aria-expanded={expandable ? open : undefined}
       >
-        <Icon width={14} height={14} className={`step-icon ${state}`} />
+        <Icon size={14} strokeWidth={2} className={`step-icon ${state}`} />
         <span className="step-label">{label}</span>
         {detail && !open && <span className="step-preview">{detail}</span>}
         {expandable && (
-          <ChevronRight width={13} height={13} className={`thought-chev ${open ? "open" : ""}`} />
+          <ChevronRight size={13} strokeWidth={2} className={`thought-chev ${open ? "open" : ""}`} />
         )}
       </button>
       {detail && open && <div className="step-detail">{detail}</div>}
@@ -240,11 +233,11 @@ export function ActivityFeed({ events, running }: ActivityFeedProps) {
         onClick={() => setOverride(!open)}
         aria-expanded={open}
       >
-        <SparkleIcon width={14} height={14} className="thought-spark" />
+        <Sparkles size={14} strokeWidth={1.75} className="thought-spark" />
         <span className={running ? "shimmer-text" : undefined}>
           {running ? headline(steps) : "查看思考过程"}
         </span>
-        <ChevronRight width={14} height={14} className={`thought-chev ${open ? "open" : ""}`} />
+        <ChevronRight size={14} strokeWidth={2} className={`thought-chev ${open ? "open" : ""}`} />
       </button>
 
       {running && (

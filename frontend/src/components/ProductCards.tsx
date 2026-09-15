@@ -1,6 +1,7 @@
 import { memo, useMemo, useState } from "react";
 import type { ProductItem } from "../types";
-import { CheckIcon, ExternalLinkIcon, GlobeIcon, SearchIcon } from "./icons";
+import { Check, ExternalLink, Globe, Heart, Search } from "lucide-react";
+import { Tooltip } from "./ui/Tooltip";
 import { platformName, shownPrice, splitReasons } from "./productText";
 
 // 商品结果区（复刻 Accio）：平台筛选胶囊 + 商品卡网格。卡片把 shopping_summary 随 task_result
@@ -122,18 +123,20 @@ const Card = memo(function Card({
       style={staggerStyle(index)}
       {...linkProps}
     >
-      <button
-        className={`card-fav ${favorited ? "on" : ""}`}
-        title={favorited ? "取消收藏" : "收藏"}
-        aria-pressed={favorited}
-        onClick={toggleFavorite}
-      >
-        {favorited ? "♥" : "♡"}
-      </button>
+      <Tooltip content={favorited ? "取消收藏" : "收藏"}>
+        <button
+          className={`card-fav ${favorited ? "on" : ""}`}
+          aria-pressed={favorited}
+          aria-label={favorited ? "取消收藏" : "收藏"}
+          onClick={toggleFavorite}
+        >
+          <Heart size={14} strokeWidth={1.75} fill={favorited ? "currentColor" : "none"} />
+        </button>
+      </Tooltip>
       <Thumb item={item} />
       {href && (
         <span className="card-visit" aria-hidden>
-          <ExternalLinkIcon width={13} height={13} />
+          <ExternalLink size={12} strokeWidth={2} />
           在 {platformName(item.platform)} 查看
         </span>
       )}
@@ -144,9 +147,11 @@ const Card = memo(function Card({
           <div className="card-topline">
             <span className="card-brand">{item.brand || ""}</span>
             {typeof item.rating === "number" && (
-              <span className="card-rating" title="平台评分（离线数据集）">
-                <i aria-hidden>★</i> {item.rating.toFixed(1)}
-              </span>
+              <Tooltip content="平台评分（离线数据集）">
+                <span className="card-rating" tabIndex={-1}>
+                  <i aria-hidden>★</i> {item.rating.toFixed(1)}
+                </span>
+              </Tooltip>
             )}
           </div>
         )}
@@ -179,14 +184,14 @@ const Card = memo(function Card({
 
         {/* 只标平台，不加「官方 ✅ 认证」那类背书：商品来自离线数据集，没有任何一方为它背书。 */}
         <div className="card-supplier">
-          <GlobeIcon width={14} height={14} />
+          <Globe size={13} strokeWidth={1.75} />
           <span className="supplier-name">{platformName(item.platform)}</span>
         </div>
 
         {reasons.length > 0 && (
           <div className="card-match">
             <div className="match-head">
-              <CheckIcon width={14} height={14} />
+              <Check size={13} strokeWidth={2.25} />
               选购理由
             </div>
             <ul>
@@ -200,21 +205,26 @@ const Card = memo(function Card({
         {/* 卡内动作：详情 / 对比 / 搜同款。整卡是 <a>，三个按钮都得自己吃掉点击。
             搜同款是一次纯向量近邻检索（不过 Agent、不烧 LLM），结果在右侧抽屉里给。 */}
         <div className="card-actions">
-          <button className="card-similar" onClick={stop(() => onDetail(item))} title="看大图与全部理由">
-            详情
-          </button>
-          <button
-            className={`card-similar ${compared ? "on" : ""}`}
-            aria-pressed={compared}
-            onClick={stop(() => onCompare(item))}
-            title={compared ? "移出对比" : "加入对比（最多 4 件）"}
-          >
-            {compared ? "✓ 对比中" : "对比"}
-          </button>
-          <button className="card-similar" onClick={openSimilar} title="按商品向量找相似商品">
-            <SearchIcon width={13} height={13} />
-            搜同款
-          </button>
+          <Tooltip content="看大图与全部理由">
+            <button className="card-similar" onClick={stop(() => onDetail(item))}>
+              详情
+            </button>
+          </Tooltip>
+          <Tooltip content={compared ? "移出对比" : "加入对比（最多 4 件）"}>
+            <button
+              className={`card-similar ${compared ? "on" : ""}`}
+              aria-pressed={compared}
+              onClick={stop(() => onCompare(item))}
+            >
+              {compared ? "✓ 对比中" : "对比"}
+            </button>
+          </Tooltip>
+          <Tooltip content="按商品向量找相似商品（不经 Agent）">
+            <button className="card-similar" onClick={openSimilar}>
+              <Search size={13} strokeWidth={1.75} />
+              搜同款
+            </button>
+          </Tooltip>
         </div>
       </div>
     </Wrapper>
@@ -392,7 +402,7 @@ export function ProductCards({
           className={`tab ${active === "all" ? "active" : ""}`}
           onClick={() => setActive("all")}
         >
-          <GlobeIcon width={15} height={15} />
+          <Globe size={14} strokeWidth={1.75} />
           Global sites
           <span className="tab-count">{items.length}</span>
         </button>
