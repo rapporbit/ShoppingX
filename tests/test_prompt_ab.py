@@ -113,7 +113,7 @@ def test_overlay_string_patch_only_touches_the_anchored_sentence(
 
 
 def test_overlay_merges_one_level_and_keeps_rest(tmp_path: Any, monkeypatch: Any) -> None:
-    """只写改动的子键：``sub_agents.search`` 换掉，``sub_agents.trade`` 与其余键原样继承。"""
+    """只写改动的子键：``sub_agents.search`` 换掉，其余键原样继承。"""
     import app.agent.prompts as prompts_mod
 
     versions_dir = tmp_path / "versions"
@@ -127,7 +127,7 @@ def test_overlay_merges_one_level_and_keeps_rest(tmp_path: Any, monkeypatch: Any
     base = _load_base_prompts()
     merged = _load_prompts("1.1.0")
     assert merged["sub_agents"]["search"] == "新的检索员提示词"
-    assert merged["sub_agents"]["trade"] == base["sub_agents"]["trade"]
+    assert merged["sub_agents"].keys() == base["sub_agents"].keys()
     assert merged["system_prompt"] == base["system_prompt"]
     _load_prompts.cache_clear()
 

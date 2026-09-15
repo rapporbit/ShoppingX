@@ -280,8 +280,8 @@ async def report_confirmation(
 ) -> None:
     """确认卡变化通知：``kind`` 为 ``required``（新出一张）/ ``resolved``（已同意或拒绝）。
 
-    **显式路由到根 thread**，理由同 :func:`report_items_preview`：交易动作可能发生在 TradeAgent
-    的子 loop 里，而子 thread 没有前端连接——事件会静默丢掉，用户就永远等不到那张确认卡。
+    **显式路由到根 thread**，理由同 :func:`report_items_preview`：子 thread 没有前端连接，
+    事件发到子 thread 会静默丢掉，用户就永远等不到那张确认卡。
     HTTP 入口（表单 / 按钮）没有任务上下文，由调用方把 ``thread_id`` 递进来。
     """
     action = "取消" if confirmation.get("action") == "cancel" else "下单"

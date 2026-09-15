@@ -103,8 +103,6 @@ async def _buyer_preferences() -> str:
     在父上下文取有两个原因：① 域（``session_domains``）按 session_dir 聚合，父子共享，但父这边
     是 planner 判完域之后的确定态；② 取偏好是纯读，放在派发前做不占子任务的超时预算。
 
-    只给 SearchAgent。TradeAgent 不注入——偏好影响不了「下哪一单」，那由主 Agent 给定的 item_id
-    决定；给它看反而多一份可能被转述进订单参数的噪声。
     """
     user_id = get_user_id() or ""
     if not user_id:
@@ -130,18 +128,10 @@ async def _run_worker(demands: str, kind: str) -> str:
     ``HarnessSession`` 里的 LoopDetector）。**任何异常都转成字符串回传**，让主 Agent 把「子任务
     失败」当普通工具结果处理，而不是整个 loop 崩。
     """
-    if kind == "trade":
-        # 交易域（工具 + prompt 段）是批 1 的 7.2；在那之前 TradeAgent 的 Toolkit 是空的，
-        # 派出去只会空转一轮再超时。宁可在入口一句话说清，让主 Agent 转去自己处理。
-        from app.agent.tool_registry import trade_tools_ready
-
-        if not trade_tools_ready():
-            return "[task_dispatch 拒绝] 交易能力尚未启用，无法下单 / 查单 / 取消。请如实告知用户。"
-    # 平台闸只对检索有意义：trade 的 demands 里出现平台名是「在 X 平台买的那单」，不是检索目标。
-    rejected = _platform_guard(demands) if kind == "search" else None
+    rejected = _platform_guard(demands)
     if rejected is not None:
         return rejected
-    prefs = await _buyer_preferences() if kind == "search" else ""
+    prefs = await _buyer_preferences()
     try:
         # fork 前捕获父会话目录，worker 继承同一目录（产物归同一会话）。
         parent_session_dir = get_session_dir()
@@ -159,7 +149,7 @@ async def _run_worker(demands: str, kind: str) -> str:
             # 槽位打标：解析出标记后**先把槽落实**（planner 没拆槽时兜底登记，见
             # ensure_dispatch_slot），再把稳定 id 传进子作用域——传名字的话，兜底那条路上
             # item_search 盖章时槽表还是空的，章照样盖不上。
-            slot = ensure_dispatch_slot(detect_slot(demands) or "") if kind == "search" else ""
+            slot = ensure_dispatch_slot(detect_slot(demands) or "")
             scope: Any = (
                 thread_scope(sub_thread_id, parent_session_dir)
                 if parent_session_dir is not None
@@ -205,12 +195,12 @@ async def _run_worker(demands: str, kind: str) -> str:
 
 async def task_dispatch(
     demands: str,
-    subagent_type: Literal["search", "trade"],
+    subagent_type: Literal["search"],
 ) -> ToolChunk:
     """把子任务派给专职子 Agent（看不到你的上下文），回传其最终回复；同轮多个独立子任务一次性多发即并行。
     参数：demands 写全预算/品类/硬约束/软偏好/目标平台（跨平台检索一条只写一个平台）；
-    subagent_type：search=只读检索（无下单工具）；trade=下单/查单/取消（无检索工具，demands
-    须给全 platform + item_id + 数量 + 地址）。
+    subagent_type：search=只读检索（只有 item_search / web_search，无下单工具）。
+    下单 / 查单 / 取消不派发，你自己调交易工具。
     """
     text = await _run_worker(demands, subagent_type)
     # 派发失败已在 _run_worker 里转成 "[task_dispatch …]" 文案。判 ERROR 状态而不是只回文本：

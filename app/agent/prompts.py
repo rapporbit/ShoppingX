@@ -3,8 +3,8 @@
 System prompt 用 XML 分块，且**纯静态**——不含任何运行时注入位。
 长期偏好 / 近期行为历史 / 会话级 P_t 这些**每轮必变**的运行时上下文一律**不进 system prompt**，
 改由 ``session_io.inject_runtime_context`` 拼进当轮 human message（见该函数的 prompt cache 说明）：
-system prompt 逐字稳定才能成为跨轮 / 跨会话都命中的缓存前缀。主 Agent 与两个 worker 各读自己的
-段（``main_agent`` / ``sub_agents.search`` / ``sub_agents.trade``），但每段自身逐字稳定，
+system prompt 逐字稳定才能成为跨轮 / 跨会话都命中的缓存前缀。主 Agent 与 SearchAgent 各读自己的
+段（``main_agent`` / ``sub_agents.search``），但每段自身逐字稳定，
 同角色跨轮跨会话都命中同一份前缀。
 """
 
@@ -153,7 +153,7 @@ def _resolved(version: str | None) -> dict[str, Any]:
 
 
 def get_worker_system_prompt(kind: str, version: str | None = None) -> str:
-    """worker 的**专职** system prompt（``sub_agents.search`` / ``sub_agents.trade``）。
+    """worker 的**专职** system prompt（``sub_agents.search``；TradeAgent 与其 ``trade`` 段已删）。
 
     批 1 起 worker 不再复用主 prompt：读写切分之后，主 prompt 里的收尾判据、bundle 槽位流程、
     派发策略对 worker 全是噪声——更糟的是**指挥它去调根本没发给它的工具**（worker 手上没有

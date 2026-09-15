@@ -12,7 +12,7 @@ server 要一次工具表的（框架在 ``_get_available_tools`` 里现拉，�
 
 **读写切分怎么不被 MCP 破坏**（三保证逐条对上）：
 
-1. **发放范围** —— ``MCP_ROLES`` 钉死只有 ``search`` 拿得到；``main`` / ``trade`` 的 Toolkit
+1. **发放范围** —— ``MCP_ROLES`` 钉死只有 ``search`` 拿得到；``main`` 的 Toolkit
    里根本没有这个 client。
 2. **``is_read_only`` 标记** —— ``agentscope.tool.MCPTool`` 的 ``is_read_only`` 取自 MCP 工具的
    ``annotations.readOnlyHint``（**取不到就是 False**）。所以对端必须声明；本仓的 fx server
