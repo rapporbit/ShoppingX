@@ -287,13 +287,6 @@ class PlanOutput(BaseModel):
             "说「我的订单/那单怎么样」→ query_order；说「取消/不要了」→ cancel_order。"
         ),
     )
-    target_refs: list[str] = Field(
-        default_factory=list,
-        description=(
-            "用户**点名的具体商品**（要评价/比较的对象），如型号名、商品标题、贴的链接原文。"
-            "「评价这款 XX」「比较这两个：A 和 B」时填；泛泛「推荐点耳机」这种没有具体对象则留空。"
-        ),
-    )
     category: str = Field(default="", description="主品类，如「旅行收纳」「跑鞋」")
     intent_grounding: IntentGrounding = Field(
         default="internal",
@@ -687,8 +680,6 @@ async def planner(intent: str) -> PlanOutput:
     plan_lines: list[str] = []
     if plan.tasks:
         plan_lines.append("任务：" + "、".join(plan.tasks))
-    if plan.target_refs:
-        plan_lines.append("指定商品：" + "、".join(plan.target_refs))
     if plan.category:
         plan_lines.append(f"品类：{plan.category}")
     if plan.intent_grounding == "web":

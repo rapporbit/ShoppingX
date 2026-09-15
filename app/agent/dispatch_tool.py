@@ -27,7 +27,6 @@ from app.api import monitor
 from app.api.context import get_session_dir, get_user_id
 from app.harness.budgets import get_fork_semaphore
 from app.harness.fork_guard import ForkLimitExceeded, enter_fork
-from app.harness.retrieval_budget import isolated_retrieval_scope
 from app.harness.truncation import truncate_tool_result
 from app.memory.injector import PREF_EMPTY, build_preference_block
 from app.tools._bundle import detect_slot, ensure_dispatch_slot, slot_scope
@@ -142,10 +141,6 @@ async def _run_worker(demands: str, kind: str) -> str:
             await monitor.report_fork(sub_thread_id, demands)
             from app.agent.agents import build_worker_agent  # 延迟导入，破模块级循环
 
-            # 收敛信号是否跨子任务共享，仍按「这条 demand 提没提平台名」自动识别（口径与旧版
-            # 的批次判定等价，只是粒度从批降到条）：跨平台泛搜的兄弟之间该共享「已经找到货了
-            # 就别再找」，定点调查 / 套装槽位则各查各的，不许一个搜到就让别人收手。
-            isolated = _detect_platform(demands) is None
             # 槽位打标：解析出标记后**先把槽落实**（planner 没拆槽时兜底登记，见
             # ensure_dispatch_slot），再把稳定 id 传进子作用域——传名字的话，兜底那条路上
             # item_search 盖章时槽表还是空的，章照样盖不上。
@@ -157,9 +152,8 @@ async def _run_worker(demands: str, kind: str) -> str:
             )
             fork_sem = get_fork_semaphore()
             sem_ctx: Any = fork_sem if fork_sem is not None else nullcontext()
-            isolate_ctx: Any = isolated_retrieval_scope() if isolated else nullcontext()
             slot_ctx: Any = slot_scope(slot) if slot else nullcontext()
-            with scope, isolate_ctx, slot_ctx:
+            with scope, slot_ctx:
                 async with sem_ctx:
                     # Agent 在子 scope **内**建：它自带的 HarnessSession / Toolkit 都是 per-loop
                     # 的，建在外面会让 worker 与主 loop 共用控制面状态（断言、循环检测全串味）。
