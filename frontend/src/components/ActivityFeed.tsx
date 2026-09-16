@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { domainLabel } from "../domains";
 import type { AguiEvent } from "../types";
-import { CheckCircle2, ChevronRight, GitFork, Loader2, Sparkles, XCircle } from "lucide-react";
+import { CheckCircle2, ChevronRight, Loader2, Sparkles, XCircle } from "lucide-react";
 
 // 「思考过程」活动流 —— 结构与动效对齐 Accio 的 thought-process 组件：
 //   · 运行中标题是一行会扫光的渐变文字（.shimmer-text），实时显示当前在做什么
@@ -18,7 +18,6 @@ const TOOL_LABEL: Record<string, string> = {
   price_compare: "跨平台比价",
   shipping_calc: "到手价测算",
   shopping_summary: "生成购物清单",
-  dispatch_tool: "派发子任务",
   ask_user: "向用户提问",
 };
 
@@ -28,7 +27,6 @@ const toolLabel = (tool?: string) => (tool ? TOOL_LABEL[tool] ?? tool : "工具�
 // 没有 result 时才退回入参串。
 function detailText(evt: AguiEvent): string {
   const d = evt.data ?? {};
-  if (evt.event === "fork") return String(d.demands ?? "");
   if (evt.event === "assistant_call") return String(d.preview ?? "");
   if (typeof d.result === "string" && d.result) return d.result;
   return Object.entries(d)
@@ -37,11 +35,12 @@ function detailText(evt: AguiEvent): string {
     .join(" · ");
 }
 
-type StepState = "running" | "done" | "error" | "fork" | "info";
+type StepState = "running" | "done" | "error" | "info";
 type Step = { evt: AguiEvent; state: StepState };
 
 // tool_start / tool_end 合并成同一行（Accio 就是一个工具一行、图标随状态变），
-// 未闭合的 start 保持旋转。并行 fork 会有同名工具同时在跑，故按工具名维护一个队列。
+// 未闭合的 start 保持旋转。同轮 batch 会有同名工具同时在跑（如跨平台 / 多槽位的 item_search），
+// 故按工具名维护一个队列。
 function buildSteps(events: AguiEvent[]): Step[] {
   const rows: Step[] = [];
   const open = new Map<string, number[]>();
@@ -57,9 +56,9 @@ function buildSteps(events: AguiEvent[]): Step[] {
       const idx = q?.shift();
       if (idx != null) rows[idx] = { evt, state };
       else rows.push({ evt, state });
-    } else if (evt.event === "fork") {
-      rows.push({ evt, state: "fork" });
     } else {
+      // 老会话回放里可能还有 `fork` 事件（A4-1 删派发前留下的），落到这里当普通 info 行画，
+      // 不再有专属图标与「子任务并行处理中」文案。
       rows.push({ evt, state: "info" });
     }
   }
@@ -70,16 +69,15 @@ const STEP_ICON = {
   running: Loader2,
   done: CheckCircle2,
   error: XCircle,
-  fork: GitFork,
   info: Sparkles,
 } as const;
 
-// 运行中标题：优先播报最后一个还在跑的工具，否则退回「正在思考」。
+// 运行中标题：优先播报最后一个还在跑的工具，否则退回「正在思考」。同轮 batch 时多个同名工具
+// 同时在跑，只播报最后一个——标题是给人看进度的，不是列清单。
 function headline(steps: Step[]): string {
   const running = [...steps].reverse().find((s) => s.state === "running");
   if (running) return `${toolLabel(String(running.evt.data?.tool ?? ""))}中…`;
-  const forking = steps.some((s) => s.state === "fork");
-  return forking ? "子任务并行处理中…" : "正在思考…";
+  return "正在思考…";
 }
 
 function StepRow({ step }: { step: Step }) {
@@ -154,11 +152,9 @@ function StepRow({ step }: { step: Step }) {
   const label =
     evt.event === "session_created"
       ? "会话已创建，开始规划"
-      : state === "fork"
-        ? "派发子任务并行处理"
-        : evt.event === "assistant_call"
-          ? "思考"
-          : toolLabel(String(evt.data?.tool ?? ""));
+      : evt.event === "assistant_call"
+        ? "思考"
+        : toolLabel(String(evt.data?.tool ?? ""));
   const detail = detailText(evt);
   const expandable = Boolean(detail);
 

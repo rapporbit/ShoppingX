@@ -276,12 +276,19 @@ export function ConfirmationCards({ confirmations, busy, error, onResolve, onCan
         : [],
     ),
   );
+  // 同一轮里模型可以并排调几次 create_order（每次各落一条 pending 记录），卡就会有好几张。
+  // 卡本身逐张画没问题，但「还剩几张要点」得说出来——否则用户点完第一张就以为完事了。
+  const pendingCount = confirmations.filter(
+    (c) => c.status === "pending" && !isConfirmationExpired(c, now),
+  ).length;
   if (!confirmations.length && !error) return null;
   return (
     <section className="confirmations-section" aria-label="交易确认" aria-busy={busy}>
       <div className="confirmations-heading">
         <div>
-          <span className="confirmation-eyebrow">由你作决定</span>
+          <span className="confirmation-eyebrow">
+            {pendingCount > 1 ? `由你作决定 · ${pendingCount} 张待确认` : "由你作决定"}
+          </span>
           <h2>交易确认</h2>
         </div>
         <button type="button" className="btn-ghost" disabled={busy} onClick={onRefresh}>

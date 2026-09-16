@@ -614,7 +614,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
                           )}
 
                           {/* 本轮结束后在右下角用小字标注用时 + token 消耗（后端权威口径，实时与回看一致）。
-                              token 总量主显，hover 看输入/输出/成本拆分（全树记账，含 fork 子 Agent）。 */}
+                              token 总量主显，hover 看输入/输出/成本拆分（本轮主环所有模型调用合计）。 */}
                           {/* 实验与自进化归属：提示词版本 / 注入策略 / 读过的 skill（后端随 task_result 下发，回看同源）。 */}
                           {turn.experiment && <ExperimentChips exp={turn.experiment} />}
 
