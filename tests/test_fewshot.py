@@ -15,12 +15,12 @@ from app.agent.prompts import get_system_prompt
 
 
 def test_render_fewshot_has_seed_examples() -> None:
-    # 种子库专打的失败类别都应在渲染文本里出现（含意图化改造后新增的评价/组合意图范例）。
+    # 种子库专打的失败类别都应在渲染文本里出现。评价单品 / 比较两件两条定点调查范例已随
+    # 定点调查一起删除（2026-09-16）。
     rendered = fewshot.render_fewshot()
     assert "别自作主张" in rendered  # 纯推荐·只做用户要的
     assert "口头" in rendered or "现在为你生成清单" in rendered  # 收尾·别口头宣告
     assert "非购物" in rendered  # 非购物·直接兜底
-    assert "评价" in rendered  # 评价单品·给结论 + 推荐替代品
 
 
 def test_system_prompt_does_not_inject_fewshot() -> None:
@@ -31,11 +31,9 @@ def test_system_prompt_does_not_inject_fewshot() -> None:
     assert "反例" not in sp
 
 
-def test_main_and_sub_share_same_system_prompt() -> None:
-    # system prompt 纯静态：主与子完全同参（无运行时注入）→ system 段字节相同（同质 fork 硬约束）。
-    main_sp = get_system_prompt()
-    sub_sp = get_system_prompt()  # dispatch_tool 子 Agent 的 fallback 路径
-    assert main_sp == sub_sp
+def test_system_prompt_is_static() -> None:
+    # system prompt 纯静态（无运行时注入）→ 两次取值字节相同，缓存前缀才稳定。
+    assert get_system_prompt() == get_system_prompt()
 
 
 def test_missing_files_degrade_to_placeholder(tmp_path: Path, monkeypatch: Any) -> None:

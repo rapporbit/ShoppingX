@@ -3,8 +3,7 @@
 单个工具一次返回过长（如爬十几页条款）会灌爆上下文、废掉后续轮。超过 token 预算就尾部截断
 并留提示，让模型知道「结果被截断、可缩小查询」。
 
-两处用它：``post_tool_call`` 的 ``truncate_result`` Hook（主/子 loop 内逐个工具结果），以及
-``dispatch_tool`` 在 fork 边界回传子 Agent 最终结果前。
+``post_tool_call`` 的 ``truncate_result`` Hook 逐个工具结果调用它。
 """
 
 from __future__ import annotations

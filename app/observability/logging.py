@@ -1,11 +1,11 @@
-"""结构化日志（A 块）——每条日志自动带 thread_id / user_id / fork_depth。
+"""结构化日志（A 块）——每条日志自动带 thread_id / user_id。
 
-**为什么。** 一次 query 会 fork 多个子 Agent 并发跑，普通 ``print`` / stdlib logging 打出来的
-日志混在一起、分不清哪条属于哪个任务 / 哪个子 Agent。structlog 把日志变成「带字段的事件」，并
+**为什么。** 多个任务并发跑，普通 ``print`` / stdlib logging 打出来的
+日志混在一起、分不清哪条属于哪个任务。structlog 把日志变成「带字段的事件」，并
 通过 **contextvars** 自动给每条日志附上当前任务的身份——定位某个 thread 的问题时按字段一筛即可。
 
 **复用 ContextVar 体系（一套机制两用）。** 不另搞一套传播：在 ``thread_scope`` 绑定 thread_id /
-user_id 的同时，顺手用 structlog 的 contextvars 绑定同样的字段（fork_depth 在 ``enter_fork`` 绑）。
+user_id 的同时，顺手用 structlog 的 contextvars 绑定同样的字段。
 于是「请求上下文隔离」和「日志上下文传播」走的是同一处入口——这正是 A 块的核心叙事：
 **ContextVar 既做 thread 隔离、又做日志上下文传播。**
 
@@ -68,7 +68,7 @@ def get_logger(name: str | None = None) -> Any:
 def bind_log_context(**fields: Any) -> Mapping[str, Any]:
     """把字段绑定进 structlog 的 contextvars（None 值跳过），返回 tokens 供还原。
 
-    在 ``thread_scope`` / ``enter_fork`` 这类作用域入口调用，离开时用
+    在 ``thread_scope`` 这类作用域入口调用，离开时用
     :func:`unbind_log_context` 还原。"""
     clean = {k: v for k, v in fields.items() if v is not None}
     return structlog.contextvars.bind_contextvars(**clean)

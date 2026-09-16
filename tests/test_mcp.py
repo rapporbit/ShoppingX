@@ -54,26 +54,26 @@ def test_exposed_names_are_a_subset_of_repo_read_only_set() -> None:
 
 def test_clients_are_empty_without_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MCP_SEARCH_URL", "")
+    assert mcp_clients("main") == []
+    assert mcp_tool_names("main") == []
+
+
+def test_only_main_gets_mcp(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A4 删 SearchAgent 后 MCP 改发给 main；已删的 search 角色拿不到。"""
+    monkeypatch.setenv("MCP_SEARCH_URL", "http://127.0.0.1:1/mcp")
+    assert MCP_ROLES == frozenset({"main"})
+    assert len(mcp_clients("main")) == 1
     assert mcp_clients("search") == []
     assert mcp_tool_names("search") == []
-
-
-def test_only_search_gets_mcp(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MCP_SEARCH_URL", "http://127.0.0.1:1/mcp")
-    assert MCP_ROLES == frozenset({"search"})
-    assert len(mcp_clients("search")) == 1
-    for role in ("main", "trade"):
-        assert mcp_clients(role) == []
-        assert mcp_tool_names(role) == []
 
 
 def test_enable_tools_whitelist_is_declarative(monkeypatch: pytest.MonkeyPatch) -> None:
     """白名单是**客户端侧**的：对端多开的工具进不来，与它自称什么无关。"""
     monkeypatch.setenv("MCP_SEARCH_URL", "http://127.0.0.1:1/mcp")
     monkeypatch.setenv("MCP_SEARCH_TOOLS", "convert_currency")
-    (client,) = mcp_clients("search")
+    (client,) = mcp_clients("main")
     assert client.enable_tools == ["convert_currency"]
-    assert mcp_tool_names("search") == ["mcp__globex-fx__convert_currency"]
+    assert mcp_tool_names("main") == ["mcp__globex-fx__convert_currency"]
 
 
 def test_mcp_tool_names_are_whitelisted(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -82,7 +82,7 @@ def test_mcp_tool_names_are_whitelisted(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("MCP_SEARCH_URL", "http://127.0.0.1:1/mcp")
     allowed_tools.cache_clear()
     try:
-        for name in mcp_tool_names("search"):
+        for name in mcp_tool_names("main"):
             assert validate_tool_call(name)
     finally:
         allowed_tools.cache_clear()
@@ -91,7 +91,7 @@ def test_mcp_tool_names_are_whitelisted(monkeypatch: pytest.MonkeyPatch) -> None
 def test_client_is_stateless(monkeypatch: pytest.MonkeyPatch) -> None:
     """有状态 client 必须在 Toolkit 构造前 connect，而本仓的 Toolkit 是每个 loop 现建的。"""
     monkeypatch.setenv("MCP_SEARCH_URL", "http://127.0.0.1:1/mcp")
-    (client,) = mcp_clients("search")
+    (client,) = mcp_clients("main")
     assert client.is_stateful is False
 
 
@@ -138,37 +138,37 @@ def fx_server() -> Iterator[str]:
             proc.wait(timeout=10)
 
 
-async def test_search_toolkit_lists_mcp_tools(
+async def test_main_toolkit_lists_mcp_tools(
     fx_server: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("MCP_SEARCH_URL", fx_server)
-    toolkit = await build_toolkit("search")
+    toolkit = await build_toolkit("main")
     names = {s["function"]["name"] for s in await toolkit.get_tool_schemas()}
     for tool in FX_TOOL_NAMES:
         assert f"mcp__globex-fx__{tool}" in names
 
 
-async def test_every_tool_in_search_group_is_read_only(
+async def test_every_mcp_tool_is_read_only(
     fx_server: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """读写切分第②根支柱：MCP 进来之后，search 组仍然一个非只读工具都没有。
+    """只读边界第②根支柱：挂进来的 MCP 工具一个非只读的都没有。
 
     ``MCPTool.is_read_only`` 取自对端的 ``annotations.readOnlyHint``，**取不到就是 False**——
     所以这条断言真的会因为 server 少写一个 annotation 而红，不是走过场。
     """
     monkeypatch.setenv("MCP_SEARCH_URL", fx_server)
-    toolkit = await build_toolkit("search")
+    toolkit = await build_toolkit("main")
     available = await toolkit._get_available_tools(["basic"])
-    assert any(rt.tool.is_mcp for rt in available.values())
-    not_read_only = [name for name, rt in available.items() if not rt.tool.is_read_only]
-    assert not_read_only == []
+    mcp = {name: rt for name, rt in available.items() if rt.tool.is_mcp}
+    assert mcp
+    assert [name for name, rt in mcp.items() if not rt.tool.is_read_only] == []
 
 
 async def test_mcp_tool_is_callable_through_toolkit(
     fx_server: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("MCP_SEARCH_URL", fx_server)
-    toolkit = await build_toolkit("search")
+    toolkit = await build_toolkit("main")
     call = ToolCallBlock(
         type="tool_call",
         id="t1",
@@ -186,7 +186,7 @@ async def test_unknown_currency_comes_back_as_data_not_protocol_error(
 ) -> None:
     """工具内部的业务错误要回成模型读得懂的结构，不是一条「工具挂了」。"""
     monkeypatch.setenv("MCP_SEARCH_URL", fx_server)
-    toolkit = await build_toolkit("search")
+    toolkit = await build_toolkit("main")
     call = ToolCallBlock(
         type="tool_call",
         id="t2",
@@ -197,14 +197,3 @@ async def test_unknown_currency_comes_back_as_data_not_protocol_error(
     payload = json.loads(chunks[-1].content[0].text)
     assert payload["ok"] is False
     assert "USD" in payload["supported"]
-
-
-async def test_main_and_trade_toolkits_have_no_mcp_tools(
-    fx_server: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """发放范围（第①根支柱）：URL 配着也一样，main / trade 的 Toolkit 里根本没有这个 client。"""
-    monkeypatch.setenv("MCP_SEARCH_URL", fx_server)
-    for role in ("main", "trade"):
-        toolkit = await build_toolkit(role)
-        available = await toolkit._get_available_tools(["basic"])
-        assert not any(rt.tool.is_mcp for rt in available.values()), role

@@ -89,8 +89,6 @@ async def test_polluted_first_search_triggers_backfill(tmp_path: Path) -> None:
         # 污染批不再算「本轮已搜到货」：同轮 40 号钩子不得凭它把 SEARCHING 立刻推回 COMPARING。
         assert ctx is not None and ctx["total_candidates"] == 0
         assert ctx["reset_fresh_candidates"] is True
-        # 初搜若走了并行 fork，postfork 棘轮闸会拦直搜——必须随回退发一次授权。
-        assert guard.postfork_search_grants == 1
 
 
 async def test_sparse_but_clean_pool_no_backfill(tmp_path: Path) -> None:
@@ -137,7 +135,6 @@ async def test_hard_cull_first_search_triggers_backfill(tmp_path: Path) -> None:
         assert BACKFILL_LATCH in guard.notified_transitions  # 只触发一次
         assert ctx is not None and ctx["total_candidates"] == 0
         assert ctx["reset_fresh_candidates"] is True
-        assert guard.postfork_search_grants == 1
 
 
 async def test_sparse_pool_without_cull_no_backfill(tmp_path: Path) -> None:

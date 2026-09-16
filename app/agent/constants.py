@@ -1,7 +1,7 @@
 """无依赖常量：被 ``app.agent`` 与 ``app.harness`` 两侧同时需要、又不能引入循环导入的那些。
 
 **这个模块只准放字面量，不准 import 本仓任何东西。** 它存在的唯一理由是打破
-``tool_registry → dispatch_tool → harness → tool_registry`` 这个环——harness 侧要判「这个工具
+``tool_registry → harness → tool_registry`` 这个环——harness 侧要判「这个工具
 是不是终结工具」，而 tool_registry 装配时要 import 到 harness。历史上的解法是「在 harness 那边
 再抄一份字面量」，抄完之后两份就分了叉（见下），代价是同一轮里两处「是否终结」判定不一致。
 """

@@ -28,10 +28,6 @@
 **动态再平衡。** normal 队列积压时把 heavy 的容量临时压到下限——高峰期优先保短任务。缩容不抢占
 已在跑的任务（``active`` 允许暂时大于 ``capacity``，随任务退出自然回落），Agent 任务跑到一半被
 掐断是不可接受的。
-
-fork 级并发（同一任务内多个子 Agent）仍走 ``asyncio.Semaphore`` 的纯排队语义（见
-:func:`app.harness.budgets.fork_concurrency_scope`）：子任务是任务自身的一部分，拒掉会丢平台覆盖。
-两层各取最贴合语义的原语。
 """
 
 from __future__ import annotations

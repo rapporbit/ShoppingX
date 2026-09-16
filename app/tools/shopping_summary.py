@@ -40,7 +40,6 @@ from app.tools._bundle import (
     get_session_mode,
     refresh_report_prices,
     render_allocation,
-    slot_display,
 )
 from app.tools._candidates import (
     enrich,
@@ -601,8 +600,7 @@ async def shopping_summary(
                     reason=reason,
                     image_url=src.image_url,
                     url=src.url,
-                    # 内部盖章是槽 id；出卡片映射成展示名（旧会话按名字盖的章原样透传）。
-                    slot=slot_display(src.slot or c.slot),
+                    slot=src.slot or c.slot,
                     slot_mode=slot_mode,
                     brand=src.brand or c.brand,
                     rating=src.rating if src.rating is not None else c.rating,

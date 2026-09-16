@@ -18,8 +18,8 @@ from app.harness import tiering
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """三个档位键都清掉，让每个用例只受自己 setenv 的那条影响。"""
-    for key in ("MAIN_LOOP_TIER_BASE", "MAIN_LOOP_TIER_FIRST", "WORKER_TIER"):
+    """档位键都清掉，让每个用例只受自己 setenv 的那条影响。"""
+    for key in ("MAIN_LOOP_TIER_BASE", "MAIN_LOOP_TIER_FIRST"):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -31,14 +31,13 @@ def _ctx(round_number: int = 1) -> dict[str, Any]:
 
 
 def test_defaults_are_all_fast_no_thinking() -> None:
-    """默认口径：**全程零思考**——基座、第一轮、worker 三处都是快档。
+    """默认口径：**全程零思考**——基座、第一轮两处都是快档。
 
     ``MAIN_LOOP_TIER_FIRST=same`` 是 2026-09-09 用户的决定：先把 thinking 整体固定为 off，
-    再去动模型组合（变量隔离）。改这三个默认值等于改延迟基线，改之前先重跑基线。
+    再去动模型组合（变量隔离）。改这两个默认值等于改延迟基线，改之前先重跑基线。
     """
     assert llm.main_loop_tier_base() == "fast"
     assert llm.main_loop_tier_first() == "same"
-    assert llm.worker_tier() == "fast"
 
 
 def test_same_means_no_switch_at_all() -> None:
@@ -83,12 +82,6 @@ def test_later_rounds_stay_on_base(_boost_on: None) -> None:
     """第 2 轮起回基座档——这条一旦失守，主 loop 每轮都在付 thinking 解码。"""
     for rnd in (2, 3, 7):
         assert tiering.first_round_tier(_ctx(rnd)) is None
-
-
-def test_worker_first_round_not_boosted(_boost_on: None, monkeypatch: pytest.MonkeyPatch) -> None:
-    """worker 也有自己的 round_number=1，但它只按 demands 搜一个平台，没有编排可言。"""
-    monkeypatch.setattr("app.harness.fork_guard.current_fork_depth", lambda: 1)
-    assert tiering.first_round_tier(_ctx(1)) is None
 
 
 def test_first_round_boosted(_boost_on: None) -> None:

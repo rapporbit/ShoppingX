@@ -11,8 +11,6 @@
 - ``summary_delta`` → ``shopping_summary``。本仓语义是「收尾清单文案的**累计全文**」，工具
   内流式产出时就在发。把主 loop 的 ``TextBlockDeltaEvent`` 也灌进去，等于用模型对清单的复述
   覆盖掉用户正在看的那份清单——**这是对手册映射表的一处刻意偏离**，理由就在这。
-- ``fork`` → ``task_dispatch``：要在进入子 ``thread_scope`` **之前**发，事件才路由得到父
-  thread 的前端连接。
 - ``task_result`` / ``task_cancelled`` / ``error``（异常）→ ``orchestrator``：会话级收尾，
   不属于某一次 reply。
 - ``model_fallback`` → ``ThrottledChatModel``（L1）：换模型这件事只有网关侧知道。

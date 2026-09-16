@@ -121,11 +121,9 @@ def test_tools_cover_all_business_tools_with_same_metadata() -> None:
     """运行时壳与声明壳一一对应，元数据取自同一处——描述就是 docstring，漂了就是两套行为。"""
     from app.agent.tool_registry import _BUSINESS_TOOLS, TOOLS, TOOLS_BY_NAME
 
-    # 15 个业务工具（12 + 交易域三件）+ 派发入口 task_dispatch
-    # （后者是原生 FunctionTool，不经 @tool 声明壳）
+    # 15 个业务工具（12 + 交易域三件）；task_dispatch 已在 A4 删除
     assert len(_BUSINESS_TOOLS) == 15
-    assert len(TOOLS) == 16
-    assert "task_dispatch" in TOOLS_BY_NAME
+    assert len(TOOLS) == 15
     for shell in _BUSINESS_TOOLS:
         ft = TOOLS_BY_NAME[shell.name]
         assert ft.description == shell.description
@@ -166,54 +164,17 @@ async def test_build_toolkit_roles_produce_schemas() -> None:
 
     main = await build_toolkit("main")
     schemas = await main.get_tool_schemas()
-    # 主 Agent 拿全集：15 业务工具 + task_dispatch（单干优先的前提是它自己什么都能干）
+    # 主 Agent 拿全集：15 业务工具
     # + 框架内置的 skill 阅读器 Skill（批 4-3：注册了 skill 就自动挂上，只读、权限恒 ALLOW）
-    assert len(schemas) == 17
-    assert {s["function"]["name"] for s in schemas} >= {"task_dispatch", "Skill"}
+    assert len(schemas) == 16
+    names = {s["function"]["name"] for s in schemas}
+    assert "Skill" in names and "task_dispatch" not in names
     assert all(s["function"]["description"] for s in schemas)
 
     with pytest.raises(ValueError):
         await build_toolkit("nope")
-
-
-@pytest.mark.asyncio
-async def test_search_worker_toolkit_has_no_write_tools() -> None:
-    """批 1 验收①：读写边界是**结构性**的——SearchAgent 的 Toolkit 里根本没有写工具对象。
-
-    不测「模型不会去调」（那是劝退），测「调不出来」：拿不到工具对象 = 连 schema 都不会出现在
-    它的 tool_schemas 里，模型无从知道有这么个工具。
-    """
-    from app.agent.tool_registry import build_toolkit
-
-    search = await build_toolkit("search")
-    names = {s["function"]["name"] for s in await search.get_tool_schemas()}
-    assert names == {"item_search", "web_search"}
-    # 写工具 / 交互工具 / 终结工具 / 派发工具，一个都不在（后者是深度上限的结构性保证）
-    for forbidden in (
-        "create_order",
-        "cancel_order",
-        "forget_preference",
-        "ask_user",
-        "shopping_summary",
-        "chat_fallback",
-        "task_dispatch",
-    ):
-        # 注意 get_tool 与 add_tool 同族，都是 async——忘 await 只会拿到一个恒真的协程对象，
-        # 断言「不为 None」永远通过（假绿）。
-        assert await search.get_tool(forbidden) is None, forbidden
-
-
-def test_search_role_agrees_with_depth_gate() -> None:
-    """发放范围与 ``depth_gate`` 的口径必须一致——发了工具又被闸硬拒是纯浪费。
-
-    往 ``_SEARCH_TOOLS`` 里加一个 depth==0 专属的工具，模型每次调都要白烧一轮再吃条拒绝文案，
-    而测试全绿、线上也不崩（只是变慢变蠢）。这条断言就是拦这种改动的。
-    """
-    from app.agent.tool_registry import _SEARCH_TOOLS
-    from app.harness.budgets import DEPTH0_ONLY_TOOLS, FORK_TOOLS, MAIN_ONLY_CONTEXT_TOOLS
-
-    blocked = DEPTH0_ONLY_TOOLS | MAIN_ONLY_CONTEXT_TOOLS | FORK_TOOLS
-    assert _SEARCH_TOOLS & blocked == set(), sorted(_SEARCH_TOOLS & blocked)
+    with pytest.raises(ValueError):
+        await build_toolkit("search")  # SearchAgent 已在 A4 删除
 
 
 async def test_content_and_artifact_tool_yields_structured_json() -> None:

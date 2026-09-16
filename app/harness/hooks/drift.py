@@ -23,6 +23,7 @@ from typing import Any
 
 from app.harness.middleware import harness_hook
 from app.harness.signals import blacklist_hits
+from app.security.content_filter import strip_fence_open
 from app.utils.env import env_bool, env_int
 from app.utils.terms import normalize_terms, term_hits
 
@@ -212,11 +213,8 @@ def _force_conclude_phase() -> None:
     收尾、一边不许收尾。推进 CONCLUDING 同时也让遥测如实反映「已进入收尾」。
     """
     try:
-        from app.harness.fork_guard import current_fork_depth
         from app.harness.phase_machine import Phase, get_phase_machine
 
-        if current_fork_depth() >= 1:
-            return
         machine = get_phase_machine()
         if machine is not None and machine.phase != Phase.CONCLUDING:
             machine.set_phase(Phase.CONCLUDING)
@@ -390,8 +388,10 @@ def _is_empty_result(result_text: str) -> bool:
     # result_nudges(20) 已往结果尾部贴了通告；loads 会因 Extra data 抛错、退回文本特征而判
     # 「非空」——贴尾巴的恰是薄池 / 空池场景（filtered_out 证据、循环提示、worker 预算批注），
     # 「连续空结果」信号在最该报的地方归零。
+    # 外部来源工具的返回已被 content_fence(15) 包进围栏：先剥开头标签，
+    # 尾部收尾标签由 raw_decode 容忍。
     try:
-        data, _ = json.JSONDecoder().raw_decode(result_text.lstrip())
+        data, _ = json.JSONDecoder().raw_decode(strip_fence_open(result_text).lstrip())
     except (ValueError, TypeError):
         data = None
     if isinstance(data, dict) and "candidates" in data:

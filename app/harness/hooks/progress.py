@@ -269,7 +269,7 @@ async def check_phase_rollback(context: dict[str, Any]) -> dict[str, Any] | None
     return context
 
 
-@harness_hook("post_reflect", name="phase_step", priority=40, main_only=True)
+@harness_hook("post_reflect", name="phase_step", priority=40)
 async def step_phase(context: dict[str, Any]) -> dict[str, Any] | None:
     """一轮 post_reflect 的阶段机三步，顺序固定：补搜判定 → 推进 → 无进展回退。"""
     changed = False
@@ -286,8 +286,6 @@ async def step_phase(context: dict[str, Any]) -> dict[str, Any] | None:
 # 已经又解码了一轮、下一步早定了。perf-audit-r3 实测：通告晚一轮到场，模型照样连发 item_search
 # 撞哨兵，白耗两轮。缀在工具结果尾部则是模型下一次解码的必读内容，零时差。
 
-# 只有直搜：本条件还要求 ``call_candidates > 0``，而派发路径数不出新候选
-# （见 signals._SEARCH_TOOLS），加上 task_dispatch 也恒为假。
 _SEARCH_NOTICE_TOOLS = frozenset({"item_search"})
 
 
@@ -306,9 +304,9 @@ def _price_tasks_hint() -> str:
     return ""
 
 
-@harness_hook("post_tool_call", name="transition_notice", priority=19, main_only=True)
+@harness_hook("post_tool_call", name="transition_notice", priority=19)
 async def append_transition_notice(context: dict[str, Any]) -> dict[str, Any] | None:
-    """把「阶段收线」通告当场缀在触发它的工具结果尾部。仅主 loop（depth 0）。
+    """把「阶段收线」通告当场缀在触发它的工具结果尾部。
 
     priority=19：在截断（10）与回放缓存记录（15）之后——通告不进回放缓存（回放那次自带
     「换参数或进下一步」的提示，不需要旧通告）；在分级提示（20）之前，与 nudge 各说各的。
@@ -339,7 +337,7 @@ async def append_transition_notice(context: dict[str, Any]) -> dict[str, Any] | 
         # 通告只点 item_search 时，模型转头连发 4 个 web_search「求证」，白耗一轮撞闸。
         notice = (
             "\n\n[阶段推进] 候选已入池，检索阶段就此收线：不要再调用 item_search / "
-            "task_dispatch / web_search——继续检索只会消耗全树检索预算并很快被机制拒绝。"
+            "web_search——继续检索只会消耗检索预算并很快被机制拒绝。"
         )
         # round3 刀 2：普通轮由系统在下一次思考前自动比价 + 精挑（harness.autopick），指路
         # 直接改成「等结果、然后收尾」；套装轮 / 关开关时仍指模型自己走 price_compare → picker。
@@ -422,9 +420,9 @@ async def append_transition_notice(context: dict[str, Any]) -> dict[str, Any] | 
     return context
 
 
-@harness_hook("pre_tool_call", name="phase_check", priority=20, main_only=True)
+@harness_hook("pre_tool_call", name="phase_check", priority=20)
 async def check_phase_permission(context: dict[str, Any]) -> dict[str, Any] | None:
-    """shopping_summary 收尾资格底线。仅 depth 0 生效，其余工具一律放行。"""
+    """shopping_summary 收尾资格底线，其余工具一律放行。"""
 
     machine = get_phase_machine()
     if machine is None:

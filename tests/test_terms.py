@@ -230,7 +230,7 @@ async def test_parallel_mode_llm_reason_only_first_per_slot(
                 }
             )
         finally:
-            reset_session_bundle(clear_file=True)
+            reset_session_bundle()
     reasons = {i.item_id: i.reason for i in msg.artifact.items}
     assert reasons["shoe0"] == "模型叙事第 0 件，正合你意。"
     assert reasons["shoe1"] == "规则理由第 1 件"

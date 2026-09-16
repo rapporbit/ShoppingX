@@ -15,12 +15,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from contextlib import contextmanager
-from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-from app.api.context import get_session_dir, get_session_tasks, get_thread_id
+from app.api.context import get_session_dir, get_session_tasks
 from app.utils.env import env_int
 
 # 任务口径的 web_search 小配额（窄口径用途门）：planner 判 evaluate / category_intel 时，
@@ -30,29 +27,6 @@ from app.utils.env import env_int
 WEB_SEARCH_TASK_QUOTA = env_int("WEB_SEARCH_TASK_QUOTA", 2)
 _TASKS_WANT_WEB = frozenset({"evaluate", "category_intel"})
 
-# 隔离检索作用域标记：由 ``task_dispatch`` 按 demands 里**有没有点名平台**自动判定
-# （``_detect_platform(demands) is None`` → 开隔离）。点了名的是跨平台泛搜，共享全树收敛信号；
-# 没点名的是独立子任务（如定点商品调查），给它自己一份局部信号，免得被别人的搜索计数拖累。
-# 见 :func:`isolated_retrieval_scope`。
-_isolated_var: ContextVar[bool] = ContextVar("shoppingx_retrieval_isolated", default=False)
-
-
-@contextmanager
-def isolated_retrieval_scope() -> Iterator[None]:
-    """独立子任务（串行 dispatch_tool）作用域：本子任务的 web_search 门控只看**自己**的召回结果，
-    不受全树其它子任务（如兄弟平台 / 兄弟商品）是否已找到候选影响。
-
-    用于纠正 :func:`web_search_allowed` 的全树共享语义在「多个独立子任务各自调查互不相关的对象」
-    场景下的错配——商品 A 搜到了，不该连带拦掉商品 B（B 自己没搜到）的 web_search 兜底。
-    只影响 web_search 门控判定，不影响 ``TREE_RETRIEVAL_BUDGET`` 那条真实的全树总成本上限
-    （见 :func:`charge_tree_retrieval`，本作用域不碰它）。
-    """
-    token = _isolated_var.set(True)
-    try:
-        yield
-    finally:
-        _isolated_var.reset(token)
-
 
 @dataclass
 class _TreeRetrieval:
@@ -60,9 +34,6 @@ class _TreeRetrieval:
     item_search_runs: int = 0  # item_search 调用次数（含召回为空的）
     web_search_runs: int = 0  # web_search 已执行次数（任务口径配额用，全树共享）
     nonempty_item_search: int = 0  # 召回到 ≥1 候选的 item_search 次数（web_search 兜底门用）
-    # 隔离作用域内，按 thread_id 记「这个子任务自己是否搜到过候选」——只在 isolated_retrieval_scope
-    # 内才写入 / 读取，供 web_search_allowed 在隔离场景下只看自己、不看全树。
-    scoped_nonempty: dict[str, int] = field(default_factory=dict)
     # ── item_search 探测召回（filtered_out）的全树汇总，供「该建议放宽预算还是该补搜」判定 ──
     probe_runs: int = 0  # 跑过探测的 item_search 次数（＝带硬过滤且命中不足的那些）
     probe_price_blocked: int = 0  # 探测差集里「只差预算」的条数
@@ -121,21 +92,13 @@ def note_web_search() -> None:
 
 
 def note_item_search(total_recall: int) -> None:
-    """item_search 完成后登记一次召回信号（供 web_search 兜底门判定）。
-
-    隔离作用域内（``isolated_retrieval_scope``）额外按当前 thread_id 记一份局部信号，
-    供 :func:`web_search_allowed` 在该场景下只看自己、不看全树。
-    """
+    """item_search 完成后登记一次召回信号（供 web_search 兜底门判定）。"""
     st = _state()
     if st is None:
         return
     st.item_search_runs += 1
     if total_recall > 0:
         st.nonempty_item_search += 1
-        if _isolated_var.get():
-            tid = get_thread_id()
-            if tid is not None:
-                st.scoped_nonempty[tid] = st.scoped_nonempty.get(tid, 0) + 1
 
 
 def note_filtered_probe(*, hits: int, price_blocked: int, other_blocked: int) -> None:
@@ -184,8 +147,8 @@ def web_search_allowed() -> bool:
 
     recommend 主链路已有候选时仍然拦截——web_search 不是「找更好」的渠道。
 
-    隔离作用域内（独立子任务，如定点商品调查）改按**本子任务自己**的召回结果判定，不受
-    全树其它子任务是否已找到候选影响——否则商品 A 搜到了会连带拦掉商品 B 自己的兜底。
+    点名评价 / 比较具体商品走场景 2（planner 判 evaluate）。原来那套「定点调查按子任务隔离
+    信号」已删（2026-09-16，真实会话 0 次使用）。
     """
     if _key() is None:
         return True  # 无 session 作用域（单测）
@@ -196,9 +159,6 @@ def web_search_allowed() -> bool:
         return True  # 同上：session 存在但还没搜过商品
     if _TASKS_WANT_WEB & set(get_session_tasks()) and st.web_search_runs < WEB_SEARCH_TASK_QUOTA:
         return True  # 评价 / 行情任务的口碑配额（配额尽则落回下面的兜底判定）
-    if _isolated_var.get():
-        tid = get_thread_id()
-        return st.scoped_nonempty.get(tid, 0) == 0 if tid is not None else True
     return st.nonempty_item_search == 0  # 搜过但全空 → 兜底放行；有候选 → 拦
 
 

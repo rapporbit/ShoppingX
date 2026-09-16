@@ -37,7 +37,6 @@ from pydantic import ValidationError
 
 from app.api import monitor
 from app.harness.autopick import maybe_autopick
-from app.harness.fork_guard import current_fork_depth
 from app.harness.middleware import harness
 from app.harness.msgs import block_text, terminal_summary, text_of
 from app.harness.phase_machine import get_phase_machine
@@ -211,11 +210,10 @@ class HarnessAgentAdapter(MiddlewareBase):
 
     async def _run_post_reflect(self, agent: Agent) -> None:
         s = self._s
-        # 「轮」的边界：解除上一轮的回退闭锁（回退后同轮不得再前进）。阶段机是主 loop 独有。
-        if current_fork_depth() == 0:
-            machine = get_phase_machine()
-            if machine is not None:
-                machine.begin_round()
+        # 「轮」的边界：解除上一轮的回退闭锁（回退后同轮不得再前进）。
+        machine = get_phase_machine()
+        if machine is not None:
+            machine.begin_round()
         ai_msg = _last_assistant(agent)
         ctx = s.base_context()
         ctx["recent_actions_summary"] = s.recent_actions_summary()

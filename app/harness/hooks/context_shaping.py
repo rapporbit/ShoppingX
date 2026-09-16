@@ -4,7 +4,6 @@
                                               <learned_strategies>、待决议确认卡 + 本会话订单
                                               <trade_state>（曾是两个 hook，2026-09-15 合一）
     post_tool_call   50  preference_inject   planner 判出域后注入域内长期偏好
-                                             （worker 由 task_dispatch 注入）
     on_session_end   90  strategy_feedback   给本轮注入过的策略结账：命中回血、连续失败淘汰
 
 上下文压缩不在本仓做：交给框架 ``compress_context``（超阈值时 LLM 摘要进 ``state.summary``，
@@ -21,7 +20,6 @@ from app.api.context import get_thread_id, get_user_id
 from app.harness.budgets import (
     TERMINAL_TOOLS,
 )
-from app.harness.fork_guard import current_fork_depth
 from app.harness.middleware import harness_hook
 from app.memory.injector import PREF_EMPTY, build_preference_block
 from app.memory.strategies import get_strategy_store, render_strategy_block, strategies_for_query
@@ -35,7 +33,7 @@ logger = logging.getLogger("shoppingx.harness.context_shaping")
 async def inject_domain_preferences(context: dict[str, Any]) -> dict[str, Any] | None:
     """planner 返回后注入域内长期偏好。一轮至多注入一次——阶段机保证 planner 只成功跑一次
     （跑完即离开 PLANNING，而 planner 不在后续阶段的白名单里）。"""
-    if context.get("tool_name") != "planner" or current_fork_depth() >= 1:
+    if context.get("tool_name") != "planner":
         return None
 
     user_id = get_user_id() or ""
@@ -139,13 +137,13 @@ async def append_system_prompt_blocks(context: dict[str, Any]) -> dict[str, Any]
 
 @harness_hook("on_session_end", name="strategy_feedback", priority=90)
 async def settle_strategies(context: dict[str, Any]) -> dict[str, Any] | None:
-    """给本轮注入过的策略结账。**只在主 loop 跑**（worker 从不注入，也就无账可结）。
+    """给本轮注入过的策略结账。
 
     priority 90 排在输出审核（10）之后：审核可能把最终回复清成空串，那时这一轮该算失败——
     顺序反了就会把一次「输出全被判违规」记成成功。
     """
     keys = injected_strategy_keys()
-    if not keys or current_fork_depth() >= 1:
+    if not keys:
         return None
     called = context.get("called_tools") or set()
     final = context.get("final_answer")
