@@ -430,8 +430,8 @@ export function useShoppingXTask() {
           lastEventIdRef.current = evt.id;
         }
       }
-      // 召回预览卡：任务还在跑就先把候选画出来（感知提速的落点）。跨平台 fork 时每个子 Agent 各推
-      // 一批，按 item_id 合并去重。**不进 events**——ActivityFeed 只认 tool_start/tool_end 那套画
+      // 召回预览卡：任务还在跑就先把候选画出来（感知提速的落点）。同轮 batch（跨平台 / 多槽位）时
+      // 每条 item_search 各推一批，按 item_id 合并去重。**不进 events**——ActivityFeed 只认 tool_start/tool_end 那套画
       // 思考行，混进去会多出一条「工具调用·运行中」的脏行。
       // 「记住了 …」那一行：curator 是后处理，这条事件在 task_result **之后**才到，故不进 events
       // （ActivityFeed 的思考流已随收尾定格），直接挂到该轮的 learnedPrefs 上追加渲染。

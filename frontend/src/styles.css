@@ -773,9 +773,6 @@ button:disabled {
   color: var(--accent);
   animation: step-spin 0.9s linear infinite;
 }
-.step-icon.fork {
-  color: var(--accent-strong);
-}
 @keyframes step-spin {
   to {
     transform: rotate(360deg);
@@ -1814,7 +1811,7 @@ button:disabled {
   line-height: 1.6;
 }
 
-/* 设置抽屉：检索平台勾选（默认单平台 amazon，勾多个才跨平台 fork 比价）。 */
+/* 设置抽屉：检索平台勾选（默认单平台 amazon，勾多个才同轮 batch 跨平台比价）。 */
 .drawer-section {
   margin-top: 14px;
 }
