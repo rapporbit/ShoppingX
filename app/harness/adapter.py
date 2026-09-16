@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import AsyncGenerator, Callable
@@ -38,7 +39,7 @@ from pydantic import ValidationError
 from app.api import monitor
 from app.harness.autopick import maybe_autopick
 from app.harness.middleware import harness
-from app.harness.msgs import block_text, terminal_summary, text_of
+from app.harness.msgs import _attr, block_text, iter_tool_results, terminal_summary, text_of
 from app.harness.phase_machine import get_phase_machine
 from app.harness.prefill import prefill
 from app.harness.session import HarnessSession, collect_call_signals
@@ -256,8 +257,63 @@ class HarnessAgentAdapter(MiddlewareBase):
                     continue  # 吞掉结束事件 = 强制再来一轮（框架原生语义）
                 s.retry_nudge = None
             if isinstance(event, Msg):
+                event = self._merge_terminal_body(agent, event)
                 event = await self._finalize(event)
             yield event
+
+    @staticmethod
+    def _merge_terminal_body(agent: Agent, msg: Msg) -> Msg:
+        """chat_fallback 收尾时，把模型写在**同一条消息**里的正文并回最终答案。
+
+        **为什么需要**：模型很爱把整篇回答写成 assistant 文本、``message`` 入参里只留一句
+        「以上就是…如果你告诉我预算我再帮你挑」。而主 loop 的 ``TextBlockDeltaEvent`` 刻意不推
+        前端（见 events.py 那段偏离说明），``final_text`` 又只取终结工具那句——于是那篇回答
+        **用户一个字都看不到**，落盘的 summary.md、会话历史、下一轮回看里也只剩客套话。
+        2026-09-16 实测 r03_category：1500+ 字符的电动牙刷选购指南，最终只存下 312 字节。
+
+        **答案的两个可能位置，都要收**（2026-09-16 实测两种都出现过）：
+        - 写在 ``message`` 入参里 → 取 chat_fallback 的**工具返回**（`reply` 字段）；框架之后还会
+          让模型说一句「以上就是…」，那句才是 ``final_text``，长答案就这么被顶掉了。
+        - 写成 assistant 正文、``message`` 只留一句 → 取那条消息的 text block（正文与 ``tool_call``
+          在同一条 Msg 里，不用按长度猜哪段算正文）。
+
+        于是口径统一成：**终结工具的产出就是最终答案**，与 ``shopping_summary`` 那条路用
+        ``summary.summary`` 覆盖 final_text 同源；模型在工具之后补的那句复述丢掉。并完的文本
+        照常走下面的 ``_finalize``（output_guard / output_audit），不绕过审核。
+
+        只认 chat_fallback：shopping_summary 那条路的伴随文本是「好的，我来生成清单」这类过程
+        碎话，并进去只会脏了清单文案。
+        """
+        ctx = list(agent.state.context)
+        reply = ""
+        for text in iter_tool_results(ctx, "chat_fallback"):
+            try:
+                reply = str((json.loads(text) or {}).get("reply") or "").strip()
+            except (json.JSONDecodeError, ValueError, AttributeError):
+                continue  # 撞闸那几次拿回的是哨兵文案不是 JSON，跳过继续往前找
+            if reply:
+                break
+        if not reply:
+            return msg
+        body = ""
+        for m in reversed(ctx):
+            content = getattr(m, "content", None)
+            if not isinstance(content, list):
+                continue
+            called = {_attr(b, "name") for b in content if _attr(b, "type") == "tool_call"}
+            if "chat_fallback" in called:
+                body = text_of(m).strip()
+                break
+        parts = [p for p in (body, reply) if p]
+        # 互含只留长的那份：模型把同一段话既写进正文又写进 message 时，拼接等于让用户读两遍。
+        if len(parts) == 2 and (parts[0] in parts[1] or parts[1] in parts[0]):
+            parts = [max(parts, key=len)]
+        answer = "\n\n".join(parts)
+        tail = text_of(msg).strip()
+        # 模型最后那句比工具产出还全时不动它——这里的目的是别丢答案，不是非要换成工具那份。
+        if answer == tail or (tail and tail not in answer and len(tail) > len(answer)):
+            return msg
+        return msg.model_copy(update={"content": [TextBlock(type="text", text=answer)]})
 
     async def _prefill(self, agent: Agent) -> None:
         """开局预置（planner / 参考图），实现见 :mod:`app.harness.prefill`。"""

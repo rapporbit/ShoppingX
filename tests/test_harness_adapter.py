@@ -7,6 +7,7 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from agentscope.agent import Agent
@@ -578,3 +579,74 @@ async def test_terminal_shortcut_still_fires_when_summary_called_this_turn(
 
     text = "".join(b.text for b in reply.content if b.type == "text")
     assert text == "上一轮的清单"
+
+
+def _fallback_turn(body: str, message: str, reply: str) -> Msg:
+    """模型的一条消息：正文写在 text block、同一条里调 chat_fallback 并拿到返回。"""
+    from app.harness.msgs import tool_blocks
+
+    blocks: list[object] = [TextBlock(type="text", text=body)] if body else []
+    blocks += tool_blocks(
+        "c1",
+        "chat_fallback",
+        {"message": message},
+        json.dumps({"reply": reply, "items": []}, ensure_ascii=False),
+    )
+    return Msg(name="assistant", role="assistant", content=blocks)
+
+
+def _final(text: str) -> Msg:
+    return Msg(name="assistant", role="assistant", content=[TextBlock(type="text", text=text)])
+
+
+def _agent_with(ctx: list[Msg]) -> object:
+    return SimpleNamespace(state=SimpleNamespace(context=ctx))
+
+
+def _merged(ctx: list[Msg], tail: str) -> str:
+    msg = HarnessAgentAdapter._merge_terminal_body(_agent_with(ctx), _final(tail))
+    return "".join(b.text for b in msg.content if b.type == "text")
+
+
+def test_answer_in_message_survives_the_models_tail() -> None:
+    """答案写在 message 里、模型之后又补一句「以上就是…」——最终答案必须是那篇答案。
+
+    不修的话 final_text 只取模型最后那句，落盘与历史里 1500+ 字符的回答只剩几十字节客套话。
+    """
+    answer = "## 关税怎么算\n\n货价 + 运费 + 关税，税率按品类。"
+    text = _merged([_fallback_turn("", answer, answer)], "以上就是跨境关税的估算规则。")
+    assert text == answer
+
+
+def test_prose_written_outside_message_is_merged_back() -> None:
+    """另一种形态：正文写成 assistant 文本、message 只留一句 —— 两段都要在。"""
+    body = "### 电动牙刷怎么选\n\n1. 声波式适合新手\n2. 压力感应防出血"
+    text = _merged([_fallback_turn(body, "以上就是完整指南！", "以上就是完整指南！")], "好的")
+    assert "声波式适合新手" in text and text.endswith("以上就是完整指南！")
+
+
+def test_same_text_in_both_places_is_not_duplicated() -> None:
+    """模型把同一段既写正文又写进 message → 只留长的那份，别让用户读两遍。"""
+    body = "声波式适合新手"
+    text = _merged([_fallback_turn(body, body, body)], "以上")
+    assert text == body
+
+
+def test_longer_model_tail_is_left_alone() -> None:
+    """模型最后那句反而比工具产出更全时不动它——目的是别丢答案，不是非要换成工具那份。"""
+    tail = "完整回答：声波式适合新手，压力感应防出血，续航看使用频率。"
+    text = _merged([_fallback_turn("", "好的", "好的")], tail)
+    assert text == tail
+
+
+def test_summary_turn_prose_is_not_merged() -> None:
+    """只认 chat_fallback：清单那条路的伴随文本是「好的，我来生成清单」，并进去只会脏了文案。"""
+    turn = Msg(
+        name="assistant",
+        role="assistant",
+        content=[
+            TextBlock(type="text", text="好的，我来生成清单"),
+            ToolCallBlock(type="tool_call", id="c2", name="shopping_summary", input="{}"),
+        ],
+    )
+    assert _merged([turn], "为你精选 2 件") == "为你精选 2 件"
