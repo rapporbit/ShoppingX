@@ -46,7 +46,8 @@ from app.utils.env import env_int
 logger = logging.getLogger(__name__)
 
 #: 单次 research 最多研究几个对象。超出的 target 直接截断（不报错——主 agent 想比 5 个手机时，
-#: 回 3 个 + 一句说明，比整条失败有用）。配额本身（会话级）在 C3 的 retrieval_budget 里。
+#: 回 3 个 + 一句说明，比整条失败有用）。会话级配额 ``RESEARCH_SEARCH_QUOTA`` 在
+#: ``app/harness/retrieval_budget.py``，闸在 ``hooks/budget.py`` 的 research_gate。
 RESEARCH_MAX_TARGETS = env_int("RESEARCH_MAX_TARGETS", 3)
 
 #: 每个 target 发一条模板查询、取几条结果。aspects 合进同一条查询，不额外发搜索。
@@ -90,6 +91,19 @@ class ResearchOutput(BaseModel):
     searched: int = 0  # 实际发出的搜索条数（配额记账用）
     raw_path: str = ""  # 原始结果落盘路径（不进上下文，供事后归因）
     note: str = ""  # 降级 / 截断 / 全空时的说明
+
+
+def normalize_targets(targets: object) -> list[str]:
+    """清洗 + 截断 target 列表。**工具侧与配额闸共用这一份**。
+
+    配额闸（``hooks/budget.py`` 的 research_gate）要在执行前算出「本次会发几条搜索」才能预扣，
+    那个数必须与工具真正发出去的条数逐字一致——各写一遍清洗逻辑，早晚会在「空串算不算一条」
+    这种细节上漂移，扣多了白拦、扣少了超配额。
+    """
+    if not isinstance(targets, list):
+        return []
+    out = [t.strip() for t in targets if isinstance(t, str) and t.strip()]
+    return out[:RESEARCH_MAX_TARGETS]
 
 
 def _build_query(target: str, aspects: list[str]) -> str:
@@ -176,7 +190,7 @@ async def research(targets: StrListArg, aspects: StrListArg | None = None) -> Re
     不要用它找商品——它不返回可下单的候选，找商品用 item_search。
     把新说法翻译成品类词、或召回全空时查背景，用 web_search。
     """
-    targets = [t.strip() for t in targets if t and t.strip()][:RESEARCH_MAX_TARGETS]
+    targets = normalize_targets(targets)
     aspects = [a.strip() for a in (aspects or []) if a and a.strip()]
     await monitor.report_tool_start("research", targets=targets, aspects=aspects)
     if not targets:
@@ -186,10 +200,7 @@ async def research(targets: StrListArg, aspects: StrListArg | None = None) -> Re
 
     # 并行发：每 target 一条模板查询，aspects 合进同一条。上界 = len(targets)，事前可知。
     packs_raw = await asyncio.gather(
-        *(
-            search_web(_build_query(t, aspects), RESEARCH_RESULTS_PER_TARGET)
-            for t in targets
-        )
+        *(search_web(_build_query(t, aspects), RESEARCH_RESULTS_PER_TARGET) for t in targets)
     )
     packs = [(t, ws.results) for t, (ws, _) in zip(targets, packs_raw, strict=True)]
     degraded_notes = [ws.note for ws, deg in packs_raw if deg and ws.note]

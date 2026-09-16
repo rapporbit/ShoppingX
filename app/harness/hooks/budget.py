@@ -2,7 +2,8 @@
 
     pre_think       20  budget_router  按全树成本定档：换模型 / 注入 hint / FALLBACK 不调 LLM
     pre_tool_call   30  spend_gate     token 档位：minimal 档收走成本放大器
-    pre_tool_call   45  search_gate    web_search 用途门 → 检索计数自增 / 越线软收敛 / 硬挡
+    pre_tool_call   45  search_gate    web_search 用途门 + research 配额门 → 检索计数自增 /
+                                       越线软收敛 / 硬挡
 
 **顺序契约**：spend 在 search 之前——预算拒绝是事实闸，不该先给被拒的调用记一次检索。
 （A4 删子 Agent 时，fork 次数闸、子搜上限、postfork 直搜闸随之删除。）
@@ -10,8 +11,8 @@
 **效率闸 vs 安全闸**（逃生门见 ``middleware._try_escape``）：依据推定的（websearch）声明
 ``escape_key``，连拒 2 次放行；依据事实的（token / 检索预算）永远硬拒。
 **预算的定义住在哪（消费在本文件，定义分两个包，改额度先找对地方）**：
-- 检索：全树计数与 web_search 任务配额在 ``app/harness/retrieval_budget.py``；上限 / 工具集合在
-  ``app/harness/budgets.py``。
+- 检索：全树计数、web_search 任务配额、research 搜索配额（三本账互不透支）在
+  ``app/harness/retrieval_budget.py``；上限 / 工具集合在 ``app/harness/budgets.py``。
 - token / 成本：全树成本与四档 ``Tier`` 在 ``app/harness/token_budget.py`` / ``model_router.py``。
 - 一次失控最多烧多少（超时 / max_iters）：``app/agent/limits.py`` 一页看全。
 """
@@ -30,13 +31,17 @@ from app.harness.middleware import HookRejectSignal, harness_hook
 from app.harness.model_router import Tier, current_tier
 from app.harness.msgs import system_message
 from app.harness.retrieval_budget import (
+    RESEARCH_SEARCH_QUOTA,
+    charge_research,
     charge_tree_retrieval,
     note_web_search,
+    research_remaining,
     web_search_allowed,
 )
 from app.harness.sentinels import (
     BUDGET_HARD_DENIED,
     WEBSEARCH_DENIED,
+    research_quota_denied,
     retrieval_exhausted,
 )
 from app.harness.state import GuardState, guard_of
@@ -60,6 +65,32 @@ async def check_websearch(context: dict[str, Any]) -> dict[str, Any] | None:
         return None
     if not web_search_allowed():
         raise HookRejectSignal(WEBSEARCH_DENIED, raw=True, escape_key="web_search")
+    return None
+
+
+async def check_research(context: dict[str, Any]) -> dict[str, Any] | None:
+    """research 配额门：按**本次会发几条搜索**预扣会话额度，不够就拦。
+
+    与 web_search 那道门的区别在判据性质：web_search 的门是**动机推定**（「有候选就不需要外部
+    信息」不一定成立），所以接逃生门、连拒 2 次放行；这道门是**事实**（额度还剩几条是数出来的），
+    照安全闸的规矩硬拒、不给 escape_key。
+
+    额度不够时给的是**可执行的出路**（「只保留最关键的 N 个对象重调一次」）而不是一句禁令——
+    research 的入参天然可缩，模型缩了就能过，比换措辞硬撞同一道闸有用。
+    """
+    if context.get("tool_name") != "research":
+        return None
+    from app.tools.research import normalize_targets  # 延迟 import：harness 不在顶层依赖 tools
+
+    args = context.get("tool_args")
+    planned = len(normalize_targets((args or {}).get("targets")))
+    if planned <= 0:
+        return None  # 空 targets 交给工具自己回「没有给出研究对象」，别在闸上耗额度
+    if not charge_research(planned):
+        raise HookRejectSignal(
+            research_quota_denied(planned, research_remaining(), RESEARCH_SEARCH_QUOTA),
+            raw=True,
+        )
     return None
 
 
@@ -129,8 +160,13 @@ async def check_spend(context: dict[str, Any]) -> dict[str, Any] | None:
 
 @harness_hook("pre_tool_call", name="search_gate", priority=45)
 async def check_search(context: dict[str, Any]) -> dict[str, Any] | None:
-    """web_search 用途门 → 检索计数与越线处理。"""
+    """web_search 用途门 + research 配额门 → 检索计数与越线处理。
+
+    三道各判各的工具、互不影响：``check_websearch`` 只看 web_search，``check_research`` 只看
+    research（它不在 ``RETRIEVAL_TOOLS`` 里，后面的 ``charge_retrieval`` 对它直接返回 None）。
+    """
     await check_websearch(context)
+    await check_research(context)
     return await charge_retrieval(context)
 
 

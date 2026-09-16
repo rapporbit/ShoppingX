@@ -59,6 +59,24 @@ WEBSEARCH_DENIED = (
     "（评价 / 行情类任务的口碑查询另有小配额；被拦说明本轮任务不含评价诉求或配额已用完。）"
 )
 
+
+# research 配额哨兵：会话级搜索条数用尽 / 本次要的条数超过剩余额度时回这条。
+# 明确报出「剩几条、单次要几条」——模型据此可以少给几个 target 再试一次（这是真出路），
+# 而不是收到一句笼统的「不许调」后换个措辞硬撞同一道闸。
+def research_quota_denied(planned: int, remaining: int, quota: int) -> str:
+    if remaining <= 0:
+        return (
+            f"[research 未执行] 本次会话的公网研究额度已用完（每会话最多 {quota} 条搜索）。"
+            "请基于已查到的资料与现有候选继续，需要补充事实时如实说明「这部分没有查到」，"
+            "不要换措辞重试。"
+        )
+    return (
+        f"[research 未执行] 本次要研究 {planned} 个对象（＝{planned} 条搜索），"
+        f"但本会话只剩 {remaining} 条公网研究额度。请只保留最关键的 {remaining} 个对象重调一次，"
+        "其余对象基于已有资料判断或如实说明不确定。"
+    )
+
+
 # token 预算硬线哨兵：成本放大器工具一律拦截，只留收尾链。
 BUDGET_HARD_DENIED = (
     "[token 预算已超限] 本次工具未执行。请立即基于现有候选走收尾"
@@ -123,6 +141,7 @@ INTERNAL_MARKERS: tuple[str, ...] = (
     "[阶段推进]",
     "[阶段回退]",
     "[web_search 未执行]",
+    "[research 未执行]",
     "[工具不存在]",
     "[工具暂时不可用]",
     "[…工具结果过长已截断",

@@ -26,7 +26,12 @@ DEFAULT_RETRIEVAL_CAP = 6
 # 「成本放大器」工具：会派生更多模型调用 / 外呼、让 token 成本乘法累积的几个口子。token 预算越
 # 硬线时执行层硬挡这些工具，逼 Agent 用现有候选走收尾。便宜的收尾 / 精挑工具与终结工具保留，
 # 让任务能「花得起地」结束，而非硬停丢掉已收敛的候选。
-COST_AMPLIFIER_TOOLS = RETRIEVAL_TOOLS | frozenset({"category_insight"})
+#
+# ``research`` 在这里但**不在** ``RETRIEVAL_TOOLS`` 里：它一次 3 条外呼 + 一次归纳解码，确实是
+# 成本放大器；但它不产可下单候选，不是「再找找更好的商品」那条路上的渠道，混进检索总额只会挤掉
+# item_search 的额度，且「停止检索立即收尾」的软收敛哨兵对它并不成立。它的会话上限走独立配额
+# ``RESEARCH_SEARCH_QUOTA``（见 retrieval_budget.py 的分账长注释）。
+COST_AMPLIFIER_TOOLS = RETRIEVAL_TOOLS | frozenset({"category_insight", "research"})
 
 # 终结工具集从 ``app.agent.constants`` 读（无依赖模块，harness 与 tool_registry 共用一份）。
 # 这里曾是一份**只有 2 个**的复制品：复制时说好「与 tool_registry 一致」，之后那边加了
