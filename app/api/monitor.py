@@ -412,7 +412,7 @@ async def report_task_result(
 
     ``elapsed_ms`` 是本轮总耗时（毫秒），前端在该轮右下角显示「用时」。缺省 ``None`` 即不带。
 
-    ``tokens`` 是本轮**全树**（主 + 各 fork 子 Agent）token 用量（``input`` / ``output`` /
+    ``tokens`` 是本轮主 loop 全部模型调用累计的 token 用量（``input`` / ``output`` /
     ``total`` / ``cost_usd`` / ``cache_read`` / ``cache_hit_rate``），前端在该轮右下角与「用时」
     并排显示「token 消耗」，hover 可见输入/输出/成本/缓存命中率拆分。缺省即不带。
     """
