@@ -121,9 +121,9 @@ def test_tools_cover_all_business_tools_with_same_metadata() -> None:
     """运行时壳与声明壳一一对应，元数据取自同一处——描述就是 docstring，漂了就是两套行为。"""
     from app.agent.tool_registry import _BUSINESS_TOOLS, TOOLS, TOOLS_BY_NAME
 
-    # 15 个业务工具（12 + 交易域三件）；task_dispatch 已在 A4 删除
-    assert len(_BUSINESS_TOOLS) == 15
-    assert len(TOOLS) == 15
+    # 16 个业务工具（13 + 交易域三件）；task_dispatch 已在 A4 删除，research 在 C2 加入
+    assert len(_BUSINESS_TOOLS) == 16
+    assert len(TOOLS) == 16
     for shell in _BUSINESS_TOOLS:
         ft = TOOLS_BY_NAME[shell.name]
         assert ft.description == shell.description
@@ -143,6 +143,8 @@ def test_read_only_flags_are_exactly_the_read_side() -> None:
         "category_insight",
         "item_picker",
         "web_search",
+        # research：外呼 + 一次归纳模型调用，不写任何持久状态（原始结果落盘是产物归档不是状态）
+        "research",
         # 交易域里唯一的只读工具：查单不改任何状态，且它是「取消前必须先查」那条顺序约束的前提
         "query_order",
     }
@@ -164,9 +166,9 @@ async def test_build_toolkit_roles_produce_schemas() -> None:
 
     main = await build_toolkit("main")
     schemas = await main.get_tool_schemas()
-    # 主 Agent 拿全集：15 业务工具
+    # 主 Agent 拿全集：16 业务工具
     # + 框架内置的 skill 阅读器 Skill（批 4-3：注册了 skill 就自动挂上，只读、权限恒 ALLOW）
-    assert len(schemas) == 16
+    assert len(schemas) == 17
     names = {s["function"]["name"] for s in schemas}
     assert "Skill" in names and "task_dispatch" not in names
     assert all(s["function"]["description"] for s in schemas)

@@ -72,19 +72,17 @@ class WebSearchOutput(BaseModel):
     note: str = ""  # 降级 / 异常时的说明
 
 
-@tool
-async def web_search(query: str, max_results: int = 5) -> WebSearchOutput:
-    """查公网外部事实（评测/口碑/趋势/新说法翻译成品类词）；不产候选。参数 query、max_results。"""
-    await monitor.report_tool_start("web_search", query=query)
+async def search_web(query: str, max_results: int = 5) -> tuple[WebSearchOutput, bool]:
+    """发一次 Tavily 搜索，返回 ``(结果, 是否降级)``。**不报 AGUI 事件**——上报归调用方。
+
+    抽出来是给 ``research``（C2）复用：外呼 / 断路器 / 截断 / 降级 note 只有这一套实现，
+    否则两个工具各写一遍，将来改截断定数必漏一边。降级（缺 key / 异常 / 熔断）一律返回
+    空结果 + note，**不抛**——调用方据 ``note`` 决定怎么说「这条外部信息暂时拿不到」。
+    """
     api_key = os.environ.get("TAVILY_API_KEY", "").strip()
     if not api_key:
-        out = WebSearchOutput(
-            query=query,
-            results=[],
-            note="未配置 TAVILY_API_KEY，web_search 已跳过；请基于已有信息判断或如实说明不确定。",
-        )
-        await monitor.report_tool_end("web_search", results=0, degraded=True, result=out.note)
-        return out
+        note = "未配置 TAVILY_API_KEY，web_search 已跳过；请基于已有信息判断或如实说明不确定。"
+        return WebSearchOutput(query=query, results=[], note=note), True
 
     degraded = False
     try:
@@ -124,6 +122,14 @@ async def web_search(query: str, max_results: int = 5) -> WebSearchOutput:
             results=[],
             note=f"web_search 调用失败（{type(e).__name__}），请如实说明不确定。",
         )
+    return out, degraded
+
+
+@tool
+async def web_search(query: str, max_results: int = 5) -> WebSearchOutput:
+    """查公网外部事实（评测/口碑/趋势/新说法翻译成品类词）；不产候选。参数 query、max_results。"""
+    await monitor.report_tool_start("web_search", query=query)
+    out, degraded = await search_web(query, max_results)
 
     # 思考结果摘要：Tavily 概括答案 + 头部几条标题（供前端展开看这一步「查到什么外部事实」）；
     # 降级 / 无果时退回 note。

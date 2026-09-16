@@ -25,6 +25,7 @@ from app.tools.item_search import item_search
 from app.tools.planner import planner
 from app.tools.price_compare import price_compare
 from app.tools.query_order import query_order
+from app.tools.research import research
 from app.tools.shipping_calc import shipping_calc
 from app.tools.shopping_summary import shopping_summary
 from app.tools.web_search import web_search
@@ -47,6 +48,7 @@ _BUSINESS_TOOLS: list[ToolShell] = [
     category_insight,
     item_picker,
     web_search,
+    research,
     chat_fallback,
     shopping_summary,
     ask_user,
@@ -70,6 +72,7 @@ _READ_ONLY_TOOLS = frozenset(
         "category_insight",
         "item_picker",
         "web_search",
+        "research",
         "query_order",
     }
 )
