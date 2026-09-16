@@ -1,7 +1,7 @@
 [project]
 name = "shoppingx-agent"
 version = "0.1.0"
-description = "ShoppingX — 全球电商对话式购物 Agent（AgentLoop + 同质子 Agent fork）"
+description = "ShoppingX — 全球电商对话式购物 Agent（AgentLoop + 单模型单环，并行靠同轮 batch 工具调用）"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
