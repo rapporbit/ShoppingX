@@ -1,16 +1,19 @@
-"""跨整棵 fork 树共享的「商品检索」预算 + 召回信号（按 session_dir 聚合）。
+"""一次会话共享的「商品检索」预算 + 召回信号（按 session_dir 聚合）。
 
-为什么把预算打在「检索总量」而不是「fork 机制」上：``MAX_FORK_DEPTH`` / ForkBudget 只堵了
-**fork 这个机制**，但「再找找更好的」这个**动机**没消失——堵死 fork 口，压力就顶到主 loop
-还握着的直调 ``item_search`` / ``web_search``（挤气球）。所以把主 loop 直调与子里的 item_search
-都计进**同一个计数器**，过阈值由 middleware 注入强制收尾信号：fork 渠道和直调渠道一起兜。
+为什么把预算打在「检索总量」而不是某个具体机制上：堵住任何单一渠道，「再找找更好的」这个**动机**
+都不会消失，压力只会顶到还开着的那个口（挤气球）。所以 ``item_search`` / ``web_search`` 计进
+**同一个计数器**，过阈值由 middleware 注入强制收尾信号。
 
 为什么用「按 session_dir 为键的模块级 dict」而不是裸 ContextVar：asyncio 子任务创建时会**拷贝**
-一份 context，子里对 ContextVar 的 ``set`` 不会回传父 loop——想跨 fork 聚合（连子的 item_search
-也一起兜）就会静默地数不到子。``session_dir`` 是显式透传给子 Agent 的（``thread_scope`` 让子
-**继承父 session_dir**），主和子都按同一 key 自增，才能真正全树聚合。
+一份 context，子任务里对 ContextVar 的 ``set`` 不回传父 loop——同轮 batch 的几个工具各跑在自己的
+子任务里，用 ContextVar 就会静默漏计。``session_dir`` 由 ``thread_scope`` 设好后被子任务继承，
+按同一 key 自增才数得准。（历史：这套聚合最初是为跨 fork 树共享写的，2026-09-16 删子 Agent 后
+口径收窄为「一次 run_agent」，机制不变。）
 
 模块级 dict 需要收尾清理（防无界增长）：``run_agent`` 结束时调 :func:`reset_tree`。
+
+三本账各管各的，互不透支：全树检索总量（``count``，堵找更好商品的动机）、web_search 任务配额
+（``WEB_SEARCH_TASK_QUOTA``）、research 搜索配额（``RESEARCH_SEARCH_QUOTA``，见下方长注释）。
 """
 
 from __future__ import annotations
@@ -27,12 +30,31 @@ from app.utils.env import env_int
 WEB_SEARCH_TASK_QUOTA = env_int("WEB_SEARCH_TASK_QUOTA", 2)
 _TASKS_WANT_WEB = frozenset({"evaluate", "category_intel"})
 
+# ``research``（C2 的有界研究函数）的**独立**会话配额，单位是**搜索条数**不是调用次数：
+# 单次上界 ``RESEARCH_MAX_TARGETS``（3，每 target 一条模板查询、aspects 合进同一条）已在工具侧
+# 截断，这里管的是会话累计 —— 6 条 ≈ 两次满载调用。
+#
+# **为什么与 WEB_SEARCH_TASK_QUOTA 分账（两个计数器互不透支）**：research 内部直调 ``search_web``，
+# 绕开 web_search 的工具层门；它单次就发 3 搜，是那道门（配额 2）的 1.5 倍，共用一份额度等于两边
+# 互相饿死。两者吃的也不是同一种成本：web_search 每条整页正文原样进主环 messages，research 的正文
+# 只进归纳模型、主环只见 schema。
+#
+# **为什么不塞进全树检索总额（RETRIEVAL_TOOLS / TREE_RETRIEVAL_BUDGET）**：那份额度堵的是「再找找
+# 更好的商品」这个动机，research 不产候选、不是这条路上的渠道，混进去只会挤掉 item_search 的额度，
+# 且「停止检索立即收尾」的软收敛哨兵对它并不成立。挤气球风险（item_search 撞线后改调 research 兜
+# 圈子）由本配额自己封顶兜住：最多 2 次调用，且拿不到可下单候选。
+#
+# **为什么是 6 而不是博客口径的 3**：博客那个 3 说的是自由 web_search —— 正文全进主环上下文。
+# research 是有界函数，主环单次增量约为裸搜的 1/10，同样的上下文预算能放更多次。
+RESEARCH_SEARCH_QUOTA = env_int("RESEARCH_SEARCH_QUOTA", 6)
+
 
 @dataclass
 class _TreeRetrieval:
     count: int = 0  # item_search + web_search 全树累计（预算计数）
     item_search_runs: int = 0  # item_search 调用次数（含召回为空的）
     web_search_runs: int = 0  # web_search 已执行次数（任务口径配额用，全树共享）
+    research_searches: int = 0  # research 已发出的搜索条数（独立配额，与 web_search 不互通）
     nonempty_item_search: int = 0  # 召回到 ≥1 候选的 item_search 次数（web_search 兜底门用）
     # ── item_search 探测召回（filtered_out）的全树汇总，供「该建议放宽预算还是该补搜」判定 ──
     probe_runs: int = 0  # 跑过探测的 item_search 次数（＝带硬过滤且命中不足的那些）
@@ -91,6 +113,37 @@ def note_web_search() -> None:
         st.web_search_runs += 1
 
 
+def research_remaining() -> int:
+    """本会话 ``research`` 还剩几条搜索额度（无 session 作用域＝单测，回满额）。"""
+    if _key() is None:
+        return RESEARCH_SEARCH_QUOTA
+    st = _state(create=False)
+    used = st.research_searches if st is not None else 0
+    return max(0, RESEARCH_SEARCH_QUOTA - used)
+
+
+def charge_research(planned: int) -> bool:
+    """预扣 ``planned`` 条 research 搜索额度：够则扣掉回 True，不够则**不扣**回 False。
+
+    **判与扣在同一个同步段里**（中间无 await），所以同轮 batch 并发发两次 research 时，第二次
+    读到的是第一次扣完后的数——不会两条都看见满额然后各搜 3 条把会话上限撑到 6 以上。
+
+    **预扣（执行前）而不是执行后结算**：与 :func:`note_web_search` 同一顺序契约。代价是全降级
+    （没配 TAVILY_API_KEY / 熔断）那次也照扣；这与 web_search 现状一致，且降级本身会带 note 回
+    模型，不会诱发重试。
+    """
+    planned = max(0, planned)
+    if _key() is None:
+        return True  # 无 session 作用域（单测直调）：失效方向中性，不拦
+    st = _state()
+    if st is None:
+        return True
+    if st.research_searches + planned > RESEARCH_SEARCH_QUOTA:
+        return False
+    st.research_searches += planned
+    return True
+
+
 def note_item_search(total_recall: int) -> None:
     """item_search 完成后登记一次召回信号（供 web_search 兜底门判定）。"""
     st = _state()
@@ -104,8 +157,8 @@ def note_item_search(total_recall: int) -> None:
 def note_filtered_probe(*, hits: int, price_blocked: int, other_blocked: int) -> None:
     """登记一次 item_search 探测召回的结论（见 ``app.tools.item_search`` 的探测段）。
 
-    全树聚合（同 session_dir）：跨平台并行时各 worker 各搜一份，「预算内到底有没有货」是
-    合流后的结论，不该由某一个平台单独说了算。
+    会话级聚合（同 session_dir）：跨平台是同轮 batch 多条 item_search 各搜一份，「预算内到底
+    有没有货」是合流后的结论，不该由某一个平台单独说了算。
     """
     st = _state()
     if st is None:
