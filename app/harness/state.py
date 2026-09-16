@@ -37,6 +37,11 @@ class GuardState:
     item_search_calls: int = 0
     #: 主 loop 本轮是否已调过终结工具（终结硬停闸用）
     terminal_reached: bool = False
+    #: 置上 ``terminal_reached`` 时所处的 ``think_step``（= 批次 id，-1 为未置位）。
+    #: 同一条 AI 消息发出的并行调用共享一个 think_step，框架按 ``is_concurrency_safe`` 把它们
+    #: 合成一个 concurrent 批用 gather 并发跑——布尔位在这种交错下会让「谁先跑完谁拦死兄弟调用」，
+    #: 出几张确认卡取决于事件循环调度。记下批次号，闸才分得清「兄弟调用」与「收尾后的新动作」。
+    terminal_step: int = -1
     #: 本次模型调用内已因「纯文字收尾」重发过几次（上限 MAX_TERMINAL_NUDGE_RETRIES）。
     #: 由适配器在每次 ``on_model_call`` 开头清零——配额是 per-call，不是 per-loop。
     terminal_nudge_retries: int = 0
