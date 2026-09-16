@@ -1,9 +1,13 @@
 """请求级上下文：用 ContextVar 保存当前任务的 thread_id 与 session_dir。
 
 ShoppingX 是 asyncio 单线程协程并发服务，同一事件循环里多个用户任务交替推进，
-主 AgentLoop 还会按需 fork 同质子 AgentLoop。若用普通全局变量保存 thread_id /
-session_dir 会立刻串台。ContextVar 为每个 asyncio Task 维护独立副本，天然隔离；
-且 ``asyncio.create_task`` 会复制当前 Task 的 ContextVar 快照，子 Agent 自动继承。
+主 AgentLoop 同一轮还会并发跑多个工具调用（``is_concurrency_safe=True``）。若用普通
+全局变量保存 thread_id / session_dir 会立刻串台。ContextVar 为每个 asyncio Task 维护
+独立副本，天然隔离；且 ``asyncio.create_task`` 会复制当前 Task 的 ContextVar 快照，
+框架并发执行的工具协程自动继承。
+
+（2026-09-16：曾用于「主 loop fork 同质子 AgentLoop」的隔离，派发已随单环收敛删除，
+ContextVar 现在只服务多用户隔离与产物归档。）
 
 写入封装见 :mod:`app.utils.thread_ctx` 的 ``thread_scope`` 上下文管理器。
 """
@@ -279,9 +283,9 @@ def reset_dest_country() -> None:
 
 
 def begin_learned_prefs() -> None:
-    """在 ``run_agent`` 入口开一份空的「本轮已沉淀偏好」累加器（须在任何 fork 之前调）。
+    """在 ``run_agent`` 入口开一份空的「本轮已沉淀偏好」累加器（须在派生任何子任务之前调）。
 
-    置一个**新** list 而非复用默认——这样子 Agent fork 时快照到的是本轮这份、且各轮互不串。
+    置一个**新** list 而非复用默认——这样框架并发跑工具协程时快照到的是本轮这份、且各轮互不串。
     """
     _learned_prefs_var.set([])
 
