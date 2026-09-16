@@ -1702,13 +1702,31 @@ def test_budget_amount_grounded(intent: str, amount: float, grounded: bool) -> N
     assert budget_amount_grounded(intent, amount) is grounded
 
 
-async def test_chat_fallback_replies(monkeypatch: Any) -> None:
+async def test_chat_fallback_passes_message_through(monkeypatch: Any) -> None:
+    """message 原样透出、**不再调模型改写**。
+
+    改写过一次的代价是真的：模型把 1500+ 字符的选购指南写进 message，fast 模型「归纳成一两句」
+    后，落盘的 summary.md 与会话历史 final_text 就只剩一句客套话，原答案谁也拿不到。
+    """
+    import app.tools.chat_fallback as mod
+
+    def _never() -> Any:
+        raise AssertionError("message 非空时不该再调模型")
+
+    monkeypatch.setattr(mod, "get_fast_llm", _never)
+    long_answer = "### 电动牙刷怎么选\n\n| 类型 | 适合谁 |\n|---|---|\n| 声波式 | 新手 |"
+    out = await mod.chat_fallback.ainvoke({"message": long_answer})
+    assert out.reply == long_answer  # 一个字都不改，Markdown 结构也保住
+
+
+async def test_chat_fallback_empty_message_falls_back_to_llm(monkeypatch: Any) -> None:
+    """入参没给文案才退回内部 LLM（与 shopping_summary 同口径）。"""
     import app.tools.chat_fallback as mod
 
     fake = _FakeLLM(content="你好！我可以帮你跨平台找商品。")
     monkeypatch.setattr(mod, "get_fast_llm", lambda: fake)
-    out = await mod.chat_fallback.ainvoke({"message": "你好"})
-    assert "你好" in out.reply
+    out = await mod.chat_fallback.ainvoke({"message": "   "})
+    assert "跨平台找商品" in out.reply
 
 
 async def test_shopping_summary_returns_list(monkeypatch: Any) -> None:
