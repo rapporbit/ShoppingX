@@ -160,6 +160,70 @@ def test_http_entry_is_registered() -> None:
     assert ("/api/threads/{thread_id}/compare", ("POST",)) in routes
 
 
+@pytest.fixture
+async def _client(monkeypatch: pytest.MonkeyPatch, tmp_path):  # type: ignore[no-untyped-def]
+    """开着鉴权的 ASGI 客户端，输出根钉到 tmp（与 test_confirmations 同一套路）。"""
+    from httpx import ASGITransport, AsyncClient
+
+    import app.api.server as server
+
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+    monkeypatch.setenv("JWT_SECRET", "test-secret-not-real")
+    monkeypatch.setattr(server, "OUTPUT_ROOT", tmp_path / "output")
+    async with AsyncClient(transport=ASGITransport(app=server.app), base_url="http://test") as c:
+        yield c
+
+
+async def test_http_compare_roundtrip_and_ownership(  # type: ignore[no-untyped-def]
+    _client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """按钮那条路走通一遍：出对比、别人碰不到、没登录进不来。
+
+    ``test_http_entry_is_registered`` 只证路径在路由表上——路由在、归属校验漏了照样是洞。
+    这条把 ``_guard_thread`` 真正打一遍：thread 属于 A，B 拿自己的 token 打同一个 thread 必须 403。
+    """
+    import app.tools._candidates as candidates
+    from app.db.accounts import claim_thread
+    from app.db.session import init_db, session_factory
+
+    # 任务已结束时登记表为空，compare 按 id 回源商品库——这里把回源换成测试商品池。
+    pool = {"c1": _cand("c1"), "c2": _cand("c2")}
+    monkeypatch.setattr(
+        candidates, "_fetch_from_store", lambda ids: [pool[i] for i in ids if i in pool]
+    )
+    monkeypatch.setattr(pc, "get_fast_llm", lambda: object())
+    monkeypatch.setattr(
+        pc,
+        "call_structured",
+        _draft([ComparisonItem(item_id="c1", pros=["轻"]), ComparisonItem(item_id="c2")], rec="c1"),
+    )
+
+    await init_db()
+    resp = await _client.post(
+        "/api/auth/register", json={"username": "cmp-a", "password": "sup3r-secret"}
+    )
+    assert resp.status_code == 200, resp.text
+    uid = resp.json()["user_id"]
+    headers = {"Authorization": f"Bearer {resp.json()['access_token']}"}
+    other = await _client.post(
+        "/api/auth/register", json={"username": "cmp-b", "password": "sup3r-secret"}
+    )
+    other_headers = {"Authorization": f"Bearer {other.json()['access_token']}"}
+    async with session_factory()() as db:
+        await claim_thread(db, "t-cmp", uid, "对比")
+
+    body = {"item_ids": ["c1", "c2"]}
+    ok = await _client.post("/api/threads/t-cmp/compare", headers=headers, json=body)
+    assert ok.status_code == 200, ok.text
+    data = ok.json()
+    assert [i["item_id"] for i in data["items"]] == ["c1", "c2"]
+    assert data["recommended_item_id"] == "c1"
+
+    assert (await _client.post("/api/threads/t-cmp/compare", json=body)).status_code == 401
+    forbidden = await _client.post("/api/threads/t-cmp/compare", headers=other_headers, json=body)
+    assert forbidden.status_code == 403, forbidden.text
+
+
 def test_is_terminal_tool() -> None:
     """终结性：调完即收尾，不让模型再调 shopping_summary 把同一份判断用散文重讲。"""
     from app.agent.constants import TERMINAL_TOOLS
