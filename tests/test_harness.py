@@ -864,6 +864,49 @@ class TestTradeTurnIsTerminal:
         assert mw.guard.terminal_reached is True
 
     @pytest.mark.asyncio
+    async def test_sibling_terminal_calls_in_same_batch_pass(self, clean_phase) -> None:
+        """「这两件分开下两个单」→ 同轮两个 create_order 并发，两张确认卡都要落。
+
+        反例（2026-09-16 实测）：布尔位下第一个跑完 post 就置位，第二个在 pre 被 `[本轮已收尾]`
+        拦掉，只落一张卡，收尾文案却写「已为你生成两张独立的确认卡」。框架按
+        ``is_concurrency_safe`` 把这两个调用合成一个 concurrent 批 gather 并发跑，**谁被拦由事件
+        循环调度决定**——同样输入可能出一张也可能出两张，所以锁的是「同批不拦」，不是执行顺序。
+        """
+        from app.harness.hooks.termination import check_terminal_reached, mark_terminal
+
+        mw = _mw()
+        mw.guard.think_step = 3
+        # 兄弟调用①：执行完置位并记下批次号
+        await mark_terminal({"_guard": mw.guard, "tool_name": "create_order"})
+        assert mw.guard.terminal_step == 3
+        # 兄弟调用②：同一条 AI 消息发出（同 think_step），照常放行
+        assert (
+            await check_terminal_reached({"_guard": mw.guard, "tool_name": "create_order"}) is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_terminal_gate_still_blocks_non_siblings(self, clean_phase) -> None:
+        """放行只开给同批的终结工具：同批的检索工具、下一批的终结工具都照拦。
+
+        前者是闸的本职（调完 shopping_summary 又 item_search 的打转尾巴），后者防连环下单。
+        """
+        from app.harness.hooks.termination import check_terminal_reached, mark_terminal
+        from app.harness.middleware import HookRejectSignal
+
+        mw = _mw()
+        mw.guard.think_step = 3
+        await mark_terminal({"_guard": mw.guard, "tool_name": "shopping_summary"})
+
+        # 同批但不是终结工具 → 拦
+        with pytest.raises(HookRejectSignal):
+            await check_terminal_reached({"_guard": mw.guard, "tool_name": "item_search"})
+
+        # 下一次模型调用里的终结工具 → 拦（批次号已经对不上）
+        mw.guard.think_step = 4
+        with pytest.raises(HookRejectSignal):
+            await check_terminal_reached({"_guard": mw.guard, "tool_name": "create_order"})
+
+    @pytest.mark.asyncio
     async def test_cancel_order_turn_gets_no_terminal_nudge(self, clean_phase) -> None:
         """取消完直接写文案收尾，不该再被催「你没调终结工具」——那是白多一轮往返。
 
