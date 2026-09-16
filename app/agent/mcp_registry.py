@@ -1,4 +1,4 @@
-"""消费侧 MCP 接线（批 4-3）—— 把一个外部 MCP server 的工具挂进 SearchAgent 的只读组。
+"""消费侧 MCP 接线（批 4-3）—— 把一个外部 MCP server 的只读工具挂进主 Agent 的 Toolkit。
 
 对端默认是本仓自建的汇率 MCP（``app/mcp/fx_server.py``，纯静态表、零外部依赖）。想换成
 Tavily MCP 或别的 HTTP MCP，把 ``MCP_SEARCH_URL`` 指过去、``MCP_SEARCH_NAME`` /
@@ -10,10 +10,10 @@ server 要一次工具表的（框架在 ``_get_available_tools`` 里现拉，�
 恰好起着」和「没起」之间飘——同一个问题两次跑出不同的工具集，这种不确定性比少一个汇率工具贵
 得多。要用就显式配 URL，配了就当它该在。
 
-**读写切分怎么不被 MCP 破坏**（三保证逐条对上）：
+**只读边界怎么不被 MCP 破坏**（三保证逐条对上）：
 
-1. **发放范围** —— ``MCP_ROLES`` 钉死只有 ``search`` 拿得到；``main`` / ``trade`` 的 Toolkit
-   里根本没有这个 client。
+1. **发放范围** —— ``MCP_ROLES`` 钉死拿得到的角色。A4 删掉 SearchAgent 后改发给 ``main``
+   （原来只发 search，worker 删了不改就等于这组工具静默消失）。
 2. **``is_read_only`` 标记** —— ``agentscope.tool.MCPTool`` 的 ``is_read_only`` 取自 MCP 工具的
    ``annotations.readOnlyHint``（**取不到就是 False**）。所以对端必须声明；本仓的 fx server
    两个工具都声明了。这一层依赖对端自觉，故有第 3 层。
@@ -39,7 +39,7 @@ from app.mcp.fx_server import FX_TOOL_NAMES
 from app.utils.env import env_float, env_str
 
 #: 拿得到 MCP 的角色。见模块 docstring「发放范围」。
-MCP_ROLES: frozenset[str] = frozenset({"search"})
+MCP_ROLES: frozenset[str] = frozenset({"main"})
 
 #: 默认对端 = 自建汇率 MCP。名字进模型看到的工具名（``mcp__{name}__{tool}``），
 #: 框架要求它匹配 ``^[a-zA-Z0-9_-]+$``。
@@ -51,7 +51,7 @@ def _tool_whitelist() -> list[str]:
     return [name.strip() for name in raw.split(",") if name.strip()]
 
 
-def mcp_tool_names(role: str = "search") -> list[str]:
+def mcp_tool_names(role: str = "main") -> list[str]:
     """该角色的 MCP 工具在模型侧的全名（``mcp__{server}__{tool}``）。
 
     给安全白名单用（``app/security/tool_whitelist.py``）：白名单只回答「这是不是本系统的
@@ -64,7 +64,7 @@ def mcp_tool_names(role: str = "search") -> list[str]:
     return [f"mcp__{server}__{tool}" for tool in _tool_whitelist()]
 
 
-def mcp_clients(role: str = "search") -> list[MCPClient]:
+def mcp_clients(role: str = "main") -> list[MCPClient]:
     """按角色返回要挂进 Toolkit 的 MCP 客户端（未配 URL 则空表）。
 
     ``is_stateful=False``：无状态 HTTP，每次调用现开一条临时会话。选它而不是长连接，是因为

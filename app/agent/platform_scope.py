@@ -10,9 +10,7 @@
   prompt cache 前缀（见 prompts.py 的说明）。它由 ``session_io.inject_runtime_context`` 拼进当轮
   human message（缓存断点之后），并由本模块的 ContextVar 供工具层机制性执行。
 - **prompt 只打动机、机制才是硬保证**（见 fork-guardrails-mechanism-not-prompt）：模型少列 / 多列
-  平台都拦不住，故 ``task_dispatch`` 补齐+丢弃、``item_search`` 的 Qdrant filter 一律以本模块的
-  启用集合为准。
-- fork 子 Agent 通过 asyncio Task 的 ContextVar 快照自动继承，无需显式传参。
+  平台都拦不住，故 ``item_search`` 的 Qdrant filter 一律以本模块的启用集合为准。
 """
 
 import os

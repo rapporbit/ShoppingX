@@ -56,7 +56,6 @@ from app.api.context import (
     set_session_pt,
 )
 from app.db.quota import remaining_usd
-from app.harness.budgets import fork_budget_scope, fork_concurrency_scope
 from app.harness.msgs import iter_tool_results
 from app.harness.phase_machine import fresh_phase_machine, reset_phase_machine
 from app.harness.retrieval_budget import reset_tree as reset_retrieval_tree
@@ -239,8 +238,8 @@ def _skills_read(messages: Sequence[Msg]) -> list[str]:
 def _experiment_summary(ab_assign: Any, messages: Sequence[Msg]) -> dict[str, Any]:
     """本轮「实验与自进化」归属：提示词版本 / A/B 桶 / 注入的策略 / 读过的 skill。
 
-    MCP 工具**不在这里**：它们只发给 SearchAgent，调用发生在 worker 的消息里，主 loop 看不到，
-    且同样不过 harness（见 mcp_registry 的诚实标注）——要看去 Langfuse 的 acting span。
+    MCP 工具**不在这里**：它们不过 harness（见 mcp_registry 的诚实标注）——要看去 Langfuse 的
+    acting span。
     """
     from app.harness.hooks.context_shaping import injected_strategy_keys
 
@@ -379,10 +378,8 @@ async def run_agent(
         turn_start = len(agent.state.context)
 
         try:
-            # fork 预算（拦主 loop 多轮 re-dispatch）+ fork 并发闸（限同时在跑的 worker 数）。
-            with fork_budget_scope(), fork_concurrency_scope():
-                async with asyncio.timeout(MAIN_AGENT_TIMEOUT_SEC):
-                    final_msg = await pump_events(agent.reply_stream(inputs, yield_final_msg=True))
+            async with asyncio.timeout(MAIN_AGENT_TIMEOUT_SEC):
+                final_msg = await pump_events(agent.reply_stream(inputs, yield_final_msg=True))
             # 必须在下面 finally 清理之前快照：curator 跑在收尾之后，而 finally 会把品类域清掉。
             session_domains = get_session_domains()
             pt = get_session_pt() or pt

@@ -9,10 +9,8 @@
 - **少数安全底线的判据**：``phase_check`` 仍用「阶段还在 PLANNING」判定 shopping_summary
   不许交卷（本轮未规划/精挑），那是精确事实判定，不是白名单。
 
-效率约束改由预算兜：全树检索预算、fork 预算、
-token 预算，见 ``hooks/budget.py``——预算永不为 0，模型总有一条能走的路。
-
-仅主 loop（depth 0）维护阶段。子 Agent（depth ≥ 1）由深度闸管权限，与阶段机无关。
+效率约束改由预算兜：检索预算、token 预算，见 ``hooks/budget.py``——预算永不为 0，
+模型总有一条能走的路。
 """
 
 from __future__ import annotations
@@ -44,7 +42,7 @@ TRANSITION_SIGNALS: dict[Phase, dict[str, Phase]] = {
 class PhaseStateMachine:
     """单会话的阶段状态机实例。
 
-    每个主 loop Agent 实例持有一个。子 Agent 不创建自己的状态机（由深度闸管权限）。
+    每个主 loop Agent 实例持有一个。
     """
 
     def __init__(self, initial: Phase = Phase.PLANNING) -> None:
@@ -79,7 +77,7 @@ class PhaseStateMachine:
         """强制设定阶段——只用于**前进**类特殊场景（reuse 跳过检索 / 强制收尾）。
 
         往回退一律走 :meth:`regress`：回退不是一次赋值而是一个事务（同轮闭锁 + 进展计数
-        清零 + 通告重武装 + 直搜解锁），散装 set_phase 会漏掉状态回收、回退被静默吞掉。
+        清零 + 通告重武装），散装 set_phase 会漏掉状态回收、回退被静默吞掉。
         """
         old = self._phase
         self._phase = phase
@@ -89,7 +87,7 @@ class PhaseStateMachine:
     def regress(self, to: Phase, *, reason: str, context: dict[str, Any] | None = None) -> None:
         """回退事务：状态回收是回退语义的一部分，由本体一次做完，钩子不得手抄。
 
-        做四件事（曾经散在钩子里各自手抄、漏一处即静默失效——「同轮 40 号钩子吞回退」）：
+        做三件事（曾经散在钩子里各自手抄、漏一处即静默失效——「同轮 40 号钩子吞回退」）：
 
         1. 阶段设回 ``to``，并**闭锁本轮前进**：同一次 post_reflect 里排在后面的转移钩子
            凭旧计数把阶段推回去 = 回退当场被吞（下一轮由 :meth:`begin_round` 解锁）。
@@ -97,8 +95,6 @@ class PhaseStateMachine:
            置 ``reset_fresh_candidates``（middleware 把跨轮累计一并清掉）——已判定「这池子
            不够用」，它就不再是「本轮已搜到货」的进展信号。
         3. 重新武装「检索收线」通告：回退即新一轮检索，搜到货后仍需当场指路。
-        4. 解锁一次直搜（postfork 棘轮）：初搜若走了并行 fork，search_authority 闸会把
-           直调 item_search 拦死，回退指路就成了空话。
 
         调用方专属的收尾（refine_backfill 的 mode=augment 触发闩、rollback 的注入指令）
         留在调用方——那些是各闸的触发语义，不是回退语义。
@@ -115,7 +111,6 @@ class PhaseStateMachine:
         guard = context.get("_guard")
         if isinstance(guard, GuardState):
             guard.notified_transitions.discard("search_close")
-            guard.postfork_search_grants += 1
 
     def begin_round(self) -> None:
         """新一轮 post_reflect 的边界（middleware 每轮开头 tick）：解除回退闭锁。"""
@@ -139,7 +134,7 @@ class PhaseStateMachine:
         self._regressed_this_round = False
 
 
-# ContextVar：主 loop 开始时 set，子 loop 通过 copy_context 自动继承快照（但子不应读写）。
+# ContextVar：主 loop 开始时 set。
 _current_phase_machine: ContextVar[PhaseStateMachine | None] = ContextVar(
     "current_phase_machine", default=None
 )

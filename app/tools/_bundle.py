@@ -1,44 +1,41 @@
 """套装（bundle）机制层 —— 「一套齐」跨品类组合优选的状态与算法。
 
 场景：「新生入学一套，预算 1500」不是单品类清单，而是**跨品类凑一套**：planner 拆出
-3~6 个槽位（床品 / 台灯 / 收纳箱…）→ 每槽一个子 Agent 并行检索 → 在**总预算**约束下做
-组合优选（哪槽该花钱、哪槽降级、加起来不超）→ 分组收尾。
+3~6 个槽位（床品 / 台灯 / 收纳箱…）→ 主环同轮 batch ``item_search(slot=槽名)`` 各槽并发
+检索 → 在**总预算**约束下做组合优选（哪槽该花钱、哪槽降级、加起来不超）→ 分组收尾。
 
 本模块只放**机制**（状态 + 纯算法），不放工具入口：
   - 槽位定义登记：planner 判出 ``bundle_slots`` 后写进来（模块 dict 按 session_dir 聚合，
-    跨工具可见——同 ``_candidates`` 的既有套路），并落 ``bundle.json`` 供续聊轮读回；
-    planner 判 ``search``（换品类）时随候选池一起清掉——**槽位生命周期 = 候选池生命周期**。
-  - 检索侧打标：候选属于哪个槽，主通路是 dispatch 派发时从 demand 里**确定性**解析
-    「套装槽位：X」标记，经 ContextVar 传给子 Agent 内的 item_search 盖章；模型侧另有
-    ``item_search(slot=...)`` 参数与关键词归槽兜底。三层兜底，不指望任何单点自觉。
+    跨工具可见——同 ``_candidates`` 的既有套路）。**槽表只活一轮**：不落盘，``run_agent``
+    收尾清内存；续聊轮由 planner 按用户原话 + P_t 重拆。
+  - **槽名即身份**：模型入参、候选盖章、检索记账、分配报告、前端分组讲的都是同一个槽名，
+    不另发 id。LLM 措辞漂移只在 :func:`resolve_slot` 这一个入口按名字包含关系归并。
+  - 检索侧打标：``item_search(slot=...)`` 经 :func:`register_slot` 解析成规范槽名后盖章；
+    没盖上的候选由 picker 用槽 keywords 匹配标题兜底归槽。
   - 组合优选：Multiple-Choice Knapsack——essential 槽必选一件、optional 槽可整槽放弃，
     约束 Σ有效价 ≤ 总预算，目标 max Σ分数。槽 ≤6 × 每槽 top5 → 穷举即可（≤ 数万组合，
     毫秒级），不需要近似算法。**不可行时如实报**：给最省组合 + 超支额，绝不静默超预算。
   - 组合报告：分配表（哪槽花了多少、砍了谁、缺了谁）登记给 shopping_summary 注入文案。
 
-「是不是槽位轮」由机制判（会话里登记的槽 ≥2），不由模型自报——同 planner 的 retrieval
-/ 币种确定性回填一个思路。
+「是不是槽位轮」由机制判（本轮登记的槽 ≥2），不由模型自报——同 planner 的币种确定性回填
+一个思路。
 
-**槽位有两种形态**（``SLOT_MODE_*``，planner 判、随槽表一起登记落盘）：``bundle`` 是上面
-说的「一套齐」；``parallel`` 是「多品类并列」——用户一次要看几类互不相干的东西（「跑鞋 +
+**槽位有两种形态**（``SLOT_MODE_*``，planner 判、随槽表一起登记）：``bundle`` 是上面说的
+「一套齐」；``parallel`` 是「多品类并列」——用户一次要看几类互不相干的东西（「跑鞋 +
 降噪耳机」），各类分头检索、各自给推荐，**不配套、不砍类、预算是每件上限不是总和**。
 两者共用槽位登记 / 打标 / 分组精排 / 报告结构，差别只在最后那一步选择规则（组合优选 vs
-每类各取 top N）与文案措辞。并列这条路是「能并行」这条派发判据在本仓真正成立的来源：
-它与平台数无关，任何配置下都能触发。
+每类各取 top N）与文案措辞。
 """
 
 from __future__ import annotations
 
 import itertools
-import json
 import logging
 import re
 from collections.abc import Iterable
-from contextlib import contextmanager
-from contextvars import ContextVar
 from typing import Any, NamedTuple
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from app.api.context import get_session_dir
 from app.tools.schemas import ItemCandidate
@@ -71,12 +68,9 @@ SLOT_MODE_PARALLEL = "parallel"
 class BundleSlot(BaseModel):
     """套装里的一个槽位（要买的一个子品类）。planner 拆解产出，picker 组合消费。
 
-    ``id`` 是槽的**稳定身份**（s1、s2…，登记时机制发号，模型无权自造）：盖章 / 检索记账 /
-    补搜额度 / 拒绝复活全按 id 走，名字降级为展示属性——LLM 措辞漂移只可能发生在「名字 → id」
-    的解析边界（:func:`resolve_slot`，全链路唯一模糊点），进了身份层就再也不会漂。
+    ``name`` 就是槽的身份：盖章 / 检索记账 / 拒绝复活 / 报告全按名字走（见模块头）。
     """
 
-    id: str = Field(default="", description="稳定槽位 id（s1、s2…），set_session_bundle 发号")
     name: str = Field(description="槽位名（中文短名，如「床品」「台灯」）")
     keywords: list[str] = Field(
         default_factory=list, description='该槽的英文检索词（如 ["bedding set", "comforter"]）'
@@ -96,22 +90,24 @@ class BundleSlot(BaseModel):
 
 
 # ── 会话级槽位登记（同 _candidates 的「按 session_dir 聚合的模块级 dict」套路）──────────
-# session_dir -> 槽位定义（planner 写、picker/dispatch 读）
+# 全部只活一轮：run_agent 收尾 reset_session_bundle() 清掉。
+# session_dir -> 槽位定义（planner 写、picker / item_search 读）
 _BUNDLE: dict[str, list[BundleSlot]] = {}
-# session_dir -> 本轮真正检索过的槽 **id**（item_search 盖章时记）。用来区分「搜了但没货」
-# （essential 缺货，要如实报）与「压根没派」（用户在 ask_user 里删掉的槽，静默不включ）。
+# session_dir -> 本轮真正检索过的槽名（item_search 盖章时记）。用来区分「搜了但没货」
+# （essential 缺货，要如实报）与「压根没搜」（用户在 ask_user 里删掉的槽，静默不列）。
 _SEARCHED: dict[str, set[str]] = {}
 # session_dir -> 最近一次组合优选的报告（picker 写、shopping_summary 注入文案时读）。
 _REPORT: dict[str, dict[str, Any]] = {}
-# session_dir -> 用户在组成确认里明确不要的槽（reconcile_slots_from_reply 记，随 bundle.json
-# 落盘——只放内存的话续聊轮清内存后拦不住复活）。register_slot 据此拒绝复活：demand 文本里
-# 再飘出这个词不代表用户改了主意。存 {"id","name"}：id 供记账，name 供创建时的漂移匹配。
-_DECLINED: dict[str, list[dict[str, str]]] = {}
-# session_dir -> 槽位形态（SLOT_MODE_*）。与槽表同生命周期、同落盘文件——形态判错的后果
-# （并列需求被 MCKP 砍掉一类）和槽表丢了一样严重，不能只放内存。
+# session_dir -> 用户在组成确认里明确不要的槽名（reconcile_slots_from_reply 记）。register_slot
+# 据此拒绝复活：模型检索时再传这个词不代表用户改了主意。跨轮不保留——下一轮用户怎么说，
+# planner 就按原话重拆。
+_DECLINED: dict[str, list[str]] = {}
+# session_dir -> 槽位形态（SLOT_MODE_*），与槽表同生命周期。
 _MODE: dict[str, str] = {}
 
-_BUNDLE_FILE = "bundle.json"
+# 老会话历史里 item_search 返回过「slot: s2」这类槽 id（槽名即身份之前的格式），模型可能照抄
+# 回来——这种引用不当成一个叫「s2」的新品类去建槽。
+_LEGACY_ID_RE = re.compile(r"s\d+")
 
 
 def _key() -> str | None:
@@ -119,105 +115,39 @@ def _key() -> str | None:
     return str(sd) if sd is not None else None
 
 
-def _next_id(k: str, slots: list[BundleSlot]) -> int:
-    """下一个可发的槽号：已用号（含 declined 里退役的）最大值 +1——id 永不复用。"""
-    used = [s.id for s in slots] + [d.get("id", "") for d in _DECLINED.get(k, [])]
-    nums = [int(i[1:]) for i in used if re.fullmatch(r"s\d+", i or "")]
-    return max(nums, default=0) + 1
-
-
 def set_session_bundle(slots: Iterable[BundleSlot], mode: str | None = None) -> None:
-    """登记本会话的槽位（planner 判出 ``bundle_slots`` ≥2 时调），并落盘供续聊轮读回。
+    """登记本轮的槽位（planner 判出 ``bundle_slots`` ≥2 时调；补槽 / 删槽通路也走这里）。
 
-    机制在此**发槽位 id**（s1、s2…，没带 id 的补发、带了的保留）——id 是身份，模型无权自造。
-    落盘失败只记日志——槽位是工作记忆，丢了最多退化成普通单品类清单，不拖垮主链路。
-
-    ``mode`` 是槽位形态（见 SLOT_MODE_*）：``None`` = 沿用会话里已登记的那个。补槽通路
-    （``register_slot`` / ``reconcile_slots_from_reply``）都走这个默认值——它们改的是槽表，
-    不该顺手把形态重置回 bundle，那会让并列轮在用户确认组成后突然变成「一套齐」。
+    名字是身份：同名只留第一个，封顶 MAX_SLOTS。``mode`` 是槽位形态（见 SLOT_MODE_*）：
+    ``None`` = 沿用已登记的那个。补槽通路（``register_slot`` / ``reconcile_slots_from_reply``）
+    都走这个默认值——它们改的是槽表，不该顺手把形态重置回 bundle，那会让并列轮在用户确认
+    组成后突然变成「一套齐」。
     """
     k = _key()
     if k is None:
         return
-    cleaned = [s for s in slots if s.name.strip()][:MAX_SLOTS]
+    seen: set[str] = set()
+    cleaned: list[BundleSlot] = []
+    for s in slots:
+        s.name = s.name.strip()
+        if s.name and s.name not in seen:
+            seen.add(s.name)
+            cleaned.append(s)
     if not cleaned:
         return
-    seen_ids: set[str] = set()
-    for s in cleaned:  # 撞号（不管来路）后到者视为没号，重新发——id 唯一性是身份层的地基
-        if s.id in seen_ids:
-            s.id = ""
-        elif re.fullmatch(r"s\d+", s.id or ""):
-            seen_ids.add(s.id)
-    n = _next_id(k, cleaned)
-    for s in cleaned:
-        if not re.fullmatch(r"s\d+", s.id or ""):
-            s.id = f"s{n}"
-            n += 1
-    _BUNDLE[k] = cleaned
+    _BUNDLE[k] = cleaned[:MAX_SLOTS]
     if mode is not None:
         _MODE[k] = mode if mode in (SLOT_MODE_BUNDLE, SLOT_MODE_PARALLEL) else SLOT_MODE_BUNDLE
-    sd = get_session_dir()
-    if sd is not None:
-        try:
-            (sd / _BUNDLE_FILE).write_text(
-                json.dumps(
-                    {
-                        "slots": [s.model_dump() for s in cleaned],
-                        "declined": _DECLINED.get(k, []),
-                        "mode": _MODE.get(k, SLOT_MODE_BUNDLE),
-                    },
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
-        except OSError as exc:
-            logger.warning("套装槽位落盘失败（续聊轮将退化为普通清单）：%s", exc)
 
 
 def get_session_bundle() -> list[BundleSlot]:
-    """读本会话的套装槽位；内存 miss 时懒读 ``bundle.json`` 回灌（续聊轮 / 进程重启后续跑）。
-
-    无会话作用域（单测直调）或从没登记过 → 空列表 = 本轮不是套装，picker 走普通精挑。
-    """
+    """读本轮登记的槽位。无会话作用域（单测直调）或本轮没登记 → 空列表 = 不是槽位轮。"""
     k = _key()
-    if k is None:
-        return []
-    if k in _BUNDLE:
-        return list(_BUNDLE[k])
-    sd = get_session_dir()
-    path = sd / _BUNDLE_FILE if sd is not None else None
-    if path is None or not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        # 旧格式（裸列表，无 id/declined）兼容：按序补发 id，declined 视为空。
-        rows = data if isinstance(data, list) else data.get("slots", [])
-        slots = [BundleSlot.model_validate(r) for r in rows]
-        declined = [] if isinstance(data, list) else list(data.get("declined", []))
-        # 旧文件没有 mode 字段 → bundle（写那些文件时只有这一种形态）。
-        mode = SLOT_MODE_BUNDLE if isinstance(data, list) else str(data.get("mode", ""))
-    except (OSError, ValueError, ValidationError) as exc:
-        logger.warning("套装槽位读回失败（本轮退化为普通清单）：%s", exc)
-        return []
-    _DECLINED[k] = declined
-    _MODE[k] = mode if mode in (SLOT_MODE_BUNDLE, SLOT_MODE_PARALLEL) else SLOT_MODE_BUNDLE
-    n = _next_id(k, slots)
-    for s in slots:
-        if not re.fullmatch(r"s\d+", s.id or ""):
-            s.id = f"s{n}"
-            n += 1
-    _BUNDLE[k] = slots
-    return list(slots)
+    return list(_BUNDLE.get(k, [])) if k is not None else []
 
 
 def get_session_mode() -> str:
-    """本会话的槽位形态（``SLOT_MODE_BUNDLE`` / ``SLOT_MODE_PARALLEL``）。
-
-    先触发一次 :func:`get_session_bundle`——形态和槽表存在同一个文件里，续聊轮内存被清后
-    要一起读回。没登记过（非套装 / 非并列轮）返回 bundle，但那种轮次槽 <2、下游根本不看
-    形态，默认值取哪个都不改变行为。
-    """
-    get_session_bundle()
+    """本轮的槽位形态。没登记过返回 bundle——那种轮次槽 <2、下游根本不看形态。"""
     k = _key()
     return _MODE.get(k, SLOT_MODE_BUNDLE) if k is not None else SLOT_MODE_BUNDLE
 
@@ -230,86 +160,51 @@ def _match_name(candidate: str, target: str) -> bool:
 
 
 def resolve_slot(ref: str) -> BundleSlot | None:
-    """把一个模型/用户产出的槽引用（id / 精确名 / 漂移名）解析成已登记槽。
+    """把模型产出的槽名（精确名 / 漂移名）解析成已登记槽；解析不出 → None。
 
-    这是**全链路唯一的字符串模糊点**：item_search 盖章、补搜闸、demand 打标全经此收口，
-    解析成功后拿到的是带稳定 id 的槽对象，身份层（记账/额度/报告）从此只讲 id、不再漂移。
-    内置懒读回（get_session_bundle）——续聊轮内存被清后照常工作。解析不出 → None。
+    这是**全链路唯一的名字模糊点**：item_search 盖章经 register_slot 走这里，盖上的是登记表
+    里的规范名，下游记账 / 分组 / 报告只做精确比较。先精确、再互含，免得「收纳袋」抢走
+    「旅行收纳袋」。
     """
     ref = (ref or "").strip()
     if not ref:
         return None
     slots = get_session_bundle()
-    for s in slots:
-        if s.id == ref:
-            return s
-    for s in slots:
-        if s.name == ref:
-            return s
-    return next((s for s in slots if _match_name(s.name, ref)), None)
-
-
-def slot_display(ref: str) -> str:
-    """槽引用 → 展示名（卡片 / 预览 / 报告用）。解析不出原样返回——旧会话候选按名字盖的章、
-    非套装轮的空串都直接透传。"""
-    s = resolve_slot(ref)
-    return s.name if s is not None else ref
+    exact = next((s for s in slots if s.name == ref), None)
+    return exact or next((s for s in slots if _match_name(s.name, ref)), None)
 
 
 def register_slot(ref: str) -> str:
-    """把一个槽引用解析成**槽 id**；确实是新品类时补登新槽（「用户确认新增」通路），
-    返回其 id。解析不出且不该创建 → 空串（调用方不盖章）。
+    """item_search 的 ``slot`` 入参 → 该盖的规范槽名；空串 = 不盖章。
 
-    创建的门槛：套装已激活（≥1 槽，懒读回后判）、不是纯 id 形状的野引用（模型幻觉出 s9
-    不代表用户要买叫「s9」的东西）、没撞上用户在组成确认里明确删掉的槽（含漂移匹配——
-    「台灯」被删后「护眼台灯」也不复活）、没超槽数上限。
+    已登记（含漂移名）→ 登记表里的名字。没登记时建新槽，两种情形：
+      - 槽表非空：用户在确认组成时新增了一类（「再加个生活用品」），补登为 essential；
+      - 槽表为空：planner 本轮没拆槽，但模型检索时明确按类传了 slot——这是并列需求（「一套齐」
+        轮 planner 必然已拆槽），按 parallel 登记。planner 判得不稳（实测同一条三品类 query 有
+        几次没拆），没有这条通路时候选一个章都盖不上，精挑退化成全池单 query 排序、某一类
+        屠版（评测 pl02：三类只剩跑鞋）。
+    不建：用户在组成确认里删过的槽（含漂移名——「台灯」删了「护眼台灯」也不复活）、老会话
+    历史里的 id 形状引用（``s2``）、已到槽数上限。
     """
     ref = (ref or "").strip()
     hit = resolve_slot(ref)
     if hit is not None:
-        return hit.id
+        return hit.name
     k = _key()
-    slots = get_session_bundle()
-    if k is None or not ref or not slots or re.fullmatch(r"s\d+", ref):
+    if k is None or not ref or _LEGACY_ID_RE.fullmatch(ref):
         return ""
-    if any(_match_name(d.get("name", ""), ref) for d in _DECLINED.get(k, [])):
-        return ""  # 用户在组成确认里明确不要过它，不复活
+    if any(_match_name(d, ref) for d in _DECLINED.get(k, [])):
+        return ""
+    slots = get_session_bundle()
     if len(slots) >= MAX_SLOTS:
         return ""
-    new = BundleSlot(name=ref, essential=True, evidence="用户确认新增")
-    set_session_bundle([*slots, new])  # 走同一落盘口发 id，保持文件与内存一致
-    return new.id
-
-
-def ensure_dispatch_slot(ref: str) -> str:
-    """派发侧的槽位兜底：把 demand 里的「子需求：X」标记落成一个真槽，返回**槽 id**。
-
-    为什么需要这条通路：并列形态的槽表本该由 planner 拆出来，但**它判得不稳**——实测同一条
-    三品类 query 有几次压根没拆（``bundle_slots`` 空）。一旦没拆，:func:`register_slot` 会因
-    「套装未激活」拒绝创建，候选就一个章都盖不上，精挑退化成全池按单一 query 排序，某一类直接
-    屠版（评测 pl02 实测：三类只剩跑鞋）。
-
-    机制兜底的依据是**模型自己已经表达过的意图**：它在派发时明写了「子需求：跑鞋」，那这一批
-    候选属于哪一类就是确定的事实，不必再回头指望 planner 那一跳判对。这与本仓一贯的做法一致
-    ——档位、币种、收货国都是「问模型稳的那件事，其余交给机制」。
-
-    只兜「槽表为空」这一种情形：有槽表时原样走 register_slot（它带着 declined 拒复活、槽数上限
-    这些既有纪律，不能绕过）。纯 id 形状的野引用（模型幻觉出 s9）一律不建。
-    """
-    ref = (ref or "").strip()
-    if not ref or re.fullmatch(r"s\d+", ref):
-        return ""
-    if get_session_bundle():
-        return register_slot(ref)
-    k = _key()
-    if k is None:
-        return ""
-    new = BundleSlot(name=ref, essential=True, evidence="派发标记")
-    # 形态定 parallel：走到这里意味着 planner 没判出槽位，而「一套齐」轮 planner 必然已登记过
-    # 槽表（套装流程的第一步就是拆槽）。并列是这条兜底通路唯一可能的来源。
-    set_session_bundle([new], mode=SLOT_MODE_PARALLEL)
-    logger.info("派发标记兜底登记槽位「%s」（planner 本轮未拆槽），形态 parallel", ref)
-    return new.id
+    if slots:
+        set_session_bundle([*slots, BundleSlot(name=ref, evidence="用户确认新增")])
+    else:
+        new = BundleSlot(name=ref, evidence="检索时按类传入")
+        set_session_bundle([new], mode=SLOT_MODE_PARALLEL)
+        logger.info("planner 本轮未拆槽，按 item_search(slot=%s) 登记并列槽", ref)
+    return ref
 
 
 def reconcile_slots_from_reply(reply: str, offered: Iterable[str] | None = None) -> list[str]:
@@ -325,44 +220,42 @@ def reconcile_slots_from_reply(reply: str, offered: Iterable[str] | None = None)
     """
     k = _key()
     reply = (reply or "").strip()
-    slots = get_session_bundle()  # 懒读回：ask_user 回复可能是续聊轮的第一次槽表访问
+    slots = get_session_bundle()
     if k is None or not reply or not slots:
         return []
-    mentioned = {s.id for s in slots if s.name and s.name in reply}
+    mentioned = {s.name for s in slots if s.name in reply}
     if len(mentioned) < 2:
         return []
     offered_text = " ".join(offered) if offered else ""
     removed = [
-        s for s in slots if s.id not in mentioned and (not offered_text or s.name in offered_text)
+        s.name
+        for s in slots
+        if s.name not in mentioned and (not offered_text or s.name in offered_text)
     ]
     if not removed:
         return []
-    # 先记 declined 再落盘——set_session_bundle 连带把 declined 写进 bundle.json，
-    # 续聊轮清内存后拒绝复活依然生效。
-    _DECLINED.setdefault(k, []).extend({"id": s.id, "name": s.name} for s in removed)
-    removed_ids = {s.id for s in removed}
-    set_session_bundle([s for s in slots if s.id not in removed_ids])
-    names = [s.name for s in removed]
-    logger.info("组成确认核销：删槽 %s，保留 %s", names, sorted(mentioned))
-    return names
+    _DECLINED.setdefault(k, []).extend(removed)
+    set_session_bundle([s for s in slots if s.name not in removed])
+    logger.info("组成确认核销：删槽 %s，保留 %s", removed, sorted(mentioned))
+    return removed
 
 
 def note_slot_searched(ref: str) -> None:
     """记下「这个槽本轮真的检索过」（item_search 盖章时调）——essential 缺货判定的依据。
 
-    接受任意槽引用（id / 名），统一解析成 id 入账；解析不出的原样记（不丢信息，只是
-    报告层对不上号——等价于「没搜过」，失效方向与漏记一致）。
+    漂移名先归到规范名；解析不出的原样记（报告层对不上号，等价于「没搜过」，失效方向与
+    漏记一致）。
     """
     k = _key()
     ref = (ref or "").strip()
     if k is None or not ref:
         return
     s = resolve_slot(ref)
-    _SEARCHED.setdefault(k, set()).add(s.id if s is not None else ref)
+    _SEARCHED.setdefault(k, set()).add(s.name if s is not None else ref)
 
 
 def searched_slots() -> set[str]:
-    """本轮检索过的槽 id 集合。"""
+    """本轮检索过的槽名集合。"""
     k = _key()
     return set(_SEARCHED.get(k, set())) if k is not None else set()
 
@@ -380,12 +273,9 @@ def get_bundle_report() -> dict[str, Any] | None:
     return _REPORT.get(k) if k is not None else None
 
 
-def reset_session_bundle(*, clear_file: bool = False) -> None:
-    """清本会话的套装状态。
-
-    两种调法：``run_agent`` 收尾清**内存**（模块级 dict 防无界增长，文件留着供续聊轮读回）；
-    planner 判 ``search``（换品类）时 ``clear_file=True`` 连盘上的一起清——旧套装与新需求无关。
-    """
+def reset_session_bundle() -> None:
+    """清本会话的槽位状态：``run_agent`` 收尾调（槽只活一轮，也防模块级 dict 无界增长）；
+    planner 判换域时调（旧套装与新需求无关）。"""
     k = _key()
     if k is None:
         return
@@ -394,61 +284,13 @@ def reset_session_bundle(*, clear_file: bool = False) -> None:
     _REPORT.pop(k, None)
     _DECLINED.pop(k, None)
     _MODE.pop(k, None)
-    if clear_file:
-        sd = get_session_dir()
-        if sd is not None:
-            (sd / _BUNDLE_FILE).unlink(missing_ok=True)
-
-
-# ── 检索侧槽位打标 ─────────────────────────────────────────────────────────────
-# dispatch 派发子 Agent 前从 demand 解析出槽名，slot_scope 设进 ContextVar；子 Agent 内的
-# item_search（asyncio task 继承 ContextVar 快照）读它给候选盖章。父子是「向下继承」，
-# 不是工具间横向传递，所以这里用裸 ContextVar 是安全的（对比 context.py 里踩过三次的坑）。
-_current_slot: ContextVar[str] = ContextVar("shoppingx_search_slot", default="")
-
-# demand 里的确定性槽位标记（prompt 约定每条槽位 demand 开头写「套装槽位：X」；并列需求
-# 那条路写「子需求：X」——同一套打标机制，措辞跟着场景走，让模型写「套装槽位：跑鞋」这种
-# 别扭话，它照做的概率就低一截，标记漏写就等于这批候选没盖章）。
-_SLOT_MARKER_RE = re.compile(r"(?:套装槽位|子需求)[:：]\s*([^\s，。;；,、）)]+)")
-
-
-@contextmanager
-def slot_scope(name: str):
-    """把当前检索槽名设进 ContextVar（dispatch 派发子 Agent 时包住整个子 loop）。"""
-    token = _current_slot.set(name.strip())
-    try:
-        yield
-    finally:
-        _current_slot.reset(token)
-
-
-def current_slot() -> str:
-    """当前检索所属的槽名；非套装派发路径为空串。"""
-    return _current_slot.get()
-
-
-def detect_slot(text: str) -> str | None:
-    """从一条 demand 文本里确定性解析它属于哪个槽，返回**槽引用**（id 或原始标记文本）。
-
-    优先认「套装槽位：X」标记——原样返回（可能是新加的槽名，交给 item_search 的
-    register_slot 统一解析/补登，保持全链路单一解析点）；退而求其次匹已登记的槽名
-    （长名优先，避免「床品」抢了「床垫床品套装」的匹配），命中返回其 id。
-    都没有 → None（这条不是套装检索）。
-    """
-    m = _SLOT_MARKER_RE.search(text)
-    if m:
-        return m.group(1)
-    for s in sorted(get_session_bundle(), key=lambda s: -len(s.name)):
-        if s.name and s.name in text:
-            return s.id
-    return None
 
 
 # ── 组合优选（Multiple-Choice Knapsack，穷举）──────────────────────────────────
 
 
 class SlotPick(NamedTuple):
-    """组合定稿的一件：属于哪个槽（完整槽对象，id 供盖章、name 供文案）+ 候选本体 +
+    """组合定稿的一件：属于哪个槽（完整槽对象，name 供盖章与文案）+ 候选本体 +
     命中的偏好词（含槽级 prefer，供理由）。"""
 
     slot: BundleSlot
@@ -479,18 +321,16 @@ def slot_query(s: BundleSlot) -> str:
 
 
 def prospective_slot(c: ItemCandidate, slots: list[BundleSlot]) -> str:
-    """这件候选将归入哪个槽（返回**槽 id**）：盖章优先（机制主通路，章即 id；旧会话读回的
-    候选按名字盖章，兼容认作对应槽），没盖章的用槽 keywords 匹配标题兜底；都不中 → ``""``。
-    ``_assign`` 与 picker 的相关性打分共用这一份判定，防两处逻辑漂移（否则被门降级的候选
-    会从「盖章路」漏进「keywords 兜底路」二次归槽）。
+    """这件候选将归入哪个槽（返回**槽名**）：盖章优先（机制主通路），没盖章或章不在本轮槽表
+    里的用槽 keywords 匹配标题兜底；都不中 → ``""``。``_assign`` 与 picker 的相关性打分共用
+    这一份判定，防两处逻辑漂移（否则被门降级的候选会从「盖章路」漏进「keywords 兜底路」
+    二次归槽）。
     """
-    if c.slot:
-        hit = next((s for s in slots if s.id == c.slot or s.name == c.slot), None)
-        if hit is not None:
-            return hit.id
+    if c.slot and any(s.name == c.slot for s in slots):
+        return c.slot
     text = _searchable(c)
     return next(
-        (s.id for s in slots if any(term_hits(kw, text) for kw in s.keywords if kw.strip())),
+        (s.name for s in slots if any(term_hits(kw, text) for kw in s.keywords if kw.strip())),
         "",
     )
 
@@ -509,9 +349,9 @@ def _assign(
     keywords 匹不上的候选**不硬塞**（归错槽比丢一件更糟——组合会拿台灯占床品的名额），
     落进 ``""`` 组，报告里如实计数。
     """
-    groups: dict[str, list[ItemCandidate]] = {s.id: [] for s in slots}
+    groups: dict[str, list[ItemCandidate]] = {s.name: [] for s in slots}
     groups[""] = []
-    gated = {s.id for s in slots if slot_query(s)} if slot_relevance is not None else set()
+    gated = {s.name for s in slots if slot_query(s)} if slot_relevance is not None else set()
     for c in survivors:
         hit = prospective_slot(c, slots)
         if (
@@ -545,7 +385,7 @@ def _slot_options(
     """
     options: dict[str, list[tuple[float, ItemCandidate, list[str]]]] = {}
     for s in stocked:
-        cands = groups[s.id]
+        cands = groups[s.name]
         priced = [p for p in (_price(c) for c in cands) if p is not None]
         lo, hi = (min(priced), max(priced)) if priced else (0.0, 0.0)
         span = hi - lo
@@ -562,7 +402,7 @@ def _slot_options(
                 score += w_relevance * slot_relevance[c.item_id]
             rows.append((score, c, [*slot_hits, *matched.get(c.item_id, [])]))
         rows.sort(key=lambda r: r[0], reverse=True)
-        options[s.id] = rows[:top_n]
+        options[s.name] = rows[:top_n]
     return options
 
 
@@ -592,7 +432,7 @@ def combine_bundle(
     if len(slots) < 2:
         return None
     groups = _assign(survivors, slots, slot_relevance, relevance_floor)
-    stocked = [s for s in slots if groups.get(s.id)]
+    stocked = [s for s in slots if groups.get(s.name)]
     if len(stocked) < 2:
         return None  # 打标全失败 / 只有一个槽有货——组合无意义，退化普通精挑
 
@@ -611,7 +451,7 @@ def combine_bundle(
     # 穷举组合：optional 槽多一个「放弃」选项（None，0 分 0 价）。价格未知按 0 计入（组合层
     # 不惩罚它，报告里如实标注件数——比拍一个假价格诚实）。
     choice_lists: list[list[tuple[float, ItemCandidate, list[str]] | None]] = [
-        [*options[s.id], *([None] if not s.essential else [])] for s in stocked
+        [*options[s.name], *([None] if not s.essential else [])] for s in stocked
     ]
     best: tuple[float, float, tuple] | None = None  # (总分, 总价, 组合)
     best_any: tuple[float, float, tuple] | None = None  # 无视预算的最省组合（不可行时的兜底）
@@ -665,7 +505,7 @@ def combine_parallel(
     if len(slots) < 2:
         return None
     groups = _assign(survivors, slots, slot_relevance, relevance_floor)
-    stocked = [s for s in slots if groups.get(s.id)]
+    stocked = [s for s in slots if groups.get(s.name)]
     if len(stocked) < 2:
         return None  # 只有一类有货——分组展示无意义，退化普通精挑
     options = _slot_options(
@@ -680,7 +520,7 @@ def combine_parallel(
         w_relevance=w_relevance,
     )
     chosen = [
-        SlotPick(slot=s, cand=row[1], matched=row[2]) for s in stocked for row in options[s.id]
+        SlotPick(slot=s, cand=row[1], matched=row[2]) for s in stocked for row in options[s.name]
     ]
     report = _build_parallel_report(slots, stocked, chosen, budget_usd, len(groups[""]))
     set_bundle_report(report)
@@ -699,7 +539,7 @@ def _build_parallel_report(
     参考数（并列需求没有「一套的总价」这回事），因此 ``feasible`` 恒 True、不判超支。
     """
     searched = searched_slots()
-    stocked_ids = {s.id for s in stocked}
+    stocked_names = {s.name for s in stocked}
     total = sum(p or 0.0 for p in (_price(c.cand) for c in chosen))
     return {
         "mode": SLOT_MODE_PARALLEL,
@@ -721,11 +561,11 @@ def _build_parallel_report(
         # 搜了但一件都没有的类：并列需求里 essential 没有意义（用户要的每一类都得如实交代），
         # 但键名沿用 bundle 那套，渲染层按 mode 换措辞即可。
         "missing_essential": sorted(
-            s.name for s in slots if s.id not in stocked_ids and s.id in searched
+            s.name for s in slots if s.name not in stocked_names and s.name in searched
         ),
         "missing_optional": [],
         "not_included": sorted(
-            s.name for s in slots if s.id not in stocked_ids and s.id not in searched
+            s.name for s in slots if s.name not in stocked_names and s.name not in searched
         ),
         "unslotted": unslotted,
         "price_unknown": sum(1 for p in chosen if _price(p.cand) is None),
@@ -746,12 +586,9 @@ def _build_report(
     unslotted: int,
 ) -> dict[str, Any]:
     """组合结果 → 分配报告（picker 结果文本 / summary 注入 / ItemPickerOutput 回显共用）。"""
-    searched = searched_slots()  # id 集合
-    stocked_ids = {s.id for s in stocked}
+    searched = searched_slots()
+    stocked_names = {s.name for s in stocked}
     chosen_ids = {p.cand.item_id for p in chosen}
-    by_id = {s.id: s for s in slots}
-    # 报告是展示/文案层的事实来源（summary 注入、前端思考过程、落盘）——槽一律写**名字**；
-    # 身份層的 id 只在内存里的比较中使用，不进报告。
     rows = [
         {
             "slot": p.slot.name,
@@ -764,12 +601,12 @@ def _build_report(
     ]
     # 每槽的升/降级备选（组合没选上的前两名）：追问轮「箱子换便宜的」可直接引用。
     alternatives = {
-        by_id[sid].name: [
+        name: [
             {"item_id": c.item_id, "title": c.title[:50], "price_usd": _price(c)}
             for _sc, c, _m in opts
             if c.item_id not in chosen_ids
         ][:2]
-        for sid, opts in options.items()
+        for name, opts in options.items()
     }
     return {
         "budget_usd": budget_usd,
@@ -783,18 +620,20 @@ def _build_report(
         "skipped_optional": [s.name for s, row in zip(stocked, combo, strict=True) if row is None],
         # essential 槽检索过但一件候选都没有——如实报缺，绝不拿别的槽的货顶。
         "missing_essential": sorted(
-            s.name for s in slots if s.essential and s.id not in stocked_ids and s.id in searched
+            s.name
+            for s in slots
+            if s.essential and s.name not in stocked_names and s.name in searched
         ),
         # optional 槽检索过但没货（含被相关性门逐空的，如「水杯」槽召回全是贴纸）——同样
         # 如实列出：不列它就是静默消失，用户以为这件没被考虑过。
         "missing_optional": sorted(
             s.name
             for s in slots
-            if not s.essential and s.id not in stocked_ids and s.id in searched
+            if not s.essential and s.name not in stocked_names and s.name in searched
         ),
         # 定义了但本轮没检索（用户在确认组成时删掉的槽，或模型没派）——中性列出，不算缺货。
         "not_included": sorted(
-            s.name for s in slots if s.id not in stocked_ids and s.id not in searched
+            s.name for s in slots if s.name not in stocked_names and s.name not in searched
         ),
         "unslotted": unslotted,
         "price_unknown": sum(1 for p in chosen if _price(p.cand) is None),

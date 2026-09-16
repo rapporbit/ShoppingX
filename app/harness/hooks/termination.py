@@ -1,7 +1,7 @@
 """终结：让循环在该停的时候停下（refdocs 14 <termination> 是 P0——Agent 最常见的失败是不收尾）。
 
-    pre_think        5  liveness_watchdog     停滞 → 收敛指令 → 硬停交部分结果（主 loop）
-    pre_tool_call    5  terminal_reached_gate 本轮已调过终结工具 → 拦下一切后续工具（主 loop）
+    pre_think        5  liveness_watchdog     停滞 → 收敛指令 → 硬停交部分结果
+    pre_tool_call    5  terminal_reached_gate 本轮已调过终结工具 → 拦下一切后续工具
     post_tool_call  30  mark_terminal         终结工具真实执行后置位，令上面那道闸生效
     post_reflect    60  terminal_enforcer     纯文字收尾、没调终结工具 → 当场重发模型
                                               （配额 per-call）
@@ -20,7 +20,6 @@ from app.harness.budgets import (
     MAX_TERMINAL_NUDGE_RETRIES,
     TERMINAL_TOOLS,
 )
-from app.harness.fork_guard import current_fork_depth
 from app.harness.middleware import HookRejectSignal, harness_hook
 from app.harness.msgs import system_message
 from app.harness.sentinels import (
@@ -36,34 +35,44 @@ logger = logging.getLogger("shoppingx.harness.termination")
 
 @harness_hook("pre_tool_call", name="terminal_reached_gate", priority=5)
 async def check_terminal_reached(context: dict[str, Any]) -> dict[str, Any] | None:
-    """终结硬停（over-loop 治理）：主 loop 本轮已调过终结工具收尾 → 之后任何工具一律拦下。
+    """终结硬停（over-loop 治理）：本轮已调过终结工具收尾 → 之后任何工具一律拦下。
 
     断掉「调完 shopping_summary 又 item_search / 再 picker」的打转尾巴，逼模型直接输出收尾文案。
-    只对主 loop（depth==0）：子 Agent 的终结是直接吐文字、本就不调终结工具。
+
+    **批次原子化**（同 ``middleware.py`` 逃生门的口径）：同一条 AI 消息里并行发出的终结工具放行。
+    模型说「这两件分开下两个单」时会同轮发两个 ``create_order``，框架并发跑；布尔位下谁先跑完
+    post 就把兄弟调用拦死，第二张确认卡静默消失、收尾文案却照说「已生成两张」（2026-09-16 实测）。
+    这类兄弟调用是**一次决策**，不是收尾后的新动作。放行只开给终结工具本身：同批的
+    ``shopping_summary`` + ``item_search`` 照拦（那才是打转），下一个 think_step 再调也照拦。
     """
     guard = guard_of(context)
-    if guard is None or current_fork_depth() != 0:
+    if guard is None:
         return None
     if guard.terminal_reached:
+        same_batch = guard.terminal_step >= 0 and guard.think_step == guard.terminal_step
+        if same_batch and context.get("tool_name") in TERMINAL_TOOLS:
+            return None
         raise HookRejectSignal(TERMINAL_REACHED_DENIED, raw=True)
     return None
 
 
 @harness_hook("post_tool_call", name="mark_terminal", priority=30)
 async def mark_terminal(context: dict[str, Any]) -> dict[str, Any] | None:
-    """本次是主 loop 真实执行的终结工具 → 置位，令后续工具被终结硬停闸拦下。
+    """本次是真实执行的终结工具 → 置位，令后续工具被终结硬停闸拦下。
 
-    只在工具真执行（过了各闸）后调，故被深度闸/预算闸拦掉的终结调用不会误置位。
+    只在工具真执行（过了各闸）后调，故被预算闸拦掉的终结调用不会误置位。
+    一并记下批次号（当前 ``think_step``），供硬停闸放行同批的兄弟终结调用。
     """
     guard = guard_of(context)
     if guard is None:
         return None
-    if current_fork_depth() == 0 and context.get("tool_name") in TERMINAL_TOOLS:
+    if context.get("tool_name") in TERMINAL_TOOLS:
         guard.terminal_reached = True
+        guard.terminal_step = guard.think_step
     return None
 
 
-@harness_hook("post_reflect", name="terminal_enforcer", priority=60, main_only=True)
+@harness_hook("post_reflect", name="terminal_enforcer", priority=60)
 async def enforce_terminal(context: dict[str, Any]) -> dict[str, Any] | None:
     """模型没调工具就想收尾、且**本轮**从未调过终结工具 → 请适配器重发一次模型。
 
@@ -125,9 +134,9 @@ def _partial_answer() -> str:
     )
 
 
-@harness_hook("pre_think", name="liveness_watchdog", priority=5, main_only=True)
+@harness_hook("pre_think", name="liveness_watchdog", priority=5)
 async def check_liveness(context: dict[str, Any]) -> dict[str, Any] | None:
-    """每次唤起模型前查一次停滞时长。仅主 loop（depth 0）。"""
+    """每次唤起模型前查一次停滞时长。"""
     guard = context.get("_guard")
     if not isinstance(guard, GuardState):
         return None

@@ -322,10 +322,6 @@ def main_loop_tier_first() -> str:
     return os.environ.get("MAIN_LOOP_TIER_FIRST", "same").strip().lower()
 
 
-def worker_tier() -> str:
-    """worker（SearchAgent / TradeAgent）档。worker 在收窄后的子任务里只做 1~2 跳，恒为快档。"""
-    return os.environ.get("WORKER_TIER", "fast").strip().lower()
-
 
 @lru_cache(maxsize=1)
 def get_vision_llm() -> ThrottledChatModel:

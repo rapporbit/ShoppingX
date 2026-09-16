@@ -16,11 +16,12 @@ from app.tools._bundle import (
     SLOT_MODE_PARALLEL,
     BundleSlot,
     combine_parallel,
-    detect_slot,
     drop_pick_from_report,
+    get_session_bundle,
     get_session_mode,
     note_slot_searched,
     refresh_report_prices,
+    register_slot,
     render_allocation,
     reset_session_bundle,
     set_session_bundle,
@@ -36,7 +37,7 @@ def _parallel_session(name: str, slots: list[BundleSlot]):
         try:
             yield
         finally:
-            reset_session_bundle(clear_file=True)
+            reset_session_bundle()
 
 
 def _slot(name: str, *, keywords: list[str] | None = None) -> BundleSlot:
@@ -114,38 +115,17 @@ def test_parallel_inactive_with_single_stocked_slot() -> None:
 
 
 # --------------------------------------------------------------------------
-# 形态登记：落盘 / 懒读回 / 旧文件兼容
+# 形态登记：与槽表同生命周期（只活一轮）
 # --------------------------------------------------------------------------
-def test_mode_persists_and_lazy_reloads() -> None:
-    """形态与槽表同生命周期：内存清掉后从 bundle.json 一起读回。
-
-    只落内存的话，续聊轮（内存已清）会把并列轮当成「一套齐」重新组合——那正是砍类事故的
-    发生方式，且用户看不出哪里错了，只觉得「我要的耳机怎么没了」。
-    """
-    sd = Path(tempfile.mkdtemp())
-    with thread_scope("t-par-4", sd):
+def test_mode_lives_one_turn_with_slot_table() -> None:
+    """形态随槽表一起清：下一轮 planner 重拆时重新判，不沿用上一轮的并列形态。"""
+    with thread_scope("t-par-4", Path(tempfile.mkdtemp())):
         set_session_bundle([_slot("跑鞋"), _slot("耳机")], mode=SLOT_MODE_PARALLEL)
-        reset_session_bundle()  # 只清内存，文件留着
         assert get_session_mode() == SLOT_MODE_PARALLEL
-        reset_session_bundle(clear_file=True)
-
-
-def test_legacy_bundle_file_without_mode_reads_as_bundle() -> None:
-    """老会话的 bundle.json 没有 mode 字段——那时只有「一套齐」一种形态，按 bundle 读回。"""
-    sd = Path(tempfile.mkdtemp())
-    with thread_scope("t-par-5", sd):
-        (sd / "bundle.json").write_text(
-            '{"slots": [{"name": "床品"}, {"name": "台灯"}], "declined": []}', encoding="utf-8"
-        )
+        set_session_bundle([_slot("跑鞋"), _slot("耳机"), _slot("袜子")])  # 补槽不重置形态
+        assert get_session_mode() == SLOT_MODE_PARALLEL
+        reset_session_bundle()
         assert get_session_mode() == SLOT_MODE_BUNDLE
-        reset_session_bundle(clear_file=True)
-
-
-def test_slot_marker_accepts_parallel_wording() -> None:
-    """并列轮的 demand 写「子需求：X」，打标机制照样认——措辞跟着场景走，让模型写
-    「套装槽位：跑鞋」这种别扭话，漏写的概率就高一截，而漏写 = 这批候选没盖章。"""
-    assert detect_slot("子需求：跑鞋。预算 500 以内") == "跑鞋"
-    assert detect_slot("套装槽位：床品，要纯棉") == "床品"
 
 
 # --------------------------------------------------------------------------
@@ -261,32 +241,22 @@ def test_drop_pick_keeps_slot_when_other_items_remain() -> None:
 
 
 # --------------------------------------------------------------------------
-# 派发侧兜底：planner 没拆槽时，按 demand 标记把槽登记回来
+# planner 漏拆槽：item_search(slot=…) 按类补登并列槽
 # --------------------------------------------------------------------------
-def test_dispatch_marker_registers_slot_when_planner_missed_it() -> None:
+def test_item_search_slot_arg_registers_parallel_slots() -> None:
     """并列形态最脆的一环是 planner 判不判得出拆槽（实测会漏）。漏了就一个章都盖不上，
-    精挑退化成全池单一 query 排序、某一类屠版。模型在派发时已明写「子需求：X」——那是确定
-    的事实，机制据此把槽登记回来，不必回头指望 planner 那一跳。"""
-    from app.tools._bundle import ensure_dispatch_slot, get_session_bundle
+    精挑退化成全池单一 query 排序、某一类屠版。模型检索时按类传了 slot——那是确定的事实，
+    register_slot 据此把槽登记回来；两槽齐了即是套装轮（autopick 让位）。"""
+    from app.harness.autopick import _is_bundle_turn
 
-    sd = Path(tempfile.mkdtemp())
-    with thread_scope("t-par-11", sd):
-        assert get_session_bundle() == []  # planner 没拆槽
-        s1 = ensure_dispatch_slot("跑鞋")
-        s2 = ensure_dispatch_slot("降噪耳机")
-        assert s1 and s2 and s1 != s2
-        assert [s.name for s in get_session_bundle()] == ["跑鞋", "降噪耳机"]
-        assert get_session_mode() == SLOT_MODE_PARALLEL
-        # 已有槽表时原样走 register_slot：同名解析回既有 id，不重复建。
-        assert ensure_dispatch_slot("跑鞋") == s1
-        reset_session_bundle(clear_file=True)
-
-
-def test_dispatch_fallback_ignores_hallucinated_id_refs() -> None:
-    """模型幻觉出的 s9 不代表用户要买一个叫「s9」的东西——纯 id 形状一律不建槽。"""
-    from app.tools._bundle import ensure_dispatch_slot, get_session_bundle
-
-    with thread_scope("t-par-12", Path(tempfile.mkdtemp())):
-        assert ensure_dispatch_slot("s9") == ""
+    with thread_scope("t-par-13", Path(tempfile.mkdtemp())):
+        assert register_slot("") == ""  # 普通轮不传 slot：不建槽
         assert get_session_bundle() == []
-        reset_session_bundle(clear_file=True)
+        assert register_slot("跑鞋") == "跑鞋"
+        assert register_slot("降噪耳机") == "降噪耳机"
+        assert get_session_mode() == SLOT_MODE_PARALLEL
+        assert _is_bundle_turn()
+        assert register_slot("跑鞋") == "跑鞋"  # 同名不重复建
+        assert register_slot("s9") == ""  # 老会话历史里的槽 id 形状不建
+        assert [s.name for s in get_session_bundle()] == ["跑鞋", "降噪耳机"]
+        reset_session_bundle()

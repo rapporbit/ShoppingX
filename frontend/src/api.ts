@@ -53,7 +53,7 @@ export async function startTaskRequest(
   skill?: string,
 ): Promise<void> {
   // platforms 在发任务这一刻从设置里读（唯一真源，见 settings.ts）：默认只搜 amazon，用户在设置
-  // 里勾了多个平台才跨平台并行 fork 比价。不必把它一路穿过 hook 的参数链。
+  // 里勾了多个平台才同轮 batch 检索、跨平台比价。不必把它一路穿过 hook 的参数链。
   const resp = await authFetch("/api/task", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

@@ -1,9 +1,8 @@
 """工具注册表：一份工具全集 + 按角色发放。
 
 每个业务工具一个文件（模块名 = 工具名），在这里汇总成 ``TOOLS``，再由 :func:`build_toolkit`
-按角色发给主 Agent / 各类 worker——**切的是发放范围，不是实现**：三种角色拿到的是同一批实现
-函数包出来的工具，只是集合不同。这是读写边界的结构性保证之一（另两个是 ``is_read_only`` 标记
-与 ``PermissionEngine`` 精准放行），不靠提示词劝退。
+发给主 Agent。A4 删掉 SearchAgent 后角色只剩 ``main``；``is_read_only`` 标记仍是
+``PermissionEngine`` 放行判定的依据（非只读工具必须进 ``permissions.DEFAULT_ALLOWED_TOOLS``）。
 
 ``TERMINAL_TOOLS`` 里的工具一旦被调用即终结循环（堵「不收尾死循环」这个最常见的 Agent 失败）。
 """
@@ -11,7 +10,6 @@
 from agentscope.tool import FunctionTool, Toolkit, ToolMiddlewareBase
 
 from app.agent.constants import TERMINAL_TOOLS as _TERMINAL_TOOLS
-from app.agent.dispatch_tool import task_dispatch
 from app.agent.mcp_registry import mcp_clients
 from app.agent.skills import skill_loaders
 from app.tools._shell import ToolShell, to_function_tool
@@ -82,25 +80,14 @@ def _make_tools(middlewares: list[ToolMiddlewareBase] | None = None) -> list[Fun
 
     **为什么每次 loop 都要重造**：``ToolMiddlewareBase`` 是挂在**工具实例**上的
     （``ToolBase._middlewares``），而 harness 的工具适配器持有 per-loop 的 ``HarnessSession``。
-    共享一份工具实例就等于共享控制面状态——主 loop 与并发 worker 的断言、循环检测、熔断计数
-    会串成一锅。重造的代价只是 12 个闭包 + 12 个 ``FunctionTool`` 对象（schema 与实现函数仍是
+    共享一份工具实例就等于共享控制面状态——并发的多个会话的断言、循环检测、熔断计数会串成
+    一锅。重造的代价只是 15 个闭包 + 15 个 ``FunctionTool`` 对象（schema 与实现函数仍是
     同一份，不重复解析业务逻辑），比起状态串味那种查半天的 bug，这点开销买得值。
     """
-    tools = [
+    return [
         to_function_tool(t, is_read_only=t.name in _READ_ONLY_TOOLS, middlewares=middlewares)
         for t in _BUSINESS_TOOLS
     ]
-    tools.append(
-        FunctionTool(
-            task_dispatch,
-            # 同轮多个独立子任务靠它并发（框架看到多个 tool_call 就并行执行），这也是不再
-            # 需要一个「入参是列表」的并行派发元工具的底气所在。
-            is_concurrency_safe=True,
-            is_read_only=False,
-            middlewares=middlewares,
-        )
-    )
-    return tools
 
 
 # 无中间件的一份（元数据查询 / 白名单 / 测试等不需要控制面的场景用）。真正跑 loop 的工具由
@@ -109,50 +96,15 @@ TOOLS: list[FunctionTool] = _make_tools()
 
 TOOLS_BY_NAME: dict[str, FunctionTool] = {t.name: t for t in TOOLS}
 
-# 角色 → 该角色能拿到的工具名（批 1 的读写切分，**切的是发放范围，不是实现**）。
+# 角色 → 该角色能拿到的工具名（None = 全集）。批 1 起曾有 ``search``（只读 SearchAgent）与
+# ``trade`` 两个 worker 角色，A1 / A4 先后删除：440 个会话里派发全是单跳壳，交易工具只出确认卡。
+# 发放口径（Skill / MCP 也按 role 切）仍保留这张表，将来真要加受限角色时从这里开口。
 #
-# 为什么不用 ``ToolGroup``：它是**运行时可激活 / 停用**的分组——非 basic 组默认不激活，模型可
-# 以调 meta tool 把组激活回来，而且工具对象照样住在 Toolkit 里（``get_tool("create_order")``
-# 拿得到）。那是「按需露出」，不是权限边界。这里要的是结构性保证：worker 的 Toolkit 里**根本
-# 没有**那个工具对象，模型再怎么想调也调不出来。
-#
-# ``task_dispatch`` 只在 main 手上：「worker 派不了 worker」是派发安全第①层（深度上限）的
-# 结构性保证，比 fork_guard 的计数守卫更硬——计数守卫拦的是次数，这个拦的是可能性。
-#
-# **为什么只有两个**（对齐手册 §7.1 那张表的刻意偏离）：手册照 refdocs 给的是五个
-# （+ category_insight / price_compare / shipping_calc），但本仓把这三个划为 depth==0 专属
-# （``budgets.DEPTH0_ONLY_TOOLS``，由 tests/test_toolkit_scope.py 钉死），理由至今成立：
-#   · price_compare 要的是**跨平台合流后的全局视图**——只搜了一个平台的 worker 拿不出别家数据，
-#     它在那里比价，比的是个寂寞；
-#   · category_insight 平台无关、主流程跑一次结果就写进 demands，N 个 worker 各跑一遍纯属重复解码；
-#   · shipping_calc 同理跟着合流后的候选集算，否则每个 worker 都为自己那批候选算一遍运费。
-# 发了工具又被闸硬拒 = 模型每次调都白烧一轮再吃一条拒绝文案。**发放范围与闸的口径必须一致**，
-# 取交集后 SearchAgent 就是「搜货 + 查库外事实」这两件事——这也正是它现在实际在做的全部。
-_SEARCH_TOOLS = frozenset({"item_search", "web_search"})
-
-# 交易工具。``query_order`` 是只读的（也标了 is_read_only），但它跟着写工具一起发给 TradeAgent：
-# 「取消前必须先查」这条顺序约束，得让同一个 Agent 两件事都做得了才成立。
-_TRADE_TOOLS = frozenset({"create_order", "query_order", "cancel_order"})
-
+# 为什么不用 ``ToolGroup``：它是**运行时可激活 / 停用**的分组——模型可以调 meta tool 把组激活
+# 回来，工具对象照样住在 Toolkit 里。那是「按需露出」，不是权限边界。
 _ROLE_TOOLS: dict[str, frozenset[str] | None] = {
-    "main": None,  # None = 全集
-    "search": _SEARCH_TOOLS,
-    "trade": _TRADE_TOOLS,
+    "main": None,
 }
-
-# 自检：search 拿到的必须全是只读工具。读写边界的三根支柱（发放范围 / is_read_only 标记 /
-# PermissionEngine）里，前两根在这里对齐——漏标一个只读，或往 search 集合里塞进一个写工具，
-# 都在 import 期就炸，而不是等线上某轮 worker 偷偷写了状态。
-assert _SEARCH_TOOLS <= _READ_ONLY_TOOLS, sorted(_SEARCH_TOOLS - _READ_ONLY_TOOLS)
-
-
-def trade_tools_ready() -> bool:
-    """交易域是否已就绪（7.2 落地后为真）。派发入口据此决定 ``trade`` 能不能派。
-
-    判据是「TradeAgent 的工具集非空」而不是某个开关变量：工具还没建出来的时候，派过去就是一个
-    零工具的 Agent 空转一轮再超时——那种失败模式对用户表现为「卡了 90 秒然后说不知道」。
-    """
-    return bool(_TRADE_TOOLS)
 
 
 async def build_toolkit(
@@ -165,8 +117,8 @@ async def build_toolkit(
     共享，工具实例则因为要挂 per-loop 的中间件而必须一 loop 一份（见 :func:`_make_tools`）。
 
     批 4-3 起同一个「发放范围」口径多管两样东西，都走框架原生、都按 role 切：
-    **Skill**（``skills_or_loaders``，只发 main，见 ``app.agent.skills``）与 **MCP**
-    （``mcps``，只发 search 且只放只读白名单，见 ``app.agent.mcp_registry``）。它们都进
+    **Skill**（``skills_or_loaders``，见 ``app.agent.skills``）与 **MCP**
+    （``mcps``，只放只读白名单，见 ``app.agent.mcp_registry``）。它们都进
     Toolkit 的 ``basic`` 组——本仓不用 ToolGroup 表达权限（理由见上方 ``_ROLE_TOOLS`` 注释），
     组只有一个，边界仍然是「这份 Toolkit 里有没有」。
     """

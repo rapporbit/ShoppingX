@@ -13,6 +13,7 @@ export type AguiEvent = {
     | "assistant_call"
     | "tool_start"
     | "tool_end"
+    // 后端 A4-1 删派发后不再下发，仅为老会话回放保留；ActivityFeed 当普通 info 行画。
     | "fork"
     | "queue_status"
     // curator 本轮沉淀了新长期偏好（data.preferences: [{content, dedup_key}]）——回复下方画一行
@@ -150,7 +151,7 @@ export type PrepareOrderInput = {
   shipping_address: ShippingAddress;
 };
 
-// 本轮全树（主 + 各 fork 子 Agent）token 用量。随 task_result 事件下发、随 turns.json 落盘回看。
+// 本轮 token 用量（主环所有模型调用合计）。随 task_result 事件下发、随 turns.json 落盘回看。
 // total = input + output（计费口径）；cost_usd 是本轮估算成本（F 块 FinOps 记账）。
 // cache_read = 命中前缀缓存折扣档的 input；cache_hit_rate = cache_read/input（0~1），
 // 是「压缩 + cache breakpoint 有没有真生效」的健康指标。旧数据可能缺这两字段，故可选。

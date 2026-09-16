@@ -25,7 +25,6 @@ from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from app.harness.fork_guard import current_fork_depth
 from app.observability import metrics
 
 logger = logging.getLogger("shoppingx.harness")
@@ -55,7 +54,7 @@ class HookRejectSignal(Exception):
 
     **逃生门（效率闸专用）**：``escape_key`` 非 None 即接入统一逃生机制（见
     :func:`_try_escape`）——同一 (gate, escape_key) 连拒达到 :data:`ESCAPE_AFTER_REJECTS` 次后
-    放行本次调用，``on_escape`` 在放行时执行配套回退（如阶段回滚）。安全闸（白名单/深度/
+    放行本次调用，``on_escape`` 在放行时执行配套回退（如阶段回滚）。安全闸（白名单/
     预算/终结）**不得声明** ``escape_key``，它们的判定不会「立错墙」，必须永远硬。
     """
 
@@ -84,8 +83,8 @@ class HarnessMiddleware:
     """
 
     def __init__(self) -> None:
-        # (name, fn, priority, main_only)
-        self._hooks: dict[str, list[tuple[str, HookFn, int, bool]]] = defaultdict(list)
+        # (name, fn, priority)
+        self._hooks: dict[str, list[tuple[str, HookFn, int]]] = defaultdict(list)
 
     def register(
         self,
@@ -94,26 +93,21 @@ class HarnessMiddleware:
         fn: HookFn,
         *,
         priority: int = 100,
-        main_only: bool = False,
     ) -> None:
-        """``main_only=True`` = 这个 Hook 只在主 loop 跑，worker（fork_depth≥1）里整个跳过。
+        """注册一个 Hook。
 
-        由注册表统一裁决，而不是每个 Hook 自己在函数第一行写 ``if current_fork_depth() >= 1:
-        return None``——那句话此前散在十几处（审查报告 P1-3）。散着写的问题不是重复本身，是
-        **它变成了一句要靠人记得抄的话**：新加的 Hook 忘了抄，就会在 worker 里悄悄跑起来，
-        没有任何东西会红。声明式的好处是漏写时它至少显式地默认为 False（跟着跑），而不是
-        看起来像特意为之。
+        （曾有 ``main_only`` 参数让 Hook 在 worker 里跳过，A4 删子 Agent 时去掉。）
         """
         if hook_point not in HOOK_POINTS:
             raise ValueError(f"未知 Hook 点: {hook_point}，可选: {HOOK_POINTS}")
-        self._hooks[hook_point].append((name, fn, priority, main_only))
+        self._hooks[hook_point].append((name, fn, priority))
         self._hooks[hook_point].sort(key=lambda t: t[2])
 
     def list_hooks(self, hook_point: str | None = None) -> list[tuple[str, str, int]]:
         """列出已注册 Hook，返回 ``[(hook_point, name, priority), ...]``。"""
         if hook_point is not None:
-            return [(hook_point, n, p) for n, _, p, _m in self._hooks.get(hook_point, [])]
-        return [(hp, n, p) for hp, hooks in self._hooks.items() for n, _, p, _m in hooks]
+            return [(hook_point, n, p) for n, _, p in self._hooks.get(hook_point, [])]
+        return [(hp, n, p) for hp, hooks in self._hooks.items() for n, _, p in hooks]
 
     async def run(self, hook_point: str, context: dict[str, Any]) -> dict[str, Any]:
         """依次执行 ``hook_point`` 上注册的所有 Hook，返回最终 context。
@@ -129,10 +123,7 @@ class HarnessMiddleware:
         fail-closed（catch 后主动 raise ``HookRejectSignal``），不能指望 Pipeline 兜。
         """
         hooks = self._hooks.get(hook_point, [])
-        in_worker = current_fork_depth() >= 1
-        for name, fn, _priority, main_only in hooks:
-            if main_only and in_worker:
-                continue
+        for name, fn, _priority in hooks:
             t0 = time.monotonic()
             try:
                 result = await fn(context)
@@ -160,15 +151,14 @@ class HarnessMiddleware:
 def _try_escape(gate: str, sig: HookRejectSignal, context: dict[str, Any]) -> bool:
     """效率闸的确定性逃生门：同一 (gate, escape_key) 连拒达阈值后放行，不依赖模型配合。
 
-    硬闸分两类。**安全闸**（深度/预算/终结/子搜上限）的判定是精确事实，永远硬拒，不接入本
-    机制；**效率闸**（postfork 直搜/websearch 动机闸）依据的是上游推定（planner 意图、
-    「派发即检索阶段」语义），推定是假设不是承诺——实证与原则见
-    docs/decisions/0001-阶段白名单降级为遥测.md。模型对同一堵墙的反复坚持本身就是「墙可能
-    立错了」的强信号，达到阈值即认输放行。
+    硬闸分两类。**安全闸**（预算/终结）的判定是精确事实，永远硬拒，不接入本机制；
+    **效率闸**（websearch 动机闸）依据的是上游推定（planner 意图），
+    推定是假设不是承诺——实证与原则见 docs/decisions/0001-阶段白名单降级为遥测.md。
+    模型对同一堵墙的反复坚持本身就是「墙可能立错了」的强信号，达到阈值即认输放行。
 
     放行是**闩锁语义**（计数不清零）：同 key 首次逃生后，后续命中直接放行。模型赢过一次说明
     这堵墙大概率立错了位置，每次放行前再攒 2 轮拒绝纯烧延迟（每轮一次 LLM 往返）。放开的只是
-    效率禁令——检索预算、token 预算、深度等安全闸照常生效，liveness 看门狗是最终兜底。
+    效率禁令——检索预算、token 预算等安全闸照常生效，liveness 看门狗是最终兜底。
 
     ``on_escape`` 回退动作的异常不冒泡（照常放行）：逃生门是为了解死锁，回退挂了不能反而把
     调用拦回去。
@@ -208,12 +198,12 @@ harness = HarnessMiddleware()
 
 
 def harness_hook(
-    hook_point: str, *, name: str, priority: int = 100, main_only: bool = False
+    hook_point: str, *, name: str, priority: int = 100
 ) -> Callable[[HookFn], HookFn]:
-    """装饰器：自动注册 Hook 到全局 ``harness`` 单例。``main_only`` 见 :meth:`Harness.register`。"""
+    """装饰器：自动注册 Hook 到全局 ``harness`` 单例。"""
 
     def decorator(fn: HookFn) -> HookFn:
-        harness.register(hook_point, name, fn, priority=priority, main_only=main_only)
+        harness.register(hook_point, name, fn, priority=priority)
         return fn
 
     return decorator

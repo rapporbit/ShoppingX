@@ -62,7 +62,6 @@ from app.tools._bundle import (
     get_session_mode,
     prospective_slot,
     render_allocation,
-    slot_display,
     slot_query,
 )
 from app.tools._candidates import (
@@ -262,15 +261,18 @@ class ItemPickerOutput(BaseModel):
         if self.offcat_count:
             payload["oncat_count"] = self.oncat_count
             payload["offcat_count"] = self.offcat_count
-        payload.update(
-            {
-                # 标题截短回显：picks 的完整标题在上下文里的检索结果中已出现过，这里只要
-                # 短 handle + item_id 够模型对上号（见 compact_candidates 的 title_chars 说明）。
-                "picks": compact_candidates(self.picks, title_chars=60),
-                "excluded": self.excluded,
-                "over_budget": self.over_budget,
-            }
+        # picks 回显**不截标题**：picks 从整池（单平台 30 条）精排而来，模型在 item_search 渲染里
+        # 只见过头部 RENDER_CAP 条；截短标题会让它为没见过全名的商品写理由 → 去「核实」白搜一轮
+        # （A0-3 q_backpack 实测）。到手价只留 landed_usd：运费 / 关税 / 重量 / 精排分是工具内部量，
+        # 写理由用不上，收尾按 id hydrate 全量。
+        payload["picks"] = compact_candidates(
+            self.picks,
+            drop={"shipping_usd", "duty_usd", "weight_kg", "rerank_score", "rerank_query"},
         )
+        # excluded / over_budget 是 Output 必填字段，投影必须能 round-trip 回 schema
+        # （test_render_projection），只裁可推导的冗余，这两个照带。
+        payload["excluded"] = self.excluded
+        payload["over_budget"] = self.over_budget
         if self.bundle is not None:
             b = self.bundle
             # rows 不回显（与 picks 同一批货，重复烧 token）；空集合字段全丢；feasible/total
@@ -386,11 +388,11 @@ async def _category_relevance(
     if len(slots) >= 2:  # 套装轮：按「将归入的槽」分批，各槽用各自的干净 query
         by_slot: dict[str, list[ItemCandidate]] = {}
         for c in survivors:
-            sid = prospective_slot(c, slots)  # 归槽判定统一返回槽 id
-            if sid:
-                by_slot.setdefault(sid, []).append(c)
+            slot_name = prospective_slot(c, slots)
+            if slot_name:
+                by_slot.setdefault(slot_name, []).append(c)
         jobs = [
-            (slot_query(s), by_slot[s.id]) for s in slots if slot_query(s) and by_slot.get(s.id)
+            (slot_query(s), by_slot[s.name]) for s in slots if slot_query(s) and by_slot.get(s.name)
         ]
     else:  # 普通轮：全池一批，query = planner 判的英文主品类
         pt = get_session_pt()
@@ -727,14 +729,14 @@ async def item_picker(
         for p in outcome.chosen:
             # 并列形态一类给好几件，同一款的颜色/包装变体会各占一张卡（bundle 每槽只有一件，
             # 撞不上这个问题）。同槽内判重、**不补位**：这一类少一张卡，好过给用户两张一样的。
-            if any(q.slot == p.slot.id and _near_duplicate(p.cand, q) for q in picks):
+            if any(q.slot == p.slot.name and _near_duplicate(p.cand, q) for q in picks):
                 drop_pick_from_report(p.cand.item_id)
                 continue
             item = p.cand.model_copy()
-            # 归槽结果回写到 slot 字段（**槽 id**）——盖章缺失、靠 keywords 兜底归槽的候选
+            # 归槽结果回写到 slot 字段（槽名）——盖章缺失、靠 keywords 兜底归槽的候选
             # （主循环补搜没传 slot 的那批）全靠这行把槽位带到收尾卡片，否则前端落「其他」组
             # （badcase 75aa84）。
-            item.slot = p.slot.id
+            item.slot = p.slot.name
             # 套装理由不单列行为亲和（弱信号、组合叙事已够满，且避免把推断词冒充成用户明说的
             # 偏好）——传空 affinity 列表；亲和仍通过 base_scores 影响了组合选择。
             reason = _build_reason(item, p.matched, [], empty_stats)
@@ -889,9 +891,8 @@ def _preview_item(c: ItemCandidate) -> dict[str, object]:
         "reason": c.pick_reason,
         "image_url": c.image_url,
         "url": c.url,
-        # 套装轮非空：前端预览阶段就能按槽分组（与收尾 SummaryItem 同构）。内部盖章是槽 id，
-        # 出前端这一步映射回展示名——前端与旧会话数据全程只见名字。
-        "slot": slot_display(c.slot),
+        # 套装轮非空：前端预览阶段就能按槽分组（与收尾 SummaryItem 同构）。
+        "slot": c.slot,
         # 卡片附加行（与 SummaryItem 同构，理由见那边）：品牌 / 评分 / 到手价寄往哪。
         "brand": c.brand,
         "rating": c.rating,

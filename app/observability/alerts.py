@@ -94,11 +94,6 @@ DEFAULT_RULES: tuple[AlertRule, ...] = (
     AlertRule("planner", p95_threshold_ms=45_000, hard_ms=90_000),  # 实测 P95 23_539
     AlertRule("shopping_summary", p95_threshold_ms=25_000, hard_ms=60_000),  # 实测 P95 11_900
     AlertRule("chat_fallback", p95_threshold_ms=12_000, hard_ms=30_000),  # 实测 P95 5_953
-    # 元工具：一次派发 = 一整棵子 AgentLoop 跑完，阈值按整轮墙钟给。手上唯一的基线是在旧的
-    # 批量派发入口（一次调用派一批平台）上量的：P95 39_930ms / 14 次调用。task_dispatch 是
-    # **一条一次**、由框架并发跑，单次墙钟只含它自己那棵子树，所以按批量版的一半估（40s），
-    # 跑够样本再校准。宁可先松：这条路径最花时间，没人盯着比阈值不准糟得多。
-    AlertRule("task_dispatch", p95_threshold_ms=40_000, hard_ms=120_000),
 )
 
 _RULES_BY_TOOL: dict[str, AlertRule] = {r.tool: r for r in DEFAULT_RULES}

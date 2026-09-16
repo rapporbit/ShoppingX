@@ -1,9 +1,8 @@
-"""并发准入的确定性单测：双池优先级队列 + 请求指纹去重 + fork 级并发 Semaphore。
+"""并发准入的确定性单测：双池优先级队列 + 请求指纹去重。
 
-三层各测各的语义：
+两层各测各的语义：
 - ``PriorityRequestQueue``（任务级）：分池、有界排队、队列满则拒、再平衡、取消不漏槽。
 - ``dedup``（幂等第 3 层）：窗口内同 (user_id, query) 判重复，窗口外放行。
-- ``fork_concurrency_scope``（fork 级）：超额**排队**，同一时刻并发子任务数不超上限。
 """
 
 from __future__ import annotations
@@ -18,7 +17,6 @@ from app.api.concurrency import (
     classify_request,
     estimated_wait_seconds,
 )
-from app.harness.budgets import fork_concurrency_scope, get_fork_semaphore
 
 
 @pytest.fixture(autouse=True)
@@ -330,34 +328,3 @@ def test_dedup_window_expires(monkeypatch: pytest.MonkeyPatch) -> None:
     now = __import__("time").monotonic() + dedup.DEDUP_WINDOW_SEC + 1
     monkeypatch.setattr(dedup.time, "monotonic", lambda: now)
     assert dedup.check_duplicate("alice", "买包") is None
-
-
-# ---------- fork 级：fork_concurrency_scope（超额排队，限并发峰值） ----------
-async def test_fork_semaphore_none_outside_scope() -> None:
-    assert get_fork_semaphore() is None  # 无作用域（单测/示例）→ 不限并发
-
-
-async def test_fork_semaphore_caps_peak_concurrency() -> None:
-    peak = 0
-    current = 0
-
-    async def worker() -> None:
-        nonlocal peak, current
-        sem = get_fork_semaphore()
-        assert sem is not None  # gather 子任务继承 ContextVar 快照 → 拿到同一个 Semaphore
-        async with sem:
-            current += 1
-            peak = max(peak, current)
-            await asyncio.sleep(0.02)
-            current -= 1
-
-    with fork_concurrency_scope(2):
-        await asyncio.gather(*(worker() for _ in range(6)))
-
-    assert peak <= 2  # 6 个子任务争 2 个槽，同一时刻并发不超 2
-
-
-async def test_fork_semaphore_scope_resets() -> None:
-    with fork_concurrency_scope(3):
-        assert get_fork_semaphore() is not None
-    assert get_fork_semaphore() is None  # 离开作用域后还原
