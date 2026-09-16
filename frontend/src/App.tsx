@@ -250,8 +250,9 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
           : [...cur, item],
     );
   }, []);
-  // 详情 / 对比 / 表单要「说一句话」时都走这条：跟输入框发消息完全同一条路。
-  const say = (text: string) => startTask(text, userId);
+  // 对比栏原先靠这条「替用户说一句话」把几件商品发给 Agent；C4 之后它直接打
+  // POST /api/threads/{tid}/compare 拿结构化结论，这条就没有消费者了（详情 / 表单走各自的
+  // 确认卡通路）。留着会是一个无人调用的发消息入口，删。
   // 输入框预填（不发送）：追问 chip 与零结果空态用。key 自增保证同文案连点也重填。
   const [draft, setDraft] = useState<{ text: string; key: number }>({ text: "", key: 0 });
   const prefill = (text: string) => setDraft((d) => ({ text, key: d.key + 1 }));
@@ -734,12 +735,12 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
 
       <ProductComparison
         open={compareOpen}
+        threadId={threadId}
         items={compareList}
         busy={running || waiting}
         onClose={() => setCompareOpen(false)}
         onRemove={toggleCompare}
         onClear={() => setCompareList([])}
-        onAsk={say}
       />
 
       <OrderIntentForm

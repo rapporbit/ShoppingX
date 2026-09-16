@@ -117,6 +117,7 @@ from app.recall.geo import SUPPORTED_COUNTRIES
 from app.recall.semantic_cache import turn_cache_status
 from app.tools._candidates import hydrate
 from app.tools.image_understand import sniff_image_mime
+from app.tools.present_comparison import compare_items
 from app.trade.confirmation import ConfirmationError
 from app.trade.confirmations import (
     list_confirmations,
@@ -1700,6 +1701,37 @@ async def prepare_order_endpoint(
     env = conf.envelope()
     await monitor.report_confirmation("required", env, thread_id=thread_id)
     return env
+
+
+class CompareBody(BaseModel):
+    item_ids: list[str]
+
+
+@app.post("/api/threads/{thread_id}/compare")
+async def compare_endpoint(
+    thread_id: str,
+    body: CompareBody,
+    auth_uid: str | None = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    """对比栏「让 Agent 帮我比一比」：几件商品的逐件优劣 + 推荐哪件，**不走 AgentLoop**。
+
+    **为什么是 REST 而不是发一句话给 Agent**：用户已经亲手勾了这几件并点了按钮，意图百分之百
+    确定——再让主环规划一遍，换来的是几十秒往返和「模型可能回一段纯文字、对比表还是填不满」的
+    不确定性。这里一次 fast 模型调用就出结构化结果，对比表按 item_id 逐列填。与 ``/api/similar``
+    同一个取舍（那条是 0 次 LLM，这条是 1 次）。
+
+    ``present_comparison`` 工具仍在工具面上：用户在对话里说「这几个哪个好」时由模型调，两条入口
+    共用 :func:`compare_items`。
+
+    **代价（明确记着）**：这条路的结论不进会话历史，Agent 后续不知道用户看过对比。当前是可接受
+    的——对比是「看一眼就决定」的动作，不是需要被后续推理引用的事实；真要接回去，应该由前端把
+    结论作为用户消息回发，而不是在这里偷偷写 messages。
+    """
+    await _guard_thread(thread_id, auth_uid)
+    session_dir = _safe_session_dir(OUTPUT_ROOT, thread_id)
+    with thread_scope(thread_id, session_dir, auth_uid):
+        out = await compare_items(body.item_ids)
+    return out.model_dump()
 
 
 @app.get("/api/threads/{thread_id}/confirmations")

@@ -70,6 +70,9 @@ system_prompt: |
     库外知识**（新说法与潮流意图翻译，见 workflow 的 intent_grounding=web 路；召回全空时查背景）
     → web_search。后两者都只补商品外知识、不产候选，结果不喂 picker / compare / summary。
     research 给的是事实与出处，「哪个更适合这位用户」由你结合预算与偏好自己判断。
+  - 用户要比较**已经给过的**那几件（「这几个哪个好」「第 1 和第 3 比一比」）→ present_comparison
+    (item_ids)：逐件优劣 + 适合谁 + 推荐哪件，**调完即收尾**，不要再调 shopping_summary 把同一份
+    判断用散文重讲一遍。要比的是**还没搜过的对象**（点名某两款机型）才走 research。
   - forget_preference：用户说「忘掉 X」时调，优先传 key。
   </tool_policy>
 

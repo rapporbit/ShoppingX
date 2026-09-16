@@ -316,6 +316,39 @@ export async function fetchSimilar(itemId: string, topK = 8): Promise<ProductIte
   }
 }
 
+// ——— 对比栏「让 Agent 帮我比一比」（C4）———
+// POST /api/threads/{tid}/compare：一次 fast 模型调用出结构化对比，**不经过 AgentLoop**。
+// 为什么不发一句话让 Agent 回：用户已经亲手勾了这几件并点了按钮，意图百分之百确定，走主环只多
+// 几十秒规划开销，还可能换回一段纯文字——那张表就还是填不满。后端按 item_id 逐列返回，
+// 编出来的 id 在那边已被丢掉（见 present_comparison 的 _ground）。
+export type ComparisonEntry = {
+  item_id: string;
+  pros: string[];
+  cons: string[];
+  best_for: string;
+};
+
+export type Comparison = {
+  items: ComparisonEntry[];
+  recommended_item_id: string;
+  recommendation_reason: string;
+  note: string;
+};
+
+export async function compareItems(threadId: string, itemIds: string[]): Promise<Comparison | null> {
+  try {
+    const resp = await authFetch(`/api/threads/${encodeURIComponent(threadId)}/compare`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ item_ids: itemIds }),
+    });
+    if (!resp.ok) return null;
+    return await resp.json();
+  } catch {
+    return null;
+  }
+}
+
 // ——— 我的会话清单（M16）———
 // 侧栏历史的真源。此前它只活在浏览器的 localStorage 里：换台设备、清个缓存，后端数据明明还在，
 // 用户却再也找不回自己的对话。现在按 token 里的身份从归属表查，登录到哪台机器都是同一份。

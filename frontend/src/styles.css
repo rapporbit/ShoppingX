@@ -3985,6 +3985,36 @@ button:disabled {
   padding: 8px 12px;
   border-radius: 6px;
 }
+/* C4 对比结论：推荐那一列整列淡色底 + 表头一枚角标。用底色而不是描边——表格里给单列描边，
+   相邻单元格的 border 会错位半格。 */
+.compare-table .compare-pick {
+  background: var(--surface-soft);
+}
+.compare-badge {
+  display: inline-block;
+  margin-bottom: 6px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text);
+  border: 1px solid var(--border-strong, var(--border));
+}
+.compare-muted {
+  color: var(--muted);
+}
+.compare-verdict {
+  margin-top: 14px;
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--surface-soft);
+}
+.compare-verdict div {
+  margin-top: 4px;
+  color: var(--text-2);
+}
 .compare-actions {
   display: flex;
   justify-content: flex-end;

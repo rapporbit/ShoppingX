@@ -20,4 +20,14 @@
 # 重发（多一轮往返，且文案只提 shopping_summary / chat_fallback，与 system prompt 的
 # ``<termination>`` 段「交易轮的终结工具是 create_order / cancel_order 本身」自相矛盾）。
 # 2026-09-10 统一到这一份（审查报告 B1）。
-TERMINAL_TOOLS = frozenset({"shopping_summary", "chat_fallback", "create_order", "cancel_order"})
+# ``present_comparison``（C4）也在其中，同一条理由：它产出的就是面向用户的最终结构化答案，
+# 调完再让模型去调 shopping_summary，只会把同一份判断用散文重讲一遍（over-loop 的老形态）。
+TERMINAL_TOOLS = frozenset(
+    {
+        "shopping_summary",
+        "chat_fallback",
+        "create_order",
+        "cancel_order",
+        "present_comparison",
+    }
+)
