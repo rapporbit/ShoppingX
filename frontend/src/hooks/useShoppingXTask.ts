@@ -63,6 +63,10 @@ export type Turn = {
   clarificationOptions?: string[] | null;
   clarificationMultiSelect?: boolean;
   clarificationPreselected?: string[] | null;
+  // ask_user(closes_turn=true)：这一问是本轮的收尾，后端没在等回复（D2）。选项因此是「下一步」
+  // chips——点一下要**发起新一轮任务**，不能往 WS 上打 clarification_response，那头没有 waiter，
+  // 打过去会被拒收、用户点了什么都不发生。同理本轮状态照常走到 done，不能停在 waiting。
+  clarificationClosesTurn?: boolean;
   // 本轮 curator 沉淀的新长期偏好（memory_updated 事件，在 task_result 之后到）。回复下方画一行
   // 「记住了 … ✕」——写入是自动的（不弹确认框打断购物），但必须看得见、且一键撤得掉。
   learnedPrefs: LearnedPref[];
@@ -513,16 +517,21 @@ export function useShoppingXTask() {
           setStatusSafe("error");
           ws.close();
           break;
-        case "clarification_request":
+        case "clarification_request": {
+          // closes_turn：问完即收尾，后端没在等——状态别切 waiting，否则任务已 done、界面却卡在
+          // 「等待回复」，输入框被 busy 锁死，用户连新一轮都发不出去。
+          const closesTurn = (evt.data.closes_turn as boolean | undefined) ?? false;
           patchLastTurn(() => ({
-            status: "waiting" as TaskStatus,
+            ...(closesTurn ? {} : { status: "waiting" as TaskStatus }),
             clarificationQuestion: (evt.data.question as string) ?? "",
             clarificationOptions: (evt.data.options as string[] | undefined) ?? null,
             clarificationMultiSelect: (evt.data.multi_select as boolean | undefined) ?? false,
             clarificationPreselected: (evt.data.preselected as string[] | undefined) ?? null,
+            clarificationClosesTurn: closesTurn,
           }));
-          setStatusSafe("waiting");
+          if (!closesTurn) setStatusSafe("waiting");
           break;
+        }
       }
     };
 

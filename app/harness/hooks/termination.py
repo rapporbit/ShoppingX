@@ -19,6 +19,7 @@ from typing import Any
 from app.harness.budgets import (
     MAX_TERMINAL_NUDGE_RETRIES,
     TERMINAL_TOOLS,
+    is_terminal_call,
 )
 from app.harness.middleware import HookRejectSignal, harness_hook
 from app.harness.msgs import system_message
@@ -50,7 +51,7 @@ async def check_terminal_reached(context: dict[str, Any]) -> dict[str, Any] | No
         return None
     if guard.terminal_reached:
         same_batch = guard.terminal_step >= 0 and guard.think_step == guard.terminal_step
-        if same_batch and context.get("tool_name") in TERMINAL_TOOLS:
+        if same_batch and is_terminal_call(context.get("tool_name"), context.get("tool_args")):
             return None
         raise HookRejectSignal(TERMINAL_REACHED_DENIED, raw=True)
     return None
@@ -66,7 +67,7 @@ async def mark_terminal(context: dict[str, Any]) -> dict[str, Any] | None:
     guard = guard_of(context)
     if guard is None:
         return None
-    if context.get("tool_name") in TERMINAL_TOOLS:
+    if is_terminal_call(context.get("tool_name"), context.get("tool_args")):
         guard.terminal_reached = True
         guard.terminal_step = guard.think_step
     return None
