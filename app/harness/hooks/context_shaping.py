@@ -1,13 +1,16 @@
-"""塑形模型看到的上下文：偏好注入 / 成功策略注入与结账。
+"""塑形模型看到的上下文：工具返回清理 / 偏好注入 / 成功策略注入与结账。
 
     on_system_prompt 50  system_prompt_append 装配期给主 Agent 追加两段：按用户原话匹配的在役策略
                                               <learned_strategies>、待决议确认卡 + 本会话订单
                                               <trade_state>（曾是两个 hook，2026-09-15 合一）
+    pre_think        10  tool_result_pruner  工具返回总量超阈值 → 最旧的换占位，削到一半（D3）
     post_tool_call   50  preference_inject   planner 判出域后注入域内长期偏好
     on_session_end   90  strategy_feedback   给本轮注入过的策略结账：命中回血、连续失败淘汰
 
-上下文压缩不在本仓做：交给框架 ``compress_context``（超阈值时 LLM 摘要进 ``state.summary``，
-随 session.json 一起持久化）。cache_control 也不在这里打，落在 formatter 层。
+**两层压缩的分工**：这里做零成本的粗活（清最旧工具返回），框架的 ``compress_context`` 做花钱的
+细活（超 ``trigger_ratio`` 时 LLM 写摘要进 ``state.summary``，随 session.json 持久化）。顺序上
+粗活在前——能白削掉的体积，没必要先花一次 LLM 调用去总结它。cache_control 不在这里打，落在
+formatter 层。
 """
 
 from __future__ import annotations
@@ -21,12 +24,80 @@ from app.harness.budgets import (
     TERMINAL_TOOLS,
 )
 from app.harness.middleware import harness_hook
+from app.harness.msgs import _attr
 from app.memory.injector import PREF_EMPTY, build_preference_block
 from app.memory.strategies import get_strategy_store, render_strategy_block, strategies_for_query
 from app.trade.confirmations import trade_state
 from app.trade.repository_sql import confirmation_repository, order_repository
+from app.utils.env import env_int
+from app.utils.tokens import count_tokens
 
 logger = logging.getLogger("shoppingx.harness.context_shaping")
+
+
+#: 上下文里工具返回的 token 总量超过它就开始清最旧的几条（0 = 关掉这道清理）。
+#: 24k 是按「普通轮输入 22.5k」（round3 基线）定的：正常一轮碰不到，多轮续聊堆起来才会。
+PRUNE_TOOL_RESULTS_TOKENS = env_int("PRUNE_TOOL_RESULTS_TOKENS", 24000)
+
+#: 最近几条工具返回一律不动——模型当前这一步的推理就靠它们，清了等于让它凭空作答。
+PRUNE_KEEP_RECENT = env_int("PRUNE_KEEP_RECENT", 6)
+
+_PRUNED_PLACEHOLDER = "[早先的工具返回已清理以腾出上下文。还需要这段内容就重新调用对应工具。]"
+
+
+def _set_block_output(block: Any, text: str) -> None:
+    """block 可能是 pydantic 对象也可能是 dict（同 ``_attr`` 那两种来源），统一写回。"""
+    if isinstance(block, dict):
+        block["output"] = text
+    else:
+        block.output = text
+
+
+@harness_hook("pre_think", name="tool_result_pruner", priority=10)
+async def prune_old_tool_results(context: dict[str, Any]) -> dict[str, Any] | None:
+    """工具返回式压缩：超阈值时把**最旧**的工具返回换成一行占位，直到总量减半。
+
+    **为什么要自己做一层**：AgentScope 的 ``compress_context`` 只有「整体超 ``trigger_ratio``
+    → LLM 写摘要」这一招，没有「清最旧工具返回」这种粗活。而多轮购物会话里吃掉上下文的正是
+    工具返回——十几条 ``item_search`` 的候选 JSON，每条几千 token，其中早先那几轮的候选模型
+    早就不看了（当前轮的候选登记表才是它的工作面）。先用零成本的替换削掉一半，再让框架决定要
+    不要为剩下的花一次 LLM 摘要，顺序上这一层必须在前。
+
+    **原地改 Msg 而不是只改视图**：``ctx["messages"]`` 里的 Msg 与 ``agent.state.context`` 是同一
+    批对象（见 adapter 那段注释），原地改 block 等于同时改了持久化状态。这是有意的——只改视图
+    的话每轮都要重清一次，而每轮清理的位置都不同，前缀缓存就会**轮轮都断**；改 state 则是断
+    一次、之后形态稳定。代价是原文真的没了，所以占位文案要写明「重新调用对应工具」。
+
+    保留最近 ``PRUNE_KEEP_RECENT`` 条不动，见该常量。
+    """
+    if PRUNE_TOOL_RESULTS_TOKENS <= 0:
+        return None
+    blocks: list[Any] = []
+    for msg in context.get("messages") or []:
+        for block in getattr(msg, "content", None) or []:
+            if _attr(block, "type") == "tool_result":
+                blocks.append(block)
+    if len(blocks) <= PRUNE_KEEP_RECENT:
+        return None
+
+    sizes = [count_tokens(str(_attr(b, "output") or "")) for b in blocks]
+    total = sum(sizes)
+    if total <= PRUNE_TOOL_RESULTS_TOKENS:
+        return None
+
+    target = PRUNE_TOOL_RESULTS_TOKENS // 2
+    pruned = 0
+    for i in range(len(blocks) - PRUNE_KEEP_RECENT):
+        if total <= target:
+            break
+        if sizes[i] <= len(_PRUNED_PLACEHOLDER):
+            continue  # 已经是占位或本就极短，换了不省反亏
+        _set_block_output(blocks[i], _PRUNED_PLACEHOLDER)
+        total -= sizes[i] - count_tokens(_PRUNED_PLACEHOLDER)
+        pruned += 1
+    if pruned:
+        logger.info("工具返回清理：%d 条 → 占位，总量 %d → %d token", pruned, sum(sizes), total)
+    return None
 
 
 @harness_hook("post_tool_call", name="preference_inject", priority=50)

@@ -1937,3 +1937,61 @@ class TestDetectionLayerLanguageBridge:
         assert _is_empty_result(empty + "\n\n[系统提示] 库里其实还有 3 件相关商品")
         full = '{"platform": "amazon", "total_recall": 5, "candidates": [{"item_id": "a"}]}'
         assert not _is_empty_result(full + "\n\n[阶段推进] 候选已入池，0 条也别再搜")
+
+
+@pytest.mark.asyncio
+async def test_tool_result_pruner_drops_oldest_and_keeps_recent() -> None:
+    """D3：工具返回总量超阈值 → 最旧的换占位削到一半，最近几条一律不动。
+
+    改的是 Msg 对象本身（与 state.context 同一批对象），所以清理是持久的、只断一次前缀缓存。
+    只改视图的话每轮都要重清、每轮断在不同位置，比不清还亏。
+    """
+    from agentscope.message import Msg, ToolResultBlock
+
+    import app.harness.hooks.context_shaping as cs
+
+    def _msg(idx: int, size: int) -> Msg:
+        return Msg(
+            name="shoppingx",
+            role="assistant",
+            content=[
+                ToolResultBlock(
+                    type="tool_result", id=f"c{idx}", name="item_search", output="x" * size
+                )
+            ],
+        )
+
+    # 30 条各 1000 token（实测 count_tokens("x" * 8000) == 1000），总 30k 超默认阈值 24k
+    msgs = [_msg(i, 8000) for i in range(30)]
+    before = [str(m.content[0].output) for m in msgs]
+    await cs.prune_old_tool_results({"messages": msgs})
+
+    after = [str(m.content[0].output) for m in msgs]
+    assert after[-cs.PRUNE_KEEP_RECENT :] == before[-cs.PRUNE_KEEP_RECENT :]  # 最近几条原样
+    assert after[0] == cs._PRUNED_PLACEHOLDER  # 最旧的先被清
+    assert any(a == b for a, b in zip(after, before, strict=True))  # 不是全清，削到一半就停
+
+    # 幂等：再跑一次不会把占位也算进去反复清理
+    again = list(after)
+    await cs.prune_old_tool_results({"messages": msgs})
+    assert [str(m.content[0].output) for m in msgs] == again
+
+
+@pytest.mark.asyncio
+async def test_tool_result_pruner_noop_below_threshold() -> None:
+    """没超阈值就一个字都不动——正常一轮（round3 基线输入 22.5k）不该触发它。"""
+    from agentscope.message import Msg, ToolResultBlock
+
+    import app.harness.hooks.context_shaping as cs
+
+    msgs = [
+        Msg(
+            name="shoppingx",
+            role="assistant",
+            content=[
+                ToolResultBlock(type="tool_result", id="c1", name="item_search", output="y" * 400)
+            ],
+        )
+    ]
+    await cs.prune_old_tool_results({"messages": msgs})
+    assert str(msgs[0].content[0].output) == "y" * 400
