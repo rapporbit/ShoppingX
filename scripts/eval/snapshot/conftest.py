@@ -51,6 +51,9 @@ class SnapResult:
     final_text: str
     calls: list[tuple[str, dict[str, Any]]]  # 本轮 (工具名, 入参)，按发生顺序
     results: dict[str, list[str]]  # 工具名 → 本轮各次返回文本
+    # 前缀缓存命中率（cache_read / input）。D5 的门禁按它判退化，故必须一路带到断言处——
+    # 只写进 RUN_LOG 的话，测试就只能去解析日志文件，那是另一种形态的漂移。
+    cache_hit_rate: float = 0.0
 
     @property
     def names(self) -> list[str]:
@@ -122,12 +125,21 @@ def snap_run(request: pytest.FixtureRequest) -> Any:
             "model_calls": out.get("model_calls"),
             "input_tokens": tk.get("input"),
             "cost_usd": tk.get("cost_usd"),
+            "cache_hit_rate": tk.get("cache_hit_rate"),
             "tools": [n for n, _ in calls],
         }
         RUN_LOG.parent.mkdir(parents=True, exist_ok=True)
         with RUN_LOG.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        return SnapResult(tid, uid, sd, out.get("final_text") or "", calls, results)
+        return SnapResult(
+            tid,
+            uid,
+            sd,
+            out.get("final_text") or "",
+            calls,
+            results,
+            float(tk.get("cache_hit_rate") or 0.0),
+        )
 
     return _run
 
