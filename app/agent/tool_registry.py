@@ -26,6 +26,7 @@ from app.tools.planner import planner
 from app.tools.present_comparison import present_comparison
 from app.tools.price_compare import price_compare
 from app.tools.query_order import query_order
+from app.tools.recall_memories import recall_memories
 from app.tools.research import research
 from app.tools.shipping_calc import shipping_calc
 from app.tools.shopping_summary import shopping_summary
@@ -36,10 +37,12 @@ from app.tools.web_search import web_search
 # 工具注册表里查得到」。
 TERMINAL_TOOLS = _TERMINAL_TOOLS
 
-# 业务工具（每文件一个，模块名 = 工具名）：九大主工具 + ask_user 澄清 + forget_preference。
+# 业务工具（每文件一个，模块名 = 工具名）：九大主工具 + ask_user 澄清 + 两个记忆工具。
 # 注意:**没有** remember_preference——偏好的识别 / 沉淀已剥离给会话结束后独立运行的记忆管家
-# （app/memory/curator.py），购物工作流里不再有「随手记长期偏好」的工具。forget_preference 保留:
-# 用户明确要撤回某条长期偏好时即时生效，这与记忆判定正交。
+# （app/memory/curator.py），购物工作流里不再有「随手记长期偏好」的工具。留下的两个都是读 / 删:
+# forget_preference 让用户明确要撤回的那条即时生效；recall_memories（D4）补的是自动注入的盲区
+# ——注入只给**本轮域内**的偏好，用户问「我以前买的那双鞋」时要的恰恰是域外那些。两者都与
+# 「记什么」的判定正交，不构成第二个写入口。
 _BUSINESS_TOOLS: list[ToolShell] = [
     planner,
     image_understand,
@@ -54,6 +57,7 @@ _BUSINESS_TOOLS: list[ToolShell] = [
     chat_fallback,
     shopping_summary,
     ask_user,
+    recall_memories,
     forget_preference,
     create_order,
     query_order,
@@ -76,6 +80,7 @@ _READ_ONLY_TOOLS = frozenset(
         "web_search",
         "research",
         "query_order",
+        "recall_memories",
     }
 )
 

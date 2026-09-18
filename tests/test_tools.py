@@ -2266,3 +2266,67 @@ class TestNullIsAbsent:
         assert _ParseResult.model_validate({"preferences": None}).preferences == []
         cur = CurationResult.model_validate({"persistent_preferences": None})
         assert cur.persistent_preferences == []
+
+
+@pytest.mark.asyncio
+async def test_recall_memories_filters_by_topic_and_ignores_domain() -> None:
+    """D4：recall_memories 按 topic 确定性筛选，且**不做域过滤**——它补的正是自动注入的盲区。
+
+    自动注入只给本轮域内的偏好（搜背包时不推「买鞋只穿宽楦」，那是对的）。用户问「我以前买的
+    那双鞋」时要的恰恰是域外那条，没有这个工具模型只能回「我不记得」而库里明明有。
+    """
+    import tempfile
+    from pathlib import Path
+    from uuid import uuid4
+
+    from app.memory.store import PreferenceEntry, get_store
+    from app.tools.recall_memories import recall_memories
+    from app.utils.thread_ctx import thread_scope
+
+    uid = f"u-{uuid4().hex[:8]}"
+    with thread_scope("t-recall", Path(tempfile.mkdtemp()), user_id=uid):
+        store = get_store()
+        await store.write(
+            uid,
+            PreferenceEntry(
+                slug="wide-toe",
+                content="买鞋只要宽楦",
+                domain="footwear",
+                category="size",
+                polarity="like",
+                keywords=["宽楦", "wide toe"],
+            ),
+        )
+        await store.write(
+            uid,
+            PreferenceEntry(
+                slug="no-plastic",
+                content="不要塑料材质",
+                domain="bags",
+                category="material",
+                polarity="dislike",
+                keywords=["塑料"],
+            ),
+        )
+        all_out = await recall_memories.ainvoke({})
+        assert all_out.count == 2  # 留空回全部，两个域的都在
+
+        shoe_out = await recall_memories.ainvoke({"topic": "宽楦"})
+        assert shoe_out.count == 1 and "宽楦" in shoe_out.preferences
+
+        miss = await recall_memories.ainvoke({"topic": "从没说过的词"})
+        assert miss.count == 0 and "没有与" in miss.note
+
+
+@pytest.mark.asyncio
+async def test_recall_memories_anonymous_says_so() -> None:
+    """匿名会话没有长期记忆——如实说要登录，别让模型编「你没告诉过我」。"""
+    import tempfile
+    from pathlib import Path
+
+    from app.tools.recall_memories import recall_memories
+    from app.utils.thread_ctx import thread_scope
+
+    with thread_scope("t-recall-anon", Path(tempfile.mkdtemp())):
+        out = await recall_memories.ainvoke({"topic": "材质"})
+    assert out.count == 0 and "匿名" in out.note
