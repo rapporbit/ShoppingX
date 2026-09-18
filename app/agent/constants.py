@@ -31,3 +31,21 @@ TERMINAL_TOOLS = frozenset(
         "present_comparison",
     }
 )
+
+
+def is_terminal_call(tool_name: object, tool_args: object = None) -> bool:
+    """这一次调用是不是终结调用——判据是「工具名 + 入参」，不只是名字。
+
+    多出入参这一维是 ``ask_user`` 逼出来的（D2）：同一个工具承载两种形态，``closes_turn=False``
+    暂停 loop 等用户回复（非终结），``closes_turn=True`` 发一组 chips 让用户挑、调完即收尾
+    （终结，等价于 Anthropic 博客的 ``present_suggestions``）。**不为收尾形态新增第三个工具**
+    是有意的：两个职责高度重叠的工具并存，模型会乱选（执行计划 §3-10）。
+
+    入参拿不到时退回名字判据——安全方向是「当成非终结」，宁可多跑一轮也不要把还在等回复的
+    那一问判成收尾、把用户晾在半路。
+    """
+    if tool_name in TERMINAL_TOOLS:
+        return True
+    if tool_name == "ask_user" and isinstance(tool_args, dict):
+        return bool(tool_args.get("closes_turn"))
+    return False

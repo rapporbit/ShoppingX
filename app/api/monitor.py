@@ -310,14 +310,21 @@ async def report_clarification_request(
     options: list[str] | None = None,
     multi_select: bool = False,
     preselected: list[str] | None = None,
+    closes_turn: bool = False,
 ) -> None:
     """Agent 需要用户澄清时上报，等待用户回复。
 
     无 options → 前端渲染问题气泡并激活输入框（老式自由文本回复）。
     有 options → 前端在展示区内嵌一张**可点选卡片**（单选按钮 / 多选清单），用户点鼠标作答、
     不复用聊天框；回传的仍是一段文本（卡片据勾选拼成自然语言），后端契约不变。
+
+    ``closes_turn=True``（D2）时这一问是**本轮的收尾**，后端不等回复、任务随即结束。前端据此
+    改投递方式：选项点选后要发起**新一轮任务**，而不是往 WS 上打 ``clarification_response``
+    ——那一头已经没有 waiter 在等，打过去只会被拒收，用户点了却什么都不发生。
     """
     data: dict[str, object] = {"question": question}
+    if closes_turn:
+        data["closes_turn"] = True
     if options:
         data["options"] = options
         data["multi_select"] = multi_select

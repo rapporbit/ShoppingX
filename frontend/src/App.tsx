@@ -508,14 +508,23 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
                           )}
 
                           {/* ask_user 的问题：渲染成一条普通 assistant 消息（不是横幅、不是另一种卡）；
-                              带 options 时选项挂在气泡下方。只对最新一轮且正等待回复时可交互。 */}
-                          {isLast && turn.status === "waiting" && turn.clarificationQuestion !== null && (
+                              带 options 时选项挂在气泡下方。只对最新一轮可交互。
+                              两种形态（D2）：等回复那种 status 停在 waiting，点选走 WS 回填本轮；
+                              closes_turn 那种本轮已结束（status=done），选项是「下一步」chips，
+                              点选发起新一轮任务——回填到一个没人在等的会话只会石沉大海。 */}
+                          {isLast &&
+                            turn.clarificationQuestion !== null &&
+                            (turn.status === "waiting" || turn.clarificationClosesTurn) && (
                             <ClarificationChoices
                               question={turn.clarificationQuestion}
                               options={turn.clarificationOptions ?? []}
                               multiSelect={turn.clarificationMultiSelect ?? false}
                               preselected={turn.clarificationPreselected}
-                              onSubmit={sendClarification}
+                              onSubmit={
+                                turn.clarificationClosesTurn
+                                  ? (text: string) => startTask(text, userId)
+                                  : sendClarification
+                              }
                             />
                           )}
 

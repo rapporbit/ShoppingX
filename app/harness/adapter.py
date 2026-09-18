@@ -110,6 +110,31 @@ def _last_assistant(agent: Agent) -> Msg | None:
     return None
 
 
+def _closing_question(ctx: list[Msg]) -> str:
+    """取本轮 ``ask_user(closes_turn=True)`` 的问题原文；没有这种调用则返回空串（D2）。
+
+    判据取自 ``tool_call`` 的入参而不是工具返回：``ask_user`` 两种形态的返回都是一段文本，等回复
+    那种回的是**用户说的话**，把它当最终答案就把用户自己的回复复读回去了。入参里的 ``closes_turn``
+    是唯一能把两者分开的东西。``input`` 在 Msg 里是 JSON 字符串（框架序列化），解不开就跳过。
+    """
+    for m in reversed(ctx):
+        content = getattr(m, "content", None)
+        if not isinstance(content, list):
+            continue
+        for b in content:
+            if _attr(b, "type") != "tool_call" or _attr(b, "name") != "ask_user":
+                continue
+            raw = _attr(b, "input")
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+            if isinstance(raw, dict) and raw.get("closes_turn"):
+                return str(raw.get("question") or "").strip()
+    return ""
+
+
 class HarnessAgentAdapter(MiddlewareBase):
     """Agent 侧的三个落点：pre_think / post_reflect / 会话收尾与 retry_nudge。"""
 
@@ -285,6 +310,7 @@ class HarnessAgentAdapter(MiddlewareBase):
         碎话，并进去只会脏了清单文案。
         """
         ctx = list(agent.state.context)
+        source = "chat_fallback"
         reply = ""
         for text in iter_tool_results(ctx, "chat_fallback"):
             try:
@@ -294,6 +320,11 @@ class HarnessAgentAdapter(MiddlewareBase):
             if reply:
                 break
         if not reply:
+            # ask_user(closes_turn=True) 的收尾问句同理并回来（D2）：chips 只在当轮可点，刷新后
+            # 历史轮不再渲染选项卡，问题原文若不进 final_text，回看这一轮就只剩模型补的那句
+            # 「你想看哪个方向？」，问的是什么没了。
+            reply, source = _closing_question(ctx), "ask_user"
+        if not reply:
             return msg
         body = ""
         for m in reversed(ctx):
@@ -301,7 +332,7 @@ class HarnessAgentAdapter(MiddlewareBase):
             if not isinstance(content, list):
                 continue
             called = {_attr(b, "name") for b in content if _attr(b, "type") == "tool_call"}
-            if "chat_fallback" in called:
+            if source in called:
                 body = text_of(m).strip()
                 break
         parts = [p for p in (body, reply) if p]

@@ -10,6 +10,7 @@ A4 删掉子 Agent 时，派发次数 ``ForkBudget``、子 Agent 并发信号量
 from __future__ import annotations
 
 from app.agent.constants import TERMINAL_TOOLS as _TERMINAL_TOOLS
+from app.agent.constants import is_terminal_call  # noqa: F401  # 转出给 hooks，见下方注释
 from app.utils.env import env_int
 
 # 「商品检索」类工具：拿信息但不推进收尾，是「再找找更好的」这个动机最爱漏出来的两个口子。
@@ -38,6 +39,9 @@ COST_AMPLIFIER_TOOLS = RETRIEVAL_TOOLS | frozenset({"category_insight", "researc
 # create_order / cancel_order，这边没跟——交易轮的收尾判定因此走的是另一套。
 # 复制常量的成本从来不在复制那一刻，在此后每一次只改了一处的修改。
 TERMINAL_TOOLS = _TERMINAL_TOOLS
+
+# ``is_terminal_call``（连入参一起判，为 ``ask_user(closes_turn=True)``）在同一个模块里转出，
+# 理由同上：判「终不终结」的两件东西必须同源，分开放迟早只改一处。
 
 # 主 loop 没调终结工具就打算用纯文字收尾时，最多提醒一次——避免模型持续不听指令时无限重试。
 MAX_TERMINAL_NUDGE_RETRIES = 1

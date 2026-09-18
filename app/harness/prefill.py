@@ -97,9 +97,8 @@ async def prefill(session: HarnessSession, agent: Agent) -> None:
     # 模型第 1 轮就拿着 plan + 品类行情直接检索（改前 9/9 遍第 1 轮都在调 category_insight）。
     kb_task = asyncio.create_task(_prefetch_kb(s, out)) if _kb_prefetch_due(out) else None
     # 套装 skill 同理预载：信号（槽位表）与 KB 预取来自同一次 planner，两件事互不依赖，一起跑。
-    skill_task = (
-        asyncio.create_task(_prefetch_skill(BUNDLE_SKILL_NAME)) if _skill_prefetch_due(out) else None
-    )
+    skill_due = _skill_prefetch_due(out)
+    skill_task = asyncio.create_task(_prefetch_skill(BUNDLE_SKILL_NAME)) if skill_due else None
     ctx = await harness.run("post_tool_call", ctx)
     # 偏好注入落 pending_inject，由下一次 on_model_call 开头消费——那正是第 1 轮。
     s.collect(ctx)
