@@ -443,6 +443,43 @@ class TestPhaseHooks:
         assert not prefill_mod._kb_prefetch_due(PlanOutput(tasks=["recommend"], category=""))
 
     @pytest.mark.asyncio
+    async def test_prefill_preloads_bundle_skill_on_slot_turn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D1：planner 拆出 ≥2 个槽位 → 套装 skill 正文随 planner 一起预注入成 ``Skill`` 工具返回。
+
+        省掉的是模型「看 description 判断要不要读」那一次往返。正文必须与模型亲手调 ``Skill``
+        拿到的字节一致（都走 loader 的 ``markdown``，不含 frontmatter），否则两条路径讲的不是
+        同一份打法。非槽位轮不注入——普通轮多塞 1.4k 字符正文是纯亏。
+        """
+        import app.harness.prefill as prefill_mod
+        import app.tools.planner as planner_mod
+        from app.harness.adapter import HarnessAgentAdapter
+        from app.tools._bundle import BundleSlot
+        from app.tools.planner import PlanOutput
+
+        slots = [BundleSlot(name="床品"), BundleSlot(name="台灯")]
+
+        async def bundle_planner(args):
+            return PlanOutput(tasks=["recommend"], category="", bundle_slots=slots)
+
+        monkeypatch.setattr(planner_mod, "planner", SimpleNamespace(ainvoke=bundle_planner))
+        agent = _StubAgent()
+        await HarnessAgentAdapter(_mw("新生入学一套"))._prefill(agent)
+
+        blocks = agent.state.context[-1].content
+        assert [b.name for b in blocks] == ["planner", "planner", "Skill", "Skill"]
+        assert blocks[-1].output.strip().startswith("#")  # frontmatter 已被框架剥掉
+        assert "MCKP" in blocks[-1].output  # 拿到的是套装打法正文，不是 description
+
+        # 判据只认槽位数，与 slot_mode 无关；不存在的 skill 静默降级为不注入
+        assert not prefill_mod._skill_prefetch_due(PlanOutput(tasks=["recommend"]))
+        assert not prefill_mod._skill_prefetch_due(
+            PlanOutput(tasks=["recommend"], bundle_slots=slots[:1])
+        )
+        assert await prefill_mod._prefetch_skill("no-such-skill") == []
+
+    @pytest.mark.asyncio
     async def test_prefill_looks_at_images_before_planner(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
