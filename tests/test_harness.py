@@ -1995,3 +1995,42 @@ async def test_tool_result_pruner_noop_below_threshold() -> None:
     ]
     await cs.prune_old_tool_results({"messages": msgs})
     assert str(msgs[0].content[0].output) == "y" * 400
+
+
+@pytest.mark.asyncio
+async def test_prefill_prefetches_orders_on_order_intent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D4：问订单的轮次把最近几张单预取上去，不靠 prompt 规矩模型「先调 query_order」。
+
+    判据两条取或——planner 的 tasks 偶尔把「我的订单到哪了」拆成 recommend，正则接得住直白说法
+    却认不出「上次买的什么时候到」，各补对方的漏。
+    """
+    import app.harness.prefill as prefill_mod
+    import app.tools.planner as planner_mod
+    import app.tools.query_order as qo_mod
+    from app.harness.adapter import HarnessAgentAdapter
+    from app.tools.planner import PlanOutput
+
+    calls: list[dict] = []
+
+    async def fake_planner(args):
+        return PlanOutput(tasks=["query_order"], category="")
+
+    async def fake_query_order(args):
+        calls.append(args)
+        return {"orders": [], "note": "暂无订单"}
+
+    monkeypatch.setattr(planner_mod, "planner", SimpleNamespace(ainvoke=fake_planner))
+    monkeypatch.setattr(qo_mod, "query_order", SimpleNamespace(ainvoke=fake_query_order))
+
+    agent = _StubAgent()
+    await HarnessAgentAdapter(_mw("我的订单到哪了"))._prefill(agent)
+    assert calls == [{"limit": 5}]
+    names = [b.name for b in agent.state.context[-1].content]
+    assert names == ["planner", "planner", "query_order", "query_order"]
+
+    # 判据两路：planner 没判出来时正则接住；两者都不命中的普通购物轮不预取
+    plan_recommend = PlanOutput(tasks=["recommend"], category="背包")
+    assert prefill_mod._orders_prefetch_due(plan_recommend, "上次买的什么时候发货")
+    assert prefill_mod._orders_prefetch_due(PlanOutput(tasks=["query_order"]), "帮我看看")
+    assert not prefill_mod._orders_prefetch_due(plan_recommend, "买个订书机")
+    assert not prefill_mod._orders_prefetch_due(plan_recommend, "通勤双肩包预算 300")

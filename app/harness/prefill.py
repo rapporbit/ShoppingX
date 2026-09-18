@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from typing import TYPE_CHECKING, Any
 
 from agentscope.message import Msg
@@ -32,6 +33,12 @@ MAX_PREFILL_IMAGES = 3
 
 #: 套装轮预注入的 skill 名（``skills/bundle-planning/SKILL.md`` 的 frontmatter name）。
 BUNDLE_SKILL_NAME = "bundle-planning"
+
+#: 订单 grounding 正则（D4）：用户直说订单时预取 query_order，不靠 prompt 规矩模型先调。
+#: 只认直白说法——查得宽了就会在「买个订书机」这种句子上空跑一次 DB。
+_ORDER_PATTERN = re.compile(
+    r"(我的|之前的|上次的)?(订单|order)|(订单|order)\s*(号|id|编号)|物流|发货|收到货|退款|退货"
+)
 
 
 async def prefill(session: HarnessSession, agent: Agent) -> None:
@@ -99,6 +106,9 @@ async def prefill(session: HarnessSession, agent: Agent) -> None:
     # 套装 skill 同理预载：信号（槽位表）与 KB 预取来自同一次 planner，两件事互不依赖，一起跑。
     skill_due = _skill_prefetch_due(out)
     skill_task = asyncio.create_task(_prefetch_skill(BUNDLE_SKILL_NAME)) if skill_due else None
+    # 订单 grounding（D4）：问订单的轮次直接把最近几张摆上去，与上面两件并发。
+    orders_due = _orders_prefetch_due(out, s.original_query)
+    orders_task = asyncio.create_task(_prefetch_orders(s)) if orders_due else None
     ctx = await harness.run("post_tool_call", ctx)
     # 偏好注入落 pending_inject，由下一次 on_model_call 开头消费——那正是第 1 轮。
     s.collect(ctx)
@@ -111,6 +121,8 @@ async def prefill(session: HarnessSession, agent: Agent) -> None:
         blocks.extend(await kb_task)
     if skill_task is not None:
         blocks.extend(await skill_task)
+    if orders_task is not None:
+        blocks.extend(await orders_task)
     append_prefilled(agent, blocks)
 
 
@@ -137,6 +149,38 @@ async def _prefetch_kb(s: HarnessSession, plan: Any) -> list[Any]:
         logger.warning("品类知识库预取失败，交回模型自行决定是否调 category_insight", exc_info=True)
         return []
     return tool_blocks("prefill_category_insight", "category_insight", args, text)
+
+
+def _orders_prefetch_due(plan: Any, query: str) -> bool:
+    """要不要预取订单：planner 判出 ``query_order`` 任务，或用户原话直说了订单（D4 grounding）。
+
+    **两条判据取或而不是只留一条**：planner 的 tasks 是机制判据、与下游一致，但它偶尔把「我的
+    订单到哪了」拆成 recommend；正则则反过来——它认得住直白说法，认不出「上次买的那个什么时候
+    到」。两条各补对方的漏，且预取拿回空列表的代价只是几行 JSON。
+
+    **为什么是预取不是 prompt 强制**：写成「问订单先调 query_order」那类规则，模型照做要多花一
+    次往返，不照做就白写。planner 已经把意图判出来了，直接把结果摆上去。
+    """
+    if os.getenv("ORDERS_PREFETCH", "1").strip().lower() in {"0", "false", "off"}:
+        return False
+    tasks = [str(t) for t in (getattr(plan, "tasks", None) or [])]
+    return "query_order" in tasks or bool(_ORDER_PATTERN.search(query or ""))
+
+
+async def _prefetch_orders(s: HarnessSession) -> list[Any]:
+    """把最近几张订单预注入成一次「模型已经调过 query_order」的工具返回。失败即空。"""
+    from app.harness.adapter import after_tool_success
+    from app.tools._shell import _to_text
+    from app.tools.query_order import query_order
+
+    args: dict[str, Any] = {"limit": 5}
+    try:
+        out = await query_order.ainvoke(args)
+        text = await after_tool_success(s, "query_order", args, _to_text(out))
+    except Exception:
+        logger.warning("订单预取失败，交回模型自行决定是否调 query_order", exc_info=True)
+        return []
+    return tool_blocks("prefill_query_order", "query_order", args, text)
 
 
 def _skill_prefetch_due(plan: Any) -> bool:
