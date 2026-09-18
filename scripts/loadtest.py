@@ -50,6 +50,7 @@ class Attempt:
     seconds: float
     reason: str = ""
     events: int = 0
+    first_event: float | None = None  # 从连 WS 起到第一条 monitor_event 的秒数（用户按下回车到首次看到反馈）
 
 
 @dataclass
@@ -82,6 +83,16 @@ class StageReport:
         混进去会让 P95 随失败率一起漂，看着像变快了。"""
         return percentile([a.seconds for a in self.attempts if a.ok], q)
 
+    def first_event(self, q: float) -> float:
+        """成功请求「连 WS → 第一条事件」的分位数：用户按下回车后多久看到反馈。"""
+        return percentile([a.first_event for a in self.attempts if a.ok and a.first_event is not None], q)
+
+    def rejected(self, q: float) -> float:
+        """被 429 拒绝的请求「连 WS → 拿到 429」的分位数：背压拒得有多快。
+        成功延迟量的是扛不扛得住，这个量的是拒不拒得干脆——过载时用户等 5s 才收到 429
+        和秒拒是两种体验。"""
+        return percentile([a.seconds for a in self.attempts if a.reason == "429 背压"], q)
+
     def failures(self) -> dict[str, int]:
         out: dict[str, int] = {}
         for a in self.attempts:
@@ -103,47 +114,54 @@ def percentile(values: list[float], q: float) -> float:
     return ordered[rank - 1]
 
 
-async def one_attempt(base_url: str, query: str, budget_sec: float, token: str | None) -> Attempt:
+async def one_attempt(
+    c: httpx.AsyncClient, base_url: str, query: str, budget_sec: float, token: str | None
+) -> Attempt:
     """一个虚拟用户：连 WS → 等 ws_ready → POST /api/task → 读事件到终态。
 
     **每个虚拟用户用自己的 thread_id**：共用一个会走进幂等第 2 层（同 thread 换 query = 覆盖
     重发），后发的会把先发的掐掉，压出来的失败全是自己造的。
+
+    **HTTP client 由外面传进来、整场共用**：构造一个 ``httpx.AsyncClient`` 要加载 SSL 证书链，
+    本机实测约 9ms 纯 CPU；500 个虚拟用户各建一个就是 4.6s 串行在压测进程里，量到的 429 时延
+    和首事件全被它抬高（2026-09-18 实测 500 并发 5.6s → 修后见表）。压测客户端先要自证不是瓶颈。
     """
     thread_id = f"lt-{uuid.uuid4().hex[:12]}"
     ws_url = base_url.replace("http://", "ws://").replace("https://", "wss://")
     ws_url = f"{ws_url}/ws/{thread_id}" + (f"?token={token}" if token else "")
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
     t0 = time.perf_counter()
     seen = 0
     try:
         async with websockets.connect(ws_url, open_timeout=budget_sec) as ws:
             await asyncio.wait_for(ws.recv(), timeout=budget_sec)  # ws_ready（connect-first）
-            async with httpx.AsyncClient(
-                base_url=base_url, timeout=budget_sec, headers=headers
-            ) as c:
-                resp = await c.post("/api/task", json={"query": query, "thread_id": thread_id})
-                if resp.status_code == 429:
-                    # 429 是**设计行为**（队列深度到顶 / 等待队列满），与超时不是一回事，
-                    # 所以单独记一类原因。混在一起会让人以为系统崩了，其实是背压正常起效。
-                    return Attempt(False, time.perf_counter() - t0, "429 背压", seen)
-                if resp.status_code >= 400:
-                    return Attempt(
-                        False, time.perf_counter() - t0, f"HTTP {resp.status_code}", seen
-                    )
-                deadline = time.perf_counter() + budget_sec
-                while time.perf_counter() < deadline:
-                    raw = await asyncio.wait_for(
-                        ws.recv(), timeout=max(1.0, deadline - time.perf_counter())
-                    )
-                    msg = json.loads(raw)
-                    if msg.get("type") != "monitor_event":
-                        continue
-                    seen += 1
-                    event = msg.get("event")
-                    if event in TERMINAL_EVENTS:
-                        ok = event == "task_result"
-                        reason = "" if ok else f"终态 {event}"
-                        return Attempt(ok, time.perf_counter() - t0, reason, seen)
+            resp = await c.post(
+                "/api/task", json={"query": query, "thread_id": thread_id}, timeout=budget_sec
+            )
+            if resp.status_code == 429:
+                # 429 是**设计行为**（队列深度到顶 / 等待队列满），与超时不是一回事，
+                # 所以单独记一类原因。混在一起会让人以为系统崩了，其实是背压正常起效。
+                return Attempt(False, time.perf_counter() - t0, "429 背压", seen)
+            if resp.status_code >= 400:
+                return Attempt(
+                    False, time.perf_counter() - t0, f"HTTP {resp.status_code}", seen
+                )
+            first: float | None = None
+            deadline = time.perf_counter() + budget_sec
+            while time.perf_counter() < deadline:
+                raw = await asyncio.wait_for(
+                    ws.recv(), timeout=max(1.0, deadline - time.perf_counter())
+                )
+                msg = json.loads(raw)
+                if msg.get("type") != "monitor_event":
+                    continue
+                seen += 1
+                if first is None:
+                    first = time.perf_counter() - t0
+                event = msg.get("event")
+                if event in TERMINAL_EVENTS:
+                    ok = event == "task_result"
+                    reason = "" if ok else f"终态 {event}"
+                    return Attempt(ok, time.perf_counter() - t0, reason, seen, first)
         return Attempt(False, time.perf_counter() - t0, "超时未收到终态", seen)
     except TimeoutError:
         return Attempt(False, time.perf_counter() - t0, "超时未收到终态", seen)
@@ -165,13 +183,17 @@ async def run_stage(
     都会把整批的吞吐拖下去，而真实流量不长那样——真实世界里有人跑完就立刻有新人进来。
     """
     sem = asyncio.Semaphore(concurrency)
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    # 连接数上限放开：httpx 默认 100，500 并发时后 400 个会在客户端排队，量出来的又是假延迟。
+    limits = httpx.Limits(max_connections=None, max_keepalive_connections=concurrency)
 
-    async def _one(i: int) -> Attempt:
+    async def _one(c: httpx.AsyncClient, i: int) -> Attempt:
         async with sem:
-            return await one_attempt(base_url, f"{query}（#{i}）", budget_sec, token)
+            return await one_attempt(c, base_url, f"{query}（#{i}）", budget_sec, token)
 
     t0 = time.perf_counter()
-    attempts = list(await asyncio.gather(*(_one(i) for i in range(requests))))
+    async with httpx.AsyncClient(base_url=base_url, headers=headers, limits=limits) as c:
+        attempts = list(await asyncio.gather(*(_one(c, i) for i in range(requests))))
     return StageReport(concurrency=concurrency, attempts=attempts, wall=time.perf_counter() - t0)
 
 
@@ -183,14 +205,16 @@ def render_table(reports: list[StageReport]) -> str:
     说明最差的那批人的体验，两个一起看才知道压力落在谁身上。
     """
     lines = [
-        "| 并发 | 请求数 | 成功率 | P50 | P95 | 吞吐 (req/s) | 失败原因 |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
+        "| 并发 | 请求数 | 成功率 | P50 | P95 | 首事件 P50 | 首事件 P95 | 429 P50 | 429 P95 | 吞吐 (req/s) | 失败原因 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for r in reports:
         fails = "、".join(f"{k}×{v}" for k, v in sorted(r.failures().items())) or "—"
         lines.append(
             f"| {r.concurrency} | {r.total} | {r.succeeded}/{r.total}"
             f"（{r.success_rate:.0%}） | {r.latency(0.5):.2f}s | {r.latency(0.95):.2f}s "
+            f"| {r.first_event(0.5):.3f}s | {r.first_event(0.95):.3f}s "
+            f"| {r.rejected(0.5):.3f}s | {r.rejected(0.95):.3f}s "
             f"| {r.throughput:.2f} | {fails} |"
         )
     return "\n".join(lines)
