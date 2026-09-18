@@ -1,8 +1,11 @@
 """Agent Skill（批 4-3）：目录加载 / 发放范围 / 注入位与批 4-2 策略块的相对次序。
 
 不测「模型有没有按 description 触发」——那是模型行为，本单不跑真实 LLM。这里测的是**机制**：
-三个 SKILL.md 真被框架的 ``LocalSkillLoader`` 读到、目录块真拼进了 system prompt、worker
+每份 SKILL.md 真被框架的 ``LocalSkillLoader`` 读到、目录块真拼进了 system prompt、worker
 拿不到、以及策略块与 skill 块的先后关系被钉死（缓存账建立在这个次序上，见 app/agent/skills.py）。
+
+``EXPECTED_SKILLS`` 是白名单而不是「扫到几个算几个」：新增一份 SKILL.md 会给每一轮的 system
+prompt 常驻多一行 description，这笔常驻开销要有人在改的时候看见，所以让它红一次。
 """
 
 import frontmatter
@@ -11,10 +14,10 @@ import pytest
 from app.agent.skills import SKILL_VIEWER_TOOL_NAME, SKILLS_DIR, skill_loaders
 from app.agent.tool_registry import build_toolkit
 
-EXPECTED_SKILLS = {"cross-border-duty", "bundle-planning", "image-shopping"}
+EXPECTED_SKILLS = {"cross-border-duty", "bundle-planning", "image-shopping", "memory-forget"}
 
 
-def test_skill_dirs_are_exactly_the_three() -> None:
+def test_skill_dirs_are_exactly_the_expected_set() -> None:
     dirs = {p.name for p in SKILLS_DIR.iterdir() if (p / "SKILL.md").is_file()}
     assert dirs == EXPECTED_SKILLS
 
@@ -32,7 +35,7 @@ def test_frontmatter_name_matches_dir(name: str) -> None:
     assert post.content.strip()
 
 
-async def test_loader_loads_all_three() -> None:
+async def test_loader_loads_every_skill_dir() -> None:
     """``scan_subdir=True`` 是必须的：默认只扫目录自身，会静默加载到 0 个。"""
     loader = skill_loaders("main")[0]  # [0] 内置目录 loader，[1] 是个人 skill loader
     skills = await loader.list_skills()
