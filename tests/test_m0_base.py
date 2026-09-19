@@ -61,6 +61,29 @@ def test_safe_join_blocks_traversal() -> None:
         safe_join(OUTPUT_ROOT, "../../etc/passwd")
 
 
+def test_artifact_root_moves_both_output_and_upload(monkeypatch: pytest.MonkeyPatch) -> None:
+    """两个产物根跟着 ``ARTIFACT_ROOT`` 一起搬（阶段 1-4），缺省时仍是项目根。
+
+    **一起搬**是关键：只挪一个的话，worker 写在新卷的 output、API 却去老路径找 uploaded，两边各对
+    一半——而这种错不报异常，只表现为「有些产物取不到」。重新 import 模块来验，因为这两个根是模块级
+    常量（保持常量形态是为了不打断既有 monkeypatch 那批测试）。
+    """
+    import importlib
+
+    import app.utils.path_utils as path_utils
+
+    monkeypatch.setenv("ARTIFACT_ROOT", "/tmp/globex-artifacts")
+    reloaded = importlib.reload(path_utils)
+    try:
+        assert reloaded.OUTPUT_ROOT == Path("/tmp/globex-artifacts/output")
+        assert reloaded.UPLOAD_ROOT == Path("/tmp/globex-artifacts/uploaded")
+    finally:
+        # 必须还原：模块是进程级单例，留着新值会让后面所有用例把产物写到 /tmp 那个根下。
+        monkeypatch.delenv("ARTIFACT_ROOT")
+        back = importlib.reload(path_utils)
+    assert back.OUTPUT_ROOT == back.PROJECT_ROOT / "output"
+
+
 def test_llm_factory_importable() -> None:
     # 只验证可导入与签名存在；真正构造需真实 env，放到联调阶段。
     from app.agent.llm import get_fast_llm, get_judge_llm, get_llm
