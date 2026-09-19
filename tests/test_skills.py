@@ -19,6 +19,9 @@ EXPECTED_SKILLS = {
     "bundle-planning",
     "image-shopping",
     "memory-personalization",
+    "search-discovery",
+    "purchase-research",
+    "order-care",
 }
 
 
