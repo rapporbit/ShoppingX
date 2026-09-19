@@ -257,3 +257,87 @@ def test_save_memory_is_allowed_without_confirm_prompt() -> None:
     assert "save_memory" in TOOLS_BY_NAME  # 进了工具面
     assert TOOLS_BY_NAME["save_memory"].is_read_only is False  # 它是写工具，别标成只读
     assert "save_memory" in DEFAULT_ALLOWED_TOOLS
+
+
+# ---------------------------------------------------------------------------
+# M3：保留期与部署开关
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_retention_hides_expired_facts_and_drops_them_on_next_write() -> None:
+    """超龄的事实立刻读不到，并在该用户下次写入时被删掉。
+
+    「读不到」必须先于「删掉」生效：一条两年前的「常寄德国」还出现在注入块里，比它留在库里
+    危害大得多。而清理挂在写入上，是因为记忆按用户切开、没有扫全库的必要。
+    """
+    from datetime import timedelta
+
+    from app.memory.fact_store import MemoryFactStore, RetentionMemoryStore
+
+    uid = uuid.uuid4().hex
+    await _with_user(uid)
+    inner = MemoryFactStore()
+    old = validate_fact("ship_to", "常寄德国", "context")
+    old.updated_at = datetime.now(UTC) - timedelta(days=400)
+    await inner.upsert_facts(uid, [old])
+
+    retained = RetentionMemoryStore(inner, timedelta(days=30))
+    assert await retained.get_facts(uid) == []  # 超龄：读不到
+    assert await retained.search_facts(uid, "德国") == []
+    assert len(await inner.get_facts(uid)) == 1  # 但还在库里，等下一次写入
+
+    await retained.upsert_facts(uid, [validate_fact("brand_style", "偏爱小众品牌")])
+    assert [f.key for f in await inner.get_facts(uid)] == ["brand_style"]
+
+
+def test_with_retention_is_off_by_default_and_wraps_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``MEMORY_RETENTION_DAYS`` 不设或 <=0 = 不限期，直接用原 store，不白套一层。"""
+    from app.memory.fact_store import RetentionMemoryStore, get_fact_store
+
+    monkeypatch.delenv("MEMORY_RETENTION_DAYS", raising=False)
+    assert not isinstance(get_fact_store(), RetentionMemoryStore)
+
+    monkeypatch.setenv("MEMORY_RETENTION_DAYS", "30")
+    store = get_fact_store()
+    assert isinstance(store, RetentionMemoryStore)
+    assert store.retention == timedelta(days=30)
+
+
+@pytest.mark.asyncio
+async def test_enable_memory_off_silences_both_tools_and_the_injection() -> None:
+    """``ENABLE_MEMORY=false``：两个工具回一句明确的「这个部署没开记忆」，注入一条都不发。
+
+    工具回执必须明确——含糊的失败模型会重试，明确的关闭它会转述给用户。
+    """
+    import os
+    import tempfile
+    from pathlib import Path
+
+    from app.harness.hooks.context_shaping import inject_long_term_memory
+    from app.memory.facts import MEMORY_DISABLED_TEXT
+    from app.tools.recall_memories import recall_memories
+    from app.tools.save_memory import save_memory
+    from app.utils.thread_ctx import thread_scope
+
+    uid = uuid.uuid4().hex
+    await _with_user(uid)
+    await MemoryFactStore().upsert_facts(uid, [validate_fact("material_avoid", "不要塑料")])
+
+    os.environ["ENABLE_MEMORY"] = "false"
+    try:
+        with thread_scope("t-off", Path(tempfile.mkdtemp()), user_id=uid):
+            saved = await save_memory.ainvoke({"key": "k", "value": "v"})
+            recalled = await recall_memories.ainvoke({"topic": ""})
+            ctx: dict = {"tool_name": "planner"}
+            assert await inject_long_term_memory(ctx) is None
+    finally:
+        os.environ.pop("ENABLE_MEMORY", None)
+
+    assert not saved.saved and saved.note == MEMORY_DISABLED_TEXT
+    assert recalled.count == 0 and recalled.note == MEMORY_DISABLED_TEXT
+    assert "inject_messages" not in ctx  # 连空占位都不塞
+    # 关开关不动库：重新打开后那条事实还在
+    assert [f.key for f in await MemoryFactStore().get_facts(uid)] == ["material_avoid"]

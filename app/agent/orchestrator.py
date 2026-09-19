@@ -45,7 +45,6 @@ from app.api.context import (
     begin_learned_prefs,
     get_learned_pref_items,
     get_learned_prefs,
-    get_session_domains,
     get_session_pt,
     reset_dest_country,
     reset_original_query,
@@ -381,8 +380,6 @@ async def run_agent(
         try:
             async with asyncio.timeout(MAIN_AGENT_TIMEOUT_SEC):
                 final_msg = await pump_events(agent.reply_stream(inputs, yield_final_msg=True))
-            # 必须在下面 finally 清理之前快照：curator 跑在收尾之后，而 finally 会把品类域清掉。
-            session_domains = get_session_domains()
             pt = get_session_pt() or pt
         except asyncio.CancelledError:
             await monitor.report_task_cancelled()
@@ -498,14 +495,8 @@ async def run_agent(
             final_text, items=items, elapsed_ms=elapsed_ms, tokens=tokens, experiment=experiment
         )
 
-        # 记忆判定（后处理）：主回复已下发，用户零感知延迟。curator 只判长期库，P_t 归 planner。
-        await curate_turn(
-            user_id or "",
-            query,
-            final_text,
-            prev_pt=pt,
-            session_domains=session_domains,
-        )
+        # 记忆抽取（后处理）：主回复已下发，用户零感知延迟。只读本轮对话文本、只写长期事实库。
+        await curate_turn(user_id or "", query, final_text)
         await monitor.report_memory_updated(get_learned_pref_items())
 
         reset_phase_machine()

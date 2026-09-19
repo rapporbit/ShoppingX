@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.exc import SQLAlchemyError
@@ -19,6 +19,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.db.models import MemoryFactRow, User
 from app.db.session import session_factory
 from app.memory.facts import MemoryCategory, MemoryFact, match_facts
+from app.utils.env import env_int
 
 logger = logging.getLogger(__name__)
 
@@ -150,9 +151,7 @@ class MemoryFactStore:
             return
         try:
             async with session_factory()() as db:
-                await db.execute(
-                    delete(MemoryFactRow).where(MemoryFactRow.user_id == user_id)
-                )
+                await db.execute(delete(MemoryFactRow).where(MemoryFactRow.user_id == user_id))
                 await db.execute(
                     update(User)
                     .where(User.id == user_id)
@@ -173,9 +172,7 @@ class MemoryFactStore:
         try:
             async with session_factory()() as db:
                 gen = (
-                    await db.execute(
-                        select(User.memory_purge_gen).where(User.id == user_id)
-                    )
+                    await db.execute(select(User.memory_purge_gen).where(User.id == user_id))
                 ).scalar_one_or_none()
                 return int(gen or 0)
         except SQLAlchemyError as exc:
@@ -183,9 +180,66 @@ class MemoryFactStore:
             return 0
 
 
+class RetentionMemoryStore:
+    """给任意 store 套一道年龄上限：``updated_at`` 早于 ``retention`` 的事实**读不到**，
+    并在该用户下一次写入时顺手删掉。``clear`` 不看年龄，照删。
+
+    **为什么过期是「读不到 + 下次写才删」而不是定时清理**：记忆库是按用户切开的小数据，
+    没有扫全库的必要；而「读不到」必须立刻生效——一条两年前的「常寄德国」还在注入块里，
+    比它留在库里危害大得多。没有时间戳的行按过期处理（来源不明的老数据不该继续影响推荐）。
+    """
+
+    def __init__(self, inner: MemoryFactStore, retention: timedelta) -> None:
+        if retention <= timedelta(0):
+            raise ValueError("retention 必须为正")
+        self.inner = inner
+        self.retention = retention
+
+    def is_live(self, fact: MemoryFact) -> bool:
+        updated = fact.updated_at
+        if updated is None:
+            return False
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=UTC)
+        return updated >= datetime.now(UTC) - self.retention
+
+    async def get_facts(self, user_id: str) -> list[MemoryFact]:
+        return [f for f in await self.inner.get_facts(user_id) if self.is_live(f)]
+
+    async def search_facts(self, user_id: str, query: str) -> list[MemoryFact]:
+        return [f for f in await self.inner.search_facts(user_id, query) if self.is_live(f)]
+
+    async def upsert_facts(self, user_id: str, facts: list[MemoryFact]) -> bool:
+        for expired in await self.inner.get_facts(user_id):
+            if not self.is_live(expired):
+                await self.inner.delete_fact(user_id, expired.key)
+        return await self.inner.upsert_facts(user_id, facts)
+
+    async def delete_fact(self, user_id: str, key: str) -> bool:
+        return await self.inner.delete_fact(user_id, key)
+
+    async def clear(self, user_id: str) -> None:
+        await self.inner.clear(user_id)
+
+    async def purge_generation(self, user_id: str) -> int:
+        return await self.inner.purge_generation(user_id)
+
+
+FactStore = MemoryFactStore | RetentionMemoryStore
+
 _store = MemoryFactStore()
 
 
-def get_fact_store() -> MemoryFactStore:
-    """进程内单例。无状态，复用只是省掉重复构造。"""
-    return _store
+def with_retention(store: MemoryFactStore, retention_days: int) -> FactStore:
+    """``retention_days <= 0`` 表示不限期，直接返回原 store；否则套一层保留期。"""
+    if retention_days <= 0:
+        return store
+    return RetentionMemoryStore(store, timedelta(days=retention_days))
+
+
+def get_fact_store() -> FactStore:
+    """进程内单例（无状态，复用只是省掉重复构造），按 ``MEMORY_RETENTION_DAYS`` 决定是否包一层。
+
+    每次读 env 而不在导入时定死：部署改了保留期不必重启，测试也能改得动。
+    """
+    return with_retention(_store, env_int("MEMORY_RETENTION_DAYS", 0))

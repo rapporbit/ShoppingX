@@ -23,6 +23,7 @@ from functools import lru_cache
 from pydantic import BaseModel, Field
 
 from app.security.content_filter import FENCE_TAG
+from app.utils.env import env_bool
 
 KEY_MAX = 64
 VALUE_MAX = 200
@@ -33,6 +34,21 @@ TIER_ONE_CAP = 8
 #: 和旧数据迁移都认它。其余 key 都由模型自拟，只经上下文生效、没有哪段代码按名字取。
 #: 定在这里而不是各自写字面量——写岔一个字符就是静默退回默认国、到手价按错国家算（计划 §4.1 C1）。
 SHIP_TO_KEY = "default_ship_to"
+
+
+#: 记忆整体关掉时，两个记忆工具回给模型的固定文案（参考实现同款）。让模型明确知道「这个部署
+#: 没有记忆」，而不是拿到一句含糊的失败——含糊的失败它会重试，明确的关闭它会转述给用户。
+MEMORY_DISABLED_TEXT = "这个部署没有开启长期记忆：不会保存，也读不到任何历史偏好。"
+
+
+def memory_enabled() -> bool:
+    """部署级总开关 ``ENABLE_MEMORY``（默认开）。
+
+    关掉时四处同时失效：每轮注入、``save_memory``、``recall_memories``、回合后抽取。
+    **不缓存**：这是部署级配置，进程生命周期内读几次的成本可以忽略，而缓存会让测试与
+    后台热更新改不动它。
+    """
+    return env_bool("ENABLE_MEMORY", True)
 
 
 class MemoryCategory(StrEnum):

@@ -198,9 +198,9 @@ async def resolve_dest_country_layered(text: str) -> tuple[str, bool, bool]:
     if user_id:
         try:
             from app.memory.fact_store import get_fact_store
-            from app.memory.facts import SHIP_TO_KEY
+            from app.memory.facts import SHIP_TO_KEY, memory_enabled
 
-            for fact in await get_fact_store().get_facts(user_id):
+            for fact in (await get_fact_store().get_facts(user_id)) if memory_enabled() else []:
                 if fact.key == SHIP_TO_KEY:
                     # key 本身已确定这条讲的是收货地，用无门控匹配——「常用收货地：中国」
                     # 若再要求语境词反而可能漏掉。M2 起按 key 取，不再按已废的 category/polarity。

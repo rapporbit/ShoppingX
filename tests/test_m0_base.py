@@ -27,17 +27,22 @@ def test_system_prompt_is_static_no_runtime_injection() -> None:
     assert "（暂无沉淀偏好）" not in get_system_prompt()
 
 
-def test_pref_field_rules_injected_into_both_memory_prompts() -> None:
-    """curator 与 preference_parse 落同一张偏好表，字段规则共用一段——读取时注入。
+def test_pref_field_rules_injected_into_the_parse_prompt() -> None:
+    """偏好页手填解析的字段规则是一段共享块，读取时注入。
 
-    占位符漏在成品里 = 模型收到一行「<<PREF_FIELD_RULES>>」天书；共享块没进来 = 两个入口
-    的落库规则失去唯一事实源（曾各抄一份、措辞已漂移）。
+    占位符漏在成品里 = 模型收到一行「<<PREF_FIELD_RULES>>」天书；共享块没进来 = 落库规则
+    失去唯一事实源（曾各抄一份、措辞已漂移）。
+
+    **M3 起 curator 不在这条船上**：它写的是 key/value/category 三字段的事实，不再有
+    polarity / slug / domain，共用那段偏好字段规则只会让它去填一套不存在的字段。这里连带
+    断言它的 prompt 里没有占位符残留。
     """
     from app.agent.prompts import get_memory_curator_prompt, get_preference_parse_prompt
 
-    for text in (get_memory_curator_prompt(), get_preference_parse_prompt()):
-        assert "<<PREF_FIELD_RULES>>" not in text
-        assert "固定写 `ship_to`" in text  # 共享块的标志性内容真进来了
+    parse_prompt = get_preference_parse_prompt()
+    assert "<<PREF_FIELD_RULES>>" not in parse_prompt
+    assert "固定写 `ship_to`" in parse_prompt  # 共享块的标志性内容真进来了
+    assert "<<PREF_FIELD_RULES>>" not in get_memory_curator_prompt()
 
 
 def test_thread_scope_sets_and_restores() -> None:
