@@ -63,6 +63,10 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
+    # 用户清空过几次长期记忆。回合后抽取是异步的：抽取开始时读一次，落库前再比一次，中途用户点了
+    # 「清空」这批就整批丢弃——否则清空按钮会被一个早于它开始、晚于它结束的抽取悄悄撤销。
+    memory_purge_gen: Mapped[int] = mapped_column(Integer, default=0)
+
     threads: Mapped[list[Thread]] = relationship(back_populates="owner")
 
 
@@ -135,6 +139,36 @@ class Preference(Base):
     # 「这条 3 个月没用过了」，把「淡出」从一个没人能解释的隐式指数函数，变成用户看得见、能自己
     # 决定删不删的显式提示。系统不该偷偷把用户的偏好打七折。
     last_confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class MemoryFactRow(Base):
+    """一条长期记忆事实（key → value + 三分类），取代 :class:`Preference` 的建模。
+
+    与旧 ``preferences`` 表的根本不同：**身份就是 ``fact_key`` 本身**，不再由 polarity/domain/slug
+    拼出 ``dedup_key``。同 key 覆盖写，一个主题永远只有一条——「我不要塑料」后来变成「塑料也行」时，
+    旧那条不是被叠加而是被替换，不需要再判两条偏好谁赢。
+
+    **列名是 ``fact_key`` / ``fact_value`` 而不是 ``key`` / ``value``**：``key`` 是 MySQL 保留字，
+    叫它在 SQLite 上一路绿灯、切到 MySQL 8 才在建表语句上炸（计划 §4.1 C3）。
+
+    ``category`` 三取一：``constraint`` 每轮全量注入（硬规则，条数天然少），``preference`` /
+    ``context`` 按 ``updated_at`` 倒序补到 cap。分类决定注入优先级，不决定能不能硬淘汰商品——
+    记忆只经模型上下文生效，不再有直接改检索结果的腿。
+    """
+
+    __tablename__ = "memory_facts"
+    __table_args__ = (UniqueConstraint("user_id", "fact_key", name="uq_fact_user_key"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    fact_key: Mapped[str] = mapped_column(String(64))
+    fact_value: Mapped[str] = mapped_column(String(200))
+    category: Mapped[str] = mapped_column(String(16), default="preference")
+
+    # 写下这条事实的会话标记。只作溯源展示（偏好页「来自哪次对话」），不参与任何判定。
+    source_session: Mapped[str] = mapped_column(String(80), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class HistoryRecord(Base):
