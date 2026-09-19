@@ -10,7 +10,10 @@ WORKDIR /app
 # 依赖层单独 COPY：改代码不重装依赖，重建秒级。
 COPY pyproject.toml uv.lock ./
 # redis 已是主依赖（事件回放不再是可选降级路径），无需再点名 extra。
-RUN uv sync --frozen --no-dev --no-install-project
+# UV_EXTRAS 默认空 = 线上镜像一字不变。多副本验收那套要连 MySQL，build 时传
+# `--build-arg UV_EXTRAS=--extra db` 把 aiomysql 装进去（见 docker/docker-compose.multi.yml）。
+ARG UV_EXTRAS=""
+RUN uv sync --frozen --no-dev --no-install-project ${UV_EXTRAS}
 
 # 应用代码（data/ 与 .env 走挂载，不进镜像——数据大且含密钥）
 COPY app/ ./app/
