@@ -37,11 +37,25 @@ def test_key_changes_when_prompts_yml_changes(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_preference_fingerprint_is_order_independent() -> None:
-    """库里的返回顺序不保证稳定；不排序就会「同一组偏好算出两个指纹」= 缓存永远不命中且不报错。"""
-    a = SimpleNamespace(dedup_key="neg:material:bag:leather", content="不要皮革", is_blocking=True)
-    b = SimpleNamespace(dedup_key="pos:style:bag:minimal", content="喜欢极简", is_blocking=False)
+    """库里的返回顺序不保证稳定；不排序就会「同一组记忆算出两个指纹」= 缓存永远不命中且不报错。"""
+    from app.memory.facts import validate_fact
+
+    a = validate_fact("material_avoid", "不要皮革", "constraint")
+    b = validate_fact("style", "喜欢极简", "preference")
     assert sc.preference_fingerprint([a, b]) == sc.preference_fingerprint([b, a])
     assert sc.preference_fingerprint([a]) != sc.preference_fingerprint([a, b])
+
+
+def test_preference_fingerprint_tracks_value_and_category() -> None:
+    """M2/C2：同 key 改了值、或分类从 preference 升成 constraint（注入优先级变了），
+    指纹都要变——否则记忆改了、注入块跟着变了，用户拿到的却还是按旧记忆生成的那一轮。"""
+    from app.memory.facts import validate_fact
+
+    base = validate_fact("material_avoid", "不要塑料", "preference")
+    changed_value = validate_fact("material_avoid", "塑料也可以", "preference")
+    changed_cat = validate_fact("material_avoid", "不要塑料", "constraint")
+    assert sc.preference_fingerprint([base]) != sc.preference_fingerprint([changed_value])
+    assert sc.preference_fingerprint([base]) != sc.preference_fingerprint([changed_cat])
 
 
 # ---------- 哪些轮次不许入缓存 ----------

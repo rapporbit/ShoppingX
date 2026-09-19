@@ -31,6 +31,9 @@ DEFAULT_ALLOWED_TOOLS: frozenset[str] = frozenset(
     {
         "ask_user",  # 向用户提问，回复通路是自建 Future 桥（见 app/api/clarification.py）
         "forget_preference",  # 删一条长期偏好，用户明说要忘才会被调
+        # 写一条长期事实。写入面已经被机制卡死：过 validate_fact 的 PII 门、只能按 key 覆盖
+        # 自己这个用户的记忆、模型没有删除口。再弹一次确认拦不住任何东西，只会把主链路停住。
+        "save_memory",
         "shopping_summary",  # 终结工具：产清单 + 落会话产物
         "chat_fallback",  # 终结工具：非购物意图兜底
         "create_order",  # 只出确认卡，决议走 HTTP（见上）

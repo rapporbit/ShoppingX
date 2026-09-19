@@ -215,19 +215,27 @@ def _prompts_fingerprint() -> str:
         return ""
 
 
-def preference_fingerprint(entries: Sequence[Any]) -> str:
-    """把一组偏好压成一个指纹。
+def preference_fingerprint(facts: Sequence[Any]) -> str:
+    """把一组长期记忆事实压成一个指纹。
 
-    取 ``dedup_key`` + 正文 + 是否硬淘汰，**排序后**再哈希：库里的返回顺序不保证稳定，不排序的话
-    同一组偏好会算出不同指纹，缓存永远不命中（症状是「开了没用」而不是报错，最难查）。
+    取 ``key`` + 正文 + 分类，**排序后**再哈希：库里的返回顺序不保证稳定，不排序的话同一组事实
+    会算出不同指纹，缓存永远不命中（症状是「开了没用」而不是报错，最难查）。
+
+    **喂进来的必须是 tier-one 那批**（`select_tier_one_facts` 的结果，见调用点
+    ``orchestrator._turn_cache_key``），不是全量：整轮缓存复用的是模型的产出，而模型只看得见
+    注入进上下文的那批。拿全量算指纹，一条根本没进上下文的旧事实被改掉就会白白清掉整片缓存；
+    反过来只拿一两条算，注入变了缓存却不变，用户会拿到按旧记忆生成的答案——那个更糟。
+
+    分类也进指纹：同一条事实从 ``preference`` 改成 ``constraint``，注入优先级变了（constraint
+    每轮必进），模型该给出不同的结果。
     """
     parts = sorted(
-        "{}|{}|{:d}".format(
-            getattr(e, "dedup_key", ""),
-            getattr(e, "content", ""),
-            bool(getattr(e, "is_blocking", False)),
+        "{}|{}|{}".format(
+            getattr(f, "key", ""),
+            getattr(f, "value", ""),
+            getattr(getattr(f, "category", ""), "value", ""),
         )
-        for e in entries
+        for f in facts
     )
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:16]
 

@@ -176,7 +176,7 @@ async def resolve_dest_country_layered(text: str) -> tuple[str, bool, bool]:
     优先级（高 → 低），**任一层命中即停**：
     1. 本轮用户明说（「寄到日本」）—— 纯规则解析，见 :func:`app.recall.geo.resolve_dest_country`。
     2. 会话级 P_t 的 ``dest_country`` —— 本会话前几轮说过一次，后面一直生效。
-    3. 长期记忆里 ``category="location"`` 的偏好 —— 跨会话记住常用收货地。
+    3. 长期记忆里 key 为 ``default_ship_to`` 的事实 —— 跨会话记住常用收货地。
     4. env ``DEFAULT_DEST_COUNTRY`` 默认值。
 
     只有走到第 4 层才算「假设」（返回 ``assumed=True``）——前三层都有用户依据。1~3 层里
@@ -197,16 +197,17 @@ async def resolve_dest_country_layered(text: str) -> tuple[str, bool, bool]:
     user_id = get_user_id()  # 第 3 层：长期记忆（跨会话常用收货地）
     if user_id:
         try:
-            from app.memory.store import get_store
+            from app.memory.fact_store import get_fact_store
+            from app.memory.facts import SHIP_TO_KEY
 
-            entries = await get_store().read(user_id)
-            for e in entries:
-                if e.category == "location" and e.polarity == "like":
-                    # 记忆条目语义已确定是收货地（category 即门控），用无门控匹配——
-                    # 「常用收货地：中国」若再要求语境词反而可能漏掉。
-                    code = match_country_name(e.content)
+            for fact in await get_fact_store().get_facts(user_id):
+                if fact.key == SHIP_TO_KEY:
+                    # key 本身已确定这条讲的是收货地，用无门控匹配——「常用收货地：中国」
+                    # 若再要求语境词反而可能漏掉。M2 起按 key 取，不再按已废的 category/polarity。
+                    code = match_country_name(fact.value)
                     if code:
                         return code, False, False
+                    break  # 有这条但解析不出国家（写成「欧洲」之类）→ 不再找别条，退默认
         except Exception:  # noqa: BLE001 —— 记忆后端挂了不该崩掉 planner，降级到默认国即可
             pass
 

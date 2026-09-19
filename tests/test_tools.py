@@ -2269,50 +2269,36 @@ class TestNullIsAbsent:
 
 
 @pytest.mark.asyncio
-async def test_recall_memories_filters_by_topic_and_ignores_domain() -> None:
-    """D4：recall_memories 按 topic 确定性筛选，且**不做域过滤**——它补的正是自动注入的盲区。
+async def test_recall_memories_filters_by_topic_over_facts() -> None:
+    """M2：recall_memories 改查 ``memory_facts``，按 topic 确定性筛选，不做任何域过滤。
 
-    自动注入只给本轮域内的偏好（搜背包时不推「买鞋只穿宽楦」，那是对的）。用户问「我以前买的
-    那双鞋」时要的恰恰是域外那条，没有这个工具模型只能回「我不记得」而库里明明有。
+    它补的是自动注入的盲区——每轮注入只给 tier-one 那批（constraint + 最近 8 条），用户问
+    「我以前买的那双鞋」时要的恰恰是没进那批的，没有这个工具模型只能回「我不记得」。
     """
     import tempfile
     from pathlib import Path
     from uuid import uuid4
 
-    from app.memory.store import PreferenceEntry, get_store
+    from app.memory.fact_store import get_fact_store
+    from app.memory.facts import validate_fact
     from app.tools.recall_memories import recall_memories
     from app.utils.thread_ctx import thread_scope
 
     uid = f"u-{uuid4().hex[:8]}"
     with thread_scope("t-recall", Path(tempfile.mkdtemp()), user_id=uid):
-        store = get_store()
-        await store.write(
+        await get_fact_store().upsert_facts(
             uid,
-            PreferenceEntry(
-                slug="wide-toe",
-                content="买鞋只要宽楦",
-                domain="footwear",
-                category="size",
-                polarity="like",
-                keywords=["宽楦", "wide toe"],
-            ),
-        )
-        await store.write(
-            uid,
-            PreferenceEntry(
-                slug="no-plastic",
-                content="不要塑料材质",
-                domain="bags",
-                category="material",
-                polarity="dislike",
-                keywords=["塑料"],
-            ),
+            [
+                validate_fact("shoe_fit", "买鞋只要宽楦", "preference"),
+                validate_fact("material_avoid", "不要塑料材质", "constraint"),
+            ],
         )
         all_out = await recall_memories.ainvoke({})
-        assert all_out.count == 2  # 留空回全部，两个域的都在
+        assert all_out.count == 2  # 留空回全部
 
         shoe_out = await recall_memories.ainvoke({"topic": "宽楦"})
-        assert shoe_out.count == 1 and "宽楦" in shoe_out.preferences
+        assert shoe_out.count == 1 and "宽楦" in shoe_out.memories
+        assert "[preference] shoe_fit:" in shoe_out.memories  # 分类与 key 都要看得见
 
         miss = await recall_memories.ainvoke({"topic": "从没说过的词"})
         assert miss.count == 0 and "没有与" in miss.note

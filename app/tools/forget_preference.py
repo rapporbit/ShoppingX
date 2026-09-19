@@ -35,9 +35,10 @@ async def forget_preference(
     key: str | None = None,
     polarity: Literal["like", "dislike"] | None = None,
 ) -> ForgetPreferenceOutput:
-    """撤回一条已沉淀的长期偏好（非终结）。用户说「忘掉 X / 别再记着」时调。
-    参数：key（<user_long_term_preferences> 里的 dedup_key，优先）或 description 关键词模糊
-    匹配；polarity 可选限定 like/dislike 一侧。
+    """清掉**旧偏好库**里的一条条目（非终结）。注意：它看不到 <user_long_term_memory> 里的事实
+    ——那些要撤回请用原 key 调 save_memory 写新值。只有用户提到的明显是 M1 之前沉淀、且这里
+    列不出来的旧偏好时才用它。参数：key（旧条目的 dedup_key）或 description 关键词模糊匹配；
+    polarity 可选限定 like/dislike 一侧。
     """
     await monitor.report_tool_start(
         "forget_preference", description=description, key=key, polarity=polarity

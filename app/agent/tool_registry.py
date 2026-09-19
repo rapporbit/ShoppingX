@@ -28,6 +28,7 @@ from app.tools.price_compare import price_compare
 from app.tools.query_order import query_order
 from app.tools.recall_memories import recall_memories
 from app.tools.research import research
+from app.tools.save_memory import save_memory
 from app.tools.shipping_calc import shipping_calc
 from app.tools.shopping_summary import shopping_summary
 from app.tools.web_search import web_search
@@ -37,12 +38,12 @@ from app.tools.web_search import web_search
 # 工具注册表里查得到」。
 TERMINAL_TOOLS = _TERMINAL_TOOLS
 
-# 业务工具（每文件一个，模块名 = 工具名）：九大主工具 + ask_user 澄清 + 两个记忆工具。
-# 注意:**没有** remember_preference——偏好的识别 / 沉淀已剥离给会话结束后独立运行的记忆管家
-# （app/memory/curator.py），购物工作流里不再有「随手记长期偏好」的工具。留下的两个都是读 / 删:
-# forget_preference 让用户明确要撤回的那条即时生效；recall_memories（D4）补的是自动注入的盲区
-# ——注入只给**本轮域内**的偏好，用户问「我以前买的那双鞋」时要的恰恰是域外那些。两者都与
-# 「记什么」的判定正交，不构成第二个写入口。
+# 业务工具（每文件一个，模块名 = 工具名）：九大主工具 + ask_user 澄清 + 三个记忆工具。
+# 三个记忆工具的分工：recall_memories 读（注入只给 tier-one 那批，用户问「我以前买的那双鞋」
+# 时要的恰恰是没进注入的）、save_memory 写（M2 加，用户当场说「记住 X」时即时生效并给回执）、
+# forget_preference 删（M4 的删除清单里，遗忘将改为 save_memory 同 key 覆盖）。
+# 回合后的 curator（app/memory/curator.py）仍是另一条写路径，两条都过 facts.validate_fact
+# 同一道门、按 key 覆盖同一张表，不构成两套语义。
 _BUSINESS_TOOLS: list[ToolShell] = [
     planner,
     image_understand,
@@ -59,6 +60,7 @@ _BUSINESS_TOOLS: list[ToolShell] = [
     ask_user,
     recall_memories,
     forget_preference,
+    save_memory,
     create_order,
     query_order,
     cancel_order,

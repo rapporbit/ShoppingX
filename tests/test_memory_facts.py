@@ -35,6 +35,26 @@ def _fact(key: str, value: str, category: str = "preference", *, age_days: int =
     )
 
 
+async def _with_user(uid: str) -> None:
+    """建一个真用户行——``memory_facts.user_id`` 有外键，没有这行写不进去。
+
+    ``created_at`` 显式设成昨天：``ratelimit.guard_daily_signups`` 直接 COUNT 当天新建的 users
+    行，而测试库是整套测试共享的——用默认「现在」建几行就会把当天注册名额吃光，害得
+    ``test_ratelimit`` 里一个毫不相干的用例 429（只在全量跑时复现，单跑那个文件永远是绿的）。
+    """
+    await init_db()
+    async with session_factory()() as db:
+        db.add(
+            User(
+                id=uid,
+                username=f"t_{uid[:8]}",
+                password_hash="x",
+                created_at=datetime.now(UTC) - timedelta(days=1),
+            )
+        )
+        await db.commit()
+
+
 def test_validate_normalizes_key_and_defaults_category() -> None:
     fact = validate_fact("  Ship To ", "  常寄\n德国  ", "context")
     assert fact.key == "ship_to"
@@ -93,12 +113,9 @@ def test_render_block_is_empty_when_no_facts() -> None:
 
 @pytest.mark.asyncio
 async def test_store_overwrites_by_key_and_clears_with_generation() -> None:
-    await init_db()
     store = MemoryFactStore()
     uid = uuid.uuid4().hex
-    async with session_factory()() as db:
-        db.add(User(id=uid, username=f"t_{uid[:8]}", password_hash="x"))
-        await db.commit()
+    await _with_user(uid)
 
     await store.upsert_facts(uid, [_fact("no_plastic", "不要塑料的", "constraint")])
     await store.upsert_facts(uid, [_fact("no_plastic", "塑料也可以")])
@@ -115,3 +132,128 @@ async def test_store_overwrites_by_key_and_clears_with_generation() -> None:
     await store.clear(uid)
     assert await store.get_facts(uid) == []
     assert await store.purge_generation(uid) == 1  # 清空必须连代数一起加
+
+
+# ============================================================
+# M2：save_memory 工具 / 收货国 C1 / 围栏
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_save_memory_writes_and_overwrites_by_key() -> None:
+    """用户当场说「记住 X」→ 当轮就落库、有回执；改主意时用同 key 覆盖，不留两条打架的。"""
+    import tempfile
+    from pathlib import Path
+
+    from app.memory.fact_store import get_fact_store
+    from app.tools.save_memory import save_memory
+    from app.utils.thread_ctx import thread_scope
+
+    uid = uuid.uuid4().hex
+    await _with_user(uid)
+    with thread_scope("t-save", Path(tempfile.mkdtemp()), user_id=uid):
+        out = await save_memory.ainvoke(
+            {"key": "Material Avoid", "value": "不要塑料的", "category": "constraint"}
+        )
+        assert out.saved and out.key == "material_avoid"  # key 规范化后才是身份
+        assert "已记住" in out.note
+
+        # 遗忘走覆盖，不走删除：模型手里没有删除口。
+        await save_memory.ainvoke({"key": "material_avoid", "value": "塑料也可以"})
+        facts = await get_fact_store().get_facts(uid)
+    assert [f.value for f in facts] == ["塑料也可以"]
+
+
+@pytest.mark.asyncio
+async def test_save_memory_rejects_pii_without_echoing_value() -> None:
+    """PII 被写入单门挡下时，回执里**不能回显 value**——被拒的多半正是不该扩散的东西。"""
+    import tempfile
+    from pathlib import Path
+
+    from app.memory.fact_store import get_fact_store
+    from app.tools.save_memory import save_memory
+    from app.utils.thread_ctx import thread_scope
+
+    uid = uuid.uuid4().hex
+    await _with_user(uid)
+    with thread_scope("t-save-pii", Path(tempfile.mkdtemp()), user_id=uid):
+        out = await save_memory.ainvoke({"key": "phone", "value": "我的手机 13800138000"})
+        assert not out.saved and "13800138000" not in out.note
+        assert await get_fact_store().get_facts(uid) == []
+
+
+@pytest.mark.asyncio
+async def test_save_memory_anonymous_says_so_and_write_failure_does_not_lie() -> None:
+    """匿名会话如实说要登录；库挂了也**不能说「已记住」**——用户据此不再说第二遍，这条就永远丢了。"""
+    import tempfile
+    from pathlib import Path
+
+    from app.memory import fact_store as fs
+    from app.tools.save_memory import save_memory
+    from app.utils.thread_ctx import thread_scope
+
+    with thread_scope("t-save-anon", Path(tempfile.mkdtemp())):
+        anon = await save_memory.ainvoke({"key": "k", "value": "v"})
+    assert not anon.saved and "匿名" in anon.note
+
+    uid = uuid.uuid4().hex
+    await _with_user(uid)
+
+    class _DeadStore(fs.MemoryFactStore):
+        async def upsert_facts(self, user_id: str, facts: list[MemoryFact]) -> bool:
+            return False  # 库挂了：store 吞掉异常、返回 False
+
+    original = fs._store
+    fs._store = _DeadStore()
+    try:
+        with thread_scope("t-save-dead", Path(tempfile.mkdtemp()), user_id=uid):
+            out = await save_memory.ainvoke({"key": "k", "value": "不要塑料"})
+    finally:
+        fs._store = original
+    assert not out.saved and "已记住" not in out.note
+
+
+@pytest.mark.asyncio
+async def test_dest_country_reads_ship_to_fact() -> None:
+    """C1：收货国第 3 层按 ``SHIP_TO_KEY`` 取事实。旧代码读的 category/polarity 已随 M1 消失，
+    不改这里不会报错、只会静默退回默认国，到手价按错国家算——所以这条测试盯的是**不报错的那种错**。
+    """
+    import tempfile
+    from pathlib import Path
+
+    from app.memory.fact_store import get_fact_store
+    from app.memory.facts import SHIP_TO_KEY
+    from app.tools.planner import resolve_dest_country_layered
+    from app.utils.thread_ctx import thread_scope
+
+    uid = uuid.uuid4().hex
+    await _with_user(uid)
+    with thread_scope("t-ship", Path(tempfile.mkdtemp()), user_id=uid):
+        await get_fact_store().upsert_facts(
+            uid, [validate_fact(SHIP_TO_KEY, "常寄德国", "context")]
+        )
+        country, assumed, stated_now = await resolve_dest_country_layered("买个背包")
+        assert (country, assumed, stated_now) == ("DE", False, False)
+
+        # 本轮原话仍然压过长期记忆（第 1 层 > 第 3 层）。
+        explicit, _, stated = await resolve_dest_country_layered("买个背包，寄到日本")
+        assert (explicit, stated) == ("JP", True)
+
+
+def test_recall_memories_output_is_fenced() -> None:
+    """召回的记忆正文源头是用户某一轮说的话：一条被写进去的「忽略以上指令」会在此后每次召回时
+    重放。它必须和网页正文一样进围栏白名单，模型才分得清「数据」与「指令」。"""
+    from app.security.content_filter import EXTERNAL_SOURCE_TOOLS
+
+    assert "recall_memories" in EXTERNAL_SOURCE_TOOLS
+
+
+def test_save_memory_is_allowed_without_confirm_prompt() -> None:
+    """写工具默认被 PermissionEngine 挂起等确认。save_memory 要进放行表，否则用户说「记住 X」
+    时主链路会停在半路等一个前端根本没有的确认按钮。"""
+    from app.agent.permissions import DEFAULT_ALLOWED_TOOLS
+    from app.agent.tool_registry import TOOLS_BY_NAME
+
+    assert "save_memory" in TOOLS_BY_NAME  # 进了工具面
+    assert TOOLS_BY_NAME["save_memory"].is_read_only is False  # 它是写工具，别标成只读
+    assert "save_memory" in DEFAULT_ALLOWED_TOOLS

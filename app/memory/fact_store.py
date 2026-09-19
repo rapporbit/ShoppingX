@@ -60,14 +60,17 @@ class MemoryFactStore:
             logger.warning("读取长期记忆失败，本轮按空处理（user=%s）：%s", user_id, exc)
             return []
 
-    async def upsert_facts(self, user_id: str, facts: list[MemoryFact]) -> None:
-        """按 ``key`` 覆盖写：存在则替换 value / category / 时间，不存在则插入。
+    async def upsert_facts(self, user_id: str, facts: list[MemoryFact]) -> bool:
+        """按 ``key`` 覆盖写：存在则替换 value / category / 时间，不存在则插入。返回是否真的落库。
 
         **覆盖而不是叠加**是这套模型的要点——「我不要塑料」后来变成「塑料也行」时，库里不该同时留着
         两条互相矛盾的事实等注入时再打架。
+
+        返回 bool 而不是 None：`save_memory` 要当场给用户一句「已记住」，库挂了还说记住了就是
+        撒谎——用户以为不用再说第二遍。容错口径不变（异常仍只记日志、不往上抛）。
         """
         if not user_id or not facts:
-            return
+            return False
         try:
             async with session_factory()() as db:
                 for fact in facts:
@@ -99,10 +102,12 @@ class MemoryFactStore:
                         row.source_session = fact.source_session or row.source_session
                         row.updated_at = now
                 await db.commit()
+                return True
         except SQLAlchemyError as exc:
             logger.warning(
                 "写入长期记忆失败，%d 条未持久化（user=%s）：%s", len(facts), user_id, exc
             )
+            return False
 
     async def search_facts(self, user_id: str, query: str) -> list[MemoryFact]:
         """按主题召回。**在 Python 侧用 :func:`match_facts` 过滤，不写成 SQL LIKE**：
@@ -128,7 +133,9 @@ class MemoryFactStore:
                     )
                 )
                 await db.commit()
-                return bool(result.rowcount)
+                # DELETE 拿到的是 CursorResult，运行时确有 rowcount；
+                # ``AsyncSession.execute`` 的返回标注是笼统的 ``Result``，故 getattr 取。
+                return bool(getattr(result, "rowcount", 0))
         except SQLAlchemyError as exc:
             logger.warning("删除记忆失败（user=%s，key=%s）：%s", user_id, key, exc)
             return False

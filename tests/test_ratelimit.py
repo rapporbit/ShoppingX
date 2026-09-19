@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -83,11 +84,18 @@ async def test_daily_signup_cap_survives_ip_rotation(client: AsyncClient, monkey
 
     上限按「当前基数 + 2」算而不是写死 2：``users`` 表**不在 conftest 的清理名单里**（账户测试
     靠不同用户名隔离），别的文件注册的用户同样计入今日总数——写死就会随执行顺序忽红忽绿。
+
+    基数必须和闸**同一个口径**只数今天新增的行。取全表 COUNT 会让上限偏高：别的测试插夹具用户
+    时把 ``created_at`` 写成昨天（那是对的，免得白占当天名额），基数多算了那几行，第三次注册就
+    不会 429，这条测试反而挂在一个与限流无关的原因上。
     """
     monkeypatch.setattr(rl, "_register_by_ip", rl.SlidingWindow(limit=999, window_s=3600))
     async with session_factory()() as db:
         await rl.guard_daily_signups(db)  # 确认此刻还没到顶（否则下面的基数没意义）
-        base = await db.scalar(select(func.count()).select_from(User))
+        today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+        base = await db.scalar(
+            select(func.count()).select_from(User).where(User.created_at >= today)
+        )
     monkeypatch.setenv("MAX_NEW_USERS_PER_DAY", str((base or 0) + 2))
 
     assert await _register(client, "rl-cap-1") == 200

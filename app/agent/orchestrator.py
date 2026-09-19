@@ -63,10 +63,11 @@ from app.harness.setup import setup_harness
 from app.harness.token_budget import budget_status, set_task_cap, tree_snapshot
 from app.harness.token_budget import reset_tree as reset_token_tree
 from app.memory.curator import curate_turn
+from app.memory.fact_store import get_fact_store
+from app.memory.facts import select_tier_one_facts
 from app.memory.history import append_turn
 from app.memory.injector import build_history_block, record_search_history
 from app.memory.session_state import pt_from_state, pt_into_state
-from app.memory.store import get_store
 from app.observability import metrics
 from app.recall.semantic_cache import (
     TurnCacheEntry,
@@ -156,15 +157,15 @@ async def _turn_cache_key(
     if not first_turn or not turn_cache_enabled():
         return None
     try:
-        entries = await get_store().read(user_id or "")
+        facts = select_tier_one_facts(await get_fact_store().get_facts(user_id or ""))
         return turn_cache_key(
             buyer=user_id or "",
-            prefs_fp=preference_fingerprint(entries),
+            prefs_fp=preference_fingerprint(facts),
             query=query,
             prompt_version=prompt_version,
         )
     except Exception:
-        # 偏好读不到就宁可不缓存：拿一个「假装没有偏好」的指纹去命中，等于把别人的偏好结果给你。
+        # 记忆读不到就宁可不缓存：拿一个「假装没有记忆」的指纹去命中，等于把别人的记忆结果给你。
         logger.warning("整轮缓存键计算失败，本轮不走缓存", exc_info=True)
         return None
 

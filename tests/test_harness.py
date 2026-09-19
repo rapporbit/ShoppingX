@@ -1577,61 +1577,61 @@ class TestGateOrderingContracts:
 
 
 # ============================================================
-# 偏好注入：planner 之后，且只给域内的
+# 长期记忆注入：planner 之后，给 tier-one 那批（M2）
 # ============================================================
 
 
-async def _run_inject_hook(tool_name: str, *domains: str) -> str:
-    """在「库里有条 footwear 的皮革 dislike」下跑注入 Hook，返回注入给模型的文本（无则空串）。"""
+async def _run_inject_hook(
+    tool_name: str, *, facts: list[tuple[str, str, str]] | None = None
+) -> str:
+    """跑一次注入 Hook，返回注入给模型的文本（无则空串）。``facts`` 是 (key, value, category)。"""
     import tempfile
     from pathlib import Path
     from uuid import uuid4
 
-    from app.api.context import set_session_domains
-    from app.harness.hooks.context_shaping import inject_domain_preferences
-    from app.memory.store import PreferenceEntry, get_store
+    from app.harness.hooks.context_shaping import inject_long_term_memory
+    from app.memory.fact_store import get_fact_store
+    from app.memory.facts import validate_fact
     from app.utils.thread_ctx import thread_scope
 
+    rows = facts if facts is not None else [("material_avoid", "不要皮革", "constraint")]
     uid = f"u-{uuid4().hex[:8]}"
     ctx: dict = {"tool_name": tool_name}
     with thread_scope("t-inject", Path(tempfile.mkdtemp()), user_id=uid):
-        await get_store().write(
-            uid,
-            PreferenceEntry(
-                slug="leather",
-                content="不要皮革",
-                category="material",
-                domain="footwear",
-                polarity="dislike",
-                keywords=["皮革", "leather"],
-            ),
-        )
-        set_session_domains(list(domains))
-        await inject_domain_preferences(ctx)
+        await get_fact_store().upsert_facts(uid, [validate_fact(*row) for row in rows])
+        await inject_long_term_memory(ctx)
     msgs = ctx.get("inject_messages") or []
     return "\n".join(m["content"] for m in msgs)
 
 
 @pytest.mark.anyio
 class TestPreferenceInject:
-    """长期偏好只在 planner 判出域**之后**注入，且只注入域内的。
+    """长期记忆在 planner **之后**注入，选哪几条按分类 + 新鲜度，不再按品类域。
 
-    改造前它拼在当轮 human 的最前面——那时 planner 还没跑、域还不存在，_in_scope 对空域一律放行，
-    模型必然看到跨域偏好，并很自觉地把它转述进 item_picker 的自由文本参数拿到硬淘汰权。
+    注入点仍在 planner 之后：它每轮都变，混进 system prompt 前缀会把跨轮的 prompt cache 打断。
+    改的是选条口径——域过滤当年是为了挡住 ``memory.assemble`` 的硬淘汰腿（跨域偏好被模型转述进
+    item_picker 就能杀商品）；M2 起记忆只经上下文生效，跨品类硬规则漏掉的代价反而更大。
     """
 
-    async def test_injects_in_domain_preference_after_planner(self) -> None:
-        text = await _run_inject_hook("planner", "footwear")  # 本轮在买鞋
-        assert "皮革" in text
+    async def test_injects_tier_one_facts_after_planner(self) -> None:
+        text = await _run_inject_hook("planner")
+        assert "皮革" in text and "[constraint]" in text
 
-    async def test_does_not_inject_cross_domain_preference(self) -> None:
-        """本轮在买包 → 鞋类的偏好压根不该出现在模型眼前。不给，胜过给了再管。"""
-        text = await _run_inject_hook("planner", "bags")
-        assert text == ""
+    async def test_injects_regardless_of_category_domain(self) -> None:
+        """买鞋的硬规则在买包这轮照样注入——「不吃坚果」这类跨品类规则不能因 planner 判域而消失。"""
+        text = await _run_inject_hook(
+            "planner", facts=[("shoe_fit", "买鞋只要宽楦", "constraint")]
+        )
+        assert "宽楦" in text
 
     async def test_does_not_inject_before_planner(self) -> None:
-        """planner 以外的工具不触发注入——域还没产生，注入了就是跨域全量。"""
-        text = await _run_inject_hook("item_search", "footwear")
+        """planner 以外的工具不触发注入——一轮只注入一次，位置固定才有前缀缓存可言。"""
+        text = await _run_inject_hook("item_search")
+        assert text == ""
+
+    async def test_no_facts_injects_nothing(self) -> None:
+        """一条记忆都没有 → 不塞空占位（省 token，也不给模型噪声）。"""
+        text = await _run_inject_hook("planner", facts=[])
         assert text == ""
 
 
