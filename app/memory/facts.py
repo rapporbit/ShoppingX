@@ -29,6 +29,11 @@ VALUE_MAX = 200
 # 每轮注入的事实条数上限。constraint 全进，剩下的名额按 updated_at 倒序补。
 TIER_ONE_CAP = 8
 
+#: **唯一一个被代码按名字读的 key**：收货国解析的第 3 层（``planner.resolve_dest_country_layered``）
+#: 和旧数据迁移都认它。其余 key 都由模型自拟，只经上下文生效、没有哪段代码按名字取。
+#: 定在这里而不是各自写字面量——写岔一个字符就是静默退回默认国、到手价按错国家算（计划 §4.1 C1）。
+SHIP_TO_KEY = "default_ship_to"
+
 
 class MemoryCategory(StrEnum):
     """事实的三分类。决定的是**注入优先级**，不是杀伤力。

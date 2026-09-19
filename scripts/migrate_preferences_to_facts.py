@@ -42,13 +42,17 @@ load_dotenv()
 from app.db.models import Preference  # noqa: E402
 from app.db.session import init_db, session_factory  # noqa: E402
 from app.memory.fact_store import get_fact_store  # noqa: E402
-from app.memory.facts import MemoryWriteRejected, validate_fact  # noqa: E402
+from app.memory.facts import (  # noqa: E402
+    SHIP_TO_KEY,
+    MemoryWriteRejected,
+    validate_fact,
+)
 
 logger = logging.getLogger("migrate_prefs")
 
 # C1：收货国原先靠 `category == "location" and polarity == "like"` 被 planner 第 3 层读到。
-# 新模型里它必须落在一个**固定 key** 上，否则 planner 查不到就静默退到默认国，到手价整个算错。
-SHIP_TO_KEY = "default_ship_to"
+# 新模型里它必须落在 `SHIP_TO_KEY` 这个**固定 key** 上（常量与 planner 共用一份，写岔就是
+# 静默退回默认国、到手价整个算错）。
 
 
 def _to_fact_args(row: Preference) -> tuple[str, str, str]:

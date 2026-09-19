@@ -4,7 +4,7 @@
                                               <learned_strategies>、待决议确认卡 + 本会话订单
                                               <trade_state>（曾是两个 hook，2026-09-15 合一）
     pre_think        10  tool_result_pruner  工具返回总量超阈值 → 最旧的换占位，削到一半（D3）
-    post_tool_call   50  preference_inject   planner 判出域后注入域内长期偏好
+    post_tool_call   50  preference_inject   planner 跑完后注入 tier-one 长期记忆（M2）
     on_session_end   90  strategy_feedback   给本轮注入过的策略结账：命中回血、连续失败淘汰
 
 **两层压缩的分工**：这里做零成本的粗活（清最旧工具返回），框架的 ``compress_context`` 做花钱的
@@ -25,7 +25,8 @@ from app.harness.budgets import (
 )
 from app.harness.middleware import harness_hook
 from app.harness.msgs import _attr
-from app.memory.injector import PREF_EMPTY, build_preference_block
+from app.memory.fact_store import get_fact_store
+from app.memory.facts import render_memory_block, select_tier_one_facts
 from app.memory.strategies import get_strategy_store, render_strategy_block, strategies_for_query
 from app.trade.confirmations import trade_state
 from app.trade.repository_sql import confirmation_repository, order_repository
@@ -101,32 +102,42 @@ async def prune_old_tool_results(context: dict[str, Any]) -> dict[str, Any] | No
 
 
 @harness_hook("post_tool_call", name="preference_inject", priority=50)
-async def inject_domain_preferences(context: dict[str, Any]) -> dict[str, Any] | None:
-    """planner 返回后注入域内长期偏好。一轮至多注入一次——阶段机保证 planner 只成功跑一次
-    （跑完即离开 PLANNING，而 planner 不在后续阶段的白名单里）。"""
+async def inject_long_term_memory(context: dict[str, Any]) -> dict[str, Any] | None:
+    """planner 返回后注入 tier-one 长期记忆。一轮至多注入一次——阶段机保证 planner 只成功跑一次
+    （跑完即离开 PLANNING，而 planner 不在后续阶段的白名单里）。
+
+    **选哪几条不再按品类域判，改按分类 + 新鲜度**（``select_tier_one_facts``：constraint 全进，
+    其余补到 8 条）。域隔离原本是为了让「买鞋不穿皮革」别在搜背包时杀掉商品——那个风险来自
+    ``memory.assemble`` 的硬淘汰腿，而记忆现在只经模型上下文生效，模型看到一条不相干的偏好
+    最多是不用它。换来的是「不吃坚果」这类跨品类硬规则不会再因为 planner 判错域而整轮消失。
+    漏掉的那些也不是不可见：模型需要时调 ``recall_memories`` 按主题捞。
+
+    注入仍落在 planner **之后**：它是每轮都变的内容，混进 system prompt 前缀会把跨轮的
+    prompt cache 打断（见 ``build_preference_block`` 当年挪出来的理由）。
+    """
     if context.get("tool_name") != "planner":
         return None
 
     user_id = get_user_id() or ""
     if not user_id:
-        return None  # 匿名用户没有长期偏好
+        return None  # 匿名用户没有长期记忆
 
-    block = await build_preference_block(user_id)
-    if not block or block == PREF_EMPTY:
-        return None  # 本轮域内没有任何偏好 → 不塞空占位（省 token，也不给模型噪声）
+    facts = select_tier_one_facts(await get_fact_store().get_facts(user_id))
+    block = render_memory_block(facts)
+    if not block:
+        return None  # 一条都没有 → 不塞空占位（省 token，也不给模型噪声）
 
-    logger.info("注入域内长期偏好（planner 后）")
+    logger.info("注入 %d 条 tier-one 长期记忆（planner 后）", len(facts))
     context.setdefault("inject_messages", []).append(
         {
             "role": "system",
             "content": (
-                "<user_long_term_preferences>\n"
                 f"{block}\n"
-                "</user_long_term_preferences>\n"
-                "以上是该用户与**本轮品类相关**的长期偏好，已由系统自动生效（检索词与精挑打分里\n"
-                "都已并入，见 memory.assemble）——**不要**再把它们转述进任何工具参数，重复一遍不会\n"
-                "让它们更生效，只会让你替用户做了他没授权的决定。它们在这里只为一件事：让你在向\n"
-                "用户解释「为什么选这几件」时，说得出是哪条偏好起了作用。"
+                "以上是这个用户此前说过、跨会话一直成立的事实，由系统从长期记忆里取出。\n"
+                "标 [constraint] 的是硬规则，**本轮必须遵守**：要让它生效，就把它写进你调用的\n"
+                "工具入参（比如 item_search 的排除词、item_picker 的偏好描述）——系统不会替你\n"
+                "把它塞进检索。[preference] / [context] 是取向与背景，与本轮品类无关时可以不用。\n"
+                "还需要这里没列出的旧记忆时，调 recall_memories 按主题捞。"
             ),
         }
     )

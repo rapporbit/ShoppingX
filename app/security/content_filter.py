@@ -34,14 +34,19 @@ logger = logging.getLogger("shoppingx.security.filter")
 # 命中后替换成它。刻意不含引号 / 反斜杠——工具返回多是 JSON 串，占位符必须保证替换后 JSON 仍合法。
 FILTERED_PLACEHOLDER = "[已过滤:疑似提示注入]"
 
-# 只有这四件工具的返回含**外部不可信文本**：网页正文 / 卖家写的商品标题描述 / RAG 知识卡片。
-# 其余的（planner / price_compare / shipping_calc / item_picker / chat_fallback /
+# 这几件工具的返回含**不可信文本**：网页正文 / 卖家写的商品标题描述 / RAG 知识卡片 / 用户自己
+# 说过的话。其余的（planner / price_compare / shipping_calc / item_picker / chat_fallback /
 # shopping_summary）要么是模型自己的产出、要么是本地确定性计算，不是注入入口。
 #
 # ``research``（C2）虽然网页正文不进主环，但它的 claim / pros / cons 是**归纳模型转述**的外部
 # 文本——注入面是收窄不是消除：正文里的「忽略以上指令」照样能被归纳模型原样搬进 claim。所以
 # 它的返回同样要过滤。
-EXTERNAL_SOURCE_TOOLS = frozenset({"web_search", "research", "item_search", "category_insight"})
+#
+# ``recall_memories``（M2）召回的是长期记忆，正文源头是用户某一轮说的话。它不来自站外，但同样
+# 不可信：一条被写进去的「忽略以上指令」会在此后**每次**召回时重放，比一次性的网页正文更持久。
+EXTERNAL_SOURCE_TOOLS = frozenset(
+    {"web_search", "research", "item_search", "category_insight", "recall_memories"}
+)
 
 # 零宽 / 不可见字符：注入常用它们打断关键词躲开正则（也躲开人眼 review）。
 # 显式写 \u 转义而非字面字符——后者在编辑器 / diff 里根本看不见，改坏了也发现不了。

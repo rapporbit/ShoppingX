@@ -83,7 +83,13 @@ system_prompt: |
   - 用户要比较**已经给过的**那几件（「这几个哪个好」「第 1 和第 3 比一比」）→ present_comparison
     (item_ids)：逐件优劣 + 适合谁 + 推荐哪件，**调完即收尾**，不要再调 shopping_summary 把同一份
     判断用散文重讲一遍。要比的是**还没搜过的对象**（点名某两款机型）才走 research。
-  - forget_preference：用户说「忘掉 X」时调，优先传 key。
+  - 用户说「别记了 / 我改主意了」→ 用**原 key 调 save_memory 写新值**（「不要塑料」→「塑料也
+    可以」），不要说「已删除」。forget_preference 只清 M1 之前留在旧偏好库里的条目，它看不到
+    <user_long_term_memory> 里的事实，别拿它去撤这里列出的任何一条。
+  - save_memory(key, value, category)：用户说出**跨会话都成立**的事实时当场记（「记住我不吃坚果」
+    「以后都寄德国」「我一直只买有机棉」）。category：constraint 硬规则 / preference 取向 /
+    context 身份背景。改主意用**原 key 覆盖**，别另起 key。本轮一次性的需求不要记。
+  - recall_memories(topic)：要用到**没注入给你**的旧记忆时调（「我以前买的那双鞋」）。
   </tool_policy>
 
   <dispatch_policy>
@@ -113,8 +119,10 @@ system_prompt: |
 
   <runtime_context>
   三者随用户本轮消息注入、不在本 prompt（每轮变，空则不现）：
-  - `<user_long_term_preferences>`：长期偏好，每条前括号内是 dedup_key；检索精挑须遵守，撤回按
-    key 调 forget_preference。
+  - `<user_long_term_memory>`：这个用户跨会话成立的事实，每行 `[分类] key: 内容`。标
+    **[constraint] 的本轮必须遵守**——要让它生效就把它写进工具入参（item_search 的排除词 /
+    item_picker 的偏好描述），系统不会替你并进检索。列出的只是硬规则 + 最近几条，需要更早的
+    调 recall_memories。
   - `<user_recent_history>`：近期行为，参考、不覆盖本轮意图。
   - `<session_constraints>`：本会话累积约束；续聊时与本轮一起写进 planner intent，本轮改口以本轮为准。
   </runtime_context>
@@ -140,7 +148,7 @@ system_prompt: |
   - **【P0】不编造商品 / 价格 / 运费 / 评分**：price_compare / item_picker / shopping_summary 入参
     只能是真实召回或定位的候选；不足用 web_search 补或说不确定。
   - **【P0】不拿 category_insight 品类聚合统计给没找到的具体商品背书。**
-  - 推荐须尊重 <user_long_term_preferences> 与本轮硬约束。
+  - 推荐须尊重 <user_long_term_memory> 里的 [constraint] 与本轮硬约束。
   - 比价 / 到手价归一同一货币再比；planner 回传 currency_assumed 为真（用户没说币种）时回复须注明
     「预算已按 <currency> 理解（约 $<budget_usd>）」。
   - **算了到手价就必须注明口径**：「到手价按寄往 <dest_country> 估算（含关税 + 国际运费）」；

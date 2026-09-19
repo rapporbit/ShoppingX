@@ -1,21 +1,25 @@
 """recall_memories —— 按主题主动翻一遍长期记忆（只读、非终结）。
 
-**为什么自动注入之外还要一个口**：``context_shaping.preference_inject`` 注入的是**本轮域内**
-的偏好（域由 planner 判出，见 ``injector._in_scope``）——搜背包时不会把「买鞋只穿宽楦」推给
-模型，这是对的，否则每轮都塞满不相干的条目。但用户说「我以前买过的那双鞋」「你还记得我不
-喜欢什么材质吗」时，要的恰恰是域外那些。没有这个工具，模型只能回「我不记得」，而库里明明有。
+**为什么自动注入之外还要一个口**：``context_shaping.preference_inject`` 每轮注入的只有 tier-one
+那批（全部 constraint + 最近 8 条，见 ``facts.select_tier_one_facts``）。老用户攒下的几十条里，
+没进那批的照样可能是用户当下问的那条——「我以前买过的那双鞋」「你还记得我不喜欢什么材质吗」。
+没有这个工具，模型只能回「我不记得」，而库里明明有。
 
-匹配沿用 ``forget_preferences`` 的口径：**互为子串的确定性匹配，不做语义猜测**。记忆类的 bug
-不会崩、只会把推荐做反（查不到就当用户没说过），所以宁可漏也不要糊。
+匹配沿用 ``facts.match_facts`` 的口径：**确定性子串匹配，不做语义猜测**。记忆类的 bug 不会崩、
+只会把推荐做反（查不到就当用户没说过），所以宁可漏也不要糊。
+
+**返回要过围栏**（`recall_memories` 已进 ``EXTERNAL_SOURCE_TOOLS``）：记忆的正文源头是用户在
+某一轮说的话，一条被写进去的「忽略以上指令」会在此后每次召回时重放。它是待评估的数据，
+不是给模型的指令。
 """
-
-from typing import Any
 
 from pydantic import BaseModel, Field
 
 from app.api import monitor
 from app.api.context import get_user_id
-from app.memory.injector import format_history, format_preferences
+from app.memory.fact_store import get_fact_store
+from app.memory.facts import MemoryFact
+from app.memory.injector import format_history
 from app.memory.store import get_store
 from app.tools._shell import tool
 
@@ -26,26 +30,26 @@ RECALL_MAX_ENTRIES = 20
 class RecallMemoriesOutput(BaseModel):
     """recall_memories 的结构化返回。"""
 
-    preferences: str = Field(default="", description="命中的长期偏好，每行一条")
+    memories: str = Field(default="", description="命中的长期记忆，每行 [分类] key: 内容")
     history: str = Field(default="", description="行为历史（搜索 / 购买）")
-    count: int = Field(default=0, description="命中的偏好条数")
+    count: int = Field(default=0, description="命中的记忆条数")
     note: str = Field(default="", description="给模型的简短说明")
 
 
-def _hit(topic: str, content: str, keywords: list[str]) -> bool:
-    """topic 与这条记忆是否互为子串命中（与 injector.forget_preferences 同一口径）。"""
-    if not topic:
-        return True
-    low = content.lower()
-    if topic in low or low in topic:
-        return True
-    return any(k and (k.lower() in topic or topic in k.lower()) for k in keywords)
+def _render(facts: list[MemoryFact]) -> str:
+    """每行一条 ``[category] key: value``——与注入块同一形态。
+
+    不复用 ``render_memory_block``：那个带 ``<user_long_term_memory>`` 标签，而这里的文本要嵌进
+    工具返回的 JSON，外面还会再包一层 ``<external_content>`` 围栏。两层标签套着反而让模型分不清
+    哪个是边界。
+    """
+    return "\n".join(f"[{f.category.value}] {f.key}: {f.value}" for f in facts)
 
 
 @tool
 async def recall_memories(topic: str = "") -> RecallMemoriesOutput:
-    """翻用户的长期记忆（偏好 + 历史）。何时调用：用户提到「我以前 / 我之前买的 / 你还记得吗」，
-    或需要**本轮品类之外**的偏好——自动注入给你的只有本轮品类域内那几条。
+    """翻用户的长期记忆（事实 + 行为历史）。何时调用：用户提到「我以前 / 我之前买的 / 你还记得
+    吗」，或需要**自动注入之外**的旧记忆——每轮注入给你的只有硬规则和最近那几条。
     参数 topic：留空回全部；给词则按该词筛（确定性子串匹配，不做语义联想）。
     """
     await monitor.report_tool_start("recall_memories", topic=topic)
@@ -54,23 +58,21 @@ async def recall_memories(topic: str = "") -> RecallMemoriesOutput:
         await monitor.report_tool_end("recall_memories", count=0)
         return RecallMemoriesOutput(note="匿名会话没有长期记忆，登录后才会跨会话记住偏好")
 
-    store = get_store()
     low = (topic or "").strip().lower()
-    entries = [e for e in await store.read(user_id) if _hit(low, e.content, list(e.keywords))]
-    history: list[Any] = list(await store.read_history(user_id))
+    facts = await get_fact_store().search_facts(user_id, low)
+    history = list(await get_store().read_history(user_id))
 
-    prefs_text = format_preferences(entries[:RECALL_MAX_ENTRIES])
     note = ""
-    if not entries:
+    if not facts:
         # 查不到要说清「库里确实没有」，别让模型把空结果说成「你没告诉过我」之外的话。
-        note = f"没有与「{topic}」相关的长期偏好" if low else "这个用户还没有沉淀任何长期偏好"
-    elif len(entries) > RECALL_MAX_ENTRIES:
-        note = f"命中 {len(entries)} 条，只回了最先的 {RECALL_MAX_ENTRIES} 条"
+        note = f"没有与「{topic}」相关的长期记忆" if low else "这个用户还没有沉淀任何长期记忆"
+    elif len(facts) > RECALL_MAX_ENTRIES:
+        note = f"命中 {len(facts)} 条，只回了最近更新的 {RECALL_MAX_ENTRIES} 条"
 
-    await monitor.report_tool_end("recall_memories", count=len(entries))
+    await monitor.report_tool_end("recall_memories", count=len(facts))
     return RecallMemoriesOutput(
-        preferences=prefs_text,
+        memories=_render(facts[:RECALL_MAX_ENTRIES]),
         history=format_history(history),
-        count=len(entries),
+        count=len(facts),
         note=note,
     )
