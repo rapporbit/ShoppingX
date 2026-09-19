@@ -80,7 +80,7 @@ class AlertRule:
 # **不设规则的工具，以及为什么：**
 # - ask_user：实测 P50 = 120_018ms，因为它 asyncio.wait_for 等用户回复、等满 ASK_USER_TIMEOUT_SEC
 #   才返回。**它的慢是语义不是故障**，设规则等于每次澄清都告警。这条只有量了基线才知道。
-# - forget_preference：极低频（用户主动撤回偏好才调），攒不出统计意义的窗口。
+# - save_memory：极低频（用户明说「记住 X」才调），攒不出统计意义的窗口。
 DEFAULT_RULES: tuple[AlertRule, ...] = (
     # 外呼型（跨网，最该盯）。
     AlertRule("item_search", p95_threshold_ms=1_000, hard_ms=8_000),  # 实测 P95 470 / P99 1888

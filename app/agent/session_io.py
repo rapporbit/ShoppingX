@@ -72,11 +72,9 @@ def inject_runtime_context(
     部分（对齐 refdocs/05 §4.4「按易变性分层，越易变越靠后」）。空的块跳过（不塞「暂无」占位，
     省 token 也不给模型噪声）；全空则原样返回 query。
 
-    **长期偏好不在这里注入**（这是 P_t 重构改掉的）。它曾经拼在这条消息的最前面，而那时 planner
-    还没跑、``session_domains`` 还是空的——``injector._in_scope`` 对空域一律放行，于是模型看到的
-    偏好块**必然是跨域全量**的：「买跑鞋时不要皮革」会出现在买旅行包的这一轮，模型很自觉地把
-    leather 转述进 ``item_picker(exclude_keywords=...)``，硬淘汰就这么绕过域闸生效了。
-    改由 ``harness.hooks.context_shaping`` 在 planner **之后**注入域内偏好——那时域才存在。
+    **长期记忆不在这里注入**（这是 P_t 重构改掉的）。它曾经拼在这条消息的最前面，而那时 planner
+    还没跑，注入的内容与后续判定对不上。改由 ``harness.hooks.context_shaping`` 在 planner
+    **之后**以 system 消息注入 tier-one 事实（见 ``facts.select_tier_one_facts``）。
     """
     parts: list[str] = []
     # 启用平台随用户设置而变（默认单平台 amazon），同属「每轮可变」——与历史一样走

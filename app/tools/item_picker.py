@@ -44,7 +44,6 @@ from app.api import monitor
 from app.api.context import (
     get_dest_country,
     get_original_query,
-    get_session_domains,
     get_session_pt,
     get_user_id,
 )
@@ -477,8 +476,10 @@ async def item_picker(
     if candidates is None:
         candidates = registry_snapshot()
 
-    # 记忆的**唯一**入口：长期库（域内）+ 会话级 P_t，硬 / 软的授权规则全在 assemble 里判一次
-    # （见 app.memory.assemble 的模块 docstring）。这里只负责把它和模型本轮传的词并起来。
+    # 会话级约束的**唯一**入口：本轮 P_t（用户亲口说的「不要 X」）+ 收藏亲和，在 assemble 里
+    # 装配一次（见其模块 docstring）。这里只负责把它和模型本轮传的词并起来。
+    # **长期记忆不在这条路上**（M4）：它每轮注入给模型，由模型写进本函数的 exclude_keywords /
+    # must_have 等入参——所以下面这些词表里凡是来自长期记忆的，都是模型显式传进来的。
     mem = await assemble(get_user_id() or "")
     # **匹配词一律归一成英文**（normalize_terms）：商品库是纯英文的（实测 amazon 样本 300 条标题
     # 0 条含中文），而下面的 _hits 是字符串命中——一条中文原子词（「塑料」）去匹 "Plastic Packing
@@ -520,16 +521,10 @@ async def item_picker(
     affinity = [
         t for t in normalize_terms(_merge_terms(mem.affinity)) if t not in prefer and t not in must
     ]
-    # 把「长期记忆本轮如何影响了结果」摆到台面上——记忆最危险的失败是**静默**的：一条偏好误杀
-    # 了一批商品，用户看不到任何提示，只会觉得「怎么搜不出东西」，且归因不到记忆头上。
+    # 「长期记忆本轮如何影响了结果」不再由这里上报（M4 删 report_memory_applied）：记忆生效的
+    # 唯一形态已经是**模型写进入参**，而入参本来就随 tool_start 事件完整上报给前端。原来那个
+    # 事件报的是系统侧悄悄加的词，那条腿没了，事件恒空。
     #
-    # **上报的是长期库那部分的全量**（mem.memory_*），不是「去重后新增的那部分」，也不含 P_t
-    # （那是用户本轮刚说的，不算「记忆生效」）。去重口径一旦兼职当上报口径，事件就恰好在最常见
-    # 的路径上静默：偏好本来就注入了 prompt，模型多半会照着转述一遍，于是「新增」为空 → 不发事件
-    # → 商品被记忆杀了、用户却什么都看不到。
-    await monitor.report_memory_applied(
-        get_session_domains(), mem.memory_exclude, mem.memory_penalty
-    )
     # 本轮没显式传预算、但会话累积过预算 → 用 P_t 兜底（续聊改颜色不该丢掉上一轮的预算上限）。
     if budget_usd is None:
         budget_usd = mem.budget_usd
@@ -847,8 +842,9 @@ async def item_picker(
         "item_picker",
         picked=len(picks),
         excluded=len(excluded),
-        auto_excluded=len(mem.memory_exclude),  # 本轮域内、来自长期硬黑名单的排除词数（可观测）
-        auto_attenuated=len(mem.memory_penalty),  # 本轮域内、来自长期软避讳的减分词数
+        # 会话级 P_t 本轮贡献的排除 / 减分词数（长期记忆那腿已随 M4 删，不再有系统侧加的词）
+        session_excluded=len(mem.exclude),
+        session_attenuated=len(mem.penalty),
         semantic=bool(sem_match or sem_hard or sem_penalty),  # 走了语义打分（论文式6/8）
         # 整池 0 命中的硬排除词（诚实性标注：这些词本轮没挡下任何商品，别让用户以为生效了）
         **({"no_effect_excludes": no_effect_excludes} if no_effect_excludes else {}),

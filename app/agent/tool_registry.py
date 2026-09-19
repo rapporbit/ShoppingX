@@ -18,7 +18,6 @@ from app.tools.cancel_order import cancel_order
 from app.tools.category_insight import category_insight
 from app.tools.chat_fallback import chat_fallback
 from app.tools.create_order import create_order
-from app.tools.forget_preference import forget_preference
 from app.tools.image_understand import image_understand
 from app.tools.item_picker import item_picker
 from app.tools.item_search import item_search
@@ -38,10 +37,11 @@ from app.tools.web_search import web_search
 # 工具注册表里查得到」。
 TERMINAL_TOOLS = _TERMINAL_TOOLS
 
-# 业务工具（每文件一个，模块名 = 工具名）：九大主工具 + ask_user 澄清 + 三个记忆工具。
-# 三个记忆工具的分工：recall_memories 读（注入只给 tier-one 那批，用户问「我以前买的那双鞋」
-# 时要的恰恰是没进注入的）、save_memory 写（M2 加，用户当场说「记住 X」时即时生效并给回执）、
-# forget_preference 删（M4 的删除清单里，遗忘将改为 save_memory 同 key 覆盖）。
+# 业务工具（每文件一个，模块名 = 工具名）：九大主工具 + ask_user 澄清 + 两个记忆工具。
+# 两个记忆工具的分工：recall_memories 读（注入只给 tier-one 那批，用户问「我以前买的那双鞋」
+# 时要的恰恰是没进注入的）、save_memory 写（用户当场说「记住 X」时即时生效并给回执）。
+# **没有删除工具**：遗忘 = 用原 key 覆盖写一条新值，彻底删除只在偏好页由用户自己动手
+# （计划 §3.2 第 2 条，与参考实现一致）——模型手里不该有抹掉用户记忆的能力。
 # 回合后的 curator（app/memory/curator.py）仍是另一条写路径，两条都过 facts.validate_fact
 # 同一道门、按 key 覆盖同一张表，不构成两套语义。
 _BUSINESS_TOOLS: list[ToolShell] = [
@@ -59,7 +59,6 @@ _BUSINESS_TOOLS: list[ToolShell] = [
     shopping_summary,
     ask_user,
     recall_memories,
-    forget_preference,
     save_memory,
     create_order,
     query_order,
@@ -68,7 +67,7 @@ _BUSINESS_TOOLS: list[ToolShell] = [
 
 
 # 只读 = 不写任何持久状态、不与用户交互、可安全并发重放。
-# 反例说明（别凭感觉标）：ask_user 会挂起等用户回复，forget_preference 删长期偏好，
+# 反例说明（别凭感觉标）：ask_user 会挂起等用户回复，save_memory 写长期记忆，
 # shopping_summary / chat_fallback 是终结工具（写会话产物 + 决定 loop 结束），都不是只读。
 _READ_ONLY_TOOLS = frozenset(
     {

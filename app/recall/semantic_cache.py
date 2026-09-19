@@ -131,9 +131,9 @@ class SemanticCache(Generic[T]):
 # 是真实伤害，不是少省一点钱）。
 
 #: 这些工具一旦在本轮出现过，本轮就**不许**进缓存：三个写工具会改真实状态，``ask_user`` 的答案
-#: 取决于当时用户怎么回的、``forget_preference`` 改的是长期记忆。重放它们等于伪造一次交互。
+#: 取决于当时用户怎么回的、``save_memory`` 改的是长期记忆。重放它们等于伪造一次交互。
 UNCACHEABLE_TOOLS = frozenset(
-    {"create_order", "cancel_order", "query_order", "ask_user", "forget_preference"}
+    {"create_order", "cancel_order", "query_order", "ask_user", "save_memory"}
 )
 
 

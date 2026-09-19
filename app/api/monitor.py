@@ -44,7 +44,6 @@ EVENT_TOOL_END = "tool_end"
 EVENT_CLARIFICATION_REQUEST = "clarification_request"
 EVENT_QUEUE_STATUS = "queue_status"
 EVENT_MEMORY_UPDATED = "memory_updated"
-EVENT_MEMORY_APPLIED = "memory_applied"
 # 会话级 P_t 约束集快照（每轮 planner 落 P_t 后推送）：偏好面板的「本次会话」区据此实时刷新。
 # **瞬态**（不进活动流、不进回放存档）：断线重连后面板走 GET /api/session/{thread}/constraints
 # 主动拉，一条随时可重建的状态快照不值得进存档。
@@ -87,7 +86,6 @@ _ACTIVITY_EVENTS = frozenset(
         EVENT_TOOL_START,
         EVENT_TOOL_END,
         EVENT_CLARIFICATION_REQUEST,
-        EVENT_MEMORY_APPLIED,
     }
 )
 
@@ -337,7 +335,7 @@ async def report_memory_updated(prefs: list[dict[str, str]]) -> None:
     """curator 本轮沉淀了新长期偏好时上报（前端在回复下方画一行「记住了 … ✕」）。
 
     透明度设计的落点：写入是自动的（不打断用户去点确认框），但**必须看得见、且一键撤得掉**——
-    每条带 ``dedup_key``，✕ 直接打 ``DELETE /api/preferences/{uid}/{key}``。当撤销成本只有一次
+    每条带 ``key``，✕ 直接打 ``DELETE /api/preferences/{uid}/{key}``。当撤销成本只有一次
     点击时，事前确认就不值得存在（同 ChatGPT 的 "Memory updated"）。
 
     在 ``report_task_result`` **之后**发（curator 是后处理，跑在主回复下发之后）——前端据此把这行
@@ -346,34 +344,6 @@ async def report_memory_updated(prefs: list[dict[str, str]]) -> None:
     if not prefs:
         return
     await _emit(EVENT_MEMORY_UPDATED, f"记住了 {len(prefs)} 条新偏好", {"preferences": prefs})
-
-
-async def report_memory_applied(
-    domains: list[str], excluded: list[str], attenuated: list[str]
-) -> None:
-    """本轮**用到了**哪些长期记忆——把「记忆如何影响了这次结果」摆到台面上。
-
-    与 :func:`report_memory_updated`（写入侧：「记住了 X」）互补，这条是**读取侧**：本轮判定的
-    品类域、哪些偏好词把商品淘汰了、哪些只是压低了排序。
-
-    **为什么这条事件不能省。** 这套记忆系统真正的病不是复杂，是**复杂且不可观测**：改造前
-    ``domain`` 字段被写入端精心维护、读取端一个都没消费，而这个 bug 静默存在了很久——因为一条
-    偏好没生效 / 误杀了一批商品，前端不会有任何提示，用户只会觉得「这破 Agent 老是搜不出东西」，
-    且**归因不到记忆头上**。把生效情况变成一个事件，以后任何一个维度接漏了，你和用户都能立刻
-    看见。空信息不发（没记忆生效就别闪一行噪声）。
-    """
-    if not (excluded or attenuated):
-        return
-    parts = []
-    if excluded:
-        parts.append(f"排除 {len(excluded)} 项")
-    if attenuated:
-        parts.append(f"降权 {len(attenuated)} 项")
-    await _emit(
-        EVENT_MEMORY_APPLIED,
-        "按你的长期偏好：" + "、".join(parts),
-        {"domains": domains, "excluded": excluded, "attenuated": attenuated},
-    )
 
 
 async def report_session_constraints(pt: Any, thread_id: str | None = None) -> None:

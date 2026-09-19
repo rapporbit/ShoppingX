@@ -10,7 +10,7 @@ import type {
   HistoryTurn,
   OrderSnapshot,
   Preference,
-  PrefDraft,
+  FactWrite,
   PrepareOrderInput,
   ProductItem,
   SessionSnapshot,
@@ -142,46 +142,33 @@ export async function fetchPreferences(userId: string): Promise<Preference[]> {
   return body.preferences ?? [];
 }
 
-// 一句自然语言 → 结构化偏好草稿（**只解析，不落库**）。前端把草稿渲染成可编辑卡，
-// 用户确认 / 改完再调 addPreferences 落库——不让 LLM 猜的 polarity/domain/keywords 悄悄进库。
-// 「绝不推荐」（blocking）尤其如此：LLM 拿不准一律给 false，要不要授予硬淘汰权由用户在草稿卡上勾。
-// 解析不出时后端返 400 —— 把 detail 抛出去让页面提示「换个说法」，不静默吞掉。
-export async function parsePreference(userId: string, text: string): Promise<PrefDraft[]> {
-  const resp = await authFetch(`/api/preferences/${encodeURIComponent(userId)}/parse`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
-  });
-  const body = await resp.json().catch(() => ({}));
-  if (!resp.ok) throw new Error(body.detail ?? "解析失败");
-  return body.drafts ?? [];
-}
-
-// 落库若干条结构化偏好（source=user：此后不被 curator 覆盖、也不衰减）。
-export async function addPreferences(userId: string, entries: PrefDraft[]): Promise<Preference[]> {
+// 手填 / 改一条长期记忆（key / value / category 三字段，与 save_memory 工具同形态）。
+// 没有「先解析成草稿」那一步了：三个字段用户自己填得出来，不必为它多跑一次 LLM。
+// 后端过 validate_fact（PII 过滤 + 长度 + key 规范化），被拒时返 400——把 detail 抛出去让页面提示。
+export async function addPreference(userId: string, fact: FactWrite): Promise<Preference[]> {
   const resp = await authFetch(`/api/preferences/${encodeURIComponent(userId)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ entries }),
+    body: JSON.stringify(fact),
   });
   const body = await resp.json().catch(() => ({}));
   if (!resp.ok) throw new Error(body.detail ?? "添加失败");
   return body.added ?? [];
 }
 
-// 改一条偏好的结构化字段。改 polarity/category/domain/slug 会换一把 dedup_key，故 URL 传**旧** key，
-// 后端「删旧 + 写新」——字段没变时新旧同 key，等价于覆盖。
+// 改一条记忆。改了 key 就是换一条，故 URL 传**旧** key，后端「删旧 + 写新」；
+// key 没变时等价于覆盖。
 export async function updatePreference(
   userId: string,
   oldKey: string,
-  draft: PrefDraft,
+  fact: FactWrite,
 ): Promise<Preference[]> {
   const resp = await authFetch(
     `/api/preferences/${encodeURIComponent(userId)}/entry/${encodeURIComponent(oldKey)}`,
     {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(draft),
+      body: JSON.stringify(fact),
     },
   );
   const body = await resp.json().catch(() => ({}));
@@ -189,13 +176,17 @@ export async function updatePreference(
   return body.updated ?? [];
 }
 
-// 删一条偏好（页面上每行的 ×，以及回复下方「记住了 …」那行的撤销）。
-// dedup_key 形如 dislike:material:global:plastic，冒号在 URL path 段里合法，但仍编码一次防意外。
-export async function deletePreference(userId: string, dedupKey: string): Promise<void> {
-  await authFetch(
-    `/api/preferences/${encodeURIComponent(userId)}/${encodeURIComponent(dedupKey)}`,
-    { method: "DELETE" },
-  );
+// 删一条记忆（页面上每行的 ×，以及回复下方「记住了 …」那行的撤销）。
+export async function deletePreference(userId: string, key: string): Promise<void> {
+  await authFetch(`/api/preferences/${encodeURIComponent(userId)}/${encodeURIComponent(key)}`, {
+    method: "DELETE",
+  });
+}
+
+// 清空全部长期记忆（偏好页的「全部清除」）。后端同时把清空代数加一，让正在跑的回合后抽取
+// 整批作废——否则刚清完，上一轮的抽取结果转头又落回空库里。
+export async function clearPreferences(userId: string): Promise<void> {
+  await authFetch(`/api/preferences/${encodeURIComponent(userId)}`, { method: "DELETE" });
 }
 
 // 读本次会话累积的 P_t 约束集（偏好面板「本次会话」区；打开面板 / 断线重连时主动拉）。
@@ -218,22 +209,6 @@ export async function deleteSessionConstraint(threadId: string, cid: string): Pr
     `/api/session/${encodeURIComponent(threadId)}/constraints/${encodeURIComponent(cid)}`,
     { method: "DELETE" },
   );
-}
-
-// 「我的资料」：收货地 / 预算上限这类硬事实，用户显式设定（零 LLM）。
-// 只传的字段才更新；传空串 / 0 = 清除该项。返回更新后的全量偏好。
-export async function updateProfile(
-  userId: string,
-  patch: { dest_country?: string; budget_max_usd?: number },
-): Promise<Preference[]> {
-  const resp = await authFetch(`/api/preferences/${encodeURIComponent(userId)}/profile`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(patch),
-  });
-  const body = await resp.json().catch(() => ({}));
-  if (!resp.ok) throw new Error(body.detail ?? "保存失败");
-  return body.preferences ?? [];
 }
 
 // 读某 thread 的逐轮对话（GET /api/history/{tid}），用于刷新 / 重进页面后「回看」并接着聊。

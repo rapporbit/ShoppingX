@@ -91,10 +91,9 @@ from app.db.accounts import MIN_PASSWORD_LEN, assert_owner, claim_thread, ensure
 from app.db.quota import disabled_status as _disabled_quota
 from app.db.quota import get_quota, quota_enabled
 from app.db.session import init_db, session_factory
-from app.memory.assemble import blocking_exclude_terms
+from app.memory.fact_store import get_fact_store
+from app.memory.facts import MemoryFact, MemoryWriteRejected, validate_fact
 from app.memory.history import read_turns
-from app.memory.injector import persist_new_preferences
-from app.memory.parser import UserPrefDraft, parse_user_preference
 from app.memory.session_state import (
     SessionPrefState,
     constraint_rows,
@@ -102,7 +101,7 @@ from app.memory.session_state import (
     pt_from_state,
     pt_into_state,
 )
-from app.memory.store import FavoriteItem, PreferenceEntry, get_store
+from app.memory.store import FavoriteItem, get_store
 from app.observability import alerts, metrics
 from app.observability.logging import configure_logging
 from app.queue import (
@@ -113,7 +112,6 @@ from app.queue import (
     queue_enabled,
 )
 from app.recall import get_recall_client
-from app.recall.geo import SUPPORTED_COUNTRIES
 from app.recall.semantic_cache import turn_cache_status
 from app.tools._candidates import hydrate
 from app.tools.image_understand import sniff_image_mime
@@ -134,7 +132,6 @@ from app.utils.path_utils import (
     UPLOAD_ROOT,
     safe_join,
 )
-from app.utils.terms import term_hits
 from app.utils.thread_ctx import thread_scope
 from app.utils.tokens import warm_tokenizer
 from app.worker import WORKER_CONCURRENCY
@@ -1102,160 +1099,132 @@ async def download_upload(
     return FileResponse(target, filename=target.name)
 
 
-# --- 长期偏好（前端偏好面板：读 / 手填 / 删 / 我的资料）----------------------
+# --- 长期记忆（前端偏好面板：读 / 手填 / 改 / 删 / 清空）----------------------
 
 
-def _pref_json(entry: PreferenceEntry) -> dict[str, Any]:
-    """一条偏好的**完整**结构化 JSON——偏好不是一句话，是一个实体，各字段驱动不同的检索行为。
+def _fact_json(fact: MemoryFact) -> dict[str, Any]:
+    """一条事实的 JSON。字段就是模型看到的那四个，不多不少。
 
-    ``dedup_key`` 是删改的 handle；``keywords``/``blocking``/``domain`` 必须回吐给前端，因为它们
-    才是真正决定行为的字段（blocking 的 keywords 进 item_picker 硬过滤黑名单、非 blocking 走
-    Attenuator 减分、domain 限定生效范围）。只给用户看 content 一句话，等于把最该透明的部分藏了。
-    ``slug`` 是去重身份的原子标识，一并给出——用户改字段时前端要拿它拼新 key。
+    页面上给用户看的，必须**和注入给模型的是同一份东西**——上一版偏好页回吐 polarity /
+    blocking / domain / keywords 七八个字段，用户改了其中一个却看不出行为会怎么变，而模型
+    根本没见过这些字段。现在两边都只有 ``key / value / category``：用户看到什么，模型就读到什么。
 
-    ``last_confirmed_at`` 给前端显示「这条 N 个月没用过了」——它**不参与任何打分**（半衰期衰减
-    已删）。与其让系统按一个没人能解释的指数函数把偏好偷偷打七折，不如把「久未复现」摆到用户
-    眼前，由他自己决定删不删。
+    ``updated_at`` 给前端显示「这条多久没更新了」——它只参与 tier-one 的补位排序（见
+    ``facts.select_tier_one_facts``）与保留期，不参与任何打分。
     """
     return {
-        "dedup_key": entry.dedup_key,
-        "content": entry.content,
-        "category": entry.category,
-        "polarity": entry.polarity,
-        "blocking": entry.blocking,
-        "domain": entry.domain,
-        "slug": entry.slug,
-        "keywords": list(entry.keywords),
-        "source": entry.source,  # agent=Agent 学到的 / user=你手填的（页面上出徽标）
-        "created_at": entry.created_at.isoformat(),
-        "last_confirmed_at": entry.last_confirmed_at.isoformat(),
+        "key": fact.key,
+        "value": fact.value,
+        "category": fact.category.value,
+        "updated_at": fact.updated_at.isoformat(),
+        "source_session": fact.source_session,
     }
 
 
 def _assert_own(user_id: str, auth_uid: str | None) -> None:
-    """开启鉴权后只能读写**自己**的偏好（同 GET 的口径，写口尤其不能漏）。"""
+    """开启鉴权后只能读写**自己**的记忆（同 GET 的口径，写口尤其不能漏）。"""
     if auth_enabled() and auth_uid != user_id:
         raise HTTPException(403, "无权访问他人偏好")
 
 
-class PreferenceParse(BaseModel):
-    """``POST /parse`` 的请求体：一句自然语言，**只解析不落库**。
+class FactWrite(BaseModel):
+    """偏好页手填 / 修改一条事实的请求体（POST 与 PUT 共用）。
 
-    拆成独立一步，是因为偏好是结构化实体：LLM 猜出来的 polarity / strength / keywords 直接写库，
-    用户既不知道它写了什么，也没机会纠正「这条其实是软倾向」。先回吐草稿给前端渲染成可编辑卡，
-    用户确认（或改完）再 POST 落库。
+    三个字段与 ``save_memory`` 工具、回合后抽取**完全一致**，且同样过 ``validate_fact`` 这道门
+    （PII 过滤、长度、key 规范化）——三条写路径一个门，页面不是特权入口。
     """
 
-    text: str
-
-
-class PreferenceCreate(BaseModel):
-    """``POST`` 的请求体：**结构化**条目（通常是 /parse 的草稿经用户确认 / 修改后回传）。"""
-
-    entries: list[UserPrefDraft]
-
-
-class ProfileUpdate(BaseModel):
-    """「我的资料」表单：硬事实，用户显式设定，不靠 LLM 从聊天里猜。
-
-    这两项和口味偏好（材质 / 风格）的失败模式不同——猜错收货国会把关税直接算错，
-    猜错预算会把候选全卡掉，后果是「结果明显不对」而非「推荐差一点」，所以值得让用户显式设定。
-    两个字段都可选：只传哪个就只更新哪个（``null`` = 不动）。
-    """
-
-    dest_country: str | None = None  # ISO 码，如 JP；空串 = 清除
-    budget_max_usd: float | None = None  # 上限 USD；<=0 = 清除
+    key: str
+    value: str
+    category: str = "preference"
 
 
 @app.get("/api/preferences/{user_id}")
 async def get_preferences(
     user_id: str, auth_uid: str | None = Depends(get_current_user_id)
 ) -> dict[str, Any]:
-    """读取某用户沉淀的长期偏好，供前端「偏好面板」展示。
+    """读取某用户的长期记忆，供前端「偏好面板」展示。
 
-    **鉴权（I 块，堵越权读）：** 开启 ``AUTH_ENABLED`` 后，只能读**自己**的偏好——token 的 sub
-    与 URL 段 user_id 不一致即 403。这正是本块要堵的洞：原来谁都能改 URL 读他人 Store。关闭时
-    退回现状（任意读）。
+    **鉴权（堵越权读）：** 开启 ``AUTH_ENABLED`` 后，只能读**自己**的记忆——token 的 sub 与 URL
+    段 user_id 不一致即 403。关闭时退回现状（任意读）。
 
-    refdoc 五接口里没有这个——但 ROADMAP 的偏好面板需要一个读口。走 ``get_store()``（后端是
-    SQLite），返回扁平 JSON。
+    store 已按 ``updated_at`` 倒序返回，前端看到的第一条就是最近被写过的那条；保留期
+    （``MEMORY_RETENTION_DAYS``）内的才返回，与注入给模型的口径一致——页面上看得见的，
+    就是模型读得到的。
     """
     _assert_own(user_id, auth_uid)
-    entries = await get_store().read(user_id)
-    # 最近被确认过的排前面，面板一眼看到最活跃的偏好。按时间排序而非按「衰减权重」——后者已删，
-    # 而它做的事本来也就是这个：把久未复现的往后排。区别只在于现在它不再偷偷影响检索。
-    entries.sort(key=lambda e: e.last_confirmed_at, reverse=True)
-    return {"user_id": user_id, "preferences": [_pref_json(e) for e in entries]}
-
-
-@app.post("/api/preferences/{user_id}/parse")
-async def parse_preference(
-    user_id: str,
-    body: PreferenceParse,
-    auth_uid: str | None = Depends(get_current_user_id),
-) -> dict[str, Any]:
-    """一句自然语言 → 结构化偏好草稿（**只解析，不落库**）。
-
-    用户不可能自己填 ``slug`` / ``keywords``，但也不该被 LLM 猜的 ``polarity`` / ``strength``
-    蒙在鼓里——这两步之间的解法就是这个端点：LLM 拆完先回吐草稿，前端渲染成可编辑的结构化卡，
-    用户改完 / 确认后再 POST 落库。解析不出（用户写了句「你好」）→ 400。
-    """
-    _assert_own(user_id, auth_uid)
-    drafts = await parse_user_preference(body.text)
-    if not drafts:
-        raise HTTPException(400, "没能从这句话里读出偏好，换个说法试试（如「不要塑料的」）")
-    return {"drafts": [d.model_dump() for d in drafts]}
+    facts = await get_fact_store().get_facts(user_id)
+    return {"user_id": user_id, "preferences": [_fact_json(f) for f in facts]}
 
 
 @app.post("/api/preferences/{user_id}")
 async def add_preference(
     user_id: str,
-    body: PreferenceCreate,
+    body: FactWrite,
     auth_uid: str | None = Depends(get_current_user_id),
 ) -> dict[str, Any]:
-    """落库若干条**结构化**偏好（``source="user"``）——通常是 /parse 的草稿经用户确认 / 修改后回传。
+    """手填一条长期记忆（同 key 覆盖）。
 
-    走 ``persist_new_preferences``（与 curator 同一个唯一落库口）。``source="user"`` 让这些条目
-    此后不被 curator 覆盖、也不随时间衰减（见 ``store._merge_on_collision`` / ``recency_weight``）。
+    **没有「先解析成结构化草稿」那一步了**：上一版要 LLM 把一句自然语言拆成 polarity /
+    category / keywords 再让用户确认，是因为那套模型有七八个字段、用户填不出来。事实只有
+    key / value / category 三个，直接填即可——省掉一次 LLM 调用，也省掉「解析不出来」的 400。
+
+    过 ``validate_fact``（PII 过滤 + 长度 + key 规范化）：被拒时回 400，**但不回显 value**
+    （被拒的多半正是不该扩散的东西，错误消息由 ``MemoryWriteRejected`` 给）。
     """
     _assert_own(user_id, auth_uid)
     if not user_id:
-        raise HTTPException(400, "匿名用户无法沉淀偏好")
-    entries = [e for e in body.entries if e.slug.strip() and e.content.strip()]
-    if not entries:
-        raise HTTPException(400, "偏好内容与 slug 不能为空")
-    # 显式传 store（而非让 persist 自己 get_store()）：读写走同一个实例，测试里替换一处即可。
-    written = await persist_new_preferences(
-        user_id, entries, source_session="", source="user", store=get_store()
-    )
-    return {"added": [_pref_json(e) for e in written]}
+        raise HTTPException(400, "匿名用户无法沉淀记忆")
+    try:
+        fact = validate_fact(body.key, body.value, body.category, source_session="")
+    except MemoryWriteRejected as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not await get_fact_store().upsert_facts(user_id, [fact]):
+        raise HTTPException(503, "记忆库暂时写不进去，请稍后再试")
+    return {"added": [_fact_json(fact)]}
 
 
-@app.put("/api/preferences/{user_id}/entry/{dedup_key:path}")
+@app.put("/api/preferences/{user_id}/entry/{key:path}")
 async def update_preference(
     user_id: str,
-    dedup_key: str,
-    body: UserPrefDraft,
+    key: str,
+    body: FactWrite,
     auth_uid: str | None = Depends(get_current_user_id),
 ) -> dict[str, Any]:
-    """就地修改一条偏好的结构化字段（改极性 / 硬软 / 品类 / 关键词 / 生效域）。
+    """就地修改一条记忆。改了 key 就是**换一条**：先删旧 key，再按新 key 写。
 
-    ``dedup_key`` 由 ``polarity:category:domain:slug`` 派生，所以改这几个字段会**换一把钥匙**——
-    实现就是「删旧 + 写新」，而不是原地改。这也是为什么不需要引入 uuid 主键：URL 里传的是**旧**
-    key（前端本来就有），新 key 由新字段确定性算出。字段没变的情况下删的和写的是同一把 key，
-    结果等价于覆盖，无副作用。
-
-    改完一律 ``source="user"``——用户亲手改过的条目，就归他管（curator 此后不得覆盖）。
+    URL 里的 ``key`` 是**旧**的（前端本来就有），body 里的是改完的。两者相同时等价于覆盖写，
+    无副作用。``:path`` 转换器是历史沿用——``validate_fact`` 规范化后的 key 不含 ``/``，
+    但让路由宽容一点，免得前端传了脏 key 时拿到 404 而不是 400。
     """
     _assert_own(user_id, auth_uid)
-    if not body.slug.strip() or not body.content.strip():
-        raise HTTPException(400, "偏好内容与 slug 不能为空")
-    store = get_store()
-    await store.delete(user_id, dedup_key)  # 旧钥匙作废（字段没变时新旧同 key，等价于覆盖）
-    written = await persist_new_preferences(
-        user_id, [body], source_session="", source="user", store=store
-    )
-    return {"updated": [_pref_json(e) for e in written]}
+    try:
+        fact = validate_fact(body.key, body.value, body.category, source_session="")
+    except MemoryWriteRejected as exc:
+        raise HTTPException(400, str(exc)) from exc
+    store = get_fact_store()
+    if key != fact.key:
+        await store.delete_fact(user_id, key)
+    if not await store.upsert_facts(user_id, [fact]):
+        raise HTTPException(503, "记忆库暂时写不进去，请稍后再试")
+    return {"updated": [_fact_json(fact)]}
+
+
+@app.delete("/api/preferences/{user_id}")
+async def clear_preferences(
+    user_id: str, auth_uid: str | None = Depends(get_current_user_id)
+) -> dict[str, str]:
+    """清空该用户全部长期记忆（偏好页的「全部清除」）。
+
+    **同一个事务里把 ``memory_purge_gen`` 加一**：正在跑的回合后抽取会在写库前后各读一次代数，
+    发现变了就整批丢弃——否则用户刚点完清空，上一轮的抽取结果转头又落回空库里，看起来就是
+    「清了个寂寞」（见 ``fact_store.clear`` 与 ``curator``）。
+
+    幂等：没有记忆的用户照样返回 ok，连点两次不报错。
+    """
+    _assert_own(user_id, auth_uid)
+    await get_fact_store().clear(user_id)
+    return {"status": "ok"}
 
 
 @app.get("/api/session/{thread_id}/constraints")
@@ -1313,89 +1282,24 @@ def _read_session_pt(session_dir: Path) -> SessionPrefState:
     return pt_from_state(state.middle_context) if state is not None else SessionPrefState()
 
 
-@app.delete("/api/preferences/{user_id}/{dedup_key:path}")
+@app.delete("/api/preferences/{user_id}/{key:path}")
 async def delete_preference(
     user_id: str,
-    dedup_key: str,
+    key: str,
     auth_uid: str | None = Depends(get_current_user_id),
 ) -> dict[str, str]:
-    """删除一条偏好（页面上每行的 ×，以及回复下方「记住了 …」的撤销）。
+    """删除一条记忆（页面上每行的 ×，以及回复下方「记住了 …」的撤销）。
 
-    ``:path`` 转换器是因为 dedup_key 形如 ``dislike:material:global:plastic``，domain 段是自由
-    文本、理论上可能含 ``/``。不存在的 key 静默成功（Store.delete 本身幂等）——用户连点两次
-    不该看到报错。
+    **这是唯一的删除口，且只有用户能走**：模型侧的「忘掉 X」走 ``save_memory`` 用原 key 覆盖写
+    （计划 §3.2 第 2 条）——识别交给模型，授权留给用户。不存在的 key 静默成功（幂等，连点两次
+    不该报错）。
 
     **删了会不会被 Agent 学回来？** 会，但只在用户重新提起同一件事时——那时他本来就是又说了
     一遍。为此加一张 tombstone 表（删除记录 + TTL + 写入前查禁）不值，真被抱怨了再加。
     """
     _assert_own(user_id, auth_uid)
-    await get_store().delete(user_id, dedup_key)
+    await get_fact_store().delete_fact(user_id, key)
     return {"status": "ok"}
-
-
-@app.put("/api/preferences/{user_id}/profile")
-async def update_profile(
-    user_id: str,
-    body: ProfileUpdate,
-    auth_uid: str | None = Depends(get_current_user_id),
-) -> dict[str, Any]:
-    """更新「我的资料」——常用收货地 / 预算上限这类**硬事实**，用户显式设定，零 LLM。
-
-    这两项走固定 ``slug``（``ship_to`` / ``budget_max``），于是 dedup_key 恒定，改值即覆盖——
-    天然是单值语义，不会像口味偏好那样越攒越多。写成普通 ``PreferenceEntry`` 而非另起一张表：
-    收货地本来就已经被 ``planner.resolve_dest_country_layered`` 的第 3 层（``category="location"``
-    的长期偏好）消费，塞进同一个 Store 就直接生效，不用改检索链路一行代码。
-
-    传空串 / 非正数 = 清除该项。
-    """
-    _assert_own(user_id, auth_uid)
-    if not user_id:
-        raise HTTPException(400, "匿名用户无法沉淀偏好")
-    store = get_store()
-
-    if body.dest_country is not None:
-        code = body.dest_country.strip().upper()
-        if not code:
-            await store.delete(user_id, "like:location:global:ship_to")
-        elif code not in SUPPORTED_COUNTRIES:
-            raise HTTPException(400, f"不支持的收货国：{code}")
-        else:
-            # content 里放**大写 ISO 码**，因为 geo.resolve_dest_country 正是从 content 文本里
-            # 正则解析国家的——这里写的格式必须是那边认得出的，否则资料填了却不生效。
-            await store.write(
-                user_id,
-                PreferenceEntry(
-                    slug="ship_to",
-                    content=f"常用收货地：{code}",
-                    category="location",
-                    # 收货地是**跨品类**的用户事实（买鞋买沙发都寄同一个地方）→ global。
-                    # 它也正好对上下面 delete 用的 "like:location:global:ship_to"。
-                    domain="global",
-                    polarity="like",
-                    keywords=[code],
-                    source="user",
-                ),
-            )
-
-    if body.budget_max_usd is not None:
-        if body.budget_max_usd <= 0:
-            await store.delete(user_id, "like:budget:global:budget_max")
-        else:
-            amount = round(body.budget_max_usd, 2)
-            await store.write(
-                user_id,
-                PreferenceEntry(
-                    slug="budget_max",
-                    content=f"预算上限约 {amount:g} 美元",
-                    category="budget",
-                    domain="global",  # 「我的资料」里的总预算档位，跨品类生效
-                    polarity="like",
-                    source="user",
-                ),
-            )
-
-    entries = await store.read(user_id)
-    return {"preferences": [_pref_json(e) for e in entries]}
 
 
 @app.get("/api/favorites/{user_id}")
@@ -1452,25 +1356,16 @@ async def get_similar(
     **刻意不走 AgentLoop**：这是一次纯向量检索（0 次 LLM 调用、亚秒级），塞进 Agent 只会换来
     几十秒的规划-工具-收尾开销，换不到任何东西。故它不进 ``FULL_TOOL_SET``，就是个 REST 端点。
 
-    **但不豁免 blocking 黑名单**：「绝不推荐」的语义是「这件商品用户永远不该看到」，对任何展示
-    通路都成立——不走 AgentLoop 省掉的是规划开销，不是用户授权的硬排除。这里没有会话品类域
-    （planner 没跑），故用 :func:`blocking_exclude_terms`（不做域过滤，只收用户亲手勾的条目），
-    命中判定与 item_picker / item_search 同一套 ``term_hits``。有排除词时多取一个 buffer 补位，
-    别让黑名单用户拿到残缺的同款列表。匿名用户无黑名单，原样直通。
+    **不再按长期记忆过滤**（M4）：原来这里会拿用户亲手勾的「绝不推荐」黑名单挡一遍同款。那条腿
+    随长期记忆改成「只经模型上下文生效」一并删了——记忆现在只有一种生效方式，就是模型把它写进
+    工具入参，而这条通路根本没有模型。留着它就等于留一条谁也看不见的第二生效通路，正是这次
+    重构要消灭的东西。代价：同款列表里可能出现用户说过不喜欢的东西，他可以照样不点。
 
     返回形状直接对齐前端 ``ProductItem``：只有货价（``price_usd``，建库时预折算），**没有到手价**
     ——那要跑 ``shipping_calc``，不是这条通路该做的事，前端照实标「货价」即可。
     """
     top_k = max(1, min(top_k, 24))
-    exclude = await blocking_exclude_terms(auth_uid or "")
-    fetch_k = top_k + (8 if exclude else 0)
-    cands = await asyncio.to_thread(get_recall_client().similar, item_id, fetch_k)
-    if exclude:
-        cands = [
-            c
-            for c in cands
-            if not any(term_hits(kw, f"{c.title} {c.brand} {c.category}".lower()) for kw in exclude)
-        ][:top_k]
+    cands = await asyncio.to_thread(get_recall_client().similar, item_id, top_k)
     return {
         "item_id": item_id,
         "items": [

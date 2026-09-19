@@ -354,15 +354,14 @@ async def item_search(
     slot 只在多槽位轮传槽名（一槽一条、同轮发）。
     返回 filtered_out = 库里有但被条件挡住（不是候选，如实说被哪个条件挡的）。
     """
-    # 个性化：把用户**本轮域内**的 like 偏好原子词拼进检索词（见 memory.assemble.search_terms）。
-    # 这条通路取代了原来的 user 塔向量画像——那条路把所有 like 加权平均成一个向量塞进召回，结果
-    # 无法归因、无法调试、也无法向用户解释。拼进 query 文本后，个性化**看得见**：它出现在下面
-    # 的 report_tool_start 上报里、前端的思考过程里、日志里。可观测的弱个性化，胜过不可观测的
-    # 强个性化——后者出问题时你连从哪儿查都不知道。
+    # 个性化**不再由系统悄悄拼词**（M4）：长期偏好每轮注入给模型看，由模型自己决定要不要写进
+    # `query` / `brand_exclude` / `price_usd_max`。个性化因此出现在**工具入参**里——上报、前端
+    # 思考过程、日志三处都看得见，且能归因到是模型哪一步加的。原来那条「系统把 like 词拼进
+    # query」的腿，和注入给模型的文本是两份来源，模型转述一遍就会重复拼，谁也说不清最终检索词
+    # 是怎么来的。
+    effective_query = query
     mem = await assemble(get_user_id() or "")
-    pref_terms = mem.search_terms
-    effective_query = " ".join([query, *pref_terms]) if pref_terms else query
-    # 记忆硬排除在**召回阶段**生效（不等 item_picker 事后杀）：见 _apply_filters 的说明。
+    # 会话级 P_t 的「不要 X」在**召回阶段**就生效（不等 item_picker 事后杀）：见 _apply_filters。
     # 归一与 picker 同口径（中文词补英文变体），命中判定同一套 term_hits。
     mem_exclude = normalize_terms(mem.exclude)
     # 平台收口（机制层，不靠模型自觉）：把入参落到本轮「启用平台」集合内——"all" 只等于全部启用平台，
@@ -371,10 +370,9 @@ async def item_search(
     platform = search_platforms[0] if len(search_platforms) == 1 else "all"  # type: ignore[assignment]
     await monitor.report_tool_start(
         "item_search",
-        query=effective_query,  # 上报**实际**用于检索的词（含偏好词）——个性化必须看得见
+        query=effective_query,  # 上报**实际**用于检索的词——检索词必须看得见
         platform=platform,
         top_k=top_k,
-        personalization=("+".join(pref_terms) if pref_terms else "inactive"),
         price_usd_max=price_usd_max,
         min_rating=min_rating,
         brand_exclude=brand_exclude,

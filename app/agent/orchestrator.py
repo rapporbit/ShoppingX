@@ -48,7 +48,6 @@ from app.api.context import (
     get_session_pt,
     reset_dest_country,
     reset_original_query,
-    reset_session_domains,
     reset_session_pt,
     reset_session_tasks,
     set_original_query,
@@ -311,10 +310,9 @@ async def run_agent(
         if quota_left is not None:
             set_task_cap(quota_left)
 
-        # 清掉上一轮残留的 ContextVar / 模块级状态（收货国、品类域、任务清单）：
+        # 清掉上一轮残留的 ContextVar / 模块级状态（收货国、任务清单）：
         # 同 thread 续聊时它们会让本轮 planner 还没跑就先按上轮结论走。
         reset_dest_country()
-        reset_session_domains()
         reset_session_tasks()
         set_original_query(query)
         fresh_phase_machine()  # 会话级复位，与上面几个 reset 同列（曾是 on_session_start hook）
@@ -414,7 +412,6 @@ async def run_agent(
             reset_diagnostics(thread_id)
             reset_session_bundle()
             reset_dest_country()
-            reset_session_domains()
             reset_session_tasks()
             reset_original_query()
             reset_session_pt()

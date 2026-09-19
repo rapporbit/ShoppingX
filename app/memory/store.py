@@ -1,26 +1,21 @@
-"""长期记忆 Store —— 跨会话持久化的用户偏好 / 历史 / 收藏。
+"""用户级持久数据 —— 跨会话的**行为历史 / 收藏**。
 
 对齐 refdocs/06 的核心区分：**长上下文 ≠ 长期记忆**。长上下文（消息历史）按 token 涨钱、只在单
-会话有效、随轮数膨胀；长期记忆按条目持久化、跨会话共享、只在「检测到新偏好」时写入。有了 Store
-保底（「不要塑料」已落库），上下文才能放心压缩——即使丢掉那条历史消息，下次新会话仍会重新注入。
+会话有效、随轮数膨胀；长期数据按条目持久化、跨会话共享、只在有新事实时写入。
 
-**Mmem 重构：三件事变了。**
+**长期记忆（偏好 / 约束 / 背景）不在本模块**，见 :mod:`app.memory.fact_store`：M1~M4 把它换成了
+``key / value / category`` 的事实模型，同 key 覆盖写。本模块只剩两样不属于那套建模的东西：
 
-1. **落地介质从「JSON 文件 / Redis 双后端」收成 SQLite**（复用 M16/M17 已有的 ``app.db``）。
-   原来那两个后端各有一处并发写隐患：文件后端覆盖式 ``write_text``（多 worker 会丢写）、Redis
-   后端 ``hget`` + ``hset`` 非原子（并发写同一条会丢更新——而 Redis 存在的理由恰恰是「可多实例
-   共享」，它在自己的目标场景里是不安全的）。关系库的事务一并管掉，还顺手把「收藏超 200 条裁最旧」
-   这类操作从「读全量→算 overflow→回写」压成一条 SQL。
+- **行为历史**：「做过什么」的事实快照，既不去重也不合并，每种 kind 留最近几条 + TTL 过期。
+- **收藏**：用户手工攒的商品清单，经 :mod:`app.memory.affinity` 一条窄路进 item_picker 的弱加分。
 
-2. **``strength`` 字段删除，改由 ``blocking`` 表达杀伤力**——见 :class:`PreferenceEntry`。
+落地介质是 SQLite（复用 M16/M17 已有的 ``app.db``），不再有后端抽象基类——原来 ABC +
+LocalFileStore + RedisStore 那三层各有一处并发写隐患（文件覆盖式 ``write_text`` 丢写、Redis
+``hget`` + ``hset`` 非原子），而关系库的事务一并管掉，还顺手把「收藏超 200 条裁最旧」从
+「读全量→算 overflow→回写」压成一条 SQL。
 
-3. **时间衰减（``recency_weight``）整个删除**，连带删掉 ``read_relevant`` / ``rank_relevant``
-   语义排序，本模块因此**不再依赖 ``app.recall.towers``**。理由见 :func:`build_preference_block`
-   一侧的注释：域隔离（``PrefDomain``）已经把「本轮相关的偏好」压到个位数，叠在上面的语义 top-k
-   是为「几十上百条偏好」准备的第二层解法，纯属冗余。
-
-**容错口径（降级不崩）：** 记忆是**增强**而非**依赖**。库读不出来只记日志、返回空——「这一轮没有
-历史偏好」，绝不让记忆故障演变成「这次任务失败」。
+**容错口径（降级不崩）：** 这些数据是**增强**而非**依赖**。库读不出来只记日志、返回空——「这一轮
+没有历史」，绝不让它演变成「这次任务失败」。
 """
 
 from __future__ import annotations
@@ -36,21 +31,11 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Favorite, HistoryRecord, Preference
+from app.db.models import Favorite, HistoryRecord
 from app.db.session import session_factory
-from app.memory.domains import DOMAIN_OTHER, PrefDomain
 from app.utils.env import env_int
 
 logger = logging.getLogger("shoppingx.memory")
-
-Polarity = Literal["like", "dislike"]
-# 谁写的这条偏好：agent=curator 从对话里学到的；user=用户在偏好页面手填的。
-# 它同时决定两件事：页面上的来源徽标，以及 curator 不得覆盖用户手填的内容（见 _apply_merge）。
-Source = Literal["agent", "user"]
-# 偏好的「维度」（材质 / 颜色 / 品牌…），区别于 PrefDomain 的「品类」（鞋 / 沙发…）。两者正交：
-# 一条偏好是「在 footwear 这个**品类**下，关于 material 这个**维度**的取向」。
-# location = 常用收货地（「我一般寄到日本」）——不是口味偏好，但同样跨会话稳定，且决定关税免征额。
-PrefCategory = Literal["material", "style", "brand", "budget", "color", "size", "location", "other"]
 
 HISTORY_TTL_DAYS = env_int("HISTORY_TTL_DAYS", 30)
 # 每种 kind 保留最近几条历史（超出的按 created_at 淘汰最旧）。设为 1 即退回 last-write-wins。
@@ -65,77 +50,6 @@ def _now() -> datetime:
 
 def _new_id() -> str:
     return uuid4().hex
-
-
-class PreferenceEntry(BaseModel):
-    """用户偏好的一条记录（跨会话持久）。领域对象，与 ORM 行 ``app.db.models.Preference`` 互转。
-
-    由 :mod:`app.memory.curator`（从对话学到）或偏好页面（用户手填）写入，两条路共用
-    ``injector.persist_new_preferences`` 这个唯一落库口。
-
-    **去重身份由代码派生，不由 LLM 手拼**：``polarity`` / ``category`` / ``domain`` 已是独立字段，
-    再让 LLM 拼一个含它们的复合 key 字符串，等于同一份信息存两遍、还可能自相矛盾（key 说 dislike，
-    polarity 字段却填 like，没有校验拦得住）。LLM 只提供真正的原子新信息 ``slug``。
-
-    **``blocking``：杀伤力只由用户授予。** 只有 ``blocking=True`` 的条目会在 item_picker 里硬淘汰
-    商品；agent 学到的偏好一律只减分（授权分档见 ``memory.assemble``）。这是 Mmem 的核心决策——
-    原来的 ``strength: hard|soft`` 是 curator 的 LLM **猜**出来的，而 hard 意味着永久、跨品类、
-    静默的硬淘汰。让一个每轮都在猜的模型决定「这件商品用户永远不该看到」，风险和收益完全不匹配。
-    硬软的分界不该是 LLM 的置信度，而该是**信息的来源**：用户明说的可以硬执行，agent 推断的只能软。
-    """
-
-    polarity: Polarity = Field(default="like")
-    category: PrefCategory = Field(default="other", description="偏好维度：material/style/brand/…")
-    domain: PrefDomain = Field(
-        default=DOMAIN_OTHER,
-        description="品类域：决定这条偏好在哪些轮次生效。global=跨品类底线（安全/过敏/伦理）",
-    )
-    slug: str = Field(
-        default="", description="LLM 给的原子标识（规范化英文，如 leather/brand_nike）"
-    )
-    content: str = Field(description="偏好内容，如「不接受皮革材质」")
-    # 可直接用于硬过滤 / 减分的原子词。content 多是整句、无法做子串匹配；keywords 才是能落地用的。
-    keywords: list[str] = Field(default_factory=list)
-    source: Source = Field(default="agent", description="agent=curator 学到的 / user=用户手填的")
-    blocking: bool = Field(
-        default=False, description="绝不推荐（硬淘汰）——仅 source=user 可为 True，见类 docstring"
-    )
-    source_session: str = Field(default="", description="来源会话 thread_id（可追溯出处）")
-    created_at: datetime = Field(default_factory=_now)
-    last_confirmed_at: datetime = Field(
-        default_factory=_now,
-        description="上次被确认的时间。**不参与打分**，只供 UI 显示「多久没用」",
-    )
-
-    @property
-    def dedup_key(self) -> str:
-        """去重键：由结构化字段确定性组装，杜绝 LLM 手拼与字段不一致的风险。"""
-        return f"{self.polarity}:{self.category}:{self.domain}:{self.slug}"
-
-    @property
-    def is_blocking(self) -> bool:
-        """这条偏好是否有权硬淘汰商品。**只有用户显式勾选的才算**——agent 学到的一律只减分。
-
-        双重校验（``source == "user"`` **且** ``blocking``）而非只看 ``blocking``：多一道防线，
-        免得将来哪条写入路径忘了守「仅 user 可设 blocking」的约定，就把硬淘汰权泄给了 LLM。
-        """
-        return self.blocking and self.source == "user"
-
-    @classmethod
-    def from_row(cls, row: Preference) -> PreferenceEntry:
-        return cls(
-            polarity=row.polarity,  # type: ignore[arg-type]
-            category=row.category,  # type: ignore[arg-type]
-            domain=row.domain,  # type: ignore[arg-type]
-            slug=row.slug,
-            content=row.content,
-            keywords=list(row.keywords or []),
-            source=row.source,  # type: ignore[arg-type]
-            blocking=row.blocking,
-            source_session=row.source_session,
-            created_at=row.created_at,
-            last_confirmed_at=row.last_confirmed_at,
-        )
 
 
 HistoryKind = Literal["purchase", "search"]
@@ -192,107 +106,20 @@ class FavoriteItem(BaseModel):
         )
 
 
-def _apply_merge(row: Preference, incoming: PreferenceEntry) -> None:
-    """``dedup_key`` 撞车时的合并（就地改 ORM 行）：取最新表达，保留最早 ``created_at``。
-
-    ``last_confirmed_at`` 刷新到当前时间——重复提及即「确认这条偏好还活着」。
-
-    **例外：用户手填的条目不被 curator 覆盖**（只刷新确认时间）。否则用户在偏好页面亲手写下的
-    「预算严格 300 以内」，会被 Agent 下一轮的推断悄悄改掉——「我明明改过了」是记忆功能最伤信任
-    的一种失败。用户自己再次手填（incoming 也是 user）时照常覆盖，那本来就是他要改。
-    """
-    row.last_confirmed_at = _now()
-    if row.source == "user" and incoming.source != "user":
-        return
-    row.content = incoming.content
-    row.keywords = list(incoming.keywords)
-    row.source = incoming.source
-    row.source_session = incoming.source_session
-    # blocking 随 incoming——但写入口已保证只有 user 能置 True（见 persist_new_preferences）。
-    row.blocking = incoming.blocking
-
-
 class PreferenceStore:
-    """用户级持久数据的读写口（偏好 / 历史 / 收藏），后端是 :mod:`app.db` 的 SQLite。
+    """用户级持久数据的读写口（**行为历史 / 收藏**），后端是 :mod:`app.db` 的 SQLite。
+
+    **偏好那一腿已经不在这里了**：长期记忆改由 :class:`app.memory.fact_store.MemoryFactStore`
+    按 ``key / value / category`` 存 ``memory_facts``（M1~M4）。旧的 ``preferences`` 表与
+    ``app.db.models.Preference`` 行保留着不 drop，作为一版回滚依据，但**没有任何代码再读写它**。
+
+    类名沿用 ``PreferenceStore`` 只是为了不动收藏 / 历史那十几处调用点；它现在名实不副，
+    等收藏与历史也重构时一并改名。
 
     **不再有后端抽象基类**：原来 ABC + LocalFileStore + RedisStore 的三层结构，是为了「离线可跑」
     与「可选真后端」——而 SQLite 两样都占（零外部依赖、库文件躺在持久卷上），一个实现就够了。
     少一层抽象，就少一处「写了不读」的接缝。
     """
-
-    async def read(self, user_id: str) -> list[PreferenceEntry]:
-        """读某用户的全部偏好。库故障返回空（降级为「本轮没有历史偏好」），不抛。"""
-        if not user_id:
-            return []
-        try:
-            async with session_factory()() as db:
-                rows = (
-                    await db.execute(select(Preference).where(Preference.user_id == user_id))
-                ).scalars()
-                return [PreferenceEntry.from_row(r) for r in rows]
-        except SQLAlchemyError as exc:
-            logger.warning("读取偏好失败，本轮降级为空偏好（user=%s）：%s", user_id, exc)
-            return []
-
-    async def write(self, user_id: str, entry: PreferenceEntry) -> None:
-        """写一条偏好；相同 ``dedup_key`` 走 :func:`_apply_merge` 覆盖合并，不堆重复条目。"""
-        if not user_id:
-            return
-        try:
-            async with session_factory()() as db:
-                row = (
-                    await db.execute(
-                        select(Preference).where(
-                            Preference.user_id == user_id,
-                            Preference.dedup_key == entry.dedup_key,
-                        )
-                    )
-                ).scalar_one_or_none()
-                if row is None:
-                    db.add(
-                        Preference(
-                            id=_new_id(),
-                            user_id=user_id,
-                            dedup_key=entry.dedup_key,
-                            polarity=entry.polarity,
-                            category=entry.category,
-                            domain=entry.domain,
-                            slug=entry.slug,
-                            content=entry.content,
-                            keywords=list(entry.keywords),
-                            source=entry.source,
-                            blocking=entry.blocking,
-                            source_session=entry.source_session,
-                            created_at=entry.created_at,
-                            last_confirmed_at=entry.last_confirmed_at,
-                        )
-                    )
-                else:
-                    _apply_merge(row, entry)
-                await db.commit()
-        except SQLAlchemyError as exc:
-            # 写失败：这条偏好本轮不落库（下次识别到会再写），但不拖垮收尾链路。
-            logger.warning(
-                "写入偏好失败，本条未持久化（user=%s，dedup_key=%s）：%s",
-                user_id,
-                entry.dedup_key,
-                exc,
-            )
-
-    async def delete(self, user_id: str, dedup_key: str) -> None:
-        """删一条偏好（用户主动撤回 / curator 矛盾消解）。不存在则静默无操作。"""
-        if not user_id:
-            return
-        try:
-            async with session_factory()() as db:
-                await db.execute(
-                    delete(Preference).where(
-                        Preference.user_id == user_id, Preference.dedup_key == dedup_key
-                    )
-                )
-                await db.commit()
-        except SQLAlchemyError as exc:
-            logger.warning("删除偏好失败（user=%s，dedup_key=%s）：%s", user_id, dedup_key, exc)
 
     # ── 行为历史 ────────────────────────────────────────────────────────────────────
 

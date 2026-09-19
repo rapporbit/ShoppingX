@@ -1,12 +1,14 @@
-"""给 Rubric 评测的测试 user 预置长期偏好，让「记忆注入」类 query（q12）评测有 ground truth。
+"""给 Rubric 评测的测试 user 预置长期记忆，让「记忆注入」类 query（q12）评测有 ground truth。
 
-q12「还是按我之前说的偏好，再帮我推荐两件家居好物」本身不带显式约束——靠注入的长期偏好兜。
-没有预置偏好时，Agent 无从尊重、judge 的 P0「违背黑名单」也没有判定基准，这条评测恒判 0、无效。
-本脚本给固定测试 user（``EVAL_USER_ID``）写入一条黑名单 + 两条家居 like 偏好；评测时用
-``run_rubric.py --user-id eval_user`` 跑，q12 的偏好注入与红线判定才成立。
+q12「还是按我之前说的偏好，再帮我推荐两件家居好物」本身不带显式约束——靠注入的长期记忆兜。
+没有预置事实时，Agent 无从尊重、judge 的 P0「违背硬规则」也没有判定基准，这条评测恒判 0、无效。
+本脚本给固定测试 user（``EVAL_USER_ID``）写入一条 constraint + 两条 preference；评测时用
+``run_rubric.py --user-id eval_user`` 跑，记忆注入与红线判定才成立。
 
-偏好是 read_relevant 按 query 语义召回的：家居/材质偏好对「买耳机」等无关 query 召不回，
-故给所有条目统一用同一 ``--user-id`` 不会污染其他评测。
+**没有域过滤了**（M4）：注入的是 tier-one 那批（全部 constraint + 最近几条其余事实），
+不再按 planner 判的品类域筛。所以这里每条只写一份，而不是像旧版那样同一条在两个域各种一份。
+代价是这三条在「买耳机」等无关 query 上也会注入——这正是参考实现的口径：事实是默认值，
+与本轮无关时模型自己会忽略它。
 
 用法：
     uv run python scripts/eval/seed_test_prefs.py            # 写入
@@ -22,63 +24,37 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from app.memory.store import PreferenceEntry, get_store  # noqa: E402
+from app.memory.fact_store import get_fact_store  # noqa: E402
+from app.memory.facts import validate_fact  # noqa: E402
 
 EVAL_USER_ID = "eval_user"
 
-# 一条黑名单（dislike，带可硬过滤 keywords）+ 两条家居 like：让 q12 的「按我之前偏好」有内容，
-# 且 P0「违背黑名单（推了塑料家居）」有判定基准。
-# 注入是按域生效的（``injector._in_scope``：entry.domain == global 或落在本轮 planner 判出的域里）。
-# 「家居好物」planner 可能判成 home_kitchen 也可能判成 furniture，两个域都种一份才不会漏注入；
-# dedup_key = polarity:category:domain:slug 含 domain，同 slug 跨域不会互相覆盖。
-# 不用 global：那会让这些家居偏好在「买耳机」等无关 query 上也注入，污染其他评测条目。
-_HOME_DOMAINS = ("home_kitchen", "furniture")
-
-_PREF_TEMPLATES = [
-    {
-        "slug": "plastic",
-        "content": "不接受塑料材质",
-        "category": "material",
-        "polarity": "dislike",
-        "keywords": ["塑料", "plastic"],
-    },
-    {
-        "slug": "natural_material",
-        "content": "偏好原木 / 藤编等自然材质的家居",
-        "category": "material",
-        "polarity": "like",
-        "keywords": ["原木", "实木", "藤编", "rattan", "wood"],
-    },
-    {
-        "slug": "niche_designer",
-        "content": "喜欢小众设计师品牌、不爱大路货",
-        "category": "brand",
-        "polarity": "like",
-        "keywords": ["小众", "设计师", "designer"],
-    },
+# 一条 constraint（每轮必注入，P0「推了塑料家居」的判定基准）+ 两条 preference。
+# key 用英文小写下划线，与 save_memory / curator 的产物同形态；value 写成几个月后单看也成立的句子。
+SEED_FACTS = [
+    ("material_avoid", "不接受塑料材质的家居用品", "constraint"),
+    ("material_taste", "偏好原木 / 实木 / 藤编等自然材质", "preference"),
+    ("brand_taste", "喜欢小众设计师品牌，不爱大路货", "preference"),
 ]
-
-SEED_PREFS = [{**tpl, "domain": d} for d in _HOME_DOMAINS for tpl in _PREF_TEMPLATES]
 
 
 async def main(clear: bool) -> None:
-    store = get_store()
-    entries = [PreferenceEntry(**p) for p in SEED_PREFS]  # type: ignore[arg-type]
+    store = get_fact_store()
+    facts = [validate_fact(k, v, c) for k, v, c in SEED_FACTS]
     if clear:
-        for e in entries:
-            await store.delete(EVAL_USER_ID, e.dedup_key)
-        print(f"已清除测试 user「{EVAL_USER_ID}」的 {len(entries)} 条预置偏好")
+        for f in facts:
+            await store.delete_fact(EVAL_USER_ID, f.key)
+        print(f"已清除测试 user「{EVAL_USER_ID}」的 {len(facts)} 条预置记忆")
         return
-    for e in entries:
-        await store.write(EVAL_USER_ID, e)
-    print(f"已为测试 user「{EVAL_USER_ID}」写入 {len(entries)} 条偏好：")
-    for e in entries:
-        print(f"  - [{e.polarity}/{e.category}] {e.content}（keywords={e.keywords}）")
+    await store.upsert_facts(EVAL_USER_ID, facts)
+    print(f"已为测试 user「{EVAL_USER_ID}」写入 {len(facts)} 条事实：")
+    for f in facts:
+        print(f"  - [{f.category.value}] {f.key}: {f.value}")
     print(f"\n评测 q12 时用：uv run python scripts/eval/run_rubric.py --user-id {EVAL_USER_ID}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--clear", action="store_true", help="删除预置偏好而非写入")
+    parser.add_argument("--clear", action="store_true", help="删除预置记忆而非写入")
     args = parser.parse_args()
     asyncio.run(main(args.clear))

@@ -17,7 +17,8 @@ from httpx import ASGITransport, AsyncClient
 
 import app.api.auth as auth
 import app.api.server as server
-from app.memory.store import PreferenceEntry, get_store
+from app.memory.fact_store import get_fact_store
+from app.memory.facts import MemoryCategory, MemoryFact
 
 _SECRET = "test-secret-please-ignore-0123456789abcdef"  # ≥32 字节，避开 PyJWT 弱密钥告警
 
@@ -70,11 +71,9 @@ async def test_auth_disabled_allows_cross_user_read(
 ) -> None:
     # 默认关闭：现状——谁都能读他人偏好（这正是本块开启后要堵的洞）。
     monkeypatch.setenv("AUTH_ENABLED", "false")
-    store = get_store()
-    await store.write(
-        "u1", PreferenceEntry(slug="niche", content="喜欢小众", category="brand", domain="other")
-    )
-    monkeypatch.setattr(server, "get_store", lambda: store)
+    store = get_fact_store()
+    await store.upsert_facts("u1", [MemoryFact(key="brand_taste", value="喜欢小众")])
+    monkeypatch.setattr(server, "get_fact_store", lambda: store)
 
     resp = await client.get("/api/preferences/u1")  # 不带 token
     assert resp.status_code == 200
@@ -84,12 +83,12 @@ async def test_auth_disabled_allows_cross_user_read(
 async def test_auth_enabled_blocks_cross_user_read(
     client: AsyncClient, auth_on: None, monkeypatch: Any, tmp_path: Path
 ) -> None:
-    store = get_store()
-    await store.write(
+    store = get_fact_store()
+    await store.upsert_facts(
         "victim",
-        PreferenceEntry(slug="secret", content="机密偏好", category="other", domain="other"),
+        [MemoryFact(key="secret", value="机密偏好", category=MemoryCategory.CONTEXT)],
     )
-    monkeypatch.setattr(server, "get_store", lambda: store)
+    monkeypatch.setattr(server, "get_fact_store", lambda: store)
 
     alice_token = auth.create_access_token("alice")
     headers = {"Authorization": f"Bearer {alice_token}"}
@@ -105,8 +104,8 @@ async def test_auth_enabled_blocks_cross_user_read(
 async def test_auth_enabled_requires_token(
     client: AsyncClient, auth_on: None, monkeypatch: Any, tmp_path: Path
 ) -> None:
-    store = get_store()
-    monkeypatch.setattr(server, "get_store", lambda: store)
+    store = get_fact_store()
+    monkeypatch.setattr(server, "get_fact_store", lambda: store)
     resp = await client.get("/api/preferences/anyone")  # 开启后缺 token
     assert resp.status_code == 401
 

@@ -44,7 +44,6 @@ from app.api.context import (
     get_session_pt,
     get_user_id,
     set_dest_country,
-    set_session_domains,
     set_session_pt,
     set_session_tasks,
 )
@@ -654,7 +653,6 @@ async def planner(intent: str) -> PlanOutput:
     if reconciled != plan.domains:
         logger.info("域反证：词面证据补入 %s（planner 判 %s）", reconciled, plan.domains)
         plan.domains = reconciled
-    set_session_domains(plan.domains)
     # 任务清单同样落 session 级（同 domains 的聚合方式）：阶段机的转移通告读它，
     # 在「无比价 / 到手价诉求」的轮次提示模型跳过 price_compare / shipping_calc——动机层提示，
     # 不是硬闸（COMPARING 阶段这两个工具仍然可用，用户中途改口还能调）。
