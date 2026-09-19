@@ -10,7 +10,7 @@
 
 import os
 import tempfile
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 os.environ.setdefault("LLM_MAIN", "gpt-4o-mini")
@@ -69,6 +69,7 @@ os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_TEST_DB}"
 # 这里用 asyncio.run 同步建掉：conftest 顶层没有事件循环，也不该为它引 session 级 async fixture
 # （anyio 的 backend fixture 是 function 级，套不上）。
 import asyncio  # noqa: E402
+from contextlib import suppress  # noqa: E402
 
 import pytest  # noqa: E402
 
@@ -184,3 +185,31 @@ def _clean_memory_tables() -> Iterator[None]:
             await db.commit()
 
     asyncio.run(_wipe())
+
+
+@pytest.fixture
+async def queue_worker() -> AsyncIterator[None]:
+    """给用例起一份进程内队列 + 一个消费它的「worker」。
+
+    阶段 1 条 7 起 API 进程不再直接跑 ``run_agent``：``POST /api/task`` 只入队，AgentLoop 在 worker
+    进程里跑。凡是要观察「任务真的跑起来了」的 API 用例都得自己扮演那个 worker，否则任务停在队列
+    里，``started`` 事件永远等不到。要换掉跑的东西时 patch 的是 ``worker.run_agent``（真正调它的那
+    个名字），不是 ``server.run_agent``——后者已经不存在了。
+    """
+    from app import worker as worker_mod
+    from app.queue import InProcessQueue, set_task_queue
+
+    queue = InProcessQueue()
+    set_task_queue(queue)
+    stop = asyncio.Event()
+    consumer = asyncio.create_task(
+        queue.consume("test-worker", worker_mod.handle_task, stop.is_set, 4)
+    )
+    try:
+        yield
+    finally:
+        stop.set()
+        consumer.cancel()
+        with suppress(asyncio.CancelledError):
+            await consumer
+        set_task_queue(None)

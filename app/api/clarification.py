@@ -7,7 +7,7 @@ dict 按 ``thread_id`` 做 key 桥接。
 同一 thread 同一时刻最多一个 pending clarification（Agent loop 是串行的）。
 单线程 asyncio、无 await 在 dict 操作之间，不需加锁。
 
-**跨进程那一半（批2-4）。** ``QUEUE_ENABLED=1`` 时 loop 跑在 worker 进程，那个 Future 住在
+**跨进程那一半（批2-4）。** loop 跑在 worker 进程，那个 Future 住在
 worker 的内存里；用户的回复却是从 API 进程的 WebSocket / HTTP 进来的，``resolve_pending`` 在那边
 找不到任何 pending，回复静默丢掉、Agent 干等到超时。补法是一张**等待令牌**：
 

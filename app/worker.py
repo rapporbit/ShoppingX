@@ -45,8 +45,9 @@ from app.config import store as config_store
 from app.db.holds import mark_running, release
 from app.db.runs import release_thread_run
 from app.db.session import init_db
+from app.deployment import assert_deployment_deps
 from app.observability.logging import configure_logging
-from app.queue import IntentTask, TaskQueue, TaskStatus, get_task_queue, queue_enabled
+from app.queue import IntentTask, TaskQueue, TaskStatus, get_task_queue
 from app.utils.env import env_int
 from app.utils.tokens import warm_tokenizer
 
@@ -333,18 +334,15 @@ async def bootstrap() -> None:
 
 
 async def amain() -> None:
+    # 与 API 同一道形态闸（阶段 1 条 7）：库不是 MySQL / 队列 Redis 不通就别起。起来了也只会空转，
+    # 且空转是无声的——没有任何日志会说「我领不到任务」。
+    await assert_deployment_deps()
     await bootstrap()
     await run_worker()
 
 
 def main() -> None:
     """进程入口：``uv run python -m app.worker``。"""
-    if not queue_enabled():
-        # 队列关着时 get_task_queue() 给的是进程内实现——它的 deque 与 API 进程的 deque 是两个对象，
-        # 这个 worker 会一条任务都收不到，还一声不吭地空转。宁可起不来。
-        raise SystemExit(
-            "QUEUE_ENABLED=0：worker 消费的进程内队列没有生产方，先把 QUEUE_ENABLED 打开"
-        )
     asyncio.run(amain())
 
 

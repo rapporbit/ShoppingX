@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -26,8 +27,9 @@ from conftest import FakeRedis  # tests/ 的 conftest（pytest 已把它放进 s
 from httpx import ASGITransport, AsyncClient
 
 import app.api.server as server
+from app import worker
 from app.api import dedup
-from app.api.concurrency import PriorityRequestQueue
+from app.queue import InProcessQueue, set_task_queue
 from app.db.models import User
 from app.db.session import init_db, session_factory
 from app.memory.fact_store import get_fact_store
@@ -43,21 +45,31 @@ async def client() -> AsyncIterator[AsyncClient]:
 
 
 @pytest.fixture(autouse=True)
-async def _clean_tasks(monkeypatch: Any, fake_redis: FakeRedis) -> AsyncIterator[None]:
-    """每个用例前换一个全新的任务队列 + 清空指纹窗口，用例后清 active_tasks 并取消遗留任务。
+async def _clean_tasks(fake_redis: FakeRedis) -> AsyncIterator[None]:
+    """每个用例前换一份全新队列**并起一个消费方**，用例后清 active_tasks 并取消遗留任务。
 
-    队列是模块单例：被取消任务的 ``release`` 是异步的、可能晚于用例结束，不换新的会让槽位计数
-    泄漏到下一个用例（看似没满其实占着）。指纹窗口 1-2 起在 Redis 上，这里清的是 conftest 注入
-    的那份假客户端——**不能再调 ``dedup.reset()``**，那会把假客户端一起摘掉，于是每条用例都去连
-    真 Redis、连不上就 503。
+    阶段 1 条 7 起 API 进程不再直接跑 ``run_agent``：任务一律入队，由 worker 消费。所以单测要自己
+    扮演那个 worker——否则每条用例的任务都会停在队列里，``started`` 永远等不到。用例里换掉的是
+    ``worker.run_agent``（真正跑它的那个名字），不是 ``server.run_agent``。
+
+    指纹窗口 1-2 起在 Redis 上，这里清的是 conftest 注入的那份假客户端——**不能调
+    ``dedup.reset()``**，那会把假客户端一起摘掉，于是每条用例都去连真 Redis、连不上就 503。
     """
-    monkeypatch.setattr(server, "task_queue", PriorityRequestQueue())
+    queue = InProcessQueue()
+    set_task_queue(queue)
+    stop = asyncio.Event()
+    consumer = asyncio.create_task(queue.consume("test-worker", worker.handle_task, stop.is_set, 4))
     fake_redis.store.clear()
     yield
+    stop.set()
+    consumer.cancel()
+    with suppress(asyncio.CancelledError):
+        await consumer
     for handle in list(server.active_tasks.values()):
         if not handle.task.done():
             handle.task.cancel()
     server.active_tasks.clear()
+    set_task_queue(None)
     fake_redis.store.clear()
 
 
@@ -75,7 +87,7 @@ async def test_create_task_registers_and_returns_thread_id(
         await release.wait()  # 卡住任务，让它在 active_tasks 里可被观察 / 取消
         return {"thread_id": thread_id}
 
-    monkeypatch.setattr(server, "run_agent", _fake_run)
+    monkeypatch.setattr(worker, "run_agent", _fake_run)
 
     resp = await client.post("/api/task", json={"query": "买帐篷", "thread_id": "t-a"})
     assert resp.status_code == 200
@@ -96,7 +108,7 @@ async def test_create_task_generates_thread_id_when_absent(
     ) -> dict[str, Any]:
         return {"thread_id": thread_id}
 
-    monkeypatch.setattr(server, "run_agent", _fake_run)
+    monkeypatch.setattr(worker, "run_agent", _fake_run)
     resp = await client.post("/api/task", json={"query": "买帐篷"})
     assert resp.status_code == 200
     assert resp.json()["thread_id"]  # 服务端兜底生成非空 id
@@ -110,7 +122,7 @@ async def test_cancel_running_task(client: AsyncClient, monkeypatch: Any) -> Non
         started.set()
         await asyncio.sleep(30)  # 长任务，等被取消
 
-    monkeypatch.setattr(server, "run_agent", _slow_run)
+    monkeypatch.setattr(worker, "run_agent", _slow_run)
     await client.post("/api/task", json={"query": "q", "thread_id": "t-cancel"})
     await asyncio.wait_for(started.wait(), timeout=1.0)
 
@@ -154,7 +166,7 @@ async def test_inflight_running_returns_query_and_events(
     async def _fake_replay(thread_id: str) -> list[dict[str, Any]]:
         return events
 
-    monkeypatch.setattr(server, "run_agent", _fake_run)
+    monkeypatch.setattr(worker, "run_agent", _fake_run)
     monkeypatch.setattr(server.event_log, "replay_current_run", _fake_replay)
 
     await client.post("/api/task", json={"query": "买帐篷", "thread_id": "t-live"})
@@ -187,7 +199,7 @@ async def test_inflight_terminal_event_treated_as_ended(
             {"type": "monitor_event", "event": "task_result", "id": "2-0"},
         ]
 
-    monkeypatch.setattr(server, "run_agent", _fake_run)
+    monkeypatch.setattr(worker, "run_agent", _fake_run)
     monkeypatch.setattr(server.event_log, "replay_current_run", _fake_replay)
 
     await client.post("/api/task", json={"query": "q", "thread_id": "t-ended"})
@@ -199,195 +211,29 @@ async def test_inflight_terminal_event_treated_as_ended(
     release.set()
 
 
-# ---------- 并发背压 + 优先级队列（refdocs 16-5 §2）----------
+# ---------- 背压（进程内准入池随阶段 1 条 7 删除）----------
+#
+# 「槽满排队 / 队列满 429 / 覆盖重发不超并发 / 收尾放槽」这四件事现在由队列深度闸 + run_holds 的
+# 用户级并发承担，用例分别在 tests/test_queue_wiring.py（429 与排位）与 tests/test_holds.py（用户
+# 级并发上限）。这里不再留同名用例，免得读的人以为进程内还有一个池子。
+
+
 def _blocking_run(started: asyncio.Event, release: asyncio.Event) -> Any:
     async def _run(
         query: str, thread_id: str, user_id: str | None = None, **_kw: Any
     ) -> dict[str, Any]:
         started.set()
-        await release.wait()  # 卡住任务，占着槽不放
+        await release.wait()  # 卡住任务，让它在 active_tasks 里可被观察 / 取消
         return {"thread_id": thread_id}
 
     return _run
-
-
-async def test_create_task_queues_when_slots_full(client: AsyncClient, monkeypatch: Any) -> None:
-    """槽满不再直接 429——先进有界队列，回 ``queued`` + 排队位置。"""
-    monkeypatch.setattr(server, "task_queue", PriorityRequestQueue(normal_slots=1, heavy_slots=1))
-    started, release = asyncio.Event(), asyncio.Event()
-    monkeypatch.setattr(server, "run_agent", _blocking_run(started, release))
-
-    r1 = await client.post("/api/task", json={"query": "q1", "thread_id": "t1"})
-    assert r1.json()["status"] == "started"
-    await asyncio.wait_for(started.wait(), timeout=1.0)
-
-    r2 = await client.post("/api/task", json={"query": "q2", "thread_id": "t2"})
-    assert r2.status_code == 200
-    assert r2.json()["status"] == "queued"
-    assert r2.json()["queue_position"] == 1
-    assert "t2" in server.active_tasks  # 排队中的任务也登记，可被取消
-    release.set()
-
-
-async def test_create_task_429_when_queue_full(client: AsyncClient, monkeypatch: Any) -> None:
-    """队列也满才 429——有界排队守住背压，不堆成「看似没满其实全在等」。"""
-    monkeypatch.setattr(
-        server, "task_queue", PriorityRequestQueue(normal_slots=1, heavy_slots=1, queue_depth=0)
-    )
-    started, release = asyncio.Event(), asyncio.Event()
-    monkeypatch.setattr(server, "run_agent", _blocking_run(started, release))
-
-    r1 = await client.post("/api/task", json={"query": "q1", "thread_id": "t1"})
-    assert r1.status_code == 200
-    await asyncio.wait_for(started.wait(), timeout=1.0)
-
-    r2 = await client.post("/api/task", json={"query": "q2", "thread_id": "t2"})
-    assert r2.status_code == 429
-    assert r2.headers["Retry-After"] == str(server.TASK_RETRY_AFTER_SEC)
-    assert "t2" not in server.active_tasks  # 被拒任务不登记
-    release.set()
-
-
-async def test_heavy_task_does_not_block_normal_task(
-    client: AsyncClient, monkeypatch: Any, tmp_path: Path
-) -> None:
-    """分池的全部意义：长续聊占满 heavy 槽，短对话照样直接开跑。"""
-    monkeypatch.setattr(
-        server, "task_queue", PriorityRequestQueue(normal_slots=1, heavy_slots=1, queue_depth=0)
-    )
-    monkeypatch.setattr(server, "OUTPUT_ROOT", tmp_path)
-
-    # 让 heavy_thread 被判为 heavy：伪造一段很长的历史。
-    async def _turns(tid: str) -> int:  # 正文进库后 _history_turns 是 async（一次 DB 查询）
-        return 99 if tid == "heavy_thread" else 0
-
-    monkeypatch.setattr(server, "_history_turns", _turns)
-    started, release = asyncio.Event(), asyncio.Event()
-    monkeypatch.setattr(server, "run_agent", _blocking_run(started, release))
-
-    r1 = await client.post("/api/task", json={"query": "q1", "thread_id": "heavy_thread"})
-    assert r1.json()["status"] == "started"
-    await asyncio.wait_for(started.wait(), timeout=1.0)
-    assert server.task_queue.stats()["heavy"]["active"] == 1
-
-    # heavy 池满了（容量 1，队列 0），但 normal 池毫发无伤
-    r2 = await client.post("/api/task", json={"query": "q2", "thread_id": "short_thread"})
-    assert r2.json()["status"] == "started"
-    release.set()
-
-
-async def test_queued_task_reports_position_over_websocket(
-    client: AsyncClient, monkeypatch: Any
-) -> None:
-    """排队反馈必须早于 session_created 推出去——用户不该对着空白屏幕猜。"""
-    monkeypatch.setattr(server, "task_queue", PriorityRequestQueue(normal_slots=1, heavy_slots=1))
-    reported: list[tuple[str, int]] = []
-
-    async def _fake_report(thread_id: str, position: int, eta: int, kind: str) -> None:
-        reported.append((thread_id, position))
-
-    monkeypatch.setattr(server.monitor, "report_queue_status", _fake_report)
-    started, release = asyncio.Event(), asyncio.Event()
-    monkeypatch.setattr(server, "run_agent", _blocking_run(started, release))
-
-    await client.post("/api/task", json={"query": "q1", "thread_id": "t1"})
-    await asyncio.wait_for(started.wait(), timeout=1.0)
-    await client.post("/api/task", json={"query": "q2", "thread_id": "t2"})
-    for _ in range(50):  # 让排队任务的后台协程跑到上报那一步
-        if reported:
-            break
-        await asyncio.sleep(0.01)
-
-    assert reported == [("t2", 1)]
-    release.set()
-
-
-async def test_create_task_replace_bypasses_limit(client: AsyncClient, monkeypatch: Any) -> None:
-    monkeypatch.setattr(
-        server, "task_queue", PriorityRequestQueue(normal_slots=1, heavy_slots=1, queue_depth=0)
-    )
-    started, release = asyncio.Event(), asyncio.Event()
-    monkeypatch.setattr(server, "run_agent", _blocking_run(started, release))
-
-    r1 = await client.post("/api/task", json={"query": "q1", "thread_id": "same"})
-    assert r1.status_code == 200
-    await asyncio.wait_for(started.wait(), timeout=1.0)
-
-    # 同 thread_id、**不同 query** = 用户改主意了：即便槽满也放行，不该被自己的旧任务挡在门外。
-    r2 = await client.post("/api/task", json={"query": "q2", "thread_id": "same"})
-    assert r2.status_code == 200
-    assert r2.json()["status"] == "started"
-    release.set()
-
-
-async def test_replacing_a_queued_task_does_not_exceed_concurrency(
-    client: AsyncClient, monkeypatch: Any
-) -> None:
-    """覆盖重发一个**还在排队**的任务不能强占：它没持槽，强占就是凭空多出一个并发。"""
-    monkeypatch.setattr(
-        server, "task_queue", PriorityRequestQueue(normal_slots=1, heavy_slots=1, queue_depth=4)
-    )
-    started, release = asyncio.Event(), asyncio.Event()
-    monkeypatch.setattr(server, "run_agent", _blocking_run(started, release))
-
-    await client.post("/api/task", json={"query": "q1", "thread_id": "t1"})  # 占住唯一的槽
-    await asyncio.wait_for(started.wait(), timeout=1.0)
-    r2 = await client.post("/api/task", json={"query": "q2", "thread_id": "t2"})
-    assert r2.json()["status"] == "queued"  # t2 排队中，没持槽
-
-    # t2 改问 → 覆盖重发。旧的 t2 还在排队，新的不该强占。
-    r3 = await client.post("/api/task", json={"query": "q2-改", "thread_id": "t2"})
-    assert r3.json()["status"] == "queued"
-    stats = server.task_queue.stats()["normal"]
-    assert stats["active"] <= stats["capacity"], "覆盖排队中的任务时并发上限被绕过"
-    release.set()
-
-
-async def test_replacing_a_running_task_may_force_a_slot(
-    client: AsyncClient, monkeypatch: Any
-) -> None:
-    """旧任务持槽时，覆盖重发照旧强占——它马上被 cancel 并还槽，真实并发不变。"""
-    monkeypatch.setattr(
-        server, "task_queue", PriorityRequestQueue(normal_slots=1, heavy_slots=1, queue_depth=0)
-    )
-    started, release = asyncio.Event(), asyncio.Event()
-    monkeypatch.setattr(server, "run_agent", _blocking_run(started, release))
-
-    await client.post("/api/task", json={"query": "q1", "thread_id": "same"})
-    await asyncio.wait_for(started.wait(), timeout=1.0)
-    r2 = await client.post("/api/task", json={"query": "q2", "thread_id": "same"})
-    assert r2.json()["status"] == "started"  # 不被自己的旧任务挡在门外
-    release.set()
-
-
-async def test_create_task_slot_released_after_done(client: AsyncClient, monkeypatch: Any) -> None:
-    monkeypatch.setattr(
-        server, "task_queue", PriorityRequestQueue(normal_slots=1, heavy_slots=1, queue_depth=0)
-    )
-
-    async def _quick_run(query: str, thread_id: str, user_id: str | None = None) -> dict[str, Any]:
-        return {"thread_id": thread_id}  # 立即完成，应释放槽
-
-    monkeypatch.setattr(server, "run_agent", _quick_run)
-
-    r1 = await client.post("/api/task", json={"query": "q1", "thread_id": "a"})
-    assert r1.status_code == 200
-    # 等第一个任务收尾、释放槽。
-    for _ in range(50):
-        if server.task_queue.active == 0:
-            break
-        await asyncio.sleep(0.01)
-    assert server.task_queue.active == 0
-    # 槽已释放：下一个任务能正常起，不被 429。
-    r2 = await client.post("/api/task", json={"query": "q2", "thread_id": "b"})
-    assert r2.status_code == 200
 
 
 # ---------- 幂等三层（refdocs 16-5 §3）----------
 async def test_same_thread_same_query_is_idempotent(client: AsyncClient, monkeypatch: Any) -> None:
     """第 1 层：刷新页面 / 双击提交 → 领回原任务，不重跑、不 cancel 旧任务。"""
     started, release = asyncio.Event(), asyncio.Event()
-    monkeypatch.setattr(server, "run_agent", _blocking_run(started, release))
+    monkeypatch.setattr(worker, "run_agent", _blocking_run(started, release))
 
     r1 = await client.post("/api/task", json={"query": "买包", "thread_id": "t1"})
     assert r1.json()["status"] == "started"
@@ -407,7 +253,7 @@ async def test_idempotency_holds_when_this_process_never_saw_the_run(
     """**真相在 DB，不在 active_tasks**（阶段 1-2）：清空本进程的字典（= 另一台副本收到请求），
     同 thread 同 query 仍被判 already_running，不会各起一个 run。"""
     started, release = asyncio.Event(), asyncio.Event()
-    monkeypatch.setattr(server, "run_agent", _blocking_run(started, release))
+    monkeypatch.setattr(worker, "run_agent", _blocking_run(started, release))
 
     try:
         await client.post("/api/task", json={"query": "买包", "thread_id": "t1"})
@@ -427,7 +273,7 @@ async def test_cross_thread_duplicate_for_clients_without_thread_id(
 ) -> None:
     """第 3 层：不自带 thread_id 的调用方（脚本 / 裸 API）连发同一 query → 领回原任务。"""
     started, release = asyncio.Event(), asyncio.Event()
-    monkeypatch.setattr(server, "run_agent", _blocking_run(started, release))
+    monkeypatch.setattr(worker, "run_agent", _blocking_run(started, release))
 
     r1 = await client.post("/api/task", json={"query": "买包", "user_id": "u"})
     assert r1.json()["status"] == "started"
@@ -446,7 +292,7 @@ async def test_dedup_never_hijacks_a_client_supplied_thread_id(
     """connect-first 的前端自带 thread_id，绝不能被并进别人的 thread——否则它那条 WS 收不到任何
     事件、界面永远转圈。它的重复由第 1 层（同 thread 同 query）管。"""
     started, release = asyncio.Event(), asyncio.Event()
-    monkeypatch.setattr(server, "run_agent", _blocking_run(started, release))
+    monkeypatch.setattr(worker, "run_agent", _blocking_run(started, release))
 
     r1 = await client.post("/api/task", json={"query": "买包", "thread_id": "t1", "user_id": "u"})
     assert r1.json()["status"] == "started"
@@ -465,24 +311,15 @@ async def test_rejected_task_leaves_no_fingerprint(
 ) -> None:
     """被 429 的请求不留指纹——否则用户退避重试会被当成「重复提交」再拒一次，陷入死循环。
 
-    1-2 起指纹是**进门就登记**的（``SET NX`` 没法只查不登记），所以这条断言守的是「被拒的路径
-    各自撤销」那一步：第二个请求不带 thread_id（才会走指纹层），被 429 之后窗口里必须是空的。
+    1-2 起指纹是**进门就登记**的（``SET NX`` 没法只查不登记），所以这条断言守的是**闸的相对顺序**：
+    队列深度闸必须排在指纹登记之前，被它拒掉的请求才不会在窗口里留下自己的指纹。
     """
-    monkeypatch.setattr(
-        server, "task_queue", PriorityRequestQueue(normal_slots=1, heavy_slots=1, queue_depth=0)
-    )
-    started, release = asyncio.Event(), asyncio.Event()
-    monkeypatch.setattr(server, "run_agent", _blocking_run(started, release))
+    monkeypatch.setattr(server, "QUEUE_MAX_DEPTH", 0)  # 深度闸当场拒：模拟队列已积压到顶
 
-    try:
-        await client.post("/api/task", json={"query": "q1", "thread_id": "t1"})
-        await asyncio.wait_for(started.wait(), timeout=1.0)
-        r2 = await client.post("/api/task", json={"query": "q2"})  # 不自带 tid → 走指纹层
-        assert r2.status_code == 429
-        assert fake_redis.store == {}  # 撤销干净：退避重试不会被自己刚才那次挡住
-        assert await dedup.check_duplicate(None, "q2", "t-retry") is None
-    finally:
-        release.set()
+    r2 = await client.post("/api/task", json={"query": "q2"})  # 不自带 tid → 才会走指纹层
+    assert r2.status_code == 429
+    assert fake_redis.store == {}  # 窗口里什么都没留下：退避重试不会被自己刚才那次挡住
+    assert await dedup.check_duplicate(None, "q2", "t-retry") is None
 
 
 # ---------- 文件下载 ----------
@@ -582,13 +419,10 @@ async def test_health(client: AsyncClient) -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "ok"
-    # 背压闸用量也在 health 里（A 块 metrics 的雏形）。
-    assert body["task_slots"]["limit"] == server.task_queue.limit
-    assert body["task_slots"]["active"] == 0
-    assert body["task_slots"]["full"] is False
-    # 双池明细：normal / heavy 各自的容量与排队深度。
-    assert set(body["pools"]) == {"normal", "heavy"}
-    assert body["pools"]["normal"]["pending"] == 0
+    # 背压用量也在 health 里（A 块 metrics 的雏形）：本副本在等结果的轮数 + 队列积压。
+    assert body["active_tasks"] == 0
+    assert body["queue"]["max_depth"] == server.QUEUE_MAX_DEPTH
+    assert body["queue"]["depth"] == 0
     # 整轮缓存状态（批2-5）：评测脚本靠这一项拒跑，缺了它 run_rubric 就探不到后端开着缓存。
     assert body["turn_cache"] == {"enabled": False, "entries": 0}
 

@@ -18,8 +18,8 @@ worker 进程里跑，而 WebSocket 与 HTTP 端点都挂在 API 进程上，于
    还在队列里排着的任务取消不掉——那恰恰是最该取消的那些。
 2. **标记必须按 ``task_id`` 而不是 ``thread_id``**。覆盖重发（同一个 thread 换个问题重问）会紧接着
    入一条新任务，按 thread 打的标记会把刚提交的新任务也一并掐掉，且用户完全看不出为什么。
-3. **本进程也可能就是执行方**（``QUEUE_ENABLED=1`` 但 Redis 建不起来时 API 兼任 worker）。所以先查
-   一遍进程内的在飞登记表（:func:`cancel_local`），命中就地掐掉，不劳 Redis 跑一趟。
+3. **本进程也可能就是执行方**（worker 进程自己发的取消，比如覆盖重发）。所以先查一遍进程内的在飞
+   登记表（:func:`cancel_local`），命中就地掐掉，不劳 Redis 跑一趟。
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from typing import Any
 
-from app.utils.env import env_bool, env_int, env_str
+from app.utils.env import env_int, env_str
 
 logger = logging.getLogger("shoppingx.control")
 
@@ -55,11 +55,6 @@ _cancelled_local: set[str] = set()
 _pending_publishes: set[asyncio.Task[Any]] = set()
 
 Handler = Callable[[dict[str, Any]], Awaitable[None]]
-
-
-def control_enabled() -> bool:
-    """默认跟随 ``QUEUE_ENABLED``：单进程部署里 API 与 worker 是同一个进程，指令直接走内存。"""
-    return env_bool("CONTROL_ENABLED", env_bool("QUEUE_ENABLED", False))
 
 
 def _redis_url() -> str:
@@ -230,13 +225,15 @@ _resolved = False
 
 
 def get_control_bus() -> ControlBus | None:
-    """返回进程级控制面；未启用 / Redis 客户端建不起来时返回 ``None``（退化为纯进程内取消）。"""
+    """返回进程级控制面（恒开，阶段 1 条 7 删掉 ``CONTROL_ENABLED``）。
+
+    Redis 客户端建不起来时返回 ``None`` 退化为纯进程内取消——与背板同一个取舍，可达性那道闸在
+    ``server.lifespan`` 里守，这里不该把整个进程带下去。
+    """
     global _bus, _resolved
     if _resolved:
         return _bus
     _resolved = True
-    if not control_enabled():
-        return None
     try:
         import redis.asyncio as aredis  # 可选依赖，懒加载（与 queue / backplane 同源）
 
