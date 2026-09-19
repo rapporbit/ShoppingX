@@ -176,30 +176,61 @@ async def add_usage(
     """
     if not quota_enabled() or not user_id or cost_usd <= 0:
         return
-    period = current_period()
     try:
         async with session_factory()() as db:
-            for attempt in range(2):
-                values: dict[str, Any] = {
-                    "cost_usd": UsageLedger.cost_usd + cost_usd,
-                    "input_tokens": UsageLedger.input_tokens + input_tokens,
-                    "output_tokens": UsageLedger.output_tokens + output_tokens,
-                    "task_count": UsageLedger.task_count + 1,
-                }
-                if prompt_version:
-                    values["prompt_version"] = prompt_version
-                stmt = (
-                    update(UsageLedger)
-                    .where(UsageLedger.user_id == user_id, UsageLedger.period_key == period)
-                    .values(**values)
-                )
-                res = cast(CursorResult[Any], await db.execute(stmt))
-                if res.rowcount:
-                    await db.commit()
-                    return
-                if attempt:  # UPDATE 落空两次 → 行既插不进也更新不到，不该发生，别死循环
-                    logger.warning("配额记账落空：user=%s period=%s", user_id, period)
-                    return
+            await accumulate_usage(
+                db,
+                user_id,
+                cost_usd,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                prompt_version=prompt_version,
+            )
+            await db.commit()
+    except Exception:
+        logger.exception("配额记账失败（不影响本次任务结果）：user=%s", user_id)
+
+
+async def accumulate_usage(
+    db: AsyncSession,
+    user_id: str,
+    cost_usd: float,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    prompt_version: str = "",
+) -> bool:
+    """把一次用量累加进本周期账本，**跑在调用方的事务里、不 commit**，返回是否落账。
+
+    抽出来是给 :func:`app.db.holds.settle` 用的：结算要把「run 标 settled」与「账记上」放进**同一个
+    事务**，否则两者之间崩一下，就会出现「额度释放了但钱没记」（免单）或「钱记了但 hold 还占着」。
+    :func:`add_usage` 只是它加了一层「自己开 session + 吞异常」的薄壳。
+
+    插入用 SAVEPOINT 包住（``begin_nested``）：并发下撞唯一索引时只回滚这一次插入，调用方事务里
+    已经做过的事（比如那条条件更新）不受牵连——直接 ``rollback()`` 会把它们一起抹掉。
+    """
+    period = current_period()
+    for attempt in range(2):
+        values: dict[str, Any] = {
+            "cost_usd": UsageLedger.cost_usd + cost_usd,
+            "input_tokens": UsageLedger.input_tokens + input_tokens,
+            "output_tokens": UsageLedger.output_tokens + output_tokens,
+            "task_count": UsageLedger.task_count + 1,
+        }
+        if prompt_version:
+            values["prompt_version"] = prompt_version
+        stmt = (
+            update(UsageLedger)
+            .where(UsageLedger.user_id == user_id, UsageLedger.period_key == period)
+            .values(**values)
+        )
+        res = cast(CursorResult[Any], await db.execute(stmt))
+        if res.rowcount:
+            return True
+        if attempt:  # UPDATE 落空两次 → 行既插不进也更新不到，不该发生，别死循环
+            logger.warning("配额记账落空：user=%s period=%s", user_id, period)
+            return False
+        try:
+            async with db.begin_nested():
                 db.add(
                     UsageLedger(
                         id=uuid.uuid4().hex,
@@ -212,10 +243,7 @@ async def add_usage(
                         prompt_version=prompt_version,
                     )
                 )
-                try:
-                    await db.commit()
-                    return
-                except IntegrityError:  # 并发下别人先插了这一行 → 回去走 UPDATE 累加
-                    await db.rollback()
-    except Exception:
-        logger.exception("配额记账失败（不影响本次任务结果）：user=%s", user_id)
+            return True
+        except IntegrityError:  # 并发下别人先插了这一行 → 回去走 UPDATE 累加
+            continue
+    return False

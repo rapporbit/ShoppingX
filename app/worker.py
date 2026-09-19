@@ -38,6 +38,7 @@ from typing import Any
 from app.agent.orchestrator import run_agent
 from app.api import clarification, control, monitor
 from app.config import store as config_store
+from app.db.holds import mark_running
 from app.db.session import init_db
 from app.observability.logging import configure_logging
 from app.queue import IntentTask, TaskQueue, TaskStatus, get_task_queue, queue_enabled
@@ -108,11 +109,17 @@ async def handle_task(task: IntentTask, queue: TaskQueue | None = None) -> None:
         await q.set_status(
             TaskStatus(task_id=task.task_id, state="running", thread_id=task.thread_id)
         )
+        # 预扣行从 queued 翻成 running：纯排障标签（两态在额度计算里等价），但多副本下这是唯一
+        # 能从库里看出「这条卡在队列里」还是「真的有 worker 在跑它」的地方。
+        await mark_running(task.task_id)
         agent_started = True
         result = await run_agent(
             task.query,
             task.thread_id,
             user_id=task.user_id,
+            # run_id = task_id：结算的幂等键。消息被 PEL 重投、整轮重跑时它不变，第二次结算就被
+            # 条件更新挡下（见 app.db.holds.settle）——「at-least-once 投递 + 幂等计费」的支点。
+            run_id=task.task_id,
             # 空元组要还原成 None 而不是空列表：``platform_scope`` 把 None 解释为「用服务端默认」，
             # 把空列表解释为「一个平台都不启用」，两者差着一整轮空军。
             platforms=list(task.platforms) or None,
