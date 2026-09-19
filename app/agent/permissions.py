@@ -35,6 +35,13 @@ DEFAULT_ALLOWED_TOOLS: frozenset[str] = frozenset(
         "save_memory",
         "shopping_summary",  # 终结工具：产清单 + 落会话产物
         "chat_fallback",  # 终结工具：非购物意图兜底
+        # 另两个终结工具，同一条理由（只读算不上——它们写会话产物并决定 loop 结束，故不标
+        # is_read_only，于是必须在这张表里精准放行）。``present_comparison`` 此前漏登记：
+        # 它的另一条入口是 REST（前端对比栏按钮，不经 AgentLoop），所以「模型在对话里调它」
+        # 这条路一直没被 DEFAULT 模式挂起过的事实掩盖住了。S3 加 ``present_guide`` 时一并补上，
+        # 并由 test_orchestrator 的「非只读工具必须全在放行集里」那条测试守着，别再漏第三个。
+        "present_comparison",
+        "present_guide",  # 终结工具：选购标准分节答案（S3）
         "create_order",  # 只出确认卡，决议走 HTTP（见上）
         "cancel_order",  # 取消前必须先 query_order（sequencing 断言），且只有 CONFIRMED 可取消
     }

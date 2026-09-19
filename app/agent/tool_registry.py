@@ -23,6 +23,7 @@ from app.tools.item_picker import item_picker
 from app.tools.item_search import item_search
 from app.tools.planner import planner
 from app.tools.present_comparison import present_comparison
+from app.tools.present_guide import present_guide
 from app.tools.price_compare import price_compare
 from app.tools.query_order import query_order
 from app.tools.recall_memories import recall_memories
@@ -55,6 +56,7 @@ _BUSINESS_TOOLS: list[ToolShell] = [
     web_search,
     research,
     present_comparison,
+    present_guide,
     chat_fallback,
     shopping_summary,
     ask_user,

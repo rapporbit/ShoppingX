@@ -650,3 +650,27 @@ def test_summary_turn_prose_is_not_merged() -> None:
         ],
     )
     assert _merged([turn], "为你精选 2 件") == "为你精选 2 件"
+
+
+def _guide_turn(body: str, markdown: str) -> Msg:
+    """模型的一条消息：同一条里调 present_guide（S3）并拿到工具排好版的 markdown。"""
+    from app.harness.msgs import tool_blocks
+
+    blocks: list[object] = [TextBlock(type="text", text=body)] if body else []
+    blocks += tool_blocks(
+        "g1",
+        "present_guide",
+        {"topic": "电动牙刷怎么挑"},
+        json.dumps({"markdown": markdown, "sections": []}, ensure_ascii=False),
+    )
+    return Msg(name="assistant", role="assistant", content=blocks)
+
+
+def test_guide_markdown_survives_the_models_tail() -> None:
+    """present_guide 的 markdown 并回 final_text —— 与 chat_fallback 同一条口径（S3）。
+
+    不并回的话屏幕上只剩模型补的那句「以上就是选购要点」，落盘 summary.md 与历史回看里那几节
+    标准一个字都没有（present_guide 没有商品卡兜底，答案被顶掉就什么都不剩）。
+    """
+    md = "### 电动牙刷怎么挑\n\n#### 1. 清洁力\n- 声波每分钟 3 万次以上"
+    assert _merged([_guide_turn("", md)], "以上就是选购要点，有偏好告诉我。") == md

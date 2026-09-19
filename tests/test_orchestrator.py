@@ -417,6 +417,20 @@ async def test_allow_tools_is_precise_and_idempotent() -> None:
     assert decision.behavior == PermissionBehavior.ASK
 
 
+async def test_every_write_tool_is_allowlisted() -> None:
+    """机制守栏：**每个非只读工具都必须在放行集里**，否则真跑时会被 DEFAULT 模式挂起。
+
+    S3 补 present_guide 时发现 present_comparison 漏了一年——它还有一条 REST 入口（对比栏按钮
+    不经 AgentLoop），把「模型在对话里调它会被挂起」这件事遮住了。这条测试把「新增写工具要
+    登记」变成红灯，不再靠人记得。
+    """
+    from app.agent.permissions import DEFAULT_ALLOWED_TOOLS
+    from app.agent.tool_registry import TOOLS
+
+    writers = {t.name for t in TOOLS if not getattr(t, "is_read_only", False)}
+    assert writers <= DEFAULT_ALLOWED_TOOLS, writers - DEFAULT_ALLOWED_TOOLS
+
+
 async def test_trade_tools_are_main_only() -> None:
     """TradeAgent 已删（A1）：交易工具只在主 Agent 手上，trade 角色不再存在。"""
     from app.agent.tool_registry import build_toolkit

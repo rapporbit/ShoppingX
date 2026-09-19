@@ -22,6 +22,8 @@
 # 2026-09-10 统一到这一份（审查报告 B1）。
 # ``present_comparison``（C4）也在其中，同一条理由：它产出的就是面向用户的最终结构化答案，
 # 调完再让模型去调 shopping_summary，只会把同一份判断用散文重讲一遍（over-loop 的老形态）。
+# ``present_guide``（S3）同理：它就是「没有商品卡那一轮」的最终答案本体，调完再让模型去调
+# chat_fallback 把标准复述一遍，正是 present_comparison 那条注释说的 over-loop 老形态。
 TERMINAL_TOOLS = frozenset(
     {
         "shopping_summary",
@@ -29,6 +31,7 @@ TERMINAL_TOOLS = frozenset(
         "create_order",
         "cancel_order",
         "present_comparison",
+        "present_guide",
     }
 )
 

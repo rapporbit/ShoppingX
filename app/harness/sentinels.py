@@ -95,8 +95,9 @@ TERMINAL_REACHED_DENIED = (
 # 主 loop 没调终结工具就想用纯文字收尾时，post_reflect 追加这条并重发一次模型。
 TERMINAL_TOOL_NUDGE = (
     "[系统提示] 你刚才没有调用任何工具就准备结束对话，但本轮还没有调用过终结性工具"
-    "（shopping_summary 或 chat_fallback）。**必须真的调用工具才能收尾**，不能只用文字回答就"
-    "停下：有商品卡可给就调 shopping_summary；纯文字 / 非购物场景就调 chat_fallback。"
+    "（shopping_summary / present_guide / chat_fallback）。**必须真的调用工具才能收尾**，不能只用"
+    "文字回答就停下：有商品卡可给就调 shopping_summary；讲的是选购标准就调 present_guide"
+    "（分节写进 sections）；其余纯文字 / 非购物场景调 chat_fallback。"
 )
 
 # token 预算软线提示原先住在这里（``BUDGET_SOFT_HINT``），已被 ``model_router.MINIMAL_HINT`` 取代：

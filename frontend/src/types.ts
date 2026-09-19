@@ -38,7 +38,10 @@ export type AguiEvent = {
     // 载荷是一条完整的服务端确认记录。真源在库里（GET /api/threads/{id}/confirmations），事件只是
     // 「有变化」的通知；前端按 confirmation_id 合并、决议单向推进（lib/confirmations.ts）。
     | "confirmation_required"
-    | "confirmation_resolved";
+    | "confirmation_resolved"
+    // 选购指南卡（data: {guide: GuideData}）：present_guide 收尾即推，前端画成一张分节卡。
+    // 与 items_preview 同一待遇——结果本身，不进活动流；进回放存档，刷新不丢。
+    | "guide_ready";
   message: string;
   data: Record<string, unknown>;
   thread_id: string | null;
@@ -159,6 +162,19 @@ export type TurnTokens = {
   cost_usd: number;
   cache_read?: number;
   cache_hit_rate?: number;
+};
+
+// 选购指南（guide_ready 事件，后端 present_guide 的结构化那份）：一节一条标准 + 假设 + 来源。
+// 正文另有一条路——工具排好的 markdown 已并回 final_text，所以历史回看即便不画这张卡也看得到
+// 全文（与 ask_user 的 chips 同一取舍：卡只在当轮与 inflight 回放里活）。
+export type GuideSection = { title: string; points: string[] };
+export type GuideSource = { title: string; url: string };
+export type GuideData = {
+  topic: string;
+  sections: GuideSection[];
+  assumptions: string[];
+  sources: GuideSource[];
+  closing: string;
 };
 
 // 本轮的「实验与自进化」归属（批 4）：提示词版本 / A/B 桶号 / 注入了哪几条策略 / 读了哪些 skill。

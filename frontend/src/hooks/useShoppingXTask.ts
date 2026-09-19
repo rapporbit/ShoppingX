@@ -21,6 +21,7 @@ import type {
   PrepareOrderInput,
   TradeConfirmation,
   AguiEvent,
+  GuideData,
   HistoryTurn,
   LearnedPref,
   ProductItem,
@@ -67,6 +68,10 @@ export type Turn = {
   // chips——点一下要**发起新一轮任务**，不能往 WS 上打 clarification_response，那头没有 waiter，
   // 打过去会被拒收、用户点了什么都不发生。同理本轮状态照常走到 done，不能停在 waiting。
   clarificationClosesTurn?: boolean;
+  // 本轮的选购指南卡（guide_ready 事件，present_guide 收尾那一轮才有）。有它时正文不再单独画一遍
+  // markdown——卡里那几节就是同一份内容，两处都画等于让用户读两遍。历史回看没有这张卡（与
+  // ask_user 的 chips 同一取舍），正文由 finalAnswer 兜着。
+  guide?: GuideData | null;
   // 本轮 curator 沉淀的新长期偏好（memory_updated 事件，在 task_result 之后到）。回复下方画一行
   // 「记住了 … ✕」——写入是自动的（不弹确认框打断购物），但必须看得见、且一键撤得掉。
   learnedPrefs: LearnedPref[];
@@ -271,6 +276,7 @@ export function useShoppingXTask() {
           const events = replayed.filter(
             (e) =>
               e.event !== "items_preview" &&
+              e.event !== "guide_ready" &&
               e.event !== "confirmation_required" &&
               e.event !== "confirmation_resolved",
           );
@@ -284,6 +290,9 @@ export function useShoppingXTask() {
             setConfirmations((prev) => mergeConfirmations(prev, replayedConfs));
           const lastPreview = [...replayed].reverse().find((e) => e.event === "items_preview");
           const previewItems = (lastPreview?.data.items as ProductItem[]) ?? [];
+          // 指南卡同理：刷新 / 切回时把已推过的那张恢复回来，不必干等收尾再发一遍。
+          const lastGuide = [...replayed].reverse().find((e) => e.event === "guide_ready");
+          const replayedGuide = (lastGuide?.data.guide as GuideData | undefined) ?? null;
           // 澄清等待中刷新/切回：回放里最后一条 clarification_request 之后若还没出现 ask_user 的
           // tool_end（用户回复 / 超时兜底都会发它），说明 Agent 仍阻塞在这个提问上——恢复 waiting
           // 状态与横幅。不恢复的话输入框回不了话，用户只能干等 ask_user 超时。
@@ -323,6 +332,7 @@ export function useShoppingXTask() {
               images: inflight.images ?? [],
               events: [...events],
               items: previewItems,
+              guide: replayedGuide,
               finalAnswer: null,
               streamingText: null,
               status: pendingQuestion !== null ? ("waiting" as TaskStatus) : "running",
@@ -453,6 +463,14 @@ export function useShoppingXTask() {
       if (evt.event === "items_preview") {
         const preview = (evt.data.items as ProductItem[]) ?? [];
         if (preview.length) patchLastTurn(() => ({ items: preview }));
+        return;
+      }
+
+      // 选购指南卡（S3）：present_guide 一收尾就推，画成一张分节卡。**不进 events**——它是结果
+      // 本身，混进 ActivityFeed 会多出一行没有工具名的脏行（与 items_preview 同一待遇）。
+      if (evt.event === "guide_ready") {
+        const guide = evt.data.guide as GuideData | undefined;
+        if (guide) patchLastTurn(() => ({ guide }));
         return;
       }
 
