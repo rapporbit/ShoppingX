@@ -13,10 +13,14 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.utils.path_utils import OUTPUT_ROOT
+
 logger = logging.getLogger("shoppingx.evolution.collector")
 
 DEFAULT_REPORT = Path("data/eval/rubric_report.json")
-DEFAULT_OUTPUT_ROOT = Path("output")
+# 产物根走 path_utils 那一份（阶段 1-4），不再是相对 CWD 的 "output"：换个目录起进程，相对路径就
+# 指到一个不存在的地方，而 _load_final_text 取不到只返回空串——bad case 会安静地全都没有回复文本。
+DEFAULT_OUTPUT_ROOT = OUTPUT_ROOT
 
 
 @dataclass

@@ -100,6 +100,37 @@ services:
       retries: 5
       start_period: 40s
 
+  # worker —— 跑 AgentLoop 的那一半（QUEUE_ENABLED=1 时 backend 只入队，真正的活在这里）。
+  # 与 backend **同一个镜像、同一份 .env**，只换 command：两边跑的必须是同一版代码，否则「API 说
+  # 有这个字段、worker 那版还没有」这种错会以最难查的形式出现（任务照跑，结果字段缺一块）。
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    image: globex-backend:latest
+    container_name: globex-worker
+    restart: unless-stopped
+    logging: *default-logging
+    env_file: [../.env]
+    command: ["python", "-m", "app.worker"]
+    # **三个卷必须与 backend 逐字相同**（阶段 1-4 的硬前提）：产物是 worker 写、API 读——
+    # output 里的 summary.md / session.json 由 GET /api/files 与会话恢复读，uploaded 里的参考图
+    # 由 image_understand 读。各挂各的卷不会报错，只会让 API 一律 404，表现为「产物莫名其妙没了」。
+    # appdb 同理：账户与会话归属是两个进程共用的真相（SQLite 单文件，MySQL 迁移见阶段 1 条 9）。
+    volumes:
+      - ../data:/app/data:ro
+      - output:/app/output
+      - uploaded:/app/uploaded
+      - appdb:/app/var
+    depends_on:
+      opensearch: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    networks: [internal] # 不接 Caddy 网络：它不收 HTTP 请求，只从 Redis Stream 领任务
+    # 关停宽限必须 > WORKER_GRACE_SECONDS（默认 330）+ 收尾余量，否则 compose 的默认 10s 会让
+    # SIGKILL 抢在收尾前面——应用侧那套 interrupted 收尾一步都跑不了（同 k8s 的三个数，见
+    # deploy/k8s/50-worker.yaml）。
+    stop_grace_period: 360s
+
   frontend:
     image: nginx:alpine # 仿 interview-site：静态托管 vite build 产物，Caddy 反代它
     container_name: globex-frontend
