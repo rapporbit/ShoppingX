@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from app.api import monitor
 from app.api.context import get_user_id
 from app.memory.fact_store import get_fact_store
-from app.memory.facts import MemoryFact
+from app.memory.facts import MEMORY_DISABLED_TEXT, MemoryFact, memory_enabled
 from app.memory.injector import format_history
 from app.memory.store import get_store
 from app.tools._shell import tool
@@ -53,6 +53,11 @@ async def recall_memories(topic: str = "") -> RecallMemoriesOutput:
     参数 topic：留空回全部；给词则按该词筛（确定性子串匹配，不做语义联想）。
     """
     await monitor.report_tool_start("recall_memories", topic=topic)
+    if not memory_enabled():
+        # 部署把记忆整个关了。给一句明确的「这里没有记忆」，别让模型拿着空结果反复重试。
+        await monitor.report_tool_end("recall_memories", count=0)
+        return RecallMemoriesOutput(note=MEMORY_DISABLED_TEXT)
+
     user_id = get_user_id() or ""
     if not user_id:
         await monitor.report_tool_end("recall_memories", count=0)

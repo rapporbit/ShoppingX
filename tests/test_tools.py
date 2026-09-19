@@ -2264,8 +2264,8 @@ class TestNullIsAbsent:
         )
         assert draft.reasons == [] and draft.off_intent == []
         assert _ParseResult.model_validate({"preferences": None}).preferences == []
-        cur = CurationResult.model_validate({"persistent_preferences": None})
-        assert cur.persistent_preferences == []
+        # M3 起 curator 的输出字段是 facts（key/value/category 三字段的事实），同洞同修。
+        assert CurationResult.model_validate({"facts": None}).facts == []
 
 
 @pytest.mark.asyncio

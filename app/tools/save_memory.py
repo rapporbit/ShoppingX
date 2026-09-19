@@ -15,7 +15,12 @@ from pydantic import BaseModel, Field
 from app.api import monitor
 from app.api.context import get_thread_id, get_user_id
 from app.memory.fact_store import get_fact_store
-from app.memory.facts import MemoryWriteRejected, validate_fact
+from app.memory.facts import (
+    MEMORY_DISABLED_TEXT,
+    MemoryWriteRejected,
+    memory_enabled,
+    validate_fact,
+)
 from app.tools._shell import tool
 
 
@@ -39,6 +44,11 @@ async def save_memory(key: str, value: str, category: str = "preference") -> Sav
     ``preference`` 取向、``context`` 身份背景。只记长期成立的，本轮一次性的需求不要记。
     """
     await monitor.report_tool_start("save_memory", key=key, category=category)
+    if not memory_enabled():
+        # 部署把记忆整个关了。必须明说没存——含糊的失败会让模型回执「记住了」。
+        await monitor.report_tool_end("save_memory", saved=False)
+        return SaveMemoryOutput(note=MEMORY_DISABLED_TEXT)
+
     user_id = get_user_id() or ""
     if not user_id:
         await monitor.report_tool_end("save_memory", saved=False)

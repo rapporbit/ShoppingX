@@ -26,7 +26,7 @@ from app.harness.budgets import (
 from app.harness.middleware import harness_hook
 from app.harness.msgs import _attr
 from app.memory.fact_store import get_fact_store
-from app.memory.facts import render_memory_block, select_tier_one_facts
+from app.memory.facts import memory_enabled, render_memory_block, select_tier_one_facts
 from app.memory.strategies import get_strategy_store, render_strategy_block, strategies_for_query
 from app.trade.confirmations import trade_state
 from app.trade.repository_sql import confirmation_repository, order_repository
@@ -117,6 +117,8 @@ async def inject_long_term_memory(context: dict[str, Any]) -> dict[str, Any] | N
     """
     if context.get("tool_name") != "planner":
         return None
+    if not memory_enabled():
+        return None  # 部署把记忆整个关了：一条都不注入
 
     user_id = get_user_id() or ""
     if not user_id:
