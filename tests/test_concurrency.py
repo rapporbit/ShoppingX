@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from conftest import FakeRedis  # tests/ 的 conftest（pytest 已把它放进 sys.path）
 
 from app.api import dedup
 from app.api.concurrency import (
@@ -17,11 +18,6 @@ from app.api.concurrency import (
     classify_request,
     estimated_wait_seconds,
 )
-
-
-@pytest.fixture(autouse=True)
-def _clear_dedup() -> None:
-    dedup.reset()
 
 
 # ---------- 分类器 ----------
@@ -275,56 +271,66 @@ def test_estimated_wait_divides_by_capacity() -> None:
     assert estimated_wait_seconds(6, 5) > estimated_wait_seconds(5, 5)
 
 
-# ---------- 幂等第 3 层：请求指纹去重 ----------
-def test_dedup_first_submit_passes() -> None:
-    assert dedup.check_duplicate("alice", "买旅行三件套") is None
+# ---------- 幂等第 3 层：请求指纹去重（阶段 1-2 起窗口在 Redis）----------
+async def test_dedup_first_submit_passes() -> None:
+    assert await dedup.check_duplicate("alice", "买旅行三件套", "thread-1") is None
 
 
-def test_dedup_catches_repeat_across_thread_ids() -> None:
-    """前端刷新会换 thread_id——active_tasks 看不见这种重复，指纹能。"""
-    dedup.remember("alice", "买旅行三件套", "thread-1")
-    assert dedup.check_duplicate("alice", "买旅行三件套") == "thread-1"
+async def test_dedup_catches_repeat_across_thread_ids() -> None:
+    """脚本 / 压测器每次换 thread_id——第 1 层看不见这种重复，指纹能，且领回**原** thread。"""
+    assert await dedup.check_duplicate("alice", "买旅行三件套", "thread-1") is None
+    assert await dedup.check_duplicate("alice", "买旅行三件套", "thread-2") == "thread-1"
 
 
-def test_dedup_distinguishes_users() -> None:
-    dedup.remember("alice", "买包", "thread-1")
-    assert dedup.check_duplicate("bob", "买包") is None
+async def test_dedup_distinguishes_users() -> None:
+    await dedup.check_duplicate("alice", "买包", "thread-1")
+    assert await dedup.check_duplicate("bob", "买包", "thread-2") is None
 
 
-def test_dedup_distinguishes_queries() -> None:
-    dedup.remember("alice", "买包", "thread-1")
-    assert dedup.check_duplicate("alice", "买鞋") is None
+async def test_dedup_distinguishes_queries() -> None:
+    await dedup.check_duplicate("alice", "买包", "thread-1")
+    assert await dedup.check_duplicate("alice", "买鞋", "thread-2") is None
 
 
-def test_dedup_remember_purges_expired_entries() -> None:
-    """``check_duplicate`` 只在「调用方不自带 thread_id」时才被调到；只在它里面 purge 的话，
-    走前端那条路（永远自带 thread_id）的部署里 ``_recent`` 会随任务数无界增长。"""
-    import time as _time
-
-    dedup.reset()
-    dedup.remember("alice", "老 query", "t-old")
-    assert len(dedup._recent) == 1
-
-    real_monotonic = _time.monotonic
-    dedup.time.monotonic = lambda: real_monotonic() + dedup.DEDUP_WINDOW_SEC + 1  # type: ignore[assignment]
-    try:
-        dedup.remember("bob", "新 query", "t-new")  # 只调 remember，不调 check_duplicate
-        assert len(dedup._recent) == 1  # 过期的老条目被顺手清掉了
-    finally:
-        dedup.time.monotonic = real_monotonic  # type: ignore[assignment]
+async def test_dedup_check_registers_atomically(fake_redis: FakeRedis) -> None:
+    """``SET NX`` 一条命令同时完成查与登记——这正是老实现（先查后登记）在并发下漏掉的那一步。"""
+    assert await dedup.check_duplicate("alice", "买包", "thread-1") is None
+    assert len(fake_redis.store) == 1
 
 
-def test_dedup_check_does_not_register() -> None:
-    """查询不登记——被 429 的请求不该留下指纹，否则退避重试会被当成重复提交再拒一次。"""
-    dedup.reset()
-    assert dedup.check_duplicate("alice", "买包") is None
-    assert dedup.check_duplicate("alice", "买包") is None  # 仍未登记
-    assert len(dedup._recent) == 0
+async def test_dedup_forget_lets_retry_through(fake_redis: FakeRedis) -> None:
+    """被 429 / already_running 拒掉的请求必须撤销指纹，否则用户退避重试会被自己刚才那次挡住。"""
+    assert await dedup.check_duplicate("alice", "买包", "thread-1") is None
+    await dedup.forget("alice", "买包")
+    assert fake_redis.store == {}
+    assert await dedup.check_duplicate("alice", "买包", "thread-2") is None
 
 
-def test_dedup_window_expires(monkeypatch: pytest.MonkeyPatch) -> None:
-    dedup.remember("alice", "买包", "thread-1")
-    # 把时钟推过窗口
-    now = __import__("time").monotonic() + dedup.DEDUP_WINDOW_SEC + 1
-    monkeypatch.setattr(dedup.time, "monotonic", lambda: now)
-    assert dedup.check_duplicate("alice", "买包") is None
+async def test_dedup_window_expires(fake_redis: FakeRedis) -> None:
+    await dedup.check_duplicate("alice", "买包", "thread-1")
+    fake_redis.now += dedup.DEDUP_WINDOW_SEC + 1  # 把 Redis 的时钟推过窗口
+    assert await dedup.check_duplicate("alice", "买包", "thread-2") is None
+
+
+async def test_dedup_unavailable_is_raised_not_swallowed() -> None:
+    """Redis 挂了要抛（调用方转 503），**不退回进程内**——那等于「看着在去重，其实每台各去各的」。"""
+
+    class _Broken:
+        async def set(self, *a: object, **kw: object) -> object:
+            raise ConnectionError("redis down")
+
+        async def get(self, key: str) -> object:
+            raise ConnectionError("redis down")
+
+        async def delete(self, *keys: str) -> object:
+            raise ConnectionError("redis down")
+
+    dedup.set_client(_Broken())
+    with pytest.raises(dedup.DedupUnavailable):
+        await dedup.check_duplicate("alice", "买包", "thread-1")
+
+
+async def test_dedup_disabled_never_reports_duplicate(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TASK_DEDUP_ENABLED", "false")
+    await dedup.check_duplicate("alice", "买包", "thread-1")
+    assert await dedup.check_duplicate("alice", "买包", "thread-2") is None

@@ -67,8 +67,6 @@ class User(Base):
     # 「清空」这批就整批丢弃——否则清空按钮会被一个早于它开始、晚于它结束的抽取悄悄撤销。
     memory_purge_gen: Mapped[int] = mapped_column(Integer, default=0)
 
-    threads: Mapped[list[Thread]] = relationship(back_populates="owner")
-
 
 class Thread(Base):
     """一段会话的归属与摘要——「这个 thread 是谁的、叫什么、什么时候更新的」。
@@ -78,13 +76,27 @@ class Thread(Base):
     他的会话**（侧栏历史），以及**校验属主**（挡住拿别人 thread_id 读历史 / 下产物 / 连事件流）。
 
     ``title`` 取该会话首轮提问的前若干字——省一次 LLM 调用，且用户自己说过的话最认得出是哪段对话。
+
+    **后三列是「同 thread 唯一真相」（阶段 1-2）。** 此前「这个 thread 上还有没有任务在跑」只存在
+    API 进程内的 ``active_tasks`` 字典里，同一个 thread 打到两台副本就各起一个 run，两轮事件往同
+    一条 WS 上推。改由一条**条件更新**认定：``UPDATE … SET active_run_id=:new WHERE id=:t AND
+    (active_run_id IS NULL OR run_status != 'running')``，影响 0 行即「这个 thread 正忙」，再按
+    ``active_query`` 分岔（同 query → already_running；不同 → 覆盖重发）。判定与占位是同一条
+    语句，两个并发请求里必然只有一个的影响行数是 1，不再依赖「中间没有 await」。
+
+    **``user_id`` 刻意不加外键**（1-2 起）：本表要在鉴权关闭的 demo 模式下也登记行——否则那条路
+    上 DB 拿不到真相，唯一真相又会退回进程内。外键会让 ``demo-user`` / 匿名身份插不进来。代价是
+    「token 的 sub 查无此人」不再由约束挡下，改在 :func:`app.db.accounts.claim_thread` 里显式查
+    users 表（见那里的 401 分支）。同理 ``owner`` / ``User.threads`` 两个 relationship 一并删掉：
+    没有外键就没有推断得出的 join 条件，而全仓从未用过它们。
     """
 
     __tablename__ = "threads"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     # index：侧栏每次都按 user_id 查会话清单，是本表最热的查询路径。
-    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    # 宽度保持 32（= users.id 的宽度）：去外键只是去约束，不是趁机改列宽，老库那列照旧。
+    user_id: Mapped[str] = mapped_column(String(32), index=True)
     title: Mapped[str] = mapped_column(String(200), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     # onupdate：每次这段会话有新一轮对话就自动刷新，侧栏据此按「最近聊过」倒序排。
@@ -92,7 +104,14 @@ class Thread(Base):
         DateTime(timezone=True), default=_now, onupdate=func.now()
     )
 
-    owner: Mapped[User] = relationship(back_populates="threads")
+    # 当前在跑的 run（= run_holds.run_id = 队列模式的 task_id）。收尾时**按身份**清空
+    # （``WHERE active_run_id = :mine``），不盲清——覆盖重发时旧 run 的 finally 晚几个 tick 才跑，
+    # 盲清会把刚接班的新 run 摘掉。与 active_tasks 的 `is` 校验同一手法。
+    active_run_id: Mapped[str | None] = mapped_column(String(64), default=None, nullable=True)
+    # idle / running。单独一列而不是「active_run_id 是否为空」：终态要区分「跑完了」与「没跑过」。
+    run_status: Mapped[str] = mapped_column(String(16), default="idle")
+    # 在跑的那句 query。幂等第 1 层靠它分岔：同一句 → 领回原任务；换了一句 → 覆盖重发。
+    active_query: Mapped[str] = mapped_column(String(500), default="")
 
 
 # ── 用户级持久数据（Mmem：从 JSON 文件 / Redis 搬进关系库）──────────────────────────────

@@ -91,6 +91,7 @@ from app.db.accounts import MIN_PASSWORD_LEN, assert_owner, claim_thread, ensure
 from app.db.holds import REASON_CONCURRENCY, HoldResult, acquire_hold, release
 from app.db.quota import disabled_status as _disabled_quota
 from app.db.quota import get_quota, quota_enabled
+from app.db.runs import claim_thread_run, release_thread_run
 from app.db.session import init_db, session_factory
 from app.memory.fact_store import get_fact_store
 from app.memory.facts import MemoryFact, MemoryWriteRejected, validate_fact
@@ -407,15 +408,31 @@ async def _enforce_quota(user_id: str | None) -> None:
         raise HTTPException(402, detail={"error": "quota_exhausted", **quota.as_dict()})
 
 
-# 在途的预扣释放 task：只为保强引用——detached task 无人引用会被 GC 掉，额度就白占到过期。
-_BG_RELEASES: set[asyncio.Task[None]] = set()
+async def _release_run_shielded(thread_id: str, run_id: str) -> None:
+    """在收尾 ``finally`` 里清 ``threads`` 上的「在跑」标记，**取消也要清干净**。
+
+    直接 ``await`` 不行：协程正在被取消时，finally 里的第一个挂起点会再吃一次 ``CancelledError``，
+    那条 UPDATE 就发不出去，thread 会一直「正忙」到 ``THREAD_STALE_RUN_SEC`` 过期。shield 一层让
+    它跑完（同 ``_report_cancel_if_queued`` / ``session_io.charge_quota`` 的手法）；这里吞掉的是
+    shield 自己抛回来的那次取消，不影响正在传播的那个。
+    """
+    with suppress(asyncio.CancelledError, Exception):
+        await asyncio.shield(asyncio.create_task(release_thread_run(thread_id, run_id)))
 
 
-def _release_in_background(run_id: str) -> None:
-    """在无 ``await`` 区间里还掉一笔预扣（准入池 429 那条路专用）。"""
-    task = asyncio.create_task(release(run_id))
-    _BG_RELEASES.add(task)
-    task.add_done_callback(_BG_RELEASES.discard)
+async def _rollback_claim(
+    run_id: str, thread_id: str, *, user_id: str | None = None, query: str | None = None
+) -> None:
+    """任务最终没起来时，把进门占下的东西**原路还回去**：预扣的额度、``threads`` 上的「在跑」
+    位置、（给了 query 时）Redis 里的那枚指纹。
+
+    三样都得还，且顺序无关紧要——它们互不依赖。漏还任何一样的症状都是「用户被自己刚才那次失败
+    挡住」：额度白占到 TTL、thread 再也发不出新任务、同一句话 5 秒内重试被判重复。
+    """
+    await release(run_id)
+    await release_thread_run(thread_id, run_id)
+    if query is not None:
+        await dedup.forget(user_id, query)
 
 
 async def _acquire_hold_or_reject(
@@ -451,12 +468,15 @@ async def _claim_thread_if_needed(thread_id: str, user_id: str | None, query: st
 
     ``claim_thread`` 自带属主校验——拿别人的 thread_id 发消息会被它拒，否则「用他的 tid 说句话」
     就成了把他的会话过户到自己名下。
+
+    **鉴权关闭时也登记一行**（阶段 1-2，归属写空身份、不查 users 表）：这行是幂等第 1 层的载体
+    （:mod:`app.db.runs` 的条件更新落在它上面），没有行就没有真相。名字里的 ``if_needed`` 现在
+    只剩「按需校验归属」这层意思。
     """
-    if not (auth_enabled() and user_id):
-        return
+    authed = auth_enabled() and bool(user_id)
     async with session_factory()() as db:
         try:
-            await claim_thread(db, thread_id, user_id, query)
+            await claim_thread(db, thread_id, user_id or "", query, verify_user=authed)
         except PermissionError as exc:
             raise HTTPException(403, "无权访问该会话") from exc
         except LookupError as exc:  # token 合法但用户已不存在 → 让他重新登录
@@ -583,6 +603,9 @@ async def _queued_runner(intent: IntentTask, position: int) -> None:
         handle = active_tasks.get(thread_id)
         if handle is not None and handle.task is asyncio.current_task():
             active_tasks.pop(thread_id, None)
+        # DB 侧真相按身份清（run_id == task_id）。队列模式下真正跑任务的是 worker 进程，但这条
+        # 影子协程与那边同生共死（它轮到 done/failed/cancelled 才返回），清在这里够用。
+        await _release_run_shielded(thread_id, intent.task_id)
 
 
 def _start_queued(
@@ -619,7 +642,7 @@ def _start_queued(
         images=list(req.image_paths or ()),
         task_id=intent.task_id,
     )
-    dedup.remember(user_id, req.query, thread_id)
+    # 指纹已在 create_task 的 check_duplicate 里登记（``SET NX`` 查与登记同一步，1-2 起）。
     queued = position > 1
     return {
         "status": "queued" if queued else "started",
@@ -686,16 +709,24 @@ async def create_task(
     run_id = uuid.uuid4().hex
     await _acquire_hold_or_reject(run_id=run_id, user_id=user_id, thread_id=thread_id, kind=kind)
 
-    # ── 幂等第 1 层：同 thread 上一个任务还活着 ──
+    # ── 幂等第 1 层：同 thread 上一个任务还活着。**真相在 DB，不在本进程**（阶段 1-2）──
+    #
+    # 判定与占位是同一条条件 UPDATE（见 app.db.runs），所以同一个 thread 打到两台副本时，只有
+    # 一台的影响行数是 1，另一台按 already_running 把用户领回去。``active_tasks`` 降级为本进程
+    # 缓存：它还管着取消口、/inflight 与影子协程的身份校验，但不再是「谁在跑」的答案。
+    claim = await claim_thread_run(thread_id, run_id, req.query)
     old = active_tasks.get(thread_id)
-    is_alive = bool(old and not old.task.done())
-    if old is not None and is_alive and old.query == req.query:
+    if not claim.can_start:
         # 同一句话又发了一遍 → 领回原任务，不重跑、不占新槽、不动旧任务。
         metrics.record_task_rejected("already_running")
         logger.info("幂等命中（同 thread 同 query）：thread_id=%s", thread_id)
         await release(run_id)  # 没起新任务 → 那笔预扣当场还掉
         return {"status": "already_running", "thread_id": thread_id}
-    is_replace = is_alive  # 同 thread 但换了 query → 覆盖重发
+    # 同 thread 但换了 query → 覆盖重发。旧 run 可能跑在**另一个进程**里（队列模式 / 另一台副本），
+    # 所以取消要按 claim 带回来的旧 run_id 送（run_id == task_id，1-1 起两者同一个东西）；本进程
+    # 恰好也有影子协程时再顺手 cancel 一下，让 /inflight 立刻干净。
+    is_replace = claim.outcome == "replaced"
+    previous_run_id = claim.previous_run_id
 
     # ── 幂等第 3 层：跨 thread 的指纹去重。**只对不自带 thread_id 的客户端生效** ──
     #
@@ -708,13 +739,24 @@ async def create_task(
     # 所以分工按「谁管 thread_id」划：自带 thread_id 的客户端（前端）由第 1 层管；不管 thread_id 的
     # 客户端（脚本 / 裸 API 调用，服务端兜底生成 tid）才走指纹去重——它们没有 WS 订阅要接，拿回
     # 原 thread_id 正好可以去 /inflight 续看。
+    #
+    # **窗口在 Redis（阶段 1-2）**，查与登记是同一条 ``SET NX EX``：多副本下才真的只跑一遍，也不
+    # 再依赖「查到登记之间没有 await」。判重时要把刚占下的两样都还掉——预扣的额度，以及上面那条
+    # 条件更新占下的「在跑」位置（这条路新生成过 thread_id，位置一定是自己抢到的）。
+    fingerprint_registered = False
     if not is_replace and req.thread_id is None:
-        dup_thread = dedup.check_duplicate(user_id, req.query)
+        try:
+            dup_thread = await dedup.check_duplicate(user_id, req.query, thread_id)
+        except dedup.DedupUnavailable as exc:
+            await _rollback_claim(run_id, thread_id)
+            logger.warning("去重窗口不可用，拒绝本次提交：%s", exc)
+            raise HTTPException(503, "服务暂时不可用（去重窗口离线），请稍后重试") from exc
         if dup_thread is not None:
             metrics.record_task_rejected("duplicate")
             logger.info("幂等命中（指纹去重）：原 thread_id=%s", dup_thread)
-            await release(run_id)
+            await _rollback_claim(run_id, thread_id)
             return {"status": "duplicate", "thread_id": dup_thread}
+        fingerprint_registered = True
 
     # ── 队列模式：不占准入槽，把任务交给 worker ──
     #
@@ -722,16 +764,20 @@ async def create_task(
     # worker 之后本进程一个 loop 都不跑，再占它就是把削峰上限按回单进程那 8 个数，队列白开。背压
     # 换成上面的队列深度闸 + worker 侧的 WORKER_CONCURRENCY——各管各真正约束得住的那件事。
     if use_queue:
-        if old is not None and is_replace:
+        if is_replace and previous_run_id is not None:
             # 覆盖重发 = **换一轮**，不是多跑一轮（批2-4 补齐）：除了掐掉 API 侧的影子协程，还要
             # 把取消送到真正在跑它的 worker，否则用户改主意重问一句，旧问题仍在后台烧着 token，
             # 两轮的事件还会同时往同一条 WS 上推。
             #
-            # 用 nowait：这里处在 endpoint 的**无 await 区间**里（准入 / 幂等判定的原子性全靠它，
-            # 见 create_task 的 docstring）。本地那一半是同步的、当场生效；剩下的 Redis 往返丢进
-            # 后台任务，且它打的标记按**旧** task_id，不会误伤下面马上要入队的这条新任务。
-            control.request_cancel_nowait(thread_id, old.task_id)
-            old.task.cancel()
+            # 按 DB 里读到的**旧 run_id** 送（1-2 起）：旧 run 可能根本不在本进程的 active_tasks
+            # 里（它是另一台副本收的），那种情况下原先按 old.task_id 送就是送了个空。
+            #
+            # 用 nowait：这里处在 endpoint 的**无 await 区间**里（准入判定的原子性靠它，见
+            # create_task 的 docstring）。本地那一半是同步的、当场生效；剩下的 Redis 往返丢进
+            # 后台任务，且它打的标记按**旧** run_id，不会误伤下面马上要入队的这条新任务。
+            control.request_cancel_nowait(thread_id, previous_run_id)
+            if old is not None:
+                old.task.cancel()
         return _start_queued(req, thread_id, user_id, turn_count, queue_depth, run_id)
 
     # ── 准入：分池 + 占槽 or 排队 or 429。以下到 create_task 之间不得出现 await ──
@@ -745,9 +791,16 @@ async def create_task(
         maybe = task_queue.try_reserve(kind)
         if maybe is None:
             metrics.record_task_rejected("queue_full")
-            # 任务没起来 → 还掉预扣。这里在无 await 区间里，只能丢后台（强引用见 _BG_RELEASES，
-            # 裸 create_task 的 task 会被 GC 掉，那笔额度就要白占到 HOLD_TTL_SEC 过期）。
-            _release_in_background(run_id)
+            # 任务没起来 → 把进门占下的都还掉，**当场还、不丢后台**：这条路下一句就是 raise，
+            # 「无 await 区间」要保护的那段（占槽 → 登记 active_tasks）根本不会执行，在这里让出
+            # 事件循环是安全的。丢后台则留下一个可观测的窗口：用户收到 429 立刻重试，指纹可能
+            # 还没撤销，于是被自己刚才那次失败判成「重复提交」。
+            await _rollback_claim(
+                run_id,
+                thread_id,
+                user_id=user_id,
+                query=req.query if fingerprint_registered else None,
+            )
             raise HTTPException(
                 429,
                 f"服务繁忙：{kind} 队列已满（并发上限 {task_queue.limit}），"
@@ -801,6 +854,9 @@ async def create_task(
             handle = active_tasks.get(thread_id)
             if handle is not None and handle.task is asyncio.current_task():
                 active_tasks.pop(thread_id, None)
+            # DB 侧那份真相同理按身份清（条件在 SQL 里，见 release_thread_run）。不清的话这个
+            # thread 会一直显示「正忙」，直到 THREAD_STALE_RUN_SEC 过去才肯接新任务。
+            await _release_run_shielded(thread_id, run_id)
 
     # asyncio.create_task 会复制当前 ContextVar 快照；run_agent 内部用 thread_scope 自己
     # 绑定 thread_id/session_dir，故这里无需预先 set_thread_context。
@@ -811,9 +867,8 @@ async def create_task(
         reservation=reservation,
         images=list(req.image_paths or ()),
     )
-    # 只有真正启动的任务才登记指纹：被 429 / already_running 的请求留下指纹的话，用户被拒之后的
-    # 重试会被当成「重复提交」再拒一次，陷入死循环。
-    dedup.remember(user_id, req.query, thread_id)
+    # 指纹在上面那次 check_duplicate 里就已经登记了（``SET NX`` 查与登记是同一步，1-2 起）。
+    # 这里不需要再补一次；被拒的路径改为各自 forget，见 _rollback_claim。
     status = "queued" if not reservation.admitted else "started"
     return {"status": status, "thread_id": thread_id, "queue_position": reservation.position}
 
