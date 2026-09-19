@@ -1,0 +1,120 @@
+# 多副本验收环境（阶段 1）。**一次性的验证台，不是部署形态** —— 验完 down -v 清掉。
+#
+# 验的是 1-1~1-4 那几刀在**两个副本**下是否真成立：预扣与并发上限（holds 表）、同 thread 唯一真相
+# （threads 条件更新）、dedup 窗口（Redis）、关停按 interrupted 收尾、产物共享卷。这些机制在单进程
+# 下全都「看着是对的」——进程内字典也能挡住同 thread 双击。只有两个副本能把它们真正证伪。
+#
+# **与线上那套完全隔离**，可以照着查：独立 project name（globex-multi）、独立网络、独立卷、独立
+# MySQL 与 Redis 容器、**不发布任何端口**（场景脚本走 docker exec 从容器内打请求）。镜像 tag 是
+# :multi，**绝不能 build 成 :latest** —— 那个 tag 是线上容器重建时用的。
+#
+# 跑法（gcjp 或本机都一样）：
+#   docker build -f docker/Dockerfile.backend --build-arg UV_EXTRAS=--extra\ db \
+#     -t globex-backend:multi .
+#   docker compose -f docker/docker-compose.multi.yml up -d
+#   python scripts/multi_scenarios.py all
+#   docker compose -f docker/docker-compose.multi.yml down -v
+
+name: globex-multi
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "2" }
+
+# 四个应用容器共用这份环境。用锚点而不是 env_file：验收环境的参数要**看得见**，写在这里比散在一份
+# 没进 git 的 .env 里可复现得多；密钥一个都不需要（打了桩，不调模型）。
+x-app-env: &app-env
+  # 账户 / 会话归属 / holds 全在 MySQL —— 多副本正确性的判据几乎都落在这几张表上。
+  DATABASE_URL: "mysql+aiomysql://root:globex@mysql:3306/globex?charset=utf8mb4"
+  QUEUE_ENABLED: "1"
+  QUEUE_REDIS_URL: "redis://redis:6379/0"
+  EVENT_REDIS_URL: "redis://redis:6379/1"
+  CONTROL_ENABLED: "1"
+  # **鉴权必须开**：holds 跟着 quota 走，而 quota 要求 auth_enabled()——关着鉴权时所有人共用
+  # 假身份，限并发等于「一个人在跑、全体排队」。关着跑这套验收，run_holds 会是空表，1-1 那几刀
+  # 一条都验不到（第一次跑正是这么翻的车）。AUTH_DEV_TOKEN 另开一个发证口给脚本换 token 用。
+  AUTH_ENABLED: "true"
+  AUTH_DEV_TOKEN: "true"
+  JWT_SECRET: "multi-acceptance-only-not-a-real-secret"
+  HOLDS_ENABLED: "1"
+  TURN_CACHE_ENABLED: "0"
+  # 产物根指到共享卷：1-4 要验的正是「worker 写、API 读得到」。指错了不报错，只会 404。
+  ARTIFACT_ROOT: "/app/artifacts"
+  STUB_SLEEP_SEC: "3"
+  # 一条消息在 PEL 里闲置多久算「上一个 worker 挂了」。线上 10 分钟（崩溃兜底，不该频繁触发），
+  # 验收台设 10 秒——场景 2 要看的就是「kill -9 之后另一个 worker 多久接管」，等十分钟没法验。
+  QUEUE_CLAIM_IDLE_MS: "10000"
+  # **故意设小**（线上默认 330）：场景 4 要在几秒内触发「排空超时被掐」，否则一条 3s 的桩任务永远
+  # 等得完，那条路根本走不到。这个值只属于验收台。
+  WORKER_GRACE_SECONDS: "5"
+  WORKER_CONCURRENCY: "2"
+  PYTHONUNBUFFERED: "1"
+
+x-app: &app
+  image: globex-backend:multi
+  restart: "no" # 验收台要的是「杀了就该死」，自动拉起会把场景 2/4 的结论搅浑
+  logging: *logging
+  environment: *app-env
+  volumes:
+    - artifacts:/app/artifacts
+  depends_on:
+    mysql: { condition: service_healthy }
+    redis: { condition: service_healthy }
+  networks: [multi]
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: globex-multi-mysql # 固定名字：场景脚本按它 docker exec 进去查表
+    logging: *logging
+    environment:
+      MYSQL_ROOT_PASSWORD: globex
+      MYSQL_DATABASE: globex
+    # utf8mb4 是硬要求：迁移里有带索引的字符串列，默认字符集下会撞 767/3072 字节的索引长度上限。
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pglobex"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [multi]
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: globex-multi-redis
+    logging: *logging
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [multi]
+
+  api1:
+    <<: *app
+    container_name: globex-multi-api1
+    command: ["python", "-m", "scripts.stub_agent", "api", "--port", "8000"]
+
+  api2:
+    <<: *app
+    container_name: globex-multi-api2
+    command: ["python", "-m", "scripts.stub_agent", "api", "--port", "8000"]
+
+  worker1:
+    <<: *app
+    container_name: globex-multi-worker1
+    command: ["python", "-m", "scripts.stub_agent", "worker"]
+    stop_grace_period: 20s # > WORKER_GRACE_SECONDS(5) + 收尾余量，同线上那三个数的关系
+
+  worker2:
+    <<: *app
+    container_name: globex-multi-worker2
+    command: ["python", "-m", "scripts.stub_agent", "worker"]
+    stop_grace_period: 20s
+
+networks:
+  multi:
+    name: globex-multi
+
+volumes:
+  artifacts:
