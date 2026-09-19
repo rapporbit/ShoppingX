@@ -11,13 +11,21 @@ import logging
 import os
 
 from app.queue.inprocess import InProcessQueue
-from app.queue.ports import IntentTask, TaskHandler, TaskQueue, TaskState, TaskStatus
+from app.queue.ports import (
+    TERMINAL_STATES,
+    IntentTask,
+    TaskHandler,
+    TaskQueue,
+    TaskState,
+    TaskStatus,
+)
 from app.queue.redis_stream import RedisStreamQueue
 from app.utils.env import env_bool
 
 logger = logging.getLogger("shoppingx.queue")
 
 __all__ = [
+    "TERMINAL_STATES",
     "IntentTask",
     "InProcessQueue",
     "RedisStreamQueue",

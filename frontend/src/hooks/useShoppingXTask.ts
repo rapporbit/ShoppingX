@@ -31,8 +31,18 @@ import type {
   TurnTokens,
 } from "../types";
 
-// 任务运行状态：idle 未开始 / connecting 正在建 WS / running 任务进行中 / done 收尾 / cancelled / error。
-export type TaskStatus = "idle" | "connecting" | "running" | "waiting" | "done" | "cancelled" | "error";
+// 任务运行状态：idle 未开始 / connecting 正在建 WS / running 任务进行中 / done 收尾 / cancelled / error /
+// interrupted（服务端关停掐断这一轮，见后端 worker 阶段 1-3——与 cancelled 分开是因为用户的下一步不同：
+// 取消是他自己要停，中断则需要他重发）。
+export type TaskStatus =
+  | "idle"
+  | "connecting"
+  | "running"
+  | "waiting"
+  | "done"
+  | "cancelled"
+  | "interrupted"
+  | "error";
 
 // 对话里的一轮：用户一句 query + 助手这一轮的全部产出。多轮续聊下，turns 累加成完整对话流，
 // 实时事件只更新**最后一轮**（同一时刻只有一个任务在跑）。回看历史时按 turns.json 重建：除结论
@@ -77,7 +87,7 @@ export type Turn = {
   learnedPrefs: LearnedPref[];
 };
 
-const TERMINAL: ReadonlySet<TaskStatus> = new Set(["done", "cancelled", "error"]);
+const TERMINAL: ReadonlySet<TaskStatus> = new Set(["done", "cancelled", "interrupted", "error"]);
 
 // 会话 threadId 存 localStorage：刷新 / 重开页面后用它拉历史「回看」并接着聊（续聊的前端落点）。
 // 它只是「上次看的是哪段」这个**光标**，不是数据本身——数据在后端，按账号归属。key 定义在 auth.ts，
@@ -525,6 +535,14 @@ export function useShoppingXTask() {
         case "task_cancelled":
           patchLastTurn(() => ({ status: "cancelled" }));
           setStatusSafe("cancelled");
+          ws.close();
+          break;
+        // 服务端关停掐断这一轮（后端已 ack 掉消息、不会背着用户重跑）。收尾方式与 cancelled 相同，
+        // 只是文案要说清「这轮没结果，重发一次就行」——不自动重发：滚动发布时多个副本同时中断，
+        // 自动重发会在同一秒打出一波重试。
+        case "task_interrupted":
+          patchLastTurn(() => ({ status: "interrupted" }));
+          setStatusSafe("interrupted");
           ws.close();
           break;
         case "error":

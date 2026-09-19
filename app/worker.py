@@ -12,10 +12,14 @@ API 进程只做鉴权、配额、幂等、入队，然后立刻回 ``thread_id`
    会边等边领，永远等不完。
 2. **等在飞任务自然跑完**，最多等 ``WORKER_GRACE_SECONDS``。这段时间里任务照常上报 AGUI 事件、
    照常落盘，用户完全无感。
-3. **超时就取消在飞任务**。被取消的那条消息**不 ack**，于是留在 PEL 里，由下一个 worker 的
-   ``XAUTOCLAIM`` 领回重跑（``QUEUE_CLAIM_IDLE_MS`` 之后）。这就是「超时转回 pending」——宁可重跑
-   一次（投递语义本就是 at-least-once，写工具那侧只出确认卡、落单要用户点按钮），也不让任务
-   凭空消失。
+3. **超时就取消在飞任务，并当场给它一个定论**（阶段 1-3 改口径）：状态写 ``interrupted``、发
+   ``task_interrupted`` 事件让用户重发、把预扣与 thread 占位还回去，消息**ack 掉**。
+
+   早先这里是「不 ack，留在 PEL 里等下一个 worker ``XAUTOCLAIM`` 领回重跑」。那条路有两个说不过去
+   的地方：重跑发生在 ``QUEUE_CLAIM_IDLE_MS``（十分钟）之后，用户那一刻早已关掉页面，事件推给一个
+   没人听的 thread；而整轮重跑意味着这一轮的模型调用再花一次，账真的会再记一次（结算按 run_id 幂等
+   只挡得住「同一笔结算跑两遍」，挡不住「同一条 query 真的跑了两遍」）。任务本身没毛病，是进程要走
+   了——这种「没结果」该由用户看见并决定要不要再来一次，不该由队列在背后替他决定。
 
 配套的 K8s 侧写法是 ``terminationGracePeriodSeconds`` 要**大于** ``WORKER_GRACE_SECONDS``，否则
 kubelet 的 SIGKILL 会先到，第 2 步白设。那份 yaml 是批 2 后面一单的事。
@@ -38,7 +42,8 @@ from typing import Any
 from app.agent.orchestrator import run_agent
 from app.api import clarification, control, monitor
 from app.config import store as config_store
-from app.db.holds import mark_running
+from app.db.holds import mark_running, release
+from app.db.runs import release_thread_run
 from app.db.session import init_db
 from app.observability.logging import configure_logging
 from app.queue import IntentTask, TaskQueue, TaskStatus, get_task_queue, queue_enabled
@@ -50,9 +55,14 @@ logger = logging.getLogger("shoppingx.worker")
 # 本进程同时跑几个 AgentLoop。默认 4 而不是 API 侧准入池的 8（5+3）：那 8 个槽是「一个进程既收请求
 # 又跑 Agent」时的上限，拆开之后 worker 可以横向加副本，单副本压满反而让长尾更长。
 WORKER_CONCURRENCY = env_int("WORKER_CONCURRENCY", 4)
-# 收到 SIGTERM 后最多等在飞任务多久。要覆盖住绝大多数单轮耗时（本仓约 40s），又不能长到让滚动更新
-# 卡住；超时的那些会转回 pending 重投，不是丢。
-WORKER_GRACE_SECONDS = env_int("WORKER_GRACE_SECONDS", 120)
+# 收到 SIGTERM 后最多等在飞任务多久。**必须 ≥ 单轮超时 ``MAIN_AGENT_TIMEOUT_SEC``（300）加余量**：
+# 小于它就等于每次发布都主动掐掉一批「本来再等几十秒就会自己超时收尾」的任务（旧默认 120 < 300，
+# 跑过 2 分钟的 run 必被掐）。330 = 300 + 30s 收尾余量；真到了 330 还没完的，按 interrupted 收场。
+WORKER_GRACE_SECONDS = env_int("WORKER_GRACE_SECONDS", 330)
+
+# 被掐之后留给「写状态 + 发事件 + 还预扣」的时间。收尾只是几次 DB / Redis 写，5s 绰绰有余；设上限是
+# 因为这几步正好发生在进程退出的路上，任一处挂住都会把整个关停拖到被 SIGKILL。
+WORKER_INTERRUPT_FINALIZE_SEC = env_int("WORKER_INTERRUPT_FINALIZE_SEC", 5)
 
 
 def consumer_name() -> str:
@@ -65,20 +75,48 @@ def consumer_name() -> str:
     return os.environ.get("WORKER_NAME") or f"{socket.gethostname()}-{os.getpid()}"
 
 
+async def _finalize_interrupted(task: IntentTask, q: TaskQueue, *, agent_started: bool) -> None:
+    """关停掐断的收尾四步。顺序有讲究，终态**最后**写。
+
+    等结果的那一方（API 侧影子协程 / 轮询调用方）一见终态就认为这一轮结束、随即放手，用户下一秒就
+    可能按重发。所以顺序是「事件 → 还预扣 → 还 thread 占位 → 写终态」：占位还挂在 ``threads`` 上时
+    写终态，用户的重发会撞上 ``already_running``——被自己刚被掐掉的那一轮挡在门外。
+
+    预扣只在 ``run_agent`` 没跑起来时还：跑起来了的话它自己的 ``finally`` 已经按真实用量结算过
+    （``orchestrator`` 里 ``charge_quota`` 那段对取消同样生效），这里再还一次会被 settle 的条件更新
+    挡下——不是错，只是白跑一趟。
+    """
+    await monitor.report_task_interrupted(thread_id=task.thread_id)
+    if not agent_started:
+        await release(task.task_id)
+    await release_thread_run(task.thread_id, task.task_id)
+    await q.set_status(
+        TaskStatus(
+            task_id=task.task_id,
+            state="interrupted",
+            thread_id=task.thread_id,
+            error="worker 关停，本轮未跑完，请重发",
+        )
+    )
+
+
 async def handle_task(task: IntentTask, queue: TaskQueue | None = None) -> None:
-    """消费一条任务：状态置 running → 跑 ``run_agent`` → 落 done / failed。
+    """消费一条任务：状态置 running → 跑 ``run_agent`` → 落终态（done / failed / cancelled /
+    interrupted）。
 
     **失败必须往外抛**：队列侧靠这个异常决定「留在 PEL 等重投」还是「重投超限进死信」。在这里吞掉
     等于任务默默消失，而状态表里还写着 running，谁都看不出发生了什么。写状态只是给轮询接口看的
     副产品，不是错误处理本身。
 
-    **被取消时不写终态**：优雅退出把在飞任务掐掉时，这条消息没有被 ack，它会被下一个 worker 领回来
-    重跑。此刻写 failed 会让轮询方以为已经有定论，而几秒后它又活了过来。
+    **取消分两种，收尾都是「正常返回」但状态不同**（批2-4 + 阶段 1-3）。两种都表现为
+    ``CancelledError``，判据是控制面的进程内标记（:func:`app.api.control.was_cancelled_locally`）
+    ——只有它知道这一刀是谁砍的：
 
-    **但「用户取消」是另一回事，两种取消必须分开**（批2-4）。它同样表现为 ``CancelledError``，
-    可语义相反：任务不该被重投——用户要的就是它别再跑了，重投一遍等于取消按钮没用。判据是控制面
-    的进程内标记（:func:`app.api.control.was_cancelled_locally`），只有它才知道这一刀是谁砍的。
-    命中就吞掉取消、把消息 ack 掉、状态落 ``cancelled``；没命中照旧往外抛（= 交还队列）。
+    - **用户取消**：状态 ``cancelled``。他要的就是它别再跑了，重投一遍等于取消按钮没用。
+    - **关停掐断**（没有标记）：状态 ``interrupted``，见 :func:`_finalize_interrupted`。
+
+    两条都不往外抛，于是消息被 ack 掉。唯一还会「交还队列重投」的是真异常那条路——那是任务本身出了
+    问题，重跑一次有意义。
     """
     q = queue or get_task_queue()
     # **先登记、再做任何 await**。取消指令与任务领取之间没有先后保证：登记放在第一次 await 之后，
@@ -128,7 +166,24 @@ async def handle_task(task: IntentTask, queue: TaskQueue | None = None) -> None:
         )
     except asyncio.CancelledError:
         if not control.was_cancelled_locally(task.task_id):
-            raise  # 优雅退出：不 ack，留在 PEL 里等下一个 worker 领回重跑
+            # 关停掐断（本进程排空超时自己砍的，见 run_worker 第 3 步）：给个定论并 ack 掉，不留 PEL
+            # 十分钟后静默重跑（理由见模块 docstring 第 3 条）。
+            if current is not None:
+                current.uncancel()  # 收尾要发好几个 await，不消费掉这次取消一步也走不了
+            logger.warning(
+                "worker 关停中断任务：%s（thread=%s），已 ack 并通知用户重发",
+                task.task_id,
+                task.thread_id,
+            )
+            try:
+                async with asyncio.timeout(WORKER_INTERRUPT_FINALIZE_SEC):
+                    await _finalize_interrupted(task, q, agent_started=agent_started)
+            except (asyncio.CancelledError, Exception) as exc:  # TimeoutError 也在 Exception 里
+                # 收尾没做完照样返回（= 照样 ack）：走到这里说明 DB / Redis 已经不好使了，此刻把消息
+                # 退回 PEL 只会换来一次没人看的静默重跑。留下的痕迹是这条 error 日志 + 库里那行没有
+                # 终态的 hold（它到 HOLD_TTL 自然失效，模块 holds 的口径 3）。
+                logger.error("中断收尾未完成：%s（%s）", task.task_id, exc)
+            return
         # 用户取消：run_agent 跑起来了的话，它的 finally 已经上报 task_cancelled 并把这一轮的账
         # 记完（「取消即免单」的洞早堵住了，见 session_io.charge_quota）。这里只负责让消息被
         # ack 掉；取消落在 run_agent 之前那几个 await 上时没人报过事件，得由这里补一条，否则
@@ -248,9 +303,9 @@ async def run_worker(
         logger.info("收到停止信号：不再领新任务，最多等 %ds 让在飞任务跑完", grace)
         _, pending = await asyncio.wait({consume}, timeout=grace)
         if pending:
-            # 超时转回 pending：取消在飞任务 → 它们不 ack → 消息留在 PEL → 下一个 worker
-            # XAUTOCLAIM 领回重跑。这是 at-least-once 的代价，也是「不丢任务」的兑现方式。
-            logger.warning("在飞任务 %ds 内未跑完，取消并交还队列重投", grace)
+            # 超时就掐：每条在飞任务在 handle_task 里按 interrupted 收场（发事件 + 写终态 + ack），
+            # 不再交还队列重投。grace 默认已大于单轮超时，走到这里的本就是极少数长尾。
+            logger.warning("在飞任务 %ds 内未跑完，取消并按 interrupted 收尾", grace)
             consume.cancel()
         with suppress(asyncio.CancelledError):
             await consume
