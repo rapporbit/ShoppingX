@@ -74,11 +74,22 @@ async def authenticate(db: AsyncSession, username: str, password: str) -> User |
     return user
 
 
-async def claim_thread(db: AsyncSession, thread_id: str, user_id: str, title: str) -> None:
+async def claim_thread(
+    db: AsyncSession, thread_id: str, user_id: str, title: str, *, verify_user: bool = True
+) -> None:
     """认领一段会话（起任务时调）：首轮登记归属 + 标题，后续轮只把 ``updated_at`` 顶到最新。
 
     **认领是一次性的**：已存在的 thread 绝不改 ``user_id``——否则「用别人的 thread_id 发一条消息」
     就成了把他人会话过户到自己名下的越权写。属主校验（assert_owner）挡的是读，这里挡的是写。
+
+    **鉴权关闭时也要登记**（阶段 1-2，``verify_user=False`` + ``user_id=""``）：``threads`` 行是
+    「这个 thread 上谁在跑」的唯一真相（见 :mod:`app.db.runs`），没有行就没有真相，幂等第 1 层又
+    会退回进程内那份各算各的字典。那条路上的 ``user_id`` 是假身份，所以不查 users 表。
+
+    ``verify_user`` 顶替的是原先外键抛 ``IntegrityError`` 的那条路：1-2 去掉了
+    ``threads.user_id`` 的外键（demo 身份不在 users 表里，带外键就插不进来），于是「token 验签
+    通过、它的 sub 在 users 表里查无此人」改由这里显式查一次——仍旧转 401 让用户重新登录，不能
+    把一个约束错误当 500 甩到脸上。
     """
     existing = await db.get(Thread, thread_id)
     if existing is not None:
@@ -90,15 +101,18 @@ async def claim_thread(db: AsyncSession, thread_id: str, user_id: str, title: st
         existing.updated_at = datetime.now(UTC)
         await db.commit()
         return
+    if verify_user and await db.get(User, user_id) is None:
+        raise LookupError("凭证对应的用户不存在")
     db.add(Thread(id=thread_id, user_id=user_id, title=title[:TITLE_MAX]))
     try:
         await db.commit()
-    except IntegrityError as exc:
-        # 外键挡下来的：token 验签通过，但它的 sub 在 users 表里查无此人——账号被删了、库被换了、
-        # 或这枚 token 是开发态发证口给一个不存在的 user_id 签的。此时该让用户重新登录（401），
-        # 而不是把一个数据库约束错误当 500 甩到脸上。
+    except IntegrityError:
+        # 并发首轮：两个请求同时插同一个 thread_id，主键约束挡下后到的那个。它要的东西（行存在
+        # 且归属已定）已经由先到的那个做完了，回滚后当成功——但属主不是自己就仍要拒。
         await db.rollback()
-        raise LookupError("凭证对应的用户不存在") from exc
+        existing = await db.get(Thread, thread_id)
+        if existing is not None and existing.user_id != user_id:
+            raise PermissionError("无权访问该会话") from None
 
 
 async def assert_owner(db: AsyncSession, thread_id: str, user_id: str) -> None:

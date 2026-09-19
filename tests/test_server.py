@@ -22,6 +22,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from conftest import FakeRedis  # tests/ 的 conftest（pytest 已把它放进 sys.path）
 from httpx import ASGITransport, AsyncClient
 
 import app.api.server as server
@@ -42,20 +43,22 @@ async def client() -> AsyncIterator[AsyncClient]:
 
 
 @pytest.fixture(autouse=True)
-async def _clean_tasks(monkeypatch: Any) -> AsyncIterator[None]:
-    """每个用例前换一个全新的任务队列 + 清空指纹表，用例后清 active_tasks 并取消遗留任务。
+async def _clean_tasks(monkeypatch: Any, fake_redis: FakeRedis) -> AsyncIterator[None]:
+    """每个用例前换一个全新的任务队列 + 清空指纹窗口，用例后清 active_tasks 并取消遗留任务。
 
-    队列与指纹表都是模块单例：被取消任务的 ``release`` 是异步的、可能晚于用例结束，不换新的会让
-    槽位计数泄漏到下一个用例（看似没满其实占着）；指纹表不清会让下个用例的同名 query 被判重复。
+    队列是模块单例：被取消任务的 ``release`` 是异步的、可能晚于用例结束，不换新的会让槽位计数
+    泄漏到下一个用例（看似没满其实占着）。指纹窗口 1-2 起在 Redis 上，这里清的是 conftest 注入
+    的那份假客户端——**不能再调 ``dedup.reset()``**，那会把假客户端一起摘掉，于是每条用例都去连
+    真 Redis、连不上就 503。
     """
     monkeypatch.setattr(server, "task_queue", PriorityRequestQueue())
-    dedup.reset()
+    fake_redis.store.clear()
     yield
     for handle in list(server.active_tasks.values()):
         if not handle.task.done():
             handle.task.cancel()
     server.active_tasks.clear()
-    dedup.reset()
+    fake_redis.store.clear()
 
 
 # ---------- POST /api/task ----------
@@ -398,6 +401,27 @@ async def test_same_thread_same_query_is_idempotent(client: AsyncClient, monkeyp
     release.set()
 
 
+async def test_idempotency_holds_when_this_process_never_saw_the_run(
+    client: AsyncClient, monkeypatch: Any
+) -> None:
+    """**真相在 DB，不在 active_tasks**（阶段 1-2）：清空本进程的字典（= 另一台副本收到请求），
+    同 thread 同 query 仍被判 already_running，不会各起一个 run。"""
+    started, release = asyncio.Event(), asyncio.Event()
+    monkeypatch.setattr(server, "run_agent", _blocking_run(started, release))
+
+    try:
+        await client.post("/api/task", json={"query": "买包", "thread_id": "t1"})
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+
+        handle = server.active_tasks.pop("t1")  # 这台副本对那个 run 一无所知
+        r2 = await client.post("/api/task", json={"query": "买包", "thread_id": "t1"})
+        assert r2.json() == {"status": "already_running", "thread_id": "t1"}
+        assert "t1" not in server.active_tasks  # 也没有凭空起第二个
+        server.active_tasks["t1"] = handle  # 放回去，让 teardown 照常收尾
+    finally:
+        release.set()
+
+
 async def test_cross_thread_duplicate_for_clients_without_thread_id(
     client: AsyncClient, monkeypatch: Any
 ) -> None:
@@ -436,21 +460,29 @@ async def test_dedup_never_hijacks_a_client_supplied_thread_id(
     release.set()
 
 
-async def test_rejected_task_leaves_no_fingerprint(client: AsyncClient, monkeypatch: Any) -> None:
-    """被 429 的请求不留指纹——否则用户退避重试会被当成「重复提交」再拒一次，陷入死循环。"""
+async def test_rejected_task_leaves_no_fingerprint(
+    client: AsyncClient, monkeypatch: Any, fake_redis: FakeRedis
+) -> None:
+    """被 429 的请求不留指纹——否则用户退避重试会被当成「重复提交」再拒一次，陷入死循环。
+
+    1-2 起指纹是**进门就登记**的（``SET NX`` 没法只查不登记），所以这条断言守的是「被拒的路径
+    各自撤销」那一步：第二个请求不带 thread_id（才会走指纹层），被 429 之后窗口里必须是空的。
+    """
     monkeypatch.setattr(
         server, "task_queue", PriorityRequestQueue(normal_slots=1, heavy_slots=1, queue_depth=0)
     )
     started, release = asyncio.Event(), asyncio.Event()
     monkeypatch.setattr(server, "run_agent", _blocking_run(started, release))
 
-    await client.post("/api/task", json={"query": "q1", "thread_id": "t1"})
-    await asyncio.wait_for(started.wait(), timeout=1.0)
-    r2 = await client.post("/api/task", json={"query": "q2", "thread_id": "t2"})
-    assert r2.status_code == 429
-
-    assert dedup.check_duplicate(None, "q2") is None  # 没留下指纹
-    release.set()
+    try:
+        await client.post("/api/task", json={"query": "q1", "thread_id": "t1"})
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        r2 = await client.post("/api/task", json={"query": "q2"})  # 不自带 tid → 走指纹层
+        assert r2.status_code == 429
+        assert fake_redis.store == {}  # 撤销干净：退避重试不会被自己刚才那次挡住
+        assert await dedup.check_duplicate(None, "q2", "t-retry") is None
+    finally:
+        release.set()
 
 
 # ---------- 文件下载 ----------

@@ -92,6 +92,52 @@ def _redirect_output_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(path_utils, "OUTPUT_ROOT", tmp_path / "output")
 
 
+class FakeRedis:
+    """够用的 Redis 替身：``SET NX EX`` / ``GET`` / ``DEL`` 三条命令 + 一个能手推的时钟。
+
+    不引 fakeredis 包，理由与 ``test_queue`` 同源——要钉的是**我们自己的取舍**（原子登记、撤销、
+    窗口过期），不是 Redis 的协议细节。
+    """
+
+    def __init__(self) -> None:
+        self.store: dict[str, tuple[str, float]] = {}
+        self.now = 0.0
+
+    def _purge(self) -> None:
+        self.store = {k: v for k, v in self.store.items() if v[1] > self.now}
+
+    async def set(self, key: str, value: str, *, nx: bool = False, ex: int = 0) -> object:
+        self._purge()
+        if nx and key in self.store:
+            return None
+        self.store[key] = (value, self.now + (ex or 10**9))
+        return True
+
+    async def get(self, key: str) -> str | None:
+        self._purge()
+        hit = self.store.get(key)
+        return hit[0] if hit else None
+
+    async def delete(self, *keys: str) -> int:
+        return sum(1 for k in keys if self.store.pop(k, None) is not None)
+
+
+@pytest.fixture(autouse=True)
+def fake_redis() -> Iterator[FakeRedis]:
+    """给幂等第 3 层一份进程内的去重窗口（阶段 1-2 起它在 Redis 上）。
+
+    **autouse 是必须的**：这层没有降级形态，Redis 不可达时 ``POST /api/task`` 一律 503（诚实
+    优于「看着在去重其实各去各的」）。测试机没有 Redis，不注入的话每条起任务的用例都 503。
+    一测一份还顺带保证指纹不串台——别的用例留下的指纹会变成随机的「重复提交」。
+    """
+    from app.api import dedup
+
+    client = FakeRedis()
+    dedup.set_client(client)
+    yield client
+    dedup.reset()
+
+
 @pytest.fixture(autouse=True)
 def _clean_memory_tables() -> Iterator[None]:
     """每个测试跑完清空四张记忆表（偏好 / 行为历史 / 收藏 / 对话正文）。
@@ -109,8 +155,8 @@ def _clean_memory_tables() -> Iterator[None]:
     ``strategies`` 是第六张，也是唯一**全局**的一张（无 user_id）——上面几张还能靠「用例各用各的
     user_id」兜底，它连这条退路都没有，一个用例写进去的策略会被下一个用例的注入位读到。
 
-    只清这六张，不动 ``users`` / ``threads``（账户测试自己靠不同用户名隔离，且它们之间没有
-    「同名 user 反复写」的问题）。
+    ``threads`` 是第七张（阶段 1-2 起）：它现在除了归属还存「谁在跑」，理由见下面那段注释。
+    只有 ``users`` 不清——账户测试自己靠不同用户名隔离，且它们之间没有「同名 user 反复写」。
     """
     yield
     from sqlalchemy import text
@@ -130,6 +176,11 @@ def _clean_memory_tables() -> Iterator[None]:
                 "strategies",
             ):
                 await db.execute(text(f"DELETE FROM {table}"))  # noqa: S608 —— 表名是字面量常量
+            # threads 也清（1-2 起）：这张表原先只存归属，一个用例留下的行顶多影响侧栏清单；
+            # 现在它还存「谁在跑」（幂等第 1 层的真相），而用例里的 thread_id 常是 "t1" 这类硬
+            # 编码字面量——上一个用例留下的行会以两种方式串台：run_status 还是 running 就把下一个
+            # 用例的请求判成 already_running；归属写着别人的 user_id 就直接 403。
+            await db.execute(text("DELETE FROM threads"))
             await db.commit()
 
     asyncio.run(_wipe())
