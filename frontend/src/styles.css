@@ -1886,7 +1886,8 @@ button:disabled {
   border-radius: 6px;
   background: var(--surface-softer);
 }
-.pref-item.pref-dislike {
+/* 硬规则（constraint）每轮都会注入给模型、推荐必须遵守——给它一眼可辨的底色 */
+.pref-item.pref-constraint {
   background: #fdf3f1;
   border-color: #f6dcd6;
 }
@@ -2506,7 +2507,50 @@ button:disabled {
   list-style: none;
 }
 
-/* 结构化字段在列表里的展示：效果标签 + 生效范围 + 关键词芯片 + 行内操作 */
+/* 归类标签 + key + 行内操作。constraint 一档最重，其余两档等价 */
+.pref-key {
+  font-size: 10.5px;
+  font-family: ui-monospace, monospace;
+  color: var(--text-2);
+  background: var(--surface);
+  border: 1px dashed var(--border-strong);
+  padding: 1px 6px;
+  border-radius: 6px;
+  cursor: help;
+}
+.pref-cat.pref-blocking {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: var(--danger);
+  font-weight: 600;
+}
+.pref-cat.pref-soft {
+  color: var(--text-2);
+  background: var(--surface-soft);
+  border-color: var(--border);
+}
+/* 「全部清除」不可撤销，所以放在标题行右侧、低调但够得着（点了还有一次 confirm） */
+.pref-clear {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--danger);
+  background: none;
+  border: 1px solid var(--danger-soft);
+  border-radius: 999px;
+  padding: 1px 9px;
+  cursor: pointer;
+}
+.pref-clear:hover {
+  background: var(--danger-soft);
+}
+.pref-editor-key {
+  font-family: ui-monospace, monospace;
+}
+.pref-editor-hint {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.5;
+}
 .pref-effect {
   font-size: 10.5px;
   padding: 1px 7px;

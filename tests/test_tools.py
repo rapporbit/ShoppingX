@@ -46,7 +46,7 @@ def test_registry_complete() -> None:
         "chat_fallback",
         "shopping_summary",
         "ask_user",
-        "forget_preference",
+        "save_memory",
     ]:
         assert expected in names, f"{expected} 未注册"
     # 无重名（重名会让 Toolkit 里出现歧义工具）。
@@ -631,32 +631,16 @@ async def test_item_picker_emits_items_preview(monkeypatch: pytest.MonkeyPatch) 
 
 
 # --------------------------------------------------------------------------
-# G1：item_picker 把当前用户的长期 dislike 黑名单确定性并入排除词
+# G1：item_picker 把**本轮会话**的 P_t 排除词确定性并入（长期记忆腿已随 M4 删，
+# 它现在只经模型上下文生效——由模型自己写进 exclude_keywords）
 # --------------------------------------------------------------------------
-async def test_item_picker_auto_excludes_user_dislikes(
+async def test_item_picker_auto_excludes_session_dislikes(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import app.memory.injector as injector_mod
-    from app.memory.store import PreferenceEntry, get_store
+    from app.api.context import set_session_pt
+    from app.memory.session_state import SessionPrefState
     from app.tools.item_picker import item_picker
     from app.utils.thread_ctx import thread_scope
-
-    # 用户在偏好页面亲手勾了「绝不推荐塑料」（source=user + blocking）——**只有这样**才有硬淘汰权。
-    store = get_store()
-    await store.write(
-        "user-x",
-        PreferenceEntry(
-            slug="plastic",
-            content="不要塑料",
-            category="material",
-            domain="global",
-            polarity="dislike",
-            keywords=["plastic"],
-            source="user",
-            blocking=True,
-        ),
-    )
-    monkeypatch.setattr(injector_mod, "get_store", lambda: store)
 
     cands = [
         ItemCandidate(
@@ -666,14 +650,17 @@ async def test_item_picker_auto_excludes_user_dislikes(
             item_id="P2", platform="a", title="canvas travel pouch", landed_usd=20, rating=4.5
         ),
     ]
-    # 注意：调用方**没有**传 exclude_keywords=["plastic"]——黑名单应由长期偏好确定性兜住。
+    # 注意：调用方**没有**传 exclude_keywords=["plastic"]——用户本轮亲口说的「不要塑料」
+    # 由 P_t 确定性兜住，不靠模型每轮记得转述。
     with thread_scope("t-g1", tmp_path, user_id="user-x"):
+        set_session_pt(SessionPrefState(exclude_terms=["plastic"]))
         out = await item_picker.ainvoke({"candidates": [c.model_dump() for c in cands], "top_k": 5})
-    assert "P1" in out.excluded  # 塑料候选被长期黑名单自动淘汰
+    assert "P1" in out.excluded
     assert [p.item_id for p in out.picks] == ["P2"]
 
-    # 匿名用户（无 user_id）则不应自动排除任何东西。
-    with thread_scope("t-g1b", tmp_path):
+    # 没有 P_t 的轮次（新会话 / 闲聊轮）不该自动排除任何东西。
+    # **另起一个 session_dir**：P_t 按 session_dir 聚合，复用同一个目录就会读到上面那份。
+    with thread_scope("t-g1b", tmp_path / "b"):
         out2 = await item_picker.ainvoke(
             {"candidates": [c.model_dump() for c in cands], "top_k": 5}
         )
@@ -704,40 +691,24 @@ async def test_item_picker_attenuates_soft_dislikes() -> None:
     assert ids == ["B", "A"]  # 命中软避讳的 A 被减分、排到 B 后
 
 
-# 长期 dislike 按 strength 分流：soft → Attenuator 减分不淘汰（对比 hard → 淘汰）
-async def test_item_picker_auto_attenuates_user_soft_dislikes(
+# P_t 的软避讳（「尽量别太塑料感」）→ Attenuator 减分不淘汰（对比 exclude_terms → 淘汰）
+async def test_item_picker_auto_attenuates_session_soft_dislikes(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import app.memory.injector as injector_mod
-    from app.memory.store import PreferenceEntry, get_store
+    from app.api.context import set_session_pt
+    from app.memory.session_state import SessionPrefState
     from app.tools.item_picker import item_picker
     from app.utils.thread_ctx import thread_scope
-
-    store = get_store()
-    # curator 从对话里学到的 dislike（source=agent）——**永远只减分不淘汰**，无论它多确信。
-    # 硬淘汰权只由用户在偏好页面显式授予（见上一条测试）。
-    await store.write(
-        "user-s",
-        PreferenceEntry(
-            slug="plastic",
-            content="不太喜欢塑料感",
-            category="material",
-            domain="global",
-            polarity="dislike",
-            keywords=["plastic"],
-            source="agent",
-        ),
-    )
-    monkeypatch.setattr(injector_mod, "get_store", lambda: store)
 
     cands = [
         ItemCandidate(item_id="P1", platform="a", title="plastic pouch", landed_usd=20, rating=4.5),
         ItemCandidate(item_id="P2", platform="a", title="canvas pouch", landed_usd=20, rating=4.5),
     ]
     with thread_scope("t-soft", tmp_path, user_id="user-s"):
+        set_session_pt(SessionPrefState(avoid_terms=["plastic"]))
         out = await item_picker.ainvoke({"candidates": [c.model_dump() for c in cands], "top_k": 5})
     ids = [c.item_id for c in out.picks]
-    assert out.excluded == []  # agent 学到的 dislike 不淘汰（只有用户勾的 blocking 才淘汰）
+    assert out.excluded == []  # 软避讳不淘汰，只减分
     assert set(ids) == {"P1", "P2"}
     assert ids == ["P2", "P1"]  # 命中软避讳的 P1 减分、排后
 
@@ -889,44 +860,34 @@ async def test_item_search_relax_never_loosens_hard_constraints_or_relevance(
     assert all(c.brand.lower() != "nomad" for c in out3.candidates)
 
 
-async def test_item_search_memory_exclusion_at_recall_stage(
+async def test_item_search_session_exclusion_at_recall_stage(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """blocking 黑名单在 **item_search 内**就过滤（不等 item_picker 事后杀），且 total_recall
+    """本轮 P_t 的排除词在 **item_search 内**就过滤（不等 item_picker 事后杀），且 total_recall
     反映排除后的真实召回数——web_search 兜底闸靠它判「召回全空」，排除前的假数字会把兜底拦死
-    （候选全被黑名单杀光时，用户拿到空清单还无处补货）。memory_excluded 把「杀了几条」摆上台面。"""
+    （候选全被排除词杀光时，用户拿到空清单还无处补货）。memory_excluded 把「杀了几条」摆上台面。
+
+    长期记忆那条腿已随 M4 删：它只经模型上下文生效，由模型自己写进 brand_exclude / query。
+    """
     import app.tools.item_search as mod
-    from app.memory.store import PreferenceEntry, get_store
+    from app.api.context import set_session_pt
+    from app.memory.session_state import SessionPrefState
     from app.utils.thread_ctx import thread_scope
 
     recall = await _build_tiny_recall()
     monkeypatch.setattr(mod, "get_recall_client", lambda: recall)
     monkeypatch.setattr(mod, "get_tower_client", lambda: TowerClient(model=None, local_dim=32))
 
-    # 用户亲手勾的「绝不推荐帆布」。domain=global：单测直调没有 planner，域为空时 fail-closed
-    # 只放行 global——测的是排除机制本身，不是域闸。
-    await get_store().write(
-        "user-ms-recall",
-        PreferenceEntry(
-            slug="canvas",
-            content="绝不推荐帆布",
-            category="material",
-            domain="global",
-            polarity="dislike",
-            keywords=["canvas"],
-            source="user",
-            blocking=True,
-        ),
-    )
     with thread_scope("t-ms-recall", tmp_path, user_id="user-ms-recall"):
+        set_session_pt(SessionPrefState(exclude_terms=["canvas"]))  # 用户本轮说的「不要帆布」
         out = await mod.item_search.ainvoke(
             {"query": "canvas travel bag", "platform": "amazon", "top_k": 5}
         )
-    assert out.memory_excluded >= 1  # canvas travel bag 在召回阶段就被黑名单杀掉
+    assert out.memory_excluded >= 1  # canvas travel bag 在召回阶段就被杀掉
     assert all("canvas" not in c.title.lower() for c in out.candidates)
     assert out.total_recall == len(out.candidates)  # 计数 = 排除后的真实召回
 
-    # 匿名（无 user_id）：黑名单不生效，canvas 候选原样返回。
+    # 没有 P_t 的轮次：不排除，canvas 候选原样返回。
     out2 = await mod.item_search.ainvoke(
         {"query": "canvas travel bag", "platform": "amazon", "top_k": 5}
     )
@@ -1059,112 +1020,44 @@ async def _recall_tower_with_query_spy(
     return mod, seen
 
 
-async def _write_like_pref(uid: str, slug: str, keyword: str, domain: str) -> None:
-    from app.memory.store import PreferenceEntry, get_store
+async def test_item_picker_does_not_add_long_term_memory_itself(monkeypatch: Any) -> None:
+    """长期记忆**不再由 item_picker 自己去读**（M4）。
 
-    await get_store().write(
-        uid,
-        PreferenceEntry(
-            slug=slug,
-            content=f"喜欢{keyword}",
-            category="material",
-            domain=domain,  # type: ignore[arg-type]
-            polarity="like",
-            keywords=[keyword],
-        ),
+    它现在只有一条生效路径：每轮注入给模型 → 模型把它写进 exclude_keywords / must_have。
+    这条测试守的是「没有第二条路」——库里存着「绝不要皮革」，而模型这轮没传任何排除词时，
+    picker 不许自作主张淘汰皮靴。这个失效方向是刻意选的：记忆生效与否，在工具入参里看得见。
+    """
+    from app.memory.fact_store import get_fact_store
+    from app.memory.facts import MemoryCategory, MemoryFact
+    from app.tools.item_picker import item_picker
+    from app.utils.thread_ctx import thread_scope
+
+    cands = [
+        ItemCandidate(item_id="M1", platform="a", title="leather boots", landed_usd=50, rating=4.9),
+        ItemCandidate(item_id="M2", platform="a", title="canvas shoes", landed_usd=40, rating=4.0),
+    ]
+    await get_fact_store().upsert_facts(
+        "u-mem",
+        [
+            MemoryFact(
+                key="material_avoid", value="绝不要皮革", category=MemoryCategory.CONSTRAINT
+            )
+        ],
     )
-
-
-async def test_item_picker_reports_memory_applied(monkeypatch: Any) -> None:
-    """本轮用到了哪些长期记忆，必须**上报出去**——记忆最危险的失败是静默的。
-
-    改造前 domain 字段「写了不读」的 bug 能长期潜伏，正是因为一条偏好没生效 / 误杀了一批商品，
-    前端不会有任何提示；用户只觉得「这破 Agent 老是搜不出东西」，且归因不到记忆头上。
-    """
-    from app.api import monitor
-    from app.memory.store import PreferenceEntry, get_store
-    from app.tools.item_picker import item_picker
-    from app.utils.thread_ctx import thread_scope
-
-    seen: list[dict[str, Any]] = []
-
-    async def _spy(domains: list[str], excluded: list[str], attenuated: list[str]) -> None:
-        seen.append({"domains": domains, "excluded": excluded, "attenuated": attenuated})
-
-    monkeypatch.setattr(monitor, "report_memory_applied", _spy)
-
-    cands = [
-        ItemCandidate(item_id="M1", platform="a", title="leather boots", landed_usd=50, rating=4.0),
-        ItemCandidate(item_id="M2", platform="a", title="canvas shoes", landed_usd=40, rating=4.0),
-    ]
     with thread_scope("t-mem", Path(tempfile.mkdtemp()), user_id="u-mem"):
-        await get_store().write(
-            "u-mem",
-            PreferenceEntry(
-                slug="leather",
-                content="不要皮革",
-                category="material",
-                domain="global",
-                polarity="dislike",
-                keywords=["leather"],
-                source="agent",  # curator 学到的 → 只减分
-            ),
-        )
         out = await item_picker.ainvoke({"candidates": [c.model_dump() for c in cands]})
+    assert out.excluded == []  # 机制不代模型执行记忆
 
-    assert seen and seen[0]["attenuated"] == ["leather"]
-    assert seen[0]["excluded"] == []  # agent 学到的拿不到硬淘汰权
-    assert out.excluded == []  # 皮靴仍在候选里，只是排后
-    assert [p.item_id for p in out.picks] == ["M2", "M1"]
-
-
-async def test_item_picker_reports_memory_even_if_model_restated_terms(monkeypatch: Any) -> None:
-    """模型自己也传了同一个词时，记忆**照报不误**——否则事件恰好在最常见的路径上静默。
-
-    偏好本来就注入了 prompt，模型多半会把 keywords 照抄进 exclude_keywords / deprioritize_keywords。
-    若上报口径取「去重后新增的那部分」，这种时候就一条事件都不发：记忆真的杀了商品，用户却什么
-    都看不到——正是这套系统要治的那个病。去重只该用于拼匹配列表，不该兼职当上报口径。
-    """
-    from app.api import monitor
-    from app.memory.store import PreferenceEntry, get_store
-    from app.tools.item_picker import item_picker
-    from app.utils.thread_ctx import thread_scope
-
-    seen: list[dict[str, Any]] = []
-
-    async def _spy(domains: list[str], excluded: list[str], attenuated: list[str]) -> None:
-        seen.append({"domains": domains, "excluded": excluded, "attenuated": attenuated})
-
-    monkeypatch.setattr(monitor, "report_memory_applied", _spy)
-
-    cands = [
-        ItemCandidate(item_id="M1", platform="a", title="leather boots", landed_usd=50, rating=4.0),
-        ItemCandidate(item_id="M2", platform="a", title="canvas shoes", landed_usd=40, rating=4.0),
-    ]
-    with thread_scope("t-mem2", Path(tempfile.mkdtemp()), user_id="u-mem2"):
-        await get_store().write(
-            "u-mem2",
-            PreferenceEntry(
-                slug="leather",
-                content="绝对不要皮革",
-                category="material",
-                domain="global",
-                polarity="dislike",
-                keywords=["leather"],
-                source="user",  # 用户亲手勾的「绝不推荐」 → 有硬淘汰权
-                blocking=True,
-            ),
-        )
-        out = await item_picker.ainvoke(
+    # 模型把注入的那条约束写进了入参 → 照常硬淘汰（这才是记忆生效的正路）。
+    with thread_scope("t-mem2", Path(tempfile.mkdtemp()), user_id="u-mem"):
+        out2 = await item_picker.ainvoke(
             {
                 "candidates": [c.model_dump() for c in cands],
-                "exclude_keywords": ["leather"],  # 模型把注入的偏好又转述了一遍
+                "exclude_keywords": ["leather"],
             }
         )
-
-    assert seen and seen[0]["excluded"] == ["leather"]  # 模型重说一遍，不影响上报
-    assert out.excluded == ["M1"]  # 皮靴被硬淘汰（用户授过权）
-    assert [p.item_id for p in out.picks] == ["M2"]
+    assert out2.excluded == ["M1"]
+    assert [p.item_id for p in out2.picks] == ["M2"]
 
 
 # --------------------------------------------------------------------------
@@ -1217,34 +1110,25 @@ def test_hits_partially_negated_still_hits() -> None:
     assert _hits("leather", "vegan leather strap with genuine leather trim")
 
 
-async def test_item_search_appends_like_prefs_to_query(monkeypatch: Any) -> None:
-    """本轮域内的 like 偏好词被拼进检索词——个性化召回，且**看得见**。"""
-    from app.api.context import set_session_domains
-    from app.utils.thread_ctx import thread_scope
+async def test_item_search_never_appends_memory_terms_itself(monkeypatch: Any) -> None:
+    """检索词**只由模型给**（M4）：库里存着「喜欢帆布」，检索词也仍然是原样的 query。
 
-    mod, seen = await _recall_tower_with_query_spy(monkeypatch)
-    with thread_scope("t-like", Path(tempfile.mkdtemp()), user_id="u-like"):
-        await _write_like_pref("u-like", "canvas", "canvas", "bags")
-        set_session_domains(["bags"])
-        out = await mod.item_search.ainvoke({"query": "travel bag", "platform": "amazon"})
-    assert seen == ["travel bag canvas"]  # 偏好词并入检索词
-    assert out.total_recall >= 1
-
-
-async def test_item_search_ignores_out_of_domain_prefs(monkeypatch: Any) -> None:
-    """**域隔离**（本次重构的原始目的）：买包时，鞋类的偏好不该掺进检索词。
-
-    改造前这条偏好会无差别地进 user 向量画像，把「买包」的请求向量往「鞋」那边拽。
+    原来这里由系统把长期 like 词拼进 query，与注入给模型的那份文本是两套来源：模型转述一遍
+    就会重复拼，最终检索词是怎么来的谁也说不清。现在个性化只能出现在**工具入参**里——
+    上报、前端思考过程、日志三处都看得见，也归因得到是模型哪一步加的。
     """
-    from app.api.context import set_session_domains
+    from app.memory.fact_store import get_fact_store
+    from app.memory.facts import MemoryFact
     from app.utils.thread_ctx import thread_scope
 
     mod, seen = await _recall_tower_with_query_spy(monkeypatch)
-    with thread_scope("t-xdomain", Path(tempfile.mkdtemp()), user_id="u-x"):
-        await _write_like_pref("u-x", "suede", "suede", "footwear")  # 鞋类偏好
-        set_session_domains(["bags"])  # 但本轮在买包
-        await mod.item_search.ainvoke({"query": "travel bag", "platform": "amazon"})
-    assert seen == ["travel bag"]  # 跨域偏好完全不参与——不加词、也不减分
+    await get_fact_store().upsert_facts(
+        "u-like", [MemoryFact(key="material_like", value="喜欢帆布 canvas")]
+    )
+    with thread_scope("t-like", Path(tempfile.mkdtemp()), user_id="u-like"):
+        out = await mod.item_search.ainvoke({"query": "travel bag", "platform": "amazon"})
+    assert seen == ["travel bag"]  # 系统不替模型拼词
+    assert out.total_recall >= 1
 
 
 async def test_item_search_no_prefs_is_pure_semantic(monkeypatch: Any) -> None:
@@ -2254,16 +2138,14 @@ class TestNullIsAbsent:
         assert plan.clear_budget is True  # 非 None 字段不受影响
 
     def test_other_structured_output_schemas_covered(self) -> None:
-        """同洞面积的另外三处 schema：null 一样归一，不臆造行为。"""
+        """同洞面积的另外两处 schema：null 一样归一，不臆造行为。"""
         from app.memory.curator import CurationResult
-        from app.memory.parser import _ParseResult
         from app.tools.shopping_summary import _SummaryDraft
 
         draft = _SummaryDraft.model_validate(
             {"summary": "文案", "reasons": None, "off_intent": None}
         )
         assert draft.reasons == [] and draft.off_intent == []
-        assert _ParseResult.model_validate({"preferences": None}).preferences == []
         # M3 起 curator 的输出字段是 facts（key/value/category 三字段的事实），同洞同修。
         assert CurationResult.model_validate({"facts": None}).facts == []
 

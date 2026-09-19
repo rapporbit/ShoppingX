@@ -8,7 +8,7 @@
 | 归谁 | 某个 user_id | 全局，没有 user_id 这一列 |
 | 来源 | 每轮对话结束后的 fast 档 LLM | 离线蒸馏（``scripts/eval/distill_strategies.py``） |
 | 进哪 | ``<user_long_term_preferences>``（planner 后） | ``<learned_strategies>``（system 段） |
-| 怎么退场 | 用户改 / ``forget_preference`` 删 | 连续失败自动淘汰（本模块） |
+| 怎么退场 | 用户改（同 key 覆盖）/ 偏好页删 | 连续失败自动淘汰（本模块） |
 
 两条路径共用一个 Store 类是很自然的下意识做法，但那会立刻要求回答「A 用户把这条策略跑挂了，
 B 用户那份算不算数」——一个不该存在的问题。所以是两张表、两个 Store、零共享状态。

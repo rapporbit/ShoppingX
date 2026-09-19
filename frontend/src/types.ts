@@ -1,10 +1,8 @@
 // 前后端唯一约定：AGUI 事件结构。后端 monitor.py 每条事件都是这个信封，
 // 前端只看 event 字段分发、看 data 取业务字段（见 app/api/monitor.py）。
 
-import type { PrefDomain } from "./domains";
 
 // 域枚举定义在 domains.ts（那里还有中文标签 / 下拉顺序），这里转出一手，组件按需从任一处取。
-export type { PrefDomain };
 
 export type AguiEvent = {
   type: "monitor_event";
@@ -22,8 +20,7 @@ export type AguiEvent = {
     // 本轮**读取侧**用到了哪些长期记忆（data: {domains, excluded, attenuated}）——思考过程里画一行
     // 「按你的长期偏好：排除 N 项、降权 M 项」。记忆最危险的失败是静默的：一条偏好误杀了一批商品，
     // 用户只会觉得「怎么老是搜不出东西」，且归因不到记忆头上。这一行就是解药。
-    | "memory_applied"
-    | "task_result"
+      | "task_result"
     | "task_cancelled"
     | "error"
     | "clarification_request"
@@ -176,45 +173,32 @@ export type TurnExperiment = {
   skills: string[];
 };
 
-// 长期偏好（GET /api/preferences/{user_id} 返回）。
-// dedup_key 是删除时的 handle；source 区分「Agent 学到的」和「你手填的」。
-//
-// blocking = 硬淘汰权：命中即把商品从结果里删掉，且用户看不到被删了什么。所以它**只由用户显式
-// 授予**——后端在唯一落库口上强制 source="agent" 的一律 false，Agent 学到的 dislike 只减分。
-// last_confirmed_at 取代了原来的 recency_weight：后端删掉了半衰期衰减，这个时间戳**不参与任何
-// 打分**，只供 UI 提示「这条很久没用过了」。注意后端 SQLite 存的是 naive datetime，ISO 串没有
-// 时区后缀 —— 按 UTC 解析，别当本地时间。
+// 一条长期记忆（GET /api/preferences/{user_id} 返回）。
+// 字段就是模型看到的那几个：页面上给用户看的，和注入给模型的是同一份东西。
+// category 决定注入优先级（constraint 每轮必注入，其余按新鲜度补位），不决定杀伤力。
+// updated_at 只参与补位排序与保留期，不参与任何打分。注意后端 SQLite 存的是 naive datetime，
+// ISO 串没有时区后缀 —— 按 UTC 解析，别当本地时间。
+export type MemoryCategory = "preference" | "constraint" | "context";
+
 export type Preference = {
-  dedup_key: string;
-  content: string;
-  category: string;
-  polarity: "like" | "dislike";
-  blocking: boolean;
-  domain: PrefDomain;
-  slug: string;
-  keywords: string[];
-  source: "agent" | "user";
-  created_at: string;
-  last_confirmed_at: string;
+  key: string;
+  value: string;
+  category: MemoryCategory;
+  updated_at: string;
+  source_session: string;
 };
 
-// 一条偏好的可编辑结构（POST /parse 的返回、POST / PUT 的请求体）。
-// 与 Preference 的差别：没有 dedup_key（它由 polarity/category/domain/slug 派生）、没有元数据
-// （source / created_at / last_confirmed_at 由后端决定，不由用户填）。
-export type PrefDraft = {
-  content: string;
-  category: string;
-  domain: PrefDomain;
-  slug: string;
-  polarity: "like" | "dislike";
-  blocking: boolean;
-  keywords: string[];
+// 手填 / 修改一条记忆的请求体（POST / PUT 共用），与 save_memory 工具同形态。
+export type FactWrite = {
+  key: string;
+  value: string;
+  category: MemoryCategory;
 };
 
-// memory_updated 事件里的一条：回复下方那行「记住了 …」，✕ 用 dedup_key 删。
+// memory_updated 事件里的一条：回复下方那行「记住了 …」，✕ 用事实的 key 删。
 export type LearnedPref = {
   content: string;
-  dedup_key: string;
+  key: string;
 };
 
 // 会话级 P_t 约束（session_constraints 事件 / GET /api/session/{tid}/constraints）。

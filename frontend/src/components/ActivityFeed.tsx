@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { domainLabel } from "../domains";
 import type { AguiEvent } from "../types";
 import { CheckCircle2, ChevronRight, Loader2, Sparkles, XCircle } from "lucide-react";
 
@@ -90,44 +89,6 @@ function StepRow({ step }: { step: Step }) {
         <div className="clarification-row">
           <span className="clarification-icon">?</span>
           <span>向用户提问：{String(evt.data?.question ?? "")}</span>
-        </div>
-      </div>
-    );
-  }
-
-  // 本轮长期记忆的**读取侧**生效情况。这套记忆系统真正的病不是复杂，是复杂且**不可观测**：
-  // 一条偏好误杀了一批商品，用户看不到任何提示，只会觉得「这破 Agent 老是搜不出东西」，且归因
-  // 不到记忆头上。所以这行不折叠、词全摊开——被排除的词尤其要写清楚，那些商品是真的没了。
-  if (evt.event === "memory_applied") {
-    const excluded = (evt.data?.excluded as string[] | undefined) ?? [];
-    const attenuated = (evt.data?.attenuated as string[] | undefined) ?? [];
-    const domains = (evt.data?.domains as string[] | undefined) ?? [];
-    return (
-      <div className="step-row">
-        <div className="memory-row">
-          <span className="memory-icon">🧠</span>
-          <div className="memory-body">
-            <span className="memory-label">
-              {evt.message || "按你的长期偏好筛选"}
-              {domains.length > 0 && (
-                <span className="memory-domain">
-                  （本轮品类：{domains.map(domainLabel).join(" / ")}）
-                </span>
-              )}
-            </span>
-            <div className="memory-terms">
-              {excluded.map((t) => (
-                <span key={`x-${t}`} className="memory-chip memory-excluded" title="含此词的商品已被移出结果">
-                  ✕ {t}
-                </span>
-              ))}
-              {attenuated.map((t) => (
-                <span key={`a-${t}`} className="memory-chip memory-attenuated" title="含此词的商品被压低排序，仍在候选里">
-                  ↓ {t}
-                </span>
-              ))}
-            </div>
-          </div>
         </div>
       </div>
     );

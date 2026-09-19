@@ -84,12 +84,14 @@ system_prompt: |
     (item_ids)：逐件优劣 + 适合谁 + 推荐哪件，**调完即收尾**，不要再调 shopping_summary 把同一份
     判断用散文重讲一遍。要比的是**还没搜过的对象**（点名某两款机型）才走 research。
   - 用户说「别记了 / 我改主意了」→ 用**原 key 调 save_memory 写新值**（「不要塑料」→「塑料也
-    可以」），不要说「已删除」。forget_preference 只清 M1 之前留在旧偏好库里的条目，它看不到
-    <user_long_term_memory> 里的事实，别拿它去撤这里列出的任何一条。
+    可以」），并说清这是**覆盖**不是删除；要彻底删掉请他去偏好页自己删。你没有删除记忆的工具，
+    任何情况下都不要回「已删除 / 已清空」。
   - save_memory(key, value, category)：用户说出**跨会话都成立**的事实时当场记（「记住我不吃坚果」
     「以后都寄德国」「我一直只买有机棉」）。category：constraint 硬规则 / preference 取向 /
     context 身份背景。改主意用**原 key 覆盖**，别另起 key。本轮一次性的需求不要记。
   - recall_memories(topic)：要用到**没注入给你**的旧记忆时调（「我以前买的那双鞋」）。
+  - **记忆本身成为话题时（「记住 X / 别记了 / 你都记得我什么 / 我以前那个」）→ 先读
+    `memory-personalization` skill**：什么该记、key 怎么起、覆盖与删除的口径全在那份 skill 里。
   </tool_policy>
 
   <dispatch_policy>

@@ -1,25 +1,27 @@
 import { useCallback, useEffect, useState } from "react";
 import {
-  addPreferences,
+  addPreference,
+  clearPreferences,
   deletePreference,
   deleteSessionConstraint,
   fetchPreferences,
   fetchSessionConstraints,
-  parsePreference,
   updatePreference,
 } from "../api";
-import type { Preference, PrefDraft, SessionSnapshot } from "../types";
+import type { FactWrite, Preference, SessionSnapshot } from "../types";
 import { CloseIcon, HeartIcon, RefreshIcon } from "./icons";
 import { PreferenceEditor } from "./PreferenceEditor";
 import { PreferenceItem } from "./PreferenceItem";
-import { ProfileForm } from "./ProfileForm";
 
-// 长期偏好管理页。三块：我的资料（硬事实）/ 添加偏好 / 已有偏好（结构化列表，可改可删）。
+// 长期记忆管理页。三块：本次会话的临时约束 / 添加一条 / 已有记忆（可改可删，可全部清空）。
 //
-// 添加走「一句话 → LLM 解析成结构化草稿 → 用户过目 / 修改 → 确认落库」：偏好是结构化实体
-// （polarity / blocking / domain / keywords 各自驱动不同的检索行为），让 LLM 猜的字段直接进库，
-// 用户既不知道写了什么、也没机会纠正。草稿卡这一步就是把结构摆到台面上——「绝不推荐」尤其如此，
-// 它是唯一会把商品从结果里删掉的字段，必须由用户在这张卡上亲手勾。
+// **用户必须能看、能改、能删**——这是这套记忆设计里唯一不可省的一环：模型在后台自动学、
+// 自动写，那就得有一个地方让人原样看到它记了什么，并且改得动。展示的字段与注入给模型的完全
+// 一致（`[category] key: value`），不多也不少。
+//
+// 「我的资料」那块（收货地 / 预算上限表单）随 M4 删了：收货国这类事实现在和别的事实走同一条
+// 路——用户在对话里说一句，模型用 save_memory 落成一条 key 为 default_ship_to 的记忆，
+// 在这个列表里照样看得见、改得动。少一张表单，少一处「写了页面却不知道生效没有」的接缝。
 type PreferenceDrawerProps = {
   userId: string;
   open: boolean;
@@ -33,31 +35,12 @@ type PreferenceDrawerProps = {
   onSessionChange: (s: SessionSnapshot | null) => void;
 };
 
-// 资料块已单独展示这两条，列表里就别重复出现。
-const PROFILE_KEYS = new Set(["like:location:global:ship_to", "like:budget:global:budget_max"]);
+// 手填新条目的初值：category 落 preference（最轻的一档）。硬规则要用户自己选——
+// constraint 每轮都会注入给模型，UI 不替他把一条随手填的东西升成硬规则。
+const EMPTY_DRAFT: FactWrite = { key: "", value: "", category: "preference" };
 
-// 手填新条目的初值。domain 落 other（判不出品类的保守档，用户自己去下拉里选具体的）、
-// blocking 落 false——硬淘汰权只在用户亲手勾选时授予，UI 不替他预勾（同 /parse 草稿）。
-const EMPTY_DRAFT: PrefDraft = {
-  content: "",
-  category: "other",
-  domain: "other",
-  slug: "",
-  polarity: "like",
-  blocking: false,
-  keywords: [],
-};
-
-function toDraft(p: Preference): PrefDraft {
-  return {
-    content: p.content,
-    category: p.category,
-    domain: p.domain,
-    slug: p.slug,
-    polarity: p.polarity,
-    blocking: p.blocking,
-    keywords: [...p.keywords],
-  };
+function toDraft(p: Preference): FactWrite {
+  return { key: p.key, value: p.value, category: p.category };
 }
 
 export function PreferenceDrawer({
@@ -71,13 +54,12 @@ export function PreferenceDrawer({
 }: PreferenceDrawerProps) {
   const [prefs, setPrefs] = useState<Preference[]>([]);
   const [loading, setLoading] = useState(false);
-  const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  // 待确认的新条目草稿（来自 /parse 或「手动填写」的空卡）。非空时列表上方渲染成可编辑卡。
-  const [drafts, setDrafts] = useState<PrefDraft[]>([]);
-  // 正在编辑的已有条目：记住**旧** dedup_key（改字段会换 key，PUT 要用旧的去删）。
-  const [editing, setEditing] = useState<{ key: string; draft: PrefDraft } | null>(null);
+  // 正在手填的那条（点「添加一条」时出现的空卡）。null = 没在填。
+  const [draft, setDraft] = useState<FactWrite | null>(null);
+  // 正在编辑的已有条目：记住**旧** key（改了 key 就是换一条，PUT 要用旧的去删）。
+  const [editing, setEditing] = useState<{ key: string; draft: FactWrite } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -128,17 +110,11 @@ export function PreferenceDrawer({
     }
   };
 
-  const parse = () =>
+  const commitDraft = () =>
     run(async () => {
-      const parsed = await parsePreference(userId, text.trim());
-      setDrafts((cur) => [...cur, ...parsed]);
-      setText("");
-    });
-
-  const commitDrafts = () =>
-    run(async () => {
-      await addPreferences(userId, drafts);
-      setDrafts([]);
+      if (!draft) return;
+      await addPreference(userId, draft);
+      setDraft(null);
       await load();
     });
 
@@ -151,11 +127,18 @@ export function PreferenceDrawer({
     });
 
   const remove = async (key: string) => {
-    setPrefs((cur) => cur.filter((p) => p.dedup_key !== key)); // 乐观删除，界面即时响应
+    setPrefs((cur) => cur.filter((p) => p.key !== key)); // 乐观删除，界面即时响应
     await deletePreference(userId, key);
   };
 
-  const listed = prefs.filter((p) => !PROFILE_KEYS.has(p.dedup_key));
+  // 清空是**不可撤销**的（没有 tombstone、也没有回收站），所以这一步要二次确认——
+  // 与单条删除的口径不同：删一条错了再填一遍就是，清空全部则是几个月的积累一次性没了。
+  const clearAll = () =>
+    run(async () => {
+      if (!window.confirm(`确定清空全部 ${prefs.length} 条长期记忆？此操作不可撤销。`)) return;
+      await clearPreferences(userId);
+      await load();
+    });
 
   return (
     <>
@@ -164,7 +147,7 @@ export function PreferenceDrawer({
         <div className="drawer-head">
           <div className="drawer-title">
             <HeartIcon width={18} height={18} />
-            偏好管理
+            记忆管理
           </div>
           <div className="drawer-tools">
             <button className="icon-btn" onClick={() => void load()} disabled={loading} title="刷新">
@@ -177,8 +160,6 @@ export function PreferenceDrawer({
         </div>
 
         <div className="drawer-user">用户：{userId}</div>
-
-        <ProfileForm userId={userId} prefs={prefs} onSaved={setPrefs} />
 
         {threadId &&
           session &&
@@ -257,61 +238,46 @@ export function PreferenceDrawer({
         )}
 
         <section className="pref-section">
-          <div className="pref-section-title">添加偏好</div>
+          <div className="pref-section-title">添加一条</div>
           <div className="pref-section-hint">
-            写一句话，我拆成结构化条目给你过目；也可以直接手动填。
+            三个字段就是模型读到的全部：key 是身份（同 key 覆盖），内容写成过几个月单看也成立的
+            句子，归类决定它有多常被读到。
           </div>
-          <div className="pref-add">
-            <input
-              value={text}
-              placeholder="如「不要塑料的，尽量选小众品牌」"
-              onChange={(e) => setText(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && text.trim() && void parse()}
+          {draft === null ? (
+            <button className="pref-manual" onClick={() => setDraft({ ...EMPTY_DRAFT })}>
+              + 添加一条
+            </button>
+          ) : (
+            <PreferenceEditor
+              draft={draft}
+              onChange={setDraft}
+              onSubmit={commitDraft}
+              onCancel={() => setDraft(null)}
+              submitLabel="添加"
+              busy={busy}
             />
-            <button onClick={() => void parse()} disabled={!text.trim() || busy}>
-              {busy ? "…" : "解析"}
-            </button>
-            <button
-              className="pref-manual"
-              title="不用 LLM，直接手动填一条"
-              onClick={() => setDrafts((cur) => [...cur, { ...EMPTY_DRAFT }])}
-            >
-              手动
-            </button>
-          </div>
-          {error && <div className="pref-error">{error}</div>}
-
-          {drafts.length > 0 && (
-            <div className="pref-drafts">
-              <div className="pref-drafts-title">待确认（{drafts.length}）—— 可改，确认后才写入</div>
-              {drafts.map((d, i) => (
-                <PreferenceEditor
-                  key={i}
-                  draft={d}
-                  onChange={(next) => setDrafts((cur) => cur.map((x, j) => (j === i ? next : x)))}
-                  onSubmit={commitDrafts}
-                  onCancel={() => setDrafts((cur) => cur.filter((_, j) => j !== i))}
-                  submitLabel={`确认添加 ${drafts.length} 条`}
-                  busy={busy}
-                />
-              ))}
-            </div>
           )}
+          {error && <div className="pref-error">{error}</div>}
         </section>
 
         <section className="pref-section">
           <div className="pref-section-title">
-            已有偏好 <span className="pref-count">{listed.length}</span>
+            长期记忆 <span className="pref-count">{prefs.length}</span>
+            {prefs.length > 0 && (
+              <button className="pref-clear" onClick={() => void clearAll()} disabled={busy}>
+                全部清除
+              </button>
+            )}
           </div>
-          {listed.length === 0 ? (
+          {prefs.length === 0 ? (
             <div className="drawer-empty">
-              {loading ? "加载中…" : "还没有偏好。上面手动添加，或者聊几轮让 Agent 自己学。"}
+              {loading ? "加载中…" : "还没有记忆。上面手动添加，或者聊几轮让 Agent 自己学。"}
             </div>
           ) : (
             <ul className="drawer-list">
-              {listed.map((p) =>
-                editing?.key === p.dedup_key ? (
-                  <li key={p.dedup_key} className="pref-item-editing">
+              {prefs.map((p) =>
+                editing?.key === p.key ? (
+                  <li key={p.key} className="pref-item-editing">
                     <PreferenceEditor
                       draft={editing.draft}
                       onChange={(draft) => setEditing({ key: editing.key, draft })}
@@ -323,10 +289,10 @@ export function PreferenceDrawer({
                   </li>
                 ) : (
                   <PreferenceItem
-                    key={p.dedup_key}
+                    key={p.key}
                     pref={p}
-                    onEdit={() => setEditing({ key: p.dedup_key, draft: toDraft(p) })}
-                    onDelete={() => void remove(p.dedup_key)}
+                    onEdit={() => setEditing({ key: p.key, draft: toDraft(p) })}
+                    onDelete={() => void remove(p.key)}
                   />
                 ),
               )}

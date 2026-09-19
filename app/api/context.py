@@ -34,27 +34,15 @@ _user_id_var: ContextVar[str | None] = ContextVar("shoppingx_user_id", default=N
 # 写入、**planner 在识别出本轮约束后当轮改写**，供 item_picker 等工具机制性读取并强制执行
 # （把「不要塑料」「预算 ≤X」从 prompt 建议升为硬保证，不靠模型每轮转述）。
 #
-# 同 _SESSION_DOMAINS 用「按 session_dir 聚合的模块级 dict」而非裸 ContextVar，理由见下面那段
+# 同 _DEST_COUNTRY 用「按 session_dir 聚合的模块级 dict」而非裸 ContextVar，理由见下面那段
 # 注释——planner 与 item_picker 各自在独立 context 里跑，前者 set 的 ContextVar 后者读不到。
 # P_t 原本是裸 ContextVar 且侥幸没暴露这个坑：它此前只由 run_agent 入口（主 context）写一次，
 # 从没有工具写过它。planner 一开始写 P_t，同一个坑就踩第三次了。
 _SESSION_PT: dict[str, "SessionPrefState"] = {}
 
-# 本轮在买哪些品类域（PrefDomain 枚举，复数——「旅行三件套」跨 bags/apparel/electronics）。由
-# planner 判定后写入，供记忆读取端把偏好**限定在相关域内生效**（「买鞋时不要皮革」不该在买沙发时
-# 也杀掉皮沙发）。
-#
-# 同 _DEST_COUNTRY 用「按 session_dir 聚合的模块级 dict」而非裸 ContextVar：
-# planner 与 item_picker 是两个工具、各自在独立 context 里跑，前者 set 的 ContextVar 后者**读不到**
-# （实测：planner 判出 footwear，item_picker 拿到空）。这个坑本文件已经踩过两次，别再踩第三次。
-#
-# 缺键（planner 没跑 / 闲聊轮 / 无会话作用域）→ 读回空列表 → 读取端**退回「全部偏好生效」的现状
-# 行为**：新机制的失效方向绝不能比现状更差，宁可多注入几条也不让偏好静默失灵。
-_SESSION_DOMAINS: dict[str, list[str]] = {}
-
-# 本轮「已沉淀偏好」累加器——curator 是长期库唯一落库口，写成功即把 (content, dedup_key) 记这里，
+# 本轮「已沉淀事实」累加器——curator 写成功即把 (content, key) 记这里，
 # 供 run_agent 收尾时汇总进 learned_preferences 返回、并经 AGUI 推给前端「记住了 … ✕」那一行。
-# 存 dedup_key 是因为那一行的 ✕ 要能删掉这条——只有 content 的话前端拿不到删除 handle。
+# 存 key 是因为那一行的 ✕ 要能删掉这条——只有 content 的话前端拿不到删除 handle。
 # 默认 None（非 run_agent 上下文，如离线脚本 / 单测直调 persist）→ 记录端 no-op，避免
 # 「模块级可变默认列表跨任务串台」的经典坑。
 # fork 子 Agent 通过 Task 的 ContextVar 快照继承同一个 list 引用，子里记的偏好自然冒泡回主轮。
@@ -65,7 +53,7 @@ _learned_prefs_var: ContextVar[list[dict[str, str]] | None] = ContextVar(
 # planner 本轮判定的任务清单（recommend / price_compare / landed_cost / ...）——「用户要不要比价」
 # 同样是意图判断，只有 planner 有依据。阶段机的转移通告读它来定向（无比价诉求时提示模型跳过
 # price_compare / shipping_calc，见 harness.hooks.progress）。按 session_dir 聚合（理由见
-# _SESSION_DOMAINS）。
+# _DEST_COUNTRY）。
 _SESSION_TASKS: dict[str, list[str]] = {}
 
 # planner 本轮判定的收货国（ISO 码）——决定关税免征额（US $0 vs CN $7 vs AU $660，差两个数量级）。
@@ -78,7 +66,7 @@ _DEST_COUNTRY: dict[str, tuple[str, bool]] = {}
 # 本轮**原始用户 query**（未经任何 LLM 转述）——工具侧唯一的「用户到底说了什么」确定性信号源。
 # planner 的 domains / category 都是 LLM 结构化输出，「合法但错」时下游拿它当锚会静默反转
 # （品类门反着杀）；反证只能靠独立信号，而独立信号只有原文词面。按 session_dir 聚合（理由见
-# _SESSION_DOMAINS）。
+# _DEST_COUNTRY）。
 _ORIGINAL_QUERY: dict[str, str] = {}
 
 
@@ -125,37 +113,11 @@ def get_session_pt() -> "SessionPrefState | None":
 
 
 def reset_session_pt() -> None:
-    """清掉本会话的 P_t（run_agent 收尾，与 reset_session_domains 对称——模块级 dict 不像
+    """清掉本会话的 P_t（run_agent 收尾，与 reset_session_tasks 对称——模块级 dict 不像
     ContextVar 会随 task 结束自动回收，不清就会按 session_dir 一直攒着）。"""
     sd = get_session_dir()
     if sd is not None:
         _SESSION_PT.pop(str(sd), None)
-
-
-def set_session_domains(domains: Sequence[str]) -> None:
-    """记下 planner 本轮判定的品类域。由 planner 工具写，item_picker / injector 读。
-
-    入参收成协变的 ``Sequence[str]``（而非 ``list[str]``）：调用方传的是 ``list[PrefDomain]``，
-    而 ``list`` 是不变的、传不进来。**不在这里 import PrefDomain**——``app.memory`` 依赖
-    ``app.api.context``，反向 import 会成循环依赖；上下文层本就该对具体业务枚举无知。
-    """
-    sd = get_session_dir()
-    if sd is not None:
-        _SESSION_DOMAINS[str(sd)] = list(domains)
-
-
-def get_session_domains() -> list[str]:
-    """读取本轮品类域；**空列表 = 判不出域**，读取端（``injector._in_scope``）据此 fail-closed：
-    只有 ``global`` 域的偏好生效。
-
-    这是刻意的保守失效方向：空域意味着「不知道本轮在买什么」，宁可让跨域偏好本轮不生效（用户
-    再说一遍即可），也不能让它在一个未知品类的轮次里静默杀商品（用户归因不了，只会觉得「这破
-    Agent 老搜不出东西」）。完整论证见 ``_in_scope`` 的 docstring。
-    """
-    sd = get_session_dir()
-    if sd is None:
-        return []
-    return list(_SESSION_DOMAINS.get(str(sd), []))
 
 
 def get_session_dir() -> Path | None:
@@ -218,18 +180,6 @@ def reset_session_tasks() -> None:
         _SESSION_TASKS.pop(str(sd), None)
 
 
-def reset_session_domains() -> None:
-    """清掉本会话的品类域判定（``run_agent`` 开局 + 收尾调，理由同 reset_session_tasks）。
-
-    开局清尤其重要：上一轮买鞋（domains=[footwear]），这一轮改口买沙发但 planner 还没跑完，
-    此时若残留旧域，「买鞋时不要皮革」这条偏好会被误判为**与本轮相关**，把皮沙发全杀掉——
-    正是这套域隔离要防的事，反而由陈旧状态自己制造出来。
-    """
-    sd = get_session_dir()
-    if sd is not None:
-        _SESSION_DOMAINS.pop(str(sd), None)
-
-
 def set_dest_country(country: str, assumed: bool = False) -> None:
     """记下 planner 本轮确定的收货国（ISO 码）+ 它是不是系统假设的。由 planner 工具写。
 
@@ -290,18 +240,19 @@ def begin_learned_prefs() -> None:
     _learned_prefs_var.set([])
 
 
-def record_learned_pref(content: str, dedup_key: str = "") -> None:
-    """把一条刚落库成功的偏好记进本轮累加器（按 content 保序去重）。
+def record_learned_pref(content: str, key: str = "") -> None:
+    """把一条刚落库成功的事实记进本轮累加器（按 content 保序去重）。
 
-    ``dedup_key`` 是前端「记住了 … ✕」那一行的删除 handle（DELETE /api/preferences/…）。
-    非 ``run_agent`` 上下文（累加器为 None，如离线脚本 / 单测直调 persist）下 no-op。
+    ``key`` 是事实的 key，也是前端「记住了 … ✕」那一行的删除 handle
+    （DELETE /api/preferences/{uid}/{key}）。非 ``run_agent`` 上下文（累加器为 None，
+    如离线脚本 / 单测直调）下 no-op。
     """
     lst = _learned_prefs_var.get()
     if lst is None or not content:
         return
     if any(p["content"] == content for p in lst):
         return
-    lst.append({"content": content, "dedup_key": dedup_key})
+    lst.append({"content": content, "key": key})
 
 
 def get_learned_prefs() -> list[str]:

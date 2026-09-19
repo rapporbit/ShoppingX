@@ -14,7 +14,12 @@ import pytest
 from app.agent.skills import SKILL_VIEWER_TOOL_NAME, SKILLS_DIR, skill_loaders
 from app.agent.tool_registry import build_toolkit
 
-EXPECTED_SKILLS = {"cross-border-duty", "bundle-planning", "image-shopping", "memory-forget"}
+EXPECTED_SKILLS = {
+    "cross-border-duty",
+    "bundle-planning",
+    "image-shopping",
+    "memory-personalization",
+}
 
 
 def test_skill_dirs_are_exactly_the_expected_set() -> None:

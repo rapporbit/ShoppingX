@@ -13,7 +13,9 @@ import pytest
 
 from app.memory.affinity import affinity_terms
 from app.memory.assemble import assemble
-from app.memory.store import FavoriteItem, PreferenceEntry, PreferenceStore, get_store
+from app.api.context import set_session_pt
+from app.memory.session_state import SessionPrefState
+from app.memory.store import FavoriteItem, PreferenceStore, get_store
 from app.tools.item_picker import item_picker
 from app.tools.schemas import ItemCandidate
 from app.utils.thread_ctx import thread_scope
@@ -85,56 +87,26 @@ async def test_negated_material_is_not_evidence(store: PreferenceStore) -> None:
 
 
 # ---------- ③ 显式表达压过行为 ----------
-async def test_explicit_dislike_beats_favorites(store: PreferenceStore) -> None:
+async def test_explicit_dislike_beats_favorites(store: PreferenceStore, tmp_path: Path) -> None:
     """嘴上说不要皮革、手上收藏过两件皮革 —— 以说的为准，不能一边减分一边加分。
 
-    **keywords 刻意用中文单词 ['皮革']**：这是 curator 从中文对话里抽词的真实形态。初版测试图省事写
-    了英文 ['genuine leather']，恰好与亲和 token 精确相等 → 压制看着生效，实则只守住了「英文、单词、
+    **排斥词刻意用中文 ['皮革']**：这是从中文对话里抽词的真实形态。初版测试图省事写了英文
+    ['genuine leather']，恰好与亲和 token 精确相等 → 压制看着生效，实则只守住了「英文、单词、
     完全同形」这条最窄的路，给 bug 发了通行证（真实链路里中文 dislike 一条都压不住）。
+
+    压制源是**会话级 P_t**（用户本轮亲口说的）。长期记忆那条腿已随 M4 删除——它现在只经模型
+    上下文生效，不再自己往 bundle 里塞词。
     """
     uid = _uid()
     await _fav_titles(store, uid, "Genuine Leather Bag", "Genuine Leather Wallet")
-    await store.write(
-        uid,
-        PreferenceEntry(
-            polarity="dislike",
-            category="material",
-            slug="leather",
-            domain="global",
-            content="不要皮革",
-            keywords=["皮革"],  # ← curator 的真实产物：中文原子词
-        ),
-    )
-    bundle = await assemble(uid)
-    assert "皮革" in bundle.penalty  # agent 学到的 dislike → 减分
-    # 亲和词是 'genuine leather'（英文、且比 blocked 里的 'leather' 更长）——跨语言 + 长词变体
-    # 两道坎都得跨过去才压得住。
+    # P_t 按 session_dir 聚合（见 api.context），所以要在 thread_scope 里写、里读。
+    with thread_scope("t-aff-dislike", tmp_path, user_id=uid):
+        set_session_pt(SessionPrefState(avoid_terms=["皮革"]))  # ← 真实产物：中文原子词
+        bundle = await assemble(uid)
+    assert "皮革" in bundle.penalty
+    # 亲和词是 'genuine leather'（英文、且比 blocked 里的 '皮革' 归一后更长）——跨语言 + 长词
+    # 变体两道坎都得跨过去才压得住。
     assert bundle.affinity == []
-
-
-async def test_out_of_scope_dislike_still_suppresses_affinity(store: PreferenceStore) -> None:
-    """**域闸不该让弱证据翻身**。
-
-    这条守的是一个真洞（初版实现里真的有）：域判不出的轮次里，用户明说的 dislike 被 fail-closed 的
-    域闸挡在 penalty 之外，而不受域闸约束的行为亲和照常加分——净效果是「他说不要皮革，系统反而把皮革
-    顶上去了」。域闸是给**杀伤力**设的闸，不该顺带给我们自己的推断开绿灯。
-    """
-    uid = _uid()
-    await _fav_titles(store, uid, "Genuine Leather Bag", "Genuine Leather Wallet")
-    await store.write(
-        uid,
-        PreferenceEntry(
-            polarity="dislike",
-            category="material",
-            slug="genuine_leather",
-            domain="footwear",  # 域外：本轮（无会话域）它进不了 penalty
-            content="买鞋时不要皮革",
-            keywords=["genuine leather"],
-        ),
-    )
-    bundle = await assemble(uid)
-    assert bundle.penalty == []  # 域闸照常挡住它的杀伤力（这是对的，不该改）
-    assert bundle.affinity == []  # 但它仍然压得住行为亲和 —— 不许弱证据反超
 
 
 # ---------- ②④ 只加分不淘汰 + 归因不静默 ----------

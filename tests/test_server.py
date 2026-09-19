@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -25,8 +27,10 @@ from httpx import ASGITransport, AsyncClient
 import app.api.server as server
 from app.api import dedup
 from app.api.concurrency import PriorityRequestQueue
-from app.memory.parser import UserPrefDraft
-from app.memory.store import PreferenceEntry, get_store
+from app.db.models import User
+from app.db.session import init_db, session_factory
+from app.memory.fact_store import get_fact_store
+from app.memory.facts import MemoryCategory, MemoryFact
 
 
 @pytest.fixture
@@ -541,46 +545,6 @@ async def test_upload_oversize_413(client: AsyncClient, monkeypatch: Any, tmp_pa
     assert resp.status_code == 413
 
 
-# ---------- 偏好读取 ----------
-async def test_get_preferences_sorted(
-    client: AsyncClient, monkeypatch: Any, tmp_path: Path
-) -> None:
-    store = get_store()
-    await store.write(
-        "u1",
-        PreferenceEntry(slug="niche", content="喜欢小众品牌", category="brand", domain="other"),
-    )
-    await store.write(
-        "u1",
-        PreferenceEntry(
-            slug="plastic",
-            content="不要塑料",
-            category="material",
-            polarity="dislike",
-            domain="other",
-        ),
-    )
-    monkeypatch.setattr(server, "get_store", lambda: store)
-
-    resp = await client.get("/api/preferences/u1")
-    assert resp.status_code == 200
-    prefs = resp.json()["preferences"]
-    assert len(prefs) == 2
-    # dislike 排在 like 前面（按 polarity 排序）。
-    assert prefs[0]["content"] == "不要塑料"
-    assert prefs[0]["polarity"] == "dislike"
-
-
-async def test_get_preferences_empty_user(
-    client: AsyncClient, monkeypatch: Any, tmp_path: Path
-) -> None:
-    store = get_store()
-    monkeypatch.setattr(server, "get_store", lambda: store)
-    resp = await client.get("/api/preferences/nobody")
-    assert resp.status_code == 200
-    assert resp.json()["preferences"] == []
-
-
 async def test_health(client: AsyncClient) -> None:
     resp = await client.get("/api/health")
     assert resp.status_code == 200
@@ -597,155 +561,144 @@ async def test_health(client: AsyncClient) -> None:
     assert body["turn_cache"] == {"enabled": False, "entries": 0}
 
 
-# ---------- 偏好写入 / 删除 / 我的资料（偏好管理页的三个写口）----------
-def _draft(**kw: Any) -> dict[str, Any]:
-    """一条结构化偏好草稿的 JSON（POST / PUT 的请求体形状）。"""
-    base = {
-        "content": "不要塑料的",
-        "category": "material",
-        "domain": "other",
-        "slug": "plastic",
-        "polarity": "dislike",
-        "blocking": False,
-        "keywords": ["塑料", "plastic"],
-    }
-    return {**base, **kw}
+async def _with_user(uid: str) -> None:
+    """建一个真用户行——``memory_facts.user_id`` 有外键，``memory_purge_gen`` 也挂在这张表上。
 
-
-async def test_parse_preference_returns_drafts_without_persisting(
-    client: AsyncClient, monkeypatch: Any, tmp_path: Path
-) -> None:
-    """/parse 只解析、**不落库**——草稿要先摆给用户过目，不让 LLM 猜的字段悄悄进库。"""
-    store = get_store()
-    monkeypatch.setattr(server, "get_store", lambda: store)
-
-    async def fake_parse(text: str) -> list[UserPrefDraft]:
-        assert "塑料" in text
-        return [UserPrefDraft(**_draft())]
-
-    monkeypatch.setattr(server, "parse_user_preference", fake_parse)
-
-    resp = await client.post("/api/preferences/u1/parse", json={"text": "不要塑料的"})
-    assert resp.status_code == 200
-    drafts = resp.json()["drafts"]
-    assert drafts[0]["blocking"] is False
-    assert drafts[0]["keywords"] == ["塑料", "plastic"]
-    assert await store.read("u1") == []  # 关键：还没落库
-
-
-async def test_add_preference_persists_structured_entries(
-    client: AsyncClient, monkeypatch: Any, tmp_path: Path
-) -> None:
-    """POST 收**结构化**条目（用户确认 / 改过的草稿），落库为 source=user。"""
-    store = get_store()
-    monkeypatch.setattr(server, "get_store", lambda: store)
-
-    # 用户在草稿卡上勾了「绝不推荐」——这是 blocking 唯一的合法来源，也正是草稿卡存在的意义：
-    # LLM 只负责把一句话拆成结构化字段，**要不要给它硬淘汰权，由用户按下那一下决定**。
-    resp = await client.post("/api/preferences/u1", json={"entries": [_draft(blocking=True)]})
-    assert resp.status_code == 200
-    added = resp.json()["added"]
-    assert added[0]["dedup_key"] == "dislike:material:other:plastic"
-    assert added[0]["source"] == "user"
-    assert added[0]["blocking"] is True
-    assert added[0]["keywords"] == ["塑料", "plastic"]
-
-
-async def test_update_preference_rekeys_on_field_change(
-    client: AsyncClient, monkeypatch: Any, tmp_path: Path
-) -> None:
-    """改 polarity/category/domain/slug 会换 dedup_key —— PUT 用旧 key 删、按新字段写，不留孤儿。"""
-    store = get_store()
-    entry = PreferenceEntry(
-        slug="plastic", content="不要塑料", category="material", polarity="dislike", domain="other"
-    )
-    await store.write("u1", entry)
-    monkeypatch.setattr(server, "get_store", lambda: store)
-
-    resp = await client.put(
-        f"/api/preferences/u1/entry/{entry.dedup_key}",
-        json=_draft(polarity="like", content="塑料也行"),  # 极性反转 → 换钥匙
-    )
-    assert resp.status_code == 200
-    entries = await store.read("u1")
-    assert len(entries) == 1  # 旧 key 已删，没留下自相矛盾的两条
-    assert entries[0].dedup_key == "like:material:other:plastic"
-    assert entries[0].content == "塑料也行"
-    assert entries[0].source == "user"  # 用户亲手改过 → 归他管，curator 此后不得覆盖
-
-
-async def test_add_preference_rejects_unparseable(
-    client: AsyncClient, monkeypatch: Any, tmp_path: Path
-) -> None:
-    """解析不出偏好（用户写了句「你好」）→ 400，让前端提示换个说法，而不是静默写脏数据。"""
-    store = get_store()
-    monkeypatch.setattr(server, "get_store", lambda: store)
-
-    async def fake_parse(text: str) -> list[UserPrefDraft]:
-        return []
-
-    monkeypatch.setattr(server, "parse_user_preference", fake_parse)
-    resp = await client.post("/api/preferences/u1/parse", json={"text": "你好呀"})
-    assert resp.status_code == 400
-    assert await store.read("u1") == []
-
-
-async def test_delete_preference(client: AsyncClient, monkeypatch: Any, tmp_path: Path) -> None:
-    """删一条（页面上的 × / 回复下方「记住了 …」的撤销）；重复删幂等，不报错。"""
-    store = get_store()
-    entry = PreferenceEntry(
-        slug="plastic", content="不要塑料", category="material", polarity="dislike", domain="other"
-    )
-    await store.write("u1", entry)
-    monkeypatch.setattr(server, "get_store", lambda: store)
-
-    resp = await client.delete(f"/api/preferences/u1/{entry.dedup_key}")
-    assert resp.status_code == 200
-    assert await store.read("u1") == []
-    assert (await client.delete(f"/api/preferences/u1/{entry.dedup_key}")).status_code == 200
-
-
-async def test_update_profile_writes_ship_to_and_budget(
-    client: AsyncClient, monkeypatch: Any, tmp_path: Path
-) -> None:
-    """「我的资料」：固定 slug → dedup_key 恒定 → 改值即覆盖（单值语义，不越攒越多）。
-
-    收货国 content 里必须留大写 ISO 码——planner 的收货国解析正是从 content 正则认国家的。
+    ``created_at`` 设成昨天：``ratelimit.guard_daily_signups`` 只数当天新建的 users 行，而测试库
+    是整套共享的，用默认「现在」会把当天注册名额吃光（只在全量跑时才复现的串台）。
     """
-    store = get_store()
-    monkeypatch.setattr(server, "get_store", lambda: store)
+    await init_db()
+    async with session_factory()() as db:
+        db.add(
+            User(
+                id=uid,
+                username=f"t_{uid[:8]}",
+                password_hash="x",
+                created_at=datetime.now(UTC) - timedelta(days=1),
+            )
+        )
+        await db.commit()
 
-    await client.put("/api/preferences/u1/profile", json={"dest_country": "JP"})
-    resp = await client.put(
-        "/api/preferences/u1/profile", json={"dest_country": "US", "budget_max_usd": 300}
-    )
+
+# ---------- 长期记忆：读 / 手填 / 改 / 删 / 清空（偏好管理页的五个口）----------
+def _uid() -> str:
+    """每个用例一个独立 user_id——测试库是整套共享的，隔离靠身份。"""
+    return f"u-{uuid4().hex[:8]}"
+
+
+def _fact_body(**kw: Any) -> dict[str, Any]:
+    """一条事实的 JSON（POST / PUT 的请求体形状）——就是模型看到的那三个字段。"""
+    return {"key": "material_avoid", "value": "不要塑料的", "category": "constraint", **kw}
+
+
+async def test_add_and_get_preferences(
+    client: AsyncClient, monkeypatch: Any, tmp_path: Path
+) -> None:
+    """手填直接落库，无「先解析成草稿」那一步——三个字段用户自己填得出来。"""
+    uid = _uid()
+    store = get_fact_store()
+    monkeypatch.setattr(server, "get_fact_store", lambda: store)
+
+    resp = await client.post(f"/api/preferences/{uid}", json=_fact_body())
     assert resp.status_code == 200
-    keys = {p["dedup_key"]: p for p in resp.json()["preferences"]}
-    assert "JP" not in keys["like:location:global:ship_to"]["content"]  # 改值即覆盖，不留旧条目
-    assert "US" in keys["like:location:global:ship_to"]["content"]
-    assert keys["like:budget:global:budget_max"]["content"] == "预算上限约 300 美元"
-    assert len(keys) == 2
+    assert resp.json()["added"][0]["key"] == "material_avoid"
 
-    # 传空 / 非正数 = 清除该项
-    resp = await client.put(
-        "/api/preferences/u1/profile", json={"dest_country": "", "budget_max_usd": 0}
-    )
+    got = await client.get(f"/api/preferences/{uid}")
+    prefs = got.json()["preferences"]
+    assert len(prefs) == 1
+    assert prefs[0]["value"] == "不要塑料的"
+    assert prefs[0]["category"] == "constraint"
+
+
+async def test_get_preferences_empty_user(
+    client: AsyncClient, monkeypatch: Any, tmp_path: Path
+) -> None:
+    uid = _uid()
+    store = get_fact_store()
+    monkeypatch.setattr(server, "get_fact_store", lambda: store)
+    resp = await client.get("/api/preferences/nobody")
+    assert resp.status_code == 200
     assert resp.json()["preferences"] == []
 
 
-async def test_update_profile_rejects_unknown_country(
+async def test_add_preference_rejects_pii_without_echoing_value(
     client: AsyncClient, monkeypatch: Any, tmp_path: Path
 ) -> None:
-    store = get_store()
-    monkeypatch.setattr(server, "get_store", lambda: store)
-    resp = await client.put("/api/preferences/u1/profile", json={"dest_country": "ZZ"})
+    """页面**不是特权入口**：与 save_memory / 回合后抽取过同一道 validate_fact。
+
+    400 的消息里不回显 value——被拒的多半正是不该扩散的东西。
+    """
+    uid = _uid()
+    store = get_fact_store()
+    monkeypatch.setattr(server, "get_fact_store", lambda: store)
+
+    card = "4111 1111 1111 1111"
+    resp = await client.post(f"/api/preferences/{uid}", json=_fact_body(value=f"我的卡号 {card}"))
     assert resp.status_code == 400
+    assert card not in resp.text
+    assert await store.get_facts(uid) == []
 
 
-# ---------- GET /api/similar：blocking 黑名单不豁免 ----------
-async def test_similar_filters_blocking_blacklist(client: AsyncClient, monkeypatch: Any) -> None:
-    """搜同款不走 AgentLoop，但「绝不推荐」黑名单照样生效——展示通路不豁免用户授权的硬排除。
-    匿名用户无黑名单，原样直通。"""
+async def test_update_preference_rekeys_and_deletes_old(
+    client: AsyncClient, monkeypatch: Any, tmp_path: Path
+) -> None:
+    """改 key = 换一条：PUT 用旧 key 删、按新 key 写，不留孤儿。"""
+    uid = _uid()
+    store = get_fact_store()
+    await store.upsert_facts(uid, [MemoryFact(key="material_avoid", value="不要塑料")])
+    monkeypatch.setattr(server, "get_fact_store", lambda: store)
+
+    resp = await client.put(
+        f"/api/preferences/{uid}/entry/material_avoid",
+        json=_fact_body(key="material_like", value="塑料也行", category="preference"),
+    )
+    assert resp.status_code == 200
+    facts = await store.get_facts(uid)
+    assert len(facts) == 1  # 旧 key 已删，没留下自相矛盾的两条
+    assert (facts[0].key, facts[0].value) == ("material_like", "塑料也行")
+
+
+async def test_delete_preference_is_idempotent(
+    client: AsyncClient, monkeypatch: Any, tmp_path: Path
+) -> None:
+    """删一条（页面上的 × / 回复下方「记住了 …」的撤销）；重复删幂等，不报错。"""
+    uid = _uid()
+    store = get_fact_store()
+    await store.upsert_facts(uid, [MemoryFact(key="material_avoid", value="不要塑料")])
+    monkeypatch.setattr(server, "get_fact_store", lambda: store)
+
+    resp = await client.delete(f"/api/preferences/{uid}/material_avoid")
+    assert resp.status_code == 200
+    assert await store.get_facts(uid) == []
+    assert (await client.delete(f"/api/preferences/{uid}/material_avoid")).status_code == 200
+
+
+async def test_clear_preferences_bumps_purge_generation(
+    client: AsyncClient, monkeypatch: Any, tmp_path: Path
+) -> None:
+    """「全部清除」：清空 + 代数加一，让正在跑的抽取整批作废（否则清了个寂寞）。"""
+    uid = f"u-purge-{uuid4().hex[:8]}"
+    await _with_user(uid)
+    store = get_fact_store()
+    await store.upsert_facts(uid, [MemoryFact(key="k1", value="v1")])
+    monkeypatch.setattr(server, "get_fact_store", lambda: store)
+    before = await store.purge_generation(uid)
+
+    resp = await client.delete(f"/api/preferences/{uid}")
+    assert resp.status_code == 200
+    assert await store.get_facts(uid) == []
+    assert await store.purge_generation(uid) == before + 1
+
+
+# ---------- GET /api/similar：不再按长期记忆过滤（M4）----------
+async def test_similar_returns_neighbors_unfiltered(
+    client: AsyncClient, monkeypatch: Any
+) -> None:
+    """搜同款不走 AgentLoop，也**不再**自己按记忆挡一遍。
+
+    记忆现在只有一种生效方式——模型把它写进工具入参——而这条通路没有模型。留一条看不见的
+    第二生效通路，正是 M4 要消灭的东西。
+    """
     from app.recall.schemas import RecallCandidate
 
     hits = [
@@ -759,30 +712,20 @@ async def test_similar_filters_blocking_blacklist(client: AsyncClient, monkeypat
 
     monkeypatch.setattr(server, "get_recall_client", lambda: _FakeRecall())
 
-    # 匿名：无黑名单，两件直通。
     resp = await client.get("/api/similar/X1")
     assert [i["item_id"] for i in resp.json()["items"]] == ["L1", "C1"]
 
-    # 登录用户拉黑 leather（用户亲手勾的 blocking，domain=bags——这条通路刻意不设域闸）。
-    await get_store().write(
+    # 登录用户即便记着「绝不推荐皮革」，同款列表也照常给两件。
+    await get_fact_store().upsert_facts(
         "user-sim",
-        PreferenceEntry(
-            slug="leather",
-            content="绝不推荐皮革",
-            category="material",
-            domain="bags",
-            polarity="dislike",
-            keywords=["leather"],
-            source="user",
-            blocking=True,
-        ),
+        [MemoryFact(key="material_avoid", value="绝不要皮革", category=MemoryCategory.CONSTRAINT)],
     )
     server.app.dependency_overrides[server.get_current_user_id] = lambda: "user-sim"
     try:
         resp2 = await client.get("/api/similar/X1")
     finally:
         server.app.dependency_overrides.pop(server.get_current_user_id, None)
-    assert [i["item_id"] for i in resp2.json()["items"]] == ["C1"]
+    assert [i["item_id"] for i in resp2.json()["items"]] == ["L1", "C1"]
 
 
 # ---------- GET /api/uploads（参考图回显：对话气泡 / 历史回看都靠它取图）----------

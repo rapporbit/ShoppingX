@@ -1,7 +1,7 @@
 """写工具的精准放行（批 0 / L3）。
 
 AgentScope 在 ``PermissionMode.DEFAULT`` 下对**非只读工具**一律发 ``RequireUserConfirmEvent``
-把 reply 挂起等人点确认。本仓的非只读工具（``ask_user`` / ``forget_preference`` / 两个终结工具 /
+把 reply 挂起等人点确认。本仓的非只读工具（``ask_user`` / ``save_memory`` / 两个终结工具 /
 两个交易暂存卡工具）是 Agent 自己的工作流零件，不是「要不要让 Agent 动你的磁盘」那类高危动作——
 每次都弹确认等于让主链路停在半路。
 
@@ -30,7 +30,6 @@ from agentscope.state import AgentState
 DEFAULT_ALLOWED_TOOLS: frozenset[str] = frozenset(
     {
         "ask_user",  # 向用户提问，回复通路是自建 Future 桥（见 app/api/clarification.py）
-        "forget_preference",  # 删一条长期偏好，用户明说要忘才会被调
         # 写一条长期事实。写入面已经被机制卡死：过 validate_fact 的 PII 门、只能按 key 覆盖
         # 自己这个用户的记忆、模型没有删除口。再弹一次确认拦不住任何东西，只会把主链路停住。
         "save_memory",
