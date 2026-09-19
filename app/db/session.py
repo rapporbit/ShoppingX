@@ -20,16 +20,20 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import event, inspect
+from alembic.script import ScriptDirectory
+from sqlalchemy import event, inspect, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
@@ -48,6 +52,9 @@ _DEFAULT_DB = PROJECT_ROOT / "var" / "globex.db"
 
 #: 基线迁移的 revision id：它建的表结构 == create_all 时代的 users/threads。老库 stamp 到这里。
 BASELINE_REVISION = "0001_accounts"
+
+#: 迁移锁的名字。MySQL 的 ``GET_LOCK`` 键 / PostgreSQL advisory lock 的哈希源，全集群共用一个。
+MIGRATION_LOCK_NAME = "globex_alembic"
 
 
 def database_url() -> str:
@@ -176,20 +183,120 @@ def _migrate_sync(stamp_baseline: bool) -> None:
     command.upgrade(cfg, "head")
 
 
+def _advisory_key(name: str) -> int:
+    """PostgreSQL 的 advisory lock 只认 64 位整数，把锁名折成一个稳定的 key（跨进程必须一致，
+    所以用 sha1 而不是 Python 的 ``hash()``——后者带进程级随机盐）。"""
+    return int.from_bytes(hashlib.sha1(name.encode()).digest()[:8], "big", signed=True)
+
+
+async def _acquire_lock(conn: AsyncConnection, dsn: str, wait_sec: int) -> bool:
+    """在 ``conn`` 这条连接上拿会话级命名锁。拿到 True，等到超时 False。"""
+    if "mysql" in dsn:
+        # GET_LOCK 自带超时参数，返回 1 拿到 / 0 超时 / NULL 出错（如锁名超 64 字符）。
+        row = await conn.execute(
+            text("SELECT GET_LOCK(:name, :wait)"),
+            {"name": MIGRATION_LOCK_NAME, "wait": wait_sec},
+        )
+        return row.scalar() == 1
+    # PostgreSQL 的阻塞版 pg_advisory_lock 没有超时参数，故轮询 try 版本自己卡表。
+    key = _advisory_key(MIGRATION_LOCK_NAME)
+    deadline = asyncio.get_running_loop().time() + wait_sec
+    while True:
+        row = await conn.execute(text("SELECT pg_try_advisory_lock(:key)"), {"key": key})
+        if row.scalar():
+            return True
+        if asyncio.get_running_loop().time() >= deadline:
+            return False
+        await asyncio.sleep(0.5)
+
+
+async def _release_lock(conn: AsyncConnection, dsn: str) -> None:
+    if "mysql" in dsn:
+        await conn.execute(text("SELECT RELEASE_LOCK(:name)"), {"name": MIGRATION_LOCK_NAME})
+    else:
+        await conn.execute(
+            text("SELECT pg_advisory_unlock(:key)"), {"key": _advisory_key(MIGRATION_LOCK_NAME)}
+        )
+
+
+@asynccontextmanager
+async def _migration_lock(dsn: str) -> AsyncIterator[bool]:
+    """**多副本首启的串行闸**：yield True = 该我跑迁移；False = 等锁超时，交给调用方决定。
+
+    为什么要这把锁：MySQL 的 DDL **不是事务性的**。四个容器（2 API + 2 worker）同时首启会一起
+    ``upgrade head``，两个进程同时建同一张表 → 一个成功一个撞 ``1050 Table already exists`` 而
+    半途退出，留下一张建了一半的库；重跑还撞同一个 1050，人不进去手动清就再也起不来。SQLite
+    不走这条路（单文件、DDL 在事务里、失败自动回滚，重跑即可），直接放行。
+
+    锁挂在一条**专用连接**上而不是迁移自己的连接：Alembic 的 env.py 现造现弃自己的引擎，我们借不到
+    它的连接。命名锁是**会话级**的，与执行 DDL 的是不是同一条连接无关，只要持锁这条一直活着。
+    连接意外断开时 MySQL / PostgreSQL 都会自动释放，不会留死锁——这正是选它而不是「锁表里插一行」
+    的理由：后者进程被 SIGKILL 就留下一把永远解不开的锁。
+    """
+    if dsn.startswith("sqlite"):
+        yield True
+        return
+    wait_sec = env_int("DB_MIGRATION_LOCK_TIMEOUT", 120)
+    engine = make_engine(dsn)
+    try:
+        async with engine.connect() as conn:
+            got = await _acquire_lock(conn, dsn, wait_sec)
+            try:
+                yield got
+            finally:
+                if got:
+                    await _release_lock(conn, dsn)
+    finally:
+        await engine.dispose()
+
+
+def _head_revision() -> str | None:
+    return ScriptDirectory.from_config(_alembic_config()).get_current_head()
+
+
+async def _current_revision() -> str | None:
+    """库里 ``alembic_version`` 记的版本号；表不存在（全新库）时 None。"""
+    engine = make_engine()
+    try:
+        async with engine.connect() as conn:
+            if "alembic_version" not in await conn.run_sync(_table_names):
+                return None
+            row = await conn.execute(text("SELECT version_num FROM alembic_version"))
+            return row.scalar()
+    finally:
+        await engine.dispose()
+
+
 async def init_db() -> None:
-    """把库升到最新版本（启动时调一次，幂等）。
+    """把库升到最新版本（启动时调一次，幂等，多副本下串行）。
 
     老库（create_all 建的、无 ``alembic_version``）先 stamp 到基线再 upgrade——见模块 docstring。
     ``to_thread``：Alembic 的 command API 是同步的，且 env.py 内部要 ``asyncio.run``，在已经跑着事件
     循环的 lifespan 里直接调会撞 "asyncio.run() cannot be called from a running event loop"。
+
+    **探库放在锁里面**：等锁那几十秒里别的副本正在建表，锁外探到的表清单一拿到锁就过期了，
+    legacy 判断会跟着判反（探时无 users、拿到锁时已经有了 → 照样 stamp → 版本号被按回基线）。
     """
-    tables = await _existing_tables()
-    legacy = "alembic_version" not in tables and "users" in tables
-    if legacy:
-        logger.info(
-            "检测到 create_all 时代的老库（%d 张表，无版本号）：stamp 到基线后再迁移", len(tables)
-        )
-    await asyncio.to_thread(_migrate_sync, legacy)
+    dsn = database_url()
+    async with _migration_lock(dsn) as got_lock:
+        if not got_lock:
+            # 等超时未必是坏事：先跑的那个副本可能已经升完了，那就直接放行，别把自己饿死在启动上。
+            current, head = await _current_revision(), _head_revision()
+            if current is not None and current == head:
+                logger.warning("等迁移锁超时，但库已在最新版本 %s，跳过迁移继续启动", head)
+                return
+            raise RuntimeError(
+                f"等待迁移锁 {MIGRATION_LOCK_NAME} 超时，且库版本 {current} 未到 {head}；"
+                "另一个副本可能卡在迁移里，检查后重启（超时值见 DB_MIGRATION_LOCK_TIMEOUT）"
+            )
+        tables = await _existing_tables()
+        legacy = "alembic_version" not in tables and "users" in tables
+        if legacy:
+            logger.info(
+                "检测到 create_all 时代的老库（%d 张表，无版本号）：stamp 到基线后再迁移",
+                len(tables),
+            )
+        await asyncio.to_thread(_migrate_sync, legacy)
 
 
 async def get_db() -> AsyncIterator[AsyncSession]:
