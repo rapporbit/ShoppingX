@@ -262,7 +262,9 @@ class RedisStreamQueue:
             try:
                 await handler(task)
             except asyncio.CancelledError:
-                # 优雅退出时的取消不算失败：不 ack、不进死信，留在 PEL 里等下一个 worker 捡。
+                # 取消不算失败：不 ack、不进死信，留在 PEL 里等下一个 worker 捡。优雅退出的正常
+                # 路径走不到这儿——handler（worker.handle_task）自己按 interrupted 收尾后正常返回，
+                # 由下面那行 ack 掉。走到这儿的是收尾也没兜住的意外取消，留 PEL 是兜底。
                 raise
             except Exception as exc:
                 await self._on_failure(stream, message_id, text, task, exc, max_deliveries)

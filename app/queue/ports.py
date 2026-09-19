@@ -30,7 +30,15 @@ from app.api.concurrency import RequestClass, classify_request
 
 # ``cancelled`` 与 ``failed`` 分开（批2-4）：轮询方要能区分「跑挂了，可以重试」与「是我自己
 # 取消的，别再重试」。把用户取消塞进 failed 会让脚本类调用方一遍遍重投一条它自己刚掐掉的任务。
-TaskState = Literal["queued", "running", "done", "failed", "cancelled"]
+#
+# ``interrupted`` 是第三种「没跑完」（阶段 1-3）：worker 排空超时被掐。它与 failed 的差别在**谁该
+# 决定重试**——任务本身没毛病，是进程要走了，所以消息被 ack 掉、由用户按「重发」再来一次，而不是
+# 留在 PEL 里十分钟后被另一个 worker 静默重跑（那一跑用户看不见，账还要再记一次）。
+TaskState = Literal["queued", "running", "done", "failed", "cancelled", "interrupted"]
+
+# 「有定论了」的四个状态：轮询方见到其一即可停手。终态集合在几处共用（状态解析、API 影子协程），
+# 单点定义省得加一个态时漏改一处——漏改的症状是前端一直转圈到等待超时。
+TERMINAL_STATES: tuple[TaskState, ...] = ("done", "failed", "cancelled", "interrupted")
 
 
 def _now_iso() -> str:
@@ -150,9 +158,7 @@ class TaskStatus:
         state = raw.get("state", "queued")
         return TaskStatus(
             task_id=raw["task_id"],
-            state=state
-            if state in ("queued", "running", "done", "failed", "cancelled")
-            else "failed",
+            state=state if state in ("queued", "running", *TERMINAL_STATES) else "failed",
             thread_id=raw.get("thread_id", ""),
             final_text=raw.get("final_text", ""),
             error=raw.get("error", ""),
@@ -171,7 +177,8 @@ async def cancel_in_flight(tasks: set[asyncio.Task[None]]) -> None:
     那个 ``await``（``gather`` 是例外，它会把取消转给子任务）。少这一手，worker 优雅退出超时那条路
     上会留一批孤儿协程——进程都在退出了它们还在跑 LLM，消息既没 ack 也没人管。
 
-    掐掉之后消息**留在 PEL 里没被 ack**，正是「超时转回 pending」要的效果。
+    掐掉之后消息怎么处置由 handler 决定：本仓的 ``worker.handle_task`` 把它按 ``interrupted`` 收尾
+    并让调用方 ack 掉（阶段 1-3）；handler 若原样把取消抛出去，消息就留在 PEL 里等 XAUTOCLAIM 重投。
     """
     if not tasks:
         return

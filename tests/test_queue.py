@@ -410,8 +410,12 @@ async def test_worker_failure_writes_failed_and_reraises(monkeypatch: pytest.Mon
     assert status is not None and status.state == "failed" and "模型挂了" in status.error
 
 
-async def test_worker_cancel_leaves_status_non_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
-    """被取消不写终态：这条消息没 ack，会被下一个 worker 领回重跑，写 failed 是在骗轮询方。"""
+async def test_worker_shutdown_cancel_writes_interrupted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """关停掐断写 ``interrupted`` 而不是 failed：任务没毛病，是进程要走了。
+
+    写 failed 会让脚本类调用方按「跑挂了」重试同一条；不写终态（阶段 1-3 之前的做法）则让轮询方
+    一直等下去——而消息现在是被 ack 掉的，那边等的东西永远不会再动。
+    """
     queue = InProcessQueue()
 
     async def _hang(*_a: Any, **_kw: Any) -> dict[str, Any]:
@@ -422,11 +426,11 @@ async def test_worker_cancel_leaves_status_non_terminal(monkeypatch: pytest.Monk
     running = asyncio.create_task(worker.handle_task(_task(), queue))
     await asyncio.sleep(0.05)
     running.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await running
+    await asyncio.wait_for(running, 2.0)  # 不往外抛 = 调用方会 ack 掉这条消息
 
     status = await queue.get_status("t1")
-    assert status is not None and status.state == "running"
+    assert status is not None and status.state == "interrupted"
+    assert status.error  # 带上「请重发」的说明，别让轮询方只看到一个陌生状态词
 
 
 async def test_worker_stop_finishes_inflight_and_leaves_rest(
@@ -465,11 +469,13 @@ async def test_worker_stop_finishes_inflight_and_leaves_rest(
 async def test_worker_grace_timeout_returns_message_to_pending(
     fake: FakeRedis, rq: RedisStreamQueue, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """宽限期内跑不完 → 掐掉在飞任务 → 消息**不 ack**、留在 PEL 里等下一个 worker 领回重跑。
+    """宽限期内跑不完 → 掐掉在飞任务 → 按 interrupted 收尾并**ack 掉**，PEL 清空。
 
-    这条是「超时转回 pending」的回归。把 ports.cancel_in_flight 那一手去掉即红：消费循环被取消时
-    在途 task 会变成孤儿协程（进程都在退出还在跑 LLM），而这里断言的 PEL 反倒照样是满的——所以
-    额外断言在飞协程真的被取消了。
+    阶段 1-3 改的就是这条断言的方向：从前是「不 ack、留 PEL 等重投」，现在是「给个定论、ack 掉，
+    要不要再来一次由用户决定」（理由见 worker 模块 docstring 第 3 条）。
+
+    把 ports.cancel_in_flight 那一手去掉即红：消费循环被取消时在途 task 会变成孤儿协程（进程都在
+    退出还在跑 LLM），没人替它收尾，PEL 也就空不掉——所以额外断言在飞协程真的被取消了。
     """
     cancelled = asyncio.Event()
 
@@ -497,7 +503,9 @@ async def test_worker_grace_timeout_returns_message_to_pending(
     stop.set()
     await asyncio.wait_for(runner, 3.0)
     await asyncio.wait_for(cancelled.wait(), 1.0)
-    assert fake.pending_ids(STREAM_NORMAL)  # 仍未 ack，可被 XAUTOCLAIM 领回
+    assert not fake.pending_ids(STREAM_NORMAL)  # 已 ack：不会有下一个 worker 背着用户重跑
+    status = await rq.get_status("t1")
+    assert status is not None and status.state == "interrupted"
 
 
 def test_worker_main_refuses_when_queue_disabled(monkeypatch: pytest.MonkeyPatch) -> None:

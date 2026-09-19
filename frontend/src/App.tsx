@@ -311,7 +311,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
     void checkAdmin().then(setIsAdmin);
   }, [userId]);
   useEffect(() => {
-    if (status === "done" || status === "cancelled" || status === "error") {
+    if (status === "done" || status === "cancelled" || status === "interrupted" || status === "error") {
       void fetchQuota().then(setQuota);
     }
   }, [status]);
@@ -538,6 +538,10 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
 
                           {turn.status === "cancelled" && !turn.errorMsg && (
                             <div className="info-banner">任务已取消。</div>
+                          )}
+
+                          {turn.status === "interrupted" && !turn.errorMsg && (
+                            <div className="info-banner">服务更新中断了这一轮，没有结果产出。重发一次即可。</div>
                           )}
 
                           {/* 选购指南卡（present_guide 收尾那一轮）：卡与 markdown 正文是同一份

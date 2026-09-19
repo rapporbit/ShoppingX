@@ -403,26 +403,80 @@ async def test_user_cancel_acks_the_message_instead_of_requeueing_it(
     assert status is not None and status.state == "cancelled"
 
 
-async def test_graceful_shutdown_cancel_still_returns_the_message_to_pending(
+async def test_graceful_shutdown_cancel_ends_the_run_as_interrupted(
     queue: InProcessQueue, monkeypatch: pytest.MonkeyPatch, spy_bus: Any
 ) -> None:
-    """优雅退出的取消照旧往外抛：消息不 ack，留在 PEL 里等下一个 worker 领回重跑。
+    """关停掐断 → 状态落 ``interrupted``、发 ``task_interrupted``、**不往外抛**（= 消息被 ack）。
 
-    与上一条是同一枚硬币的两面。判据是控制面的进程内标记——没有它就只能二选一，两种取消里
-    必然有一种是错的。
+    与上一条是同一枚硬币的两面：两种取消都表现为 CancelledError，判据是控制面的进程内标记。差别
+    只在收尾文案与用户的下一步——取消是他自己要停，中断要他重发。
+
+    阶段 1-3 前这条路是「往外抛、不 ack、留 PEL」，十分钟后被另一个 worker 领回静默重跑：用户看不
+    见那一跑（页面早关了），账却真的再花一次。
     """
     started = asyncio.Event()
     _slow_agent(monkeypatch, started)
+    events: list[str | None] = []
+
+    async def _spy(thread_id: str | None = None) -> None:
+        events.append(thread_id)
+
+    monkeypatch.setattr(monitor, "report_task_interrupted", _spy)
     intent = server.IntentTask.create(task_id="ct-3", thread_id="ct-3", query="买帐篷")
     running = asyncio.create_task(worker.handle_task(intent, queue))
     await asyncio.wait_for(started.wait(), 2.0)
 
     running.cancel()  # 没打过取消标记 = 不是用户取消
-    with pytest.raises(asyncio.CancelledError):
-        await running
+    await asyncio.wait_for(running, 2.0)  # 正常返回，没有 CancelledError 漏出去
 
     status = await queue.get_status("ct-3")
-    assert status is not None and status.state == "running"  # 不写终态：它待会儿还会活过来
+    assert status is not None and status.state == "interrupted"
+    assert events == ["ct-3"]  # thread_id 显式带上，否则前端收不到（同 enqueue_failed 那条）
+    assert control.was_cancelled_locally("ct-3") is False  # 这一刀不是用户砍的，别留成标记
+
+
+async def test_interrupt_frees_the_thread_slot_before_writing_the_terminal_state(
+    queue: InProcessQueue, monkeypatch: pytest.MonkeyPatch, spy_bus: Any
+) -> None:
+    """中断收尾的顺序：事件 → 还 thread 占位 → 写终态。**占位必须先还**。
+
+    等结果的那一方一见终态就放手，用户下一秒就可能按重发。占位还挂在 threads 上时写终态，那次重发
+    会撞上 already_running——被自己刚被掐掉的那一轮挡在门外，而那一轮已经不存在了。
+
+    预扣不在这条路上还：``run_agent`` 跑起来了，它自己的 finally 会按真实用量结算。
+    """
+    started = asyncio.Event()
+    _slow_agent(monkeypatch, started)
+    order: list[str] = []
+
+    async def _spy_event(thread_id: str | None = None) -> None:
+        order.append("event")
+
+    async def _spy_release_thread(thread_id: str, run_id: str) -> bool:
+        order.append(f"release_thread:{thread_id}:{run_id}")
+        return True
+
+    async def _spy_release_hold(run_id: str) -> None:
+        order.append("release_hold")
+
+    original_set_status = queue.set_status
+
+    async def _spy_status(status: Any) -> None:
+        order.append(f"status:{status.state}")
+        await original_set_status(status)
+
+    monkeypatch.setattr(monitor, "report_task_interrupted", _spy_event)
+    monkeypatch.setattr(worker, "release_thread_run", _spy_release_thread)
+    monkeypatch.setattr(worker, "release", _spy_release_hold)
+    intent = server.IntentTask.create(task_id="ct-5", thread_id="ct-5", query="买帐篷")
+    running = asyncio.create_task(worker.handle_task(intent, queue))
+    await asyncio.wait_for(started.wait(), 2.0)
+    monkeypatch.setattr(queue, "set_status", _spy_status)
+
+    running.cancel()
+    await asyncio.wait_for(running, 2.0)
+
+    assert order == ["event", "release_thread:ct-5:ct-5", "status:interrupted"]
 
 
 async def test_user_cancel_during_pre_run_awaits_is_still_a_user_cancel(

@@ -50,6 +50,9 @@ EVENT_MEMORY_UPDATED = "memory_updated"
 EVENT_SESSION_CONSTRAINTS = "session_constraints"
 EVENT_TASK_RESULT = "task_result"
 EVENT_TASK_CANCELLED = "task_cancelled"
+# worker 关停排空超时把这一轮掐掉时发（阶段 1-3）。与 task_cancelled 分开：那条是「用户不要了」，
+# 这条是「服务端要走了，这轮没结果，请重发」——前端文案与用户的下一步动作都不一样。
+EVENT_TASK_INTERRUPTED = "task_interrupted"
 EVENT_ERROR = "error"
 # 收尾文案的流式增量（杠杆3·感知延迟）：shopping_summary 内部 LLM 边生成边推，用户提前 ~10s
 # 看到清单文案逐字出现。**瞬态事件**：不进活动流（回看由 task_result 的定稿承担）、不进事件
@@ -434,6 +437,24 @@ async def report_task_cancelled(thread_id: str | None = None) -> None:
     发不出去，前端永远停在转圈。
     """
     await _emit(EVENT_TASK_CANCELLED, "任务已取消", {}, thread_id=thread_id)
+
+
+async def report_task_interrupted(thread_id: str | None = None) -> None:
+    """worker 关停排空超时、这一轮被掐时上报（阶段 1-3）。
+
+    发这条事件的那一刻消息**已经决定要 ack**：它不会被另一个 worker 捡回去重跑，所以「要不要再来
+    一次」由用户按重发决定。不发的话前端只会一直转圈到等待超时，用户既不知道发生了什么、也不知道
+    该重发——而这是每次滚动发布都可能撞上的正常路径，不是异常。
+
+    ``thread_id`` 显式传入的理由同 :func:`report_task_cancelled`：被掐的位置可能在
+    ``thread_scope`` 之外（run_agent 还没起来），ContextVar 是空的。
+    """
+    await _emit(
+        EVENT_TASK_INTERRUPTED,
+        "服务更新中断了这一轮",
+        {"reason": "worker_shutdown", "retryable": True},
+        thread_id=thread_id,
+    )
 
 
 async def report_error(error_type: str, message: str, thread_id: str | None = None) -> None:

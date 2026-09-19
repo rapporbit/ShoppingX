@@ -17,6 +17,7 @@ const STATUS_TEXT: Record<TaskStatus, string> = {
   waiting: "等待回复",
   done: "已完成",
   cancelled: "已取消",
+  interrupted: "已中断",
   error: "出错",
 };
 

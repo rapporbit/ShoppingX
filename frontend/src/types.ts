@@ -22,6 +22,9 @@ export type AguiEvent = {
     // 用户只会觉得「怎么老是搜不出东西」，且归因不到记忆头上。这一行就是解药。
       | "task_result"
     | "task_cancelled"
+    // 服务端关停掐断了这一轮（data: {reason, retryable}）。后端已 ack 掉那条消息、不会背着用户
+    // 重跑，所以这里只负责把「没结果、重发一次」说清楚。
+    | "task_interrupted"
     | "error"
     | "clarification_request"
     // 收尾文案的流式增量（data.text: 累计全文）：shopping_summary 边生成边推，任务还在跑时

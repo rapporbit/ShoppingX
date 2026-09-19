@@ -107,6 +107,7 @@ from app.memory.store import FavoriteItem, get_store
 from app.observability import alerts, metrics
 from app.observability.logging import configure_logging
 from app.queue import (
+    TERMINAL_STATES,
     InProcessQueue,
     IntentTask,
     TaskStatus,
@@ -580,7 +581,7 @@ async def _queued_runner(intent: IntentTask, position: int) -> None:
         while asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(QUEUE_POLL_SECONDS)
             status = await queue.get_status(intent.task_id)
-            if status is not None and status.state in ("done", "failed", "cancelled"):
+            if status is not None and status.state in TERMINAL_STATES:
                 return
         logger.warning(
             "等结果超时（%ds）：task=%s thread=%s",
@@ -604,7 +605,8 @@ async def _queued_runner(intent: IntentTask, position: int) -> None:
         if handle is not None and handle.task is asyncio.current_task():
             active_tasks.pop(thread_id, None)
         # DB 侧真相按身份清（run_id == task_id）。队列模式下真正跑任务的是 worker 进程，但这条
-        # 影子协程与那边同生共死（它轮到 done/failed/cancelled 才返回），清在这里够用。
+        # 影子协程与那边同生共死（它轮到终态才返回），清在这里够用。worker 关停中断那条路上占位
+        # 已经由 worker 先清过一遍（它写终态前清，好让用户能立刻重发），这里再清一次是空转，无害。
         await _release_run_shielded(thread_id, intent.task_id)
 
 
