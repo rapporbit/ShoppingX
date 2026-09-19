@@ -43,8 +43,10 @@ data:
   DATABASE_URL: "sqlite+aiosqlite:////app/var/globex.db"
   # DATABASE_URL: "postgresql+asyncpg://globex:***@postgres:5432/globex"
   # ---- worker 优雅退出。这两个数与 50-worker.yaml 的 grace 是一组，改一个必须改另一个 ----
+  # WORKER_GRACE_SECONDS 必须 ≥ MAIN_AGENT_TIMEOUT_SEC（300），否则每次发布都会掐掉一批马上
+  # 就会自己收尾的任务；50-worker.yaml 的 terminationGracePeriodSeconds 要大于它 + preStop。
   WORKER_CONCURRENCY: "4"
-  WORKER_GRACE_SECONDS: "120"
+  WORKER_GRACE_SECONDS: "330"
   # ---- 整轮缓存（批2-5）：压测 / 演示开关，线上必须关。开着跑评测，分数是上一次那份的复读 ----
   TURN_CACHE_ENABLED: "0"
   AUTH_ENABLED: "true"

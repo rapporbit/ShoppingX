@@ -19,12 +19,14 @@ kubectl apply -f deploy/k8s/
 ## 三个数的大小关系（`50-worker.yaml` 的核心）
 
 ```
-terminationGracePeriodSeconds (150s)  >  preStop (5s) + WORKER_GRACE_SECONDS (120s)
+terminationGracePeriodSeconds (365s)  >  preStop (5s) + WORKER_GRACE_SECONDS (330s)
 ```
 
-preStop 的耗时**算在 grace 里面**，不是加在外面——这是最容易记反的一条。多出来的 25s 留给
-「等完在飞任务之后」的收尾（停控制面订阅、关队列客户端、发最后一批事件）。配小了不会丢任务
-（消息没 ack，留在 PEL 里被下一个 worker 领回重跑），但会白跑半程。
+preStop 的耗时**算在 grace 里面**，不是加在外面——这是最容易记反的一条。多出来的 30s 留给
+「等完在飞任务之后」的收尾（每条被掐的任务按 interrupted 收尾，再停控制面订阅、关队列客户端）。
+WORKER_GRACE_SECONDS 本身必须 ≥ MAIN_AGENT_TIMEOUT_SEC（300），否则每次发布都在掐马上就会自己
+收尾的任务。配小了不会丢任务（SIGKILL 下消息没 ack，留在 PEL 里被下一个 worker 领回重跑），但会
+白跑半程、token 花两次。
 
 ## 滚动更新为什么不丢任务
 
