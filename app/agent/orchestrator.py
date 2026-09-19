@@ -35,6 +35,7 @@ from app.agent.platform_scope import platform_scope
 from app.agent.session_io import (
     charge_quota,
     inject_runtime_context,
+    release_hold,
     write_session_artifacts,
 )
 from app.agent.skills import render_selected_skill, resolve_selected_skill
@@ -274,8 +275,13 @@ async def run_agent(
     platforms: Sequence[str] | None = None,
     image_paths: Sequence[str] | None = None,
     skill: str | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     """主 AgentLoop 的入口：一轮任务从这里进、从这里出。
+
+    ``run_id``：准入时那笔 credit 预扣的幂等键（队列模式下就是 ``task_id``），见
+    :mod:`app.db.holds`。本轮结束时按它结算——**同一个 run_id 重跑一遍不会被记第二次账**。
+    为 ``None`` 时退回老账本（``add_usage``），预扣开关关着或调用方没走准入时就是这条路。
 
     ``skill``：用户在输入框 ``/`` 显式选中的 skill 目录名。服务端在首次模型调用前校验归属并把
     正文拼进本轮用户消息（``authority=reference_only``）；找不到就报错结束本轮，**不静默降级
@@ -416,7 +422,13 @@ async def run_agent(
             reset_original_query()
             reset_session_pt()
             if snap is not None:
-                await charge_quota(user_id, snap, prompt_version=ab_assign.version)
+                await charge_quota(
+                    user_id, snap, prompt_version=ab_assign.version, run_id=run_id or ""
+                )
+            elif run_id:
+                # 一个模型调用都没发生就结束了（入口即挂 / 取消得极早）：账是 0，但**预扣必须还**，
+                # 否则这一笔会一直占着用户的并发额度直到 HOLD_TTL_SEC 过期。
+                await release_hold(run_id)
 
         messages: list[Msg] = list(agent.state.context)
         # **final_text 取事件泵拿到的那条 Msg，不从 context 尾部取**：on_session_end 的输出审核

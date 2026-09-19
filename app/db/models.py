@@ -259,6 +259,54 @@ class UsageLedger(Base):
     )
 
 
+class RunHold(Base):
+    """一次 run 的 **credit 预授权**（阶段 1-1）——「这个人此刻占着多少额度、在跑几个任务」。
+
+    **它补的是 UsageLedger 答不了的两个问题。** 账本是**事后**累加的：任务跑完才记一笔。于是同一个
+    用户同时发 20 条 query，每条进门时读到的都是「还剩很多」，20 条全放行，跑完一起记账直接透支——
+    额度闸对并发是瞎的。本表在**进门时**就按档位占住一笔（预扣），并发的后来者读到的余额已经扣过，
+    透支窗口就关上了；跑完按真实用量结算，多退少补。
+
+    **第二个问题是「这个人同时在跑几个」。** 此前唯一的答案是 API 进程内的 ``active_tasks`` 字典，
+    多副本下一人打两台就各算各的。这里 ``state ∈ (queued, running)`` 的行数就是全局真相，
+    ``SELECT … FOR UPDATE`` 锁住用户行之后数，两个请求撞上时后到的那个一定看得见先到的那行。
+
+    **``run_id`` 即 ``task_id``**（队列模式下就是 ``IntentTask.task_id``，直跑模式由 API 生成）。
+    选它作主键是为了让 ``settle`` 天然幂等：同一条消息被 PEL 重投、整轮重跑一遍，结算仍只落一次
+    （条件更新 ``WHERE state IN ('queued','running')`` 影响 0 行即已结算）。这正是简历里「按 run_id
+    幂等的多退少补」那句——现状 ``add_usage`` 无 run_id，重投就是重复计费。
+
+    **``expires_at`` 不靠后台任务清理。** 进程被 kill -9 时行会永远停在 running，占着这个人的并发
+    额度。与其加一个扫表协程（多一个要监控的东西），不如让**读侧**忽略过期行：数并发、算已占额度
+    时都带 ``expires_at > now``。过期行留在表里是天然的排障线索（「这个 run 没有终态」）。
+
+    **``credits_held`` vs ``credits_charged``：** 前者是进门时按档位（normal / heavy）猜的量，后者是
+    结算时按 ``cost_usd`` 算出的真实量。两者都留着，「猜得准不准」才有数据可查——档位值本就该由
+    压测实测均值定，而不是拍脑袋定完再也不回头看。
+    """
+
+    __tablename__ = "run_holds"
+
+    # 主键 = run_id（队列模式即 task_id）。幂等结算的支点，见类 docstring。
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # 不加外键，理由同 UsageLedger：鉴权关闭时 user_id 是不在 users 表里的假身份。
+    # 复合 index：唯一的热查询就是「这个人有几行还活着」，(user_id, state) 一次索引扫完。
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    thread_id: Mapped[str] = mapped_column(String(64), default="")
+    # 准入档位（app.api.concurrency.RequestClass）：normal / heavy，决定预扣多少。
+    kind: Mapped[str] = mapped_column(String(16), default="normal")
+
+    credits_held: Mapped[int] = mapped_column(Integer, default=0)
+    credits_charged: Mapped[int] = mapped_column(Integer, default=0)
+    # queued（已预扣，未开跑）/ running / settled（已结算，额度已释放）。
+    # 没有 "expired" 这个写入态：过期由 expires_at 与当前时间比出来，不需要有人去改它。
+    state: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class Message(Base):
     """一条对话消息（``user`` 或 ``assistant``）——**会话正文的真源**，原先落 ``turns.json``。
 

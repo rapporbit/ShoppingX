@@ -88,6 +88,7 @@ from app.api.concurrency import (
 )
 from app.config import store as config_store
 from app.db.accounts import MIN_PASSWORD_LEN, assert_owner, claim_thread, ensure_dev_admin
+from app.db.holds import REASON_CONCURRENCY, HoldResult, acquire_hold, release
 from app.db.quota import disabled_status as _disabled_quota
 from app.db.quota import get_quota, quota_enabled
 from app.db.session import init_db, session_factory
@@ -406,6 +407,45 @@ async def _enforce_quota(user_id: str | None) -> None:
         raise HTTPException(402, detail={"error": "quota_exhausted", **quota.as_dict()})
 
 
+# 在途的预扣释放 task：只为保强引用——detached task 无人引用会被 GC 掉，额度就白占到过期。
+_BG_RELEASES: set[asyncio.Task[None]] = set()
+
+
+def _release_in_background(run_id: str) -> None:
+    """在无 ``await`` 区间里还掉一笔预扣（准入池 429 那条路专用）。"""
+    task = asyncio.create_task(release(run_id))
+    _BG_RELEASES.add(task)
+    task.add_done_callback(_BG_RELEASES.discard)
+
+
+async def _acquire_hold_or_reject(
+    *, run_id: str, user_id: str | None, thread_id: str, kind: str
+) -> HoldResult:
+    """credit 预授权 + 用户级并发上限（阶段 1-1）：过了才准进门，见 :mod:`app.db.holds`。
+
+    **为什么它不能并进上面那道 ``_enforce_quota``。** 那道闸读的是**事后账本**，同一个人并发发 20
+    条时每条都读到「还剩很多」，全部放行。这里在进门时就把「打算花的」占住，后到的请求看见的余额
+    已经扣过还在跑的那些——两道闸挡的是不同的东西，前者挡「今天花完了」，后者挡「同时开太多」。
+
+    **两种拒绝码不一样**：额度耗尽 402（等一会儿也不会好转，要等日切），并发超限 429 +
+    ``Retry-After``（前面那几个跑完就能进，重试是对的）。
+    """
+    result = await acquire_hold(run_id=run_id, user_id=user_id, thread_id=thread_id, kind=kind)
+    if result.ok:
+        return result
+    metrics.record_task_rejected(result.reason)
+    logger.info(
+        "预授权拒绝：user=%s reason=%s active=%d", user_id, result.reason, result.active_runs
+    )
+    if result.reason == REASON_CONCURRENCY:
+        raise HTTPException(
+            429,
+            detail=result.as_dict(),
+            headers={"Retry-After": str(TASK_RETRY_AFTER_SEC)},
+        )
+    raise HTTPException(402, detail=result.as_dict())
+
+
 async def _claim_thread_if_needed(thread_id: str, user_id: str | None, query: str) -> None:
     """归属登记（M16）：首轮把 thread 记到本人名下，后续轮顶新 updated_at（侧栏据此排序）。
 
@@ -546,14 +586,22 @@ async def _queued_runner(intent: IntentTask, position: int) -> None:
 
 
 def _start_queued(
-    req: TaskRequest, thread_id: str, user_id: str | None, turn_count: int, depth: int
+    req: TaskRequest,
+    thread_id: str,
+    user_id: str | None,
+    turn_count: int,
+    depth: int,
+    run_id: str,
 ) -> dict[str, Any]:
     """登记影子协程并返回响应体。
 
     **全同步**：它处在 endpoint 的无 ``await`` 区间里（原子性理由见 create_task）。
+
+    ``task_id`` 直接取准入时那笔预扣的 ``run_id``——两者是同一个东西：结算与消费侧去重都按它认人，
+    各生成一个只会让「这条消息对应哪笔预扣」再也查不出来。
     """
     intent = IntentTask.create(
-        task_id=uuid.uuid4().hex,
+        task_id=run_id,
         thread_id=thread_id,
         query=req.query,
         history_turns=turn_count,
@@ -630,6 +678,14 @@ async def create_task(
     use_queue = queue_enabled()
     queue_depth = await _queue_depth_or_429(kind) if use_queue else 0
 
+    # ── 预授权：占住额度 + 数在飞数。**必须在幂等判定之前** ──
+    #
+    # 位置是被无 await 区间逼出来的：下面从幂等第 1 层到占槽 / 入队那一整段的原子性全靠「一个
+    # await 都没有」（同 thread 同 query 的两个请求若在中间被切开，会双双通过第 1 层各起一个 run）。
+    # 代价是幂等命中的请求也先占一笔——那几条路各自在 return 前把它还掉，下面三处 release。
+    run_id = uuid.uuid4().hex
+    await _acquire_hold_or_reject(run_id=run_id, user_id=user_id, thread_id=thread_id, kind=kind)
+
     # ── 幂等第 1 层：同 thread 上一个任务还活着 ──
     old = active_tasks.get(thread_id)
     is_alive = bool(old and not old.task.done())
@@ -637,6 +693,7 @@ async def create_task(
         # 同一句话又发了一遍 → 领回原任务，不重跑、不占新槽、不动旧任务。
         metrics.record_task_rejected("already_running")
         logger.info("幂等命中（同 thread 同 query）：thread_id=%s", thread_id)
+        await release(run_id)  # 没起新任务 → 那笔预扣当场还掉
         return {"status": "already_running", "thread_id": thread_id}
     is_replace = is_alive  # 同 thread 但换了 query → 覆盖重发
 
@@ -656,6 +713,7 @@ async def create_task(
         if dup_thread is not None:
             metrics.record_task_rejected("duplicate")
             logger.info("幂等命中（指纹去重）：原 thread_id=%s", dup_thread)
+            await release(run_id)
             return {"status": "duplicate", "thread_id": dup_thread}
 
     # ── 队列模式：不占准入槽，把任务交给 worker ──
@@ -674,7 +732,7 @@ async def create_task(
             # 后台任务，且它打的标记按**旧** task_id，不会误伤下面马上要入队的这条新任务。
             control.request_cancel_nowait(thread_id, old.task_id)
             old.task.cancel()
-        return _start_queued(req, thread_id, user_id, turn_count, queue_depth)
+        return _start_queued(req, thread_id, user_id, turn_count, queue_depth, run_id)
 
     # ── 准入：分池 + 占槽 or 排队 or 429。以下到 create_task 之间不得出现 await ──
     #
@@ -687,6 +745,9 @@ async def create_task(
         maybe = task_queue.try_reserve(kind)
         if maybe is None:
             metrics.record_task_rejected("queue_full")
+            # 任务没起来 → 还掉预扣。这里在无 await 区间里，只能丢后台（强引用见 _BG_RELEASES，
+            # 裸 create_task 的 task 会被 GC 掉，那笔额度就要白占到 HOLD_TTL_SEC 过期）。
+            _release_in_background(run_id)
             raise HTTPException(
                 429,
                 f"服务繁忙：{kind} 队列已满（并发上限 {task_queue.limit}），"
@@ -720,6 +781,7 @@ async def create_task(
                 platforms=req.platforms,
                 image_paths=req.image_paths,
                 skill=req.skill,
+                run_id=run_id,  # 结算按它认人（见 app.db.holds）
             )
         except asyncio.CancelledError:
             logger.info("task cancelled: thread_id=%s", thread_id)
@@ -777,9 +839,14 @@ async def create_task_async(
     await _enforce_quota(user_id)
     await _claim_thread_if_needed(thread_id, user_id, req.query)
     turn_count = await _history_turns(thread_id)
-    depth = await _queue_depth_or_429(classify_request(turn_count))
+    kind = classify_request(turn_count)
+    depth = await _queue_depth_or_429(kind)
+    # 预授权与主路径同一道闸：脚本批量灌入正是并发透支最容易发生的地方，放过它等于把闸开在
+    # 用不着的那一边。这条路没有幂等三层，拿到就直接入队，不需要任何 release 分支。
+    run_id = uuid.uuid4().hex
+    await _acquire_hold_or_reject(run_id=run_id, user_id=user_id, thread_id=thread_id, kind=kind)
     intent = IntentTask.create(
-        task_id=uuid.uuid4().hex,
+        task_id=run_id,
         thread_id=thread_id,
         query=req.query,
         history_turns=turn_count,

@@ -13,9 +13,11 @@ import asyncio
 import contextlib
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Coroutine, Sequence
 from pathlib import Path
+from typing import Any
 
+from app.db.holds import release, settle
 from app.db.quota import add_usage
 from app.memory.injector import HISTORY_EMPTY
 from app.tools.shopping_summary import ShoppingSummaryOutput
@@ -138,10 +140,39 @@ def write_session_artifacts(
 _pending_charges: set[asyncio.Task[None]] = set()
 
 
-async def charge_quota(
-    user_id: str | None, snap: dict[str, float | int], prompt_version: str = ""
+async def _charge(
+    user_id: str | None, snap: dict[str, float | int], prompt_version: str, run_id: str
 ) -> None:
-    """把本轮全树成本记进用户配额账本，**取消路径下也要记完**。
+    """记账的本体：有预扣行就走结算（按 run_id 幂等），没有就退回老账本。
+
+    两条路的先后不能反：``settle`` 返回 True 表示「这笔账归预扣那条路管」——包括**已经结算过**的
+    情形，此时再调 ``add_usage`` 就是把同一轮记两遍（PEL 重投正是这个形态）。
+    """
+    cost = float(snap["cost_usd"])
+    if run_id and await settle(
+        run_id,
+        cost,
+        input_tokens=int(snap["input_tokens"]),
+        output_tokens=int(snap["output_tokens"]),
+        prompt_version=prompt_version,
+    ):
+        return
+    await add_usage(
+        user_id,
+        cost,
+        int(snap["input_tokens"]),
+        int(snap["output_tokens"]),
+        prompt_version=prompt_version,
+    )
+
+
+async def charge_quota(
+    user_id: str | None,
+    snap: dict[str, float | int],
+    prompt_version: str = "",
+    run_id: str = "",
+) -> None:
+    """把本轮全树成本记进账，**取消路径下也要记完**。``run_id`` 非空时走预扣结算（阶段 1-1）。
 
     为什么绕这一圈而不是直接 ``await add_usage(...)``：本函数跑在 run_agent 的 finally 里，而这条
     路径最常见的触发者恰恰是「用户点了取消」——此时本 task 已被 cancel，直接 await 会在第一个挂起
@@ -149,15 +180,17 @@ async def charge_quota(
     ``shield`` 让记账在独立 task 里跑到完，外层的取消信号照常传播（suppress 只吞掉 shield 这个
     await 点二次抛出的 CancelledError，不影响 run_agent 里原本那条 raise）。
     """
-    task = asyncio.create_task(
-        add_usage(
-            user_id,
-            float(snap["cost_usd"]),
-            int(snap["input_tokens"]),
-            int(snap["output_tokens"]),
-            prompt_version=prompt_version,
-        )
-    )
+    await _shielded(_charge(user_id, snap, prompt_version, run_id))
+
+
+async def release_hold(run_id: str) -> None:
+    """本轮一分钱没花（模型一次都没调）时还掉预扣。同样要 shield：取消是这条路最常见的触发者。"""
+    await _shielded(release(run_id))
+
+
+async def _shielded(coro: Coroutine[Any, Any, None]) -> None:
+    """把收尾写库丢进独立 task 跑完，外层取消照常传播（手法见 :func:`charge_quota`）。"""
+    task = asyncio.create_task(coro)
     _pending_charges.add(task)
     task.add_done_callback(_pending_charges.discard)
     with contextlib.suppress(asyncio.CancelledError):
