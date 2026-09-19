@@ -2,6 +2,22 @@
 
 从 ``HarnessAgentAdapter`` 抽出来的一段——它是「机制替模型做的一次工具调用」，不是 AgentScope
 中间件桥接的一部分。适配器的 ``on_reply`` 开头调 :func:`prefill`；产物直接写进 ``state.context``。
+
+**这里预取的只有事实，不含 skill 正文**（2026-09-19 按 Anthropic ``commerce-agents`` 的分界
+线收敛，曾有过的套装 skill 预注入 D1 已删）。那条线是：
+
+* **机制（预取 / 强制）管事实接地** —— planner 拆出的字段、品类行情、订单。漏了就是幻觉，
+  不可恢复，所以不赌模型。参考项目同样只对读工具做 grounding（``grounding.py``：店铺条款 /
+  订单 / 没见过的 product_id）。
+* **模型自觉管打法加载** —— skill 正文靠模型读 ``<agent-skills>`` 目录里的 description 自己调
+  ``Skill(skill=…)`` 取（``prompt.py`` 那句「call ``load_skill`` in the same round as your
+  first read」）。漏了只是流程走样，可评测、可回归。
+
+推翻预注入的三条实据：① 省往返的说法不成立——同轮可以既发 ``Skill`` 又发 ``item_search``，
+串行是 prompt 措辞造成的；② 判据不硬——C6 禁改 planner schema 后，「送礼」「怎么选」这类只能
+退回关键词正则，误判率不比模型读 description 低，而 ``bundle_slots`` 本身也是 LLM 输出；
+③ ``HarnessSession`` 每轮新建、``state.context`` 跨轮累积，预注入会让同一份正文在多轮会话里
+躺 N 份（实测 ``prefill_planner`` 在 3 轮会话里出现 6 次）。
 """
 
 from __future__ import annotations
@@ -30,9 +46,6 @@ logger = logging.getLogger("shoppingx.harness.prefill")
 
 # 一次任务最多看几张图：每张都是一次 VL 往返 + 一段上下文，传一堆图既烧预算又稀释意图。
 MAX_PREFILL_IMAGES = 3
-
-#: 套装轮预注入的 skill 名（``skills/bundle-planning/SKILL.md`` 的 frontmatter name）。
-BUNDLE_SKILL_NAME = "bundle-planning"
 
 #: 订单 grounding 正则（D4）：用户直说订单时预取 query_order，不靠 prompt 规矩模型先调。
 #: 只认直白说法——查得宽了就会在「买个订书机」这种句子上空跑一次 DB。
@@ -103,10 +116,7 @@ async def prefill(session: HarnessSession, agent: Agent) -> None:
     # （OpenSearch 两段式检索）互不依赖，并发跑；KB 预取的结果作为第二对 tool 块预置进上下文，
     # 模型第 1 轮就拿着 plan + 品类行情直接检索（改前 9/9 遍第 1 轮都在调 category_insight）。
     kb_task = asyncio.create_task(_prefetch_kb(s, out)) if _kb_prefetch_due(out) else None
-    # 套装 skill 同理预载：信号（槽位表）与 KB 预取来自同一次 planner，两件事互不依赖，一起跑。
-    skill_due = _skill_prefetch_due(out)
-    skill_task = asyncio.create_task(_prefetch_skill(BUNDLE_SKILL_NAME)) if skill_due else None
-    # 订单 grounding（D4）：问订单的轮次直接把最近几张摆上去，与上面两件并发。
+    # 订单 grounding（D4）：问订单的轮次直接把最近几张摆上去，与 KB 预取并发。
     orders_due = _orders_prefetch_due(out, s.original_query)
     orders_task = asyncio.create_task(_prefetch_orders(s)) if orders_due else None
     ctx = await harness.run("post_tool_call", ctx)
@@ -119,8 +129,6 @@ async def prefill(session: HarnessSession, agent: Agent) -> None:
     blocks.extend(tool_blocks(call_id, "planner", args, text))
     if kb_task is not None:
         blocks.extend(await kb_task)
-    if skill_task is not None:
-        blocks.extend(await skill_task)
     if orders_task is not None:
         blocks.extend(await orders_task)
     append_prefilled(agent, blocks)
@@ -181,46 +189,6 @@ async def _prefetch_orders(s: HarnessSession) -> list[Any]:
         logger.warning("订单预取失败，交回模型自行决定是否调 query_order", exc_info=True)
         return []
     return tool_blocks("prefill_query_order", "query_order", args, text)
-
-
-def _skill_prefetch_due(plan: Any) -> bool:
-    """要不要预注入套装 skill：开关开 + planner 拆出 ≥2 个槽位。
-
-    判据与下游对齐（``autopick._is_bundle_turn`` 与 ``planner._clean_bundle_slots`` 都按
-    ``len(bundle_slots) >= 2`` 认槽位轮），不看 ``slot_mode``——它区分的是「一套齐」与「多品类
-    并列」两种形态，而两种形态的打法写在同一份 SKILL.md 里，取哪种都要读同一段正文。
-    """
-    if os.getenv("SKILL_PREFETCH", "1").strip().lower() in {"0", "false", "off"}:
-        return False
-    return len(getattr(plan, "bundle_slots", None) or []) >= 2
-
-
-async def _prefetch_skill(name: str) -> list[Any]:
-    """把 skill 正文预注入成一次「模型已经调过 ``Skill`` 工具」的工具返回。失败即空。
-
-    Anthropic 的口径是「加载一个 skill 要花掉模型一轮」：模型先读 ``<agent-skills>`` 目录里的
-    description，判断这次用得上，再调 ``Skill(skill=…)`` 把正文取进来——判断那一步是纯仪式，
-    因为 planner 拆出的槽位表已经确定性地告诉了系统「这轮是套装轮」。同一个信号预加载 skill，
-    省掉的正是这次往返（q_backpack 刚从 9 次模型调用压到 4 次，不能再往回加）。
-
-    走 loader 而不是直接读 SKILL.md：``Skill.markdown`` 是框架剥掉 frontmatter 后的正文，与模型
-    亲手调一次拿到的字节完全一致。自己读文件会把 frontmatter 也塞进去，预注入版和手调版讲的就
-    不是一份东西了。``SKILLS_ENABLED=0`` 时 ``skill_loaders`` 返回空表，这里自然降级为不注入。
-    """
-    from app.agent.skills import skill_loaders
-
-    try:
-        for loader in skill_loaders("main"):
-            for skill in await loader.list_skills():
-                if getattr(skill, "name", "") != name:
-                    continue
-                markdown = str(getattr(skill, "markdown", "") or "")
-                if not markdown:
-                    return []
-                return tool_blocks(f"prefill_skill_{name}", "Skill", {"skill": name}, markdown)
-    except Exception:
-        logger.warning("skill 预注入失败（%s），交回模型自行决定是否调 Skill", name, exc_info=True)
-    return []
 
 
 async def _prefill_vision(session: HarnessSession) -> tuple[list[Any], str]:

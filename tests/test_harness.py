@@ -443,14 +443,20 @@ class TestPhaseHooks:
         assert not prefill_mod._kb_prefetch_due(PlanOutput(tasks=["recommend"], category=""))
 
     @pytest.mark.asyncio
-    async def test_prefill_preloads_bundle_skill_on_slot_turn(
+    async def test_prefill_never_injects_skill_bodies(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """D1：planner 拆出 ≥2 个槽位 → 套装 skill 正文随 planner 一起预注入成 ``Skill`` 工具返回。
+        """槽位轮也**不预注入** skill 正文——打法加载归模型，机制只管事实接地。
 
-        省掉的是模型「看 description 判断要不要读」那一次往返。正文必须与模型亲手调 ``Skill``
-        拿到的字节一致（都走 loader 的 ``markdown``，不含 frontmatter），否则两条路径讲的不是
-        同一份打法。非槽位轮不注入——普通轮多塞 1.4k 字符正文是纯亏。
+        曾有过的 D1（``bundle_slots >= 2`` → 预注入 ``bundle-planning`` 正文）2026-09-19 删除，
+        照 Anthropic ``commerce-agents`` 的分界线收敛：它对 skill 只在 static prompt 里放
+        name + description，正文靠模型调 ``load_skill`` 取；机制的强制/预取只用在读工具上
+        （店铺条款 / 订单 / 没见过的 product_id）。本仓的对应物是 ``<agent-skills>`` 目录块 +
+        内置 ``Skill`` 工具 + prompt 里的意图分流表。
+
+        这条测试盯的是**回潮**：谁要是再把 skill 正文塞进 prefill，槽位轮的 block 名单里就会
+        冒出 ``Skill``——那意味着同一份正文会在多轮会话里被 ``state.context`` 累积成 N 份
+        （``HarnessSession`` 每轮新建、``prefilled`` 每轮复位）。
         """
         import app.harness.prefill as prefill_mod
         import app.tools.planner as planner_mod
@@ -468,16 +474,9 @@ class TestPhaseHooks:
         await HarnessAgentAdapter(_mw("新生入学一套"))._prefill(agent)
 
         blocks = agent.state.context[-1].content
-        assert [b.name for b in blocks] == ["planner", "planner", "Skill", "Skill"]
-        assert blocks[-1].output.strip().startswith("#")  # frontmatter 已被框架剥掉
-        assert "MCKP" in blocks[-1].output  # 拿到的是套装打法正文，不是 description
-
-        # 判据只认槽位数，与 slot_mode 无关；不存在的 skill 静默降级为不注入
-        assert not prefill_mod._skill_prefetch_due(PlanOutput(tasks=["recommend"]))
-        assert not prefill_mod._skill_prefetch_due(
-            PlanOutput(tasks=["recommend"], bundle_slots=slots[:1])
-        )
-        assert await prefill_mod._prefetch_skill("no-such-skill") == []
+        assert [b.name for b in blocks] == ["planner", "planner"]
+        assert not hasattr(prefill_mod, "_prefetch_skill")
+        assert not hasattr(prefill_mod, "_skill_prefetch_due")
 
     @pytest.mark.asyncio
     async def test_prefill_looks_at_images_before_planner(
