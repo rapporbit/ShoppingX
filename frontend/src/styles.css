@@ -4951,3 +4951,86 @@ button:active:not(:disabled) {
 .platform-item label .switch {
   margin-left: auto;
 }
+
+/* ============================ 选购指南卡（present_guide / S3） ============================
+   与商品卡并列的第二类「结果本身」：一节一条标准、要点成列表、来源单独一栏。
+   视觉上不做成带边框的重卡片——它是助手的回答正文，只用左侧一道发丝线把它和普通消息分开，
+   节序号靠计数器画（不用 list-style，中文场景里「1.」的缩进不好对齐）。 */
+.guide-card {
+  margin-top: 4px;
+  padding-left: 14px;
+  border-left: 2px solid var(--border-strong);
+}
+.guide-topic {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text);
+}
+.guide-assumptions {
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.guide-sections {
+  counter-reset: guide;
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+}
+.guide-section {
+  counter-increment: guide;
+  margin-top: 12px;
+}
+.guide-section:first-child {
+  margin-top: 0;
+}
+.guide-section-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+.guide-section-title::before {
+  content: counter(guide) ". ";
+  color: var(--muted);
+  font-weight: 500;
+}
+.guide-points {
+  margin: 5px 0 0;
+  padding-left: 16px;
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--text-2);
+}
+.guide-points li {
+  margin: 3px 0;
+}
+.guide-closing {
+  margin-top: 14px;
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: var(--text);
+}
+.guide-sources {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  font-size: 12.5px;
+}
+.guide-sources-label {
+  color: var(--muted);
+}
+.guide-sources a {
+  color: var(--text-2);
+  text-decoration: none;
+  border-bottom: 1px solid var(--border-strong);
+  padding-bottom: 1px;
+}
+.guide-sources a:hover {
+  color: var(--accent-strong);
+  border-color: var(--accent);
+}

@@ -37,10 +37,11 @@ system_prompt: |
   planner 已由系统在开局跑完——结果（tasks、结构化字段、session_state 累积约束）就在上文的 planner
   工具消息里；有品类时 category_insight 也已预取在上文。你的第一步是拿着这份 plan 决定**怎么做**。
 
-  非购物（plan 的 tasks 为空 / 与商品无关）走快捷路径、调完直接 chat_fallback：品类行情 →
+  非购物（plan 的 tasks 为空 / 与商品无关）走快捷路径、查完直接收尾：品类行情 →
   category_insight；点名对象的口碑 / 评测 / 选购维度 → research；闲聊 → 直接兜底。
-  **完整答案写在 chat_fallback 的 message 里**（原样发给用户，表格列表都行），不要先讲一遍
-  再调工具补一句客套——那句客套会盖掉你的答案。
+  收尾工具见 <termination>（讲标准走 present_guide，其余走 chat_fallback）。**完整答案写在收尾
+  工具的入参里**（原样发给用户，表格列表都行），不要先讲一遍再调工具补一句客套——那句客套
+  会盖掉你的答案。
 
   **意图分流表——这轮像哪一行，就调 `Skill(skill="…")` 读那份**（那里是这类活的完整打法，
   预算口径、检索方式、收尾要求都不同，不要凭印象走）。两条规矩：**和本轮第一个检索/读取工具
@@ -69,7 +70,7 @@ system_prompt: |
   - `closes_turn=false`（默认）——**没它没法往下做**时用，暂停等回复。检索前的澄清都是这种。
   - `closes_turn=true`——**已经把清单 / 答案给完了**，顺带问一句下一步想看什么（换个价位段？
     看看别的品类？），带 1~4 个选项。它调完本轮就结束、不等回复，**必须和 shopping_summary /
-    chat_fallback 在同一轮发出**，不能单独用它收尾（那等于只抛问题不给答案）。
+    present_guide / chat_fallback 在同一轮发出**，不能单独用它收尾（那等于只抛问题不给答案）。
     答案还没给就用它 = 把用户晾在半路。
   </workflow>
 
@@ -118,8 +119,10 @@ system_prompt: |
   **最高优先级（P0）**：最易犯错是不收尾、死循环。tasks 做完、信息够就**立即收尾**。精挑结果
   （系统自动或你调的 item_picker）≥1 件后**下一动作就是真调 shopping_summary**（说「现在生成清单」
   然后停＝没收尾）；文案与逐件理由写在 summary / reasons 入参里（写法见工具说明）。收尾选工具
-  看有无商品卡：有 → shopping_summary，纯文字 → chat_fallback（**答案原文放 message**，它
-  就是用户看到的最终回复；别只放一句「已回答」）。交易轮的终结工具是
+  看有无商品卡：有 → shopping_summary；纯文字分两种——讲选购标准 / 判断依据 → present_guide
+  （分节写进 sections，来源写进 sources，工具替你排版），其余（闲聊、问能力、一句话答完）→
+  chat_fallback（**答案原文放 message**，它就是用户看到的最终回复；别只放一句「已回答」）。
+  交易轮的终结工具是
   create_order / cancel_order 本身（调完即收尾，不用再补一个 shopping_summary）。
   **空召回（P0 诚实）**：只看候选**总数**。=0 → 照样调 shopping_summary（自然是空清单），
   如实说没找到、建议放宽，

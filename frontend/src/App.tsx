@@ -17,6 +17,7 @@ import { ClarificationChoices } from "./components/ClarificationChoices";
 import { FavoritesDrawer } from "./components/FavoritesDrawer";
 import { SkillsDrawer } from "./components/SkillsDrawer";
 import { FinalAnswer } from "./components/FinalAnswer";
+import { GuideCard } from "./components/GuideCard";
 import { LearnedPrefsBar } from "./components/LearnedPrefsBar";
 import { PreferenceDrawer } from "./components/PreferenceDrawer";
 import { ConfirmationCards } from "./components/ConfirmationCards";
@@ -539,7 +540,12 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
                             <div className="info-banner">任务已取消。</div>
                           )}
 
-                          {turn.finalAnswer && (
+                          {/* 选购指南卡（present_guide 收尾那一轮）：卡与 markdown 正文是同一份
+                              内容，只画卡，否则用户读两遍。历史回看没有这张卡（事件不落库），
+                              那时 finalAnswer 里的 markdown 接着画。 */}
+                          {turn.guide && <GuideCard guide={turn.guide} threadId={isLast ? threadId : null} />}
+
+                          {turn.finalAnswer && !turn.guide && (
                             <FinalAnswer
                               markdown={turn.finalAnswer}
                               threadId={isLast ? threadId : null}
@@ -548,7 +554,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
 
                           {/* 收尾文案流式预览：summary 还在生成时逐字先看（感知延迟优化）。
                               定稿（task_result）一到 streamingText 即清空，由上面的 finalAnswer 接管。 */}
-                          {!turn.finalAnswer && turn.streamingText && (
+                          {!turn.finalAnswer && !turn.guide && turn.streamingText && (
                             <FinalAnswer markdown={turn.streamingText} threadId={null} />
                           )}
 

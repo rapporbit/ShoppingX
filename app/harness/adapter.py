@@ -288,7 +288,7 @@ class HarnessAgentAdapter(MiddlewareBase):
 
     @staticmethod
     def _merge_terminal_body(agent: Agent, msg: Msg) -> Msg:
-        """chat_fallback 收尾时，把模型写在**同一条消息**里的正文并回最终答案。
+        """文本型终结工具收尾时，把模型写在**同一条消息**里的正文并回最终答案。
 
         **为什么需要**：模型很爱把整篇回答写成 assistant 文本、``message`` 入参里只留一句
         「以上就是…如果你告诉我预算我再帮你挑」。而主 loop 的 ``TextBlockDeltaEvent`` 刻意不推
@@ -306,18 +306,26 @@ class HarnessAgentAdapter(MiddlewareBase):
         ``summary.summary`` 覆盖 final_text 同源；模型在工具之后补的那句复述丢掉。并完的文本
         照常走下面的 ``_finalize``（output_guard / output_audit），不绕过审核。
 
-        只认 chat_fallback：shopping_summary 那条路的伴随文本是「好的，我来生成清单」这类过程
-        碎话，并进去只会脏了清单文案。
+        只认文本型终结工具（chat_fallback / present_guide）：shopping_summary 那条路的伴随文本是
+        「好的，我来生成清单」这类过程碎话，并进去只会脏了清单文案。
         """
         ctx = list(agent.state.context)
-        source = "chat_fallback"
+        source = ""
         reply = ""
-        for text in iter_tool_results(ctx, "chat_fallback"):
-            try:
-                reply = str((json.loads(text) or {}).get("reply") or "").strip()
-            except (json.JSONDecodeError, ValueError, AttributeError):
-                continue  # 撞闸那几次拿回的是哨兵文案不是 JSON，跳过继续往前找
+        # 两个「产出即最终答案」的文本型终结工具，各取自己那个正文字段：
+        # chat_fallback.reply（模型原样透出的回复）、present_guide.markdown（工具排好版的指南，
+        # S3）。后者不并回来的后果与前者一模一样：屏幕上只剩模型补的那句「以上就是选购要点」，
+        # 落盘 summary.md 与历史回看里那几节标准一个字都没有。
+        for name, field in (("chat_fallback", "reply"), ("present_guide", "markdown")):
+            for text in iter_tool_results(ctx, name):
+                try:
+                    reply = str((json.loads(text) or {}).get(field) or "").strip()
+                except (json.JSONDecodeError, ValueError, AttributeError):
+                    continue  # 撞闸那几次拿回的是哨兵文案不是 JSON，跳过继续往前找
+                if reply:
+                    break
             if reply:
+                source = name
                 break
         if not reply:
             # ask_user(closes_turn=True) 的收尾问句同理并回来（D2）：chips 只在当轮可点，刷新后

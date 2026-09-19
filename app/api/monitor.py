@@ -72,6 +72,11 @@ EVENT_MODEL_FALLBACK = "model_fallback"
 # 前端刷新时会再 GET 一次列表。
 EVENT_CONFIRMATION_REQUIRED = "confirmation_required"
 EVENT_CONFIRMATION_RESOLVED = "confirmation_resolved"
+# 选购指南卡（S3 的 present_guide）：分节标准 + 假设 + 来源，前端按块渲染成一张卡。
+# 与 items_preview 同一取向：**不瞬态**（进回放存档，刷新页面不该让刚看到的指南消失），
+# 不进活动流（它是结果本身，不是思考行）。正文另有一条路——工具排好的 markdown 经
+# ``adapter._merge_terminal_body`` 并回 final_text，所以历史回看即便不渲染卡也看得到全文。
+EVENT_GUIDE_READY = "guide_ready"
 
 # 事件里携带的自由文本（demands / preview / 最终答案）截断上限，避免单条事件灌爆前端。
 _MAX_TEXT = 2000
@@ -255,6 +260,20 @@ async def report_items_preview(items: list[dict[str, Any]]) -> None:
         {"items": items},
         thread_id=root,
     )
+
+
+async def report_guide(guide: dict[str, Any]) -> None:
+    """选购指南定稿（``present_guide``）：结构化那份推给前端渲染卡。
+
+    ``guide`` 字段与 ``GuideOutput`` 同构（topic / sections / assumptions / sources / closing），
+    只是去掉了 ``markdown``（正文走 final_text，不必在事件里带第二份，那只会让单条事件翻倍）。
+    路由与 ``report_items_preview`` 同口径：显式送根 thread。
+    """
+    rec = _activity_recorder.get()
+    root = rec.root_thread_id if rec is not None and rec.root_thread_id else None
+    sections = guide.get("sections")
+    count = len(sections) if isinstance(sections, list) else 0
+    await _emit(EVENT_GUIDE_READY, f"选购指南 {count} 节", {"guide": guide}, thread_id=root)
 
 
 def root_thread_id() -> str | None:
