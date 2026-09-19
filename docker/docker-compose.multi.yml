@@ -12,6 +12,10 @@
 #   docker build -f docker/Dockerfile.backend --build-arg UV_EXTRAS=--extra\ db \
 #     -t globex-backend:multi .
 #   docker compose -f docker/docker-compose.multi.yml up -d
+#
+# 四个容器**可以同时首启**：MySQL 的 DDL 不是事务性的，同时 upgrade 会撞 `1050 Table already
+# exists` 留半成品库，所以 init_db() 用 MySQL 的 GET_LOCK 把迁移串起来（app/db/session.py）。
+# 第一次跑这套环境（2026-09-20 之前）得手工先起一个再起其余，就是因为还没有这把锁。
 #   python scripts/multi_scenarios.py all
 #   docker compose -f docker/docker-compose.multi.yml down -v
 
