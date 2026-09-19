@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from app import worker
+from app import queue as queue_pkg
 from app.queue import InProcessQueue, RedisStreamQueue, get_task_queue, set_task_queue
 from app.queue.ports import IntentTask, TaskQueue, TaskStatus
 from app.queue.redis_stream import GROUP, STREAM_DEAD, STREAM_LARGE, STREAM_NORMAL
@@ -352,17 +353,21 @@ async def test_inprocess_status_table_is_bounded() -> None:
 
 
 # ── 工厂 ────────────────────────────────────────────────────────────────────
-def test_factory_defaults_to_inprocess(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("QUEUE_ENABLED", raising=False)
-    assert isinstance(get_task_queue(), InProcessQueue)
-    assert get_task_queue() is get_task_queue()  # 单例
+def test_factory_builds_a_redis_stream_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """工厂恒给 Redis Stream（阶段 1 条 7 删掉 QUEUE_ENABLED）；单例只建一次。"""
+    monkeypatch.setattr(queue_pkg, "_queue", None)
+    monkeypatch.setenv("QUEUE_REDIS_URL", "redis://127.0.0.1:6379/15")
+    q = get_task_queue()
+    assert isinstance(q, RedisStreamQueue)
+    assert get_task_queue() is q  # 单例
 
 
-def test_factory_falls_back_when_redis_client_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    """开了队列但 Redis 客户端建不起来时回落进程内——启动期缺依赖不该让整个服务起不来。"""
-    monkeypatch.setenv("QUEUE_ENABLED", "1")
+def test_factory_raises_instead_of_falling_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    """客户端建不起来就抛：悄悄回落进程内 deque = 把任务扔进一个没有消费方的队列。"""
+    monkeypatch.setattr(queue_pkg, "_queue", None)
     monkeypatch.setenv("QUEUE_REDIS_URL", "notredis://nowhere")
-    assert isinstance(get_task_queue(), InProcessQueue)
+    with pytest.raises(RuntimeError):
+        get_task_queue()
 
 
 def test_both_implementations_satisfy_the_port(fake: FakeRedis) -> None:
@@ -506,10 +511,3 @@ async def test_worker_grace_timeout_returns_message_to_pending(
     assert not fake.pending_ids(STREAM_NORMAL)  # 已 ack：不会有下一个 worker 背着用户重跑
     status = await rq.get_status("t1")
     assert status is not None and status.state == "interrupted"
-
-
-def test_worker_main_refuses_when_queue_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """QUEUE_ENABLED=0 起 worker 是纯误配：它消费的进程内 deque 没有生产方，宁可起不来。"""
-    monkeypatch.delenv("QUEUE_ENABLED", raising=False)
-    with pytest.raises(SystemExit):
-        worker.main()

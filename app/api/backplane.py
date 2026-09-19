@@ -1,6 +1,6 @@
 """事件背板（批 2）——把 AGUI 事件从「产生它的进程」送到「挂着那条 WebSocket 的进程」。
 
-**解决什么。** `QUEUE_ENABLED=1` 之后，跑 AgentLoop 的是独立 worker 进程，而浏览器的 WebSocket
+**解决什么。** 跑 AgentLoop 的是独立 worker 进程，而浏览器的 WebSocket
 连在 API 进程上。事件由 worker 侧的 :class:`ConnectionManager` 发出，那张路由表里一条连接都没有
 ——于是每一条 `tool_start` / `summary_delta` / `task_result` 都静默丢掉，用户对着一个转圈的界面等
 到收尾（`GET /api/task/{id}` 与落盘历史仍然是对的，但实时性没了）。这正是批2-2 报告里点名的
@@ -36,7 +36,7 @@ from contextlib import suppress
 from typing import Any
 
 from app.api.connection import ConnectionManager
-from app.utils.env import env_bool, env_int, env_str
+from app.utils.env import env_int, env_str
 
 logger = logging.getLogger("shoppingx.backplane")
 
@@ -50,16 +50,6 @@ _RETRY_SECONDS = 2.0
 # 未完成的发布任务上限。Redis 卡住（连得上但不响应）时任务会一直堆，不设顶就是慢性内存泄漏；
 # 超过就丢弃新的发布——丢事件总好过把跑任务的进程拖垮，这与本模块的降级方向一致。
 _MAX_INFLIGHT = env_int("BACKPLANE_MAX_INFLIGHT", 1000)
-
-
-def backplane_enabled() -> bool:
-    """默认跟随 ``QUEUE_ENABLED``：单进程部署下背板没有任何用处，多一个 Redis 依赖反而是风险。
-
-    直接读环境变量而不 import ``app.queue``：本模块被 :mod:`app.api.monitor` 引用，而 monitor 几乎
-    被所有工具引用——不把队列包拖进这条 import 链上，省掉一整类循环导入的隐患。默认值与
-    ``app.queue.queue_enabled`` 同源（都是 ``QUEUE_ENABLED`` 默认关），此处不引入第二个开关口径。
-    """
-    return env_bool("BACKPLANE_ENABLED", env_bool("QUEUE_ENABLED", False))
 
 
 def _redis_url() -> str:
@@ -224,13 +214,15 @@ _resolved = False
 
 
 def get_backplane() -> EventBackplane | None:
-    """返回进程级背板；未启用 / Redis 客户端建不起来时返回 ``None``（静默降级为单进程行为）。"""
+    """返回进程级背板（恒开，阶段 1 条 7 删掉 ``BACKPLANE_ENABLED``）。
+
+    Redis 客户端建不起来时返回 ``None`` 降级为单进程行为——跑 API 的进程不该因为背板建不起来就
+    起不来，可达性那道闸在 ``server.lifespan`` 里守。
+    """
     global _backplane, _resolved
     if _resolved:
         return _backplane
     _resolved = True
-    if not backplane_enabled():
-        return None
     try:
         import redis.asyncio as aredis  # 可选依赖，懒加载（与 event_log / queue 同源）
 

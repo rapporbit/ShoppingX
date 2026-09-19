@@ -17,6 +17,7 @@ from httpx import ASGITransport, AsyncClient
 
 import app.api.auth as auth
 import app.api.server as server
+from app import worker
 from app.memory.fact_store import get_fact_store
 from app.memory.facts import MemoryCategory, MemoryFact
 
@@ -111,7 +112,7 @@ async def test_auth_enabled_requires_token(
 
 
 async def test_task_identity_from_token_not_body(
-    client: AsyncClient, auth_on: None, monkeypatch: Any
+    client: AsyncClient, auth_on: None, monkeypatch: Any, queue_worker: None
 ) -> None:
     # 开启后：跑任务的 user_id 取自 token 的 sub，前端 body 里传的 user_id 被忽略（防冒名写偏好）。
     seen: dict[str, str | None] = {}
@@ -122,7 +123,7 @@ async def test_task_identity_from_token_not_body(
         seen["user_id"] = user_id
         return {"thread_id": thread_id}
 
-    monkeypatch.setattr(server, "run_agent", _fake_run)
+    monkeypatch.setattr(worker, "run_agent", _fake_run)
     # 得先真注册一个用户：M16 起，thread 会被认领到 token 的 sub 名下，而归属表有外键——
     # 给一个查无此人的 user_id 签的 token 现在会被拒（401，见 accounts.claim_thread）。
     reg = await client.post(

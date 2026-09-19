@@ -14,6 +14,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 import app.api.server as server
+from app import worker
 
 pytestmark = pytest.mark.anyio
 
@@ -107,13 +108,13 @@ async def _own_thread(client: AsyncClient, headers: dict[str, str], tid: str, qu
 
 
 @pytest.fixture(autouse=True)
-async def _fake_agent(monkeypatch: Any) -> AsyncIterator[None]:
+async def _fake_agent(monkeypatch: Any, queue_worker: None) -> AsyncIterator[None]:
     """把 run_agent 换成立刻返回的假实现：本文件验的是归属与鉴权，不是 Agent 本身。"""
 
     async def _noop(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         return {"final": "ok"}
 
-    monkeypatch.setattr(server, "run_agent", _noop)
+    monkeypatch.setattr(worker, "run_agent", _noop)
     yield
     for handle in list(server.active_tasks.values()):
         if not handle.task.done():

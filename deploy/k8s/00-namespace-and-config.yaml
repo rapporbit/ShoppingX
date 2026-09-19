@@ -19,14 +19,9 @@ metadata:
   name: globex-config
   namespace: globex
 data:
-  # ---- 削峰队列（批2-1/2-2）。K8s 形态下必须开：不开的话 worker 进程起来就 SystemExit ----
-  QUEUE_ENABLED: "1"
+  # ---- 任务队列（批2-1/2-2）。恒开、无开关：探不到 Redis 的进程会拒绝启动 ----
   QUEUE_REDIS_URL: "redis://redis:6379/2"
-  # 背板与控制面缺省跟随 QUEUE_ENABLED，这里显式写出来只是为了让人读 yaml 就知道它们开着。
-  # 背板（批2-3）不开 = 事件由 worker 发、浏览器连的是 api，前端全程转圈；
-  # 控制面（批2-4）不开 = 取消按钮和澄清回复跨不过进程边界。K8s 下这两样都不是可选项。
-  BACKPLANE_ENABLED: "1"
-  CONTROL_ENABLED: "1"
+  # 事件背板（批2-3）与控制面（批2-4）同样恒开，各自的 *_REDIS_URL 不配则复用上面这个实例。
   # ---- 共享熔断（批2-5）。多副本时才有意义：一个副本探到下游挂了，别的副本不必再各撞一遍 ----
   BREAKER_SHARED: "1"
   # ---- 事件回放（断线重连补缺口）与向量 / 全文检索 ----

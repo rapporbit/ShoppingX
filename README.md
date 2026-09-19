@@ -122,7 +122,6 @@ uv run ruff check . && uv run mypy app && uv run pytest   # 1355 tests
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
-| `QUEUE_ENABLED` | `0` | 开削峰队列；开了要另起 `uv run python -m app.worker`，API 只入队 |
 | `PROMPT_VERSION` / `PROMPT_AB_VARIANTS` | `1.0.0` / 空 | 默认（对照组）提示词版本 / 候选版本与放量百分比，留空即不做实验 |
 | `SKILLS_ENABLED` | 开 | `skills/*/SKILL.md` 按需知识；关掉则三个 skill 都不注入 |
 | `MCP_SEARCH_URL` | 空 | 挂进 SearchAgent 的外部只读 MCP；留空 = 不挂 |

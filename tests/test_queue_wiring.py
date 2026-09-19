@@ -1,13 +1,12 @@
-"""批 2 · API ↔ 队列 ↔ worker 的接线（`QUEUE_ENABLED=1` 那条路）。
+"""API ↔ 队列 ↔ worker 的接线（阶段 1 条 7 起是唯一一条路）。
 
 分工上这里只管**接线**，队列自身的语义（双流分级 / ack / 重投 / 死信）在 ``tests/test_queue.py``。
 两件事必须分别钉死，因为它们的失败形态完全不同：队列写错是任务跑错地方，接线写错是**契约悄悄变了**
 ——前端还在按老响应体渲染，用户看到的就是一个永远转圈的界面。
 
-所以本文件的第一等公民是那条「前端零改动」的断言：队列模式下 ``POST /api/task`` 的响应体、
-``active_tasks`` 的登记、``queue_status`` 事件三样与单进程模式**逐项同形**，只多一个加法字段
-``task_id``（老前端会忽略它）。以及反向的那条：``QUEUE_ENABLED=0``（默认）时这套代码一个字节都不
-执行，本仓既有的 ``tests/test_server.py`` 全绿即是它的回归。
+所以本文件的第一等公民是那条「前端零改动」的断言：``POST /api/task`` 的响应体、``active_tasks``
+的登记、``queue_status`` 事件三样与队列上线前**逐项同形**，只多一个加法字段 ``task_id``（老前端
+会忽略它）。
 
 用 ``InProcessQueue`` 而不是 FakeRedis：接线关心的是「谁调了谁、传了什么」，换成 Redis 只会把
 Stream 协议的噪声引进来，真 Redis 的双进程冒烟另跑（见 docs/plans/批2-进度.md）。
@@ -26,7 +25,6 @@ from httpx import ASGITransport, AsyncClient
 import app.api.server as server
 from app import worker
 from app.api import control, dedup, monitor
-from app.api.concurrency import PriorityRequestQueue
 from app.queue import InProcessQueue, set_task_queue
 
 
@@ -39,22 +37,16 @@ async def client() -> AsyncIterator[AsyncClient]:
 
 @pytest.fixture
 def queue(monkeypatch: pytest.MonkeyPatch) -> InProcessQueue:
-    """把工厂单例换成本用例专属的队列，并把 ``QUEUE_ENABLED`` 拨到开。
-
-    ``server.queue_enabled`` 是 import 进 server 命名空间的名字，patch 它比改环境变量更准——环境
-    变量还要考虑 ``.env`` 里已有的值与模块级常量的读取时机。
-    """
+    """把工厂单例换成本用例专属的队列（真实部署恒是 Redis Stream，单测用进程内实现代替）。"""
     q = InProcessQueue()
     set_task_queue(q)
-    monkeypatch.setattr(server, "queue_enabled", lambda: True)
     monkeypatch.setattr(server, "QUEUE_POLL_SECONDS", 0.02)  # 用例里不等整秒
     return q
 
 
 @pytest.fixture(autouse=True)
 async def _clean(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
-    """惯例同 ``tests/test_server.py``：换新准入池 + 清指纹表，用例后取消遗留任务、复位队列单例。"""
-    monkeypatch.setattr(server, "task_queue", PriorityRequestQueue())
+    """惯例同 ``tests/test_server.py``：清指纹表，用例后取消遗留任务、复位队列单例。"""
     dedup.reset()
     yield
     for handle in list(server.active_tasks.values()):
@@ -201,12 +193,6 @@ async def test_enqueue_failure_surfaces_as_error_event(
 
 
 # ---------- POST /api/task/async + GET /api/task/{task_id} ----------
-async def test_task_async_requires_queue_enabled(client: AsyncClient) -> None:
-    """关着队列时 503 而不是退回本进程跑：那样会返回一个永远停在 queued 的 task_id，是骗人。"""
-    resp = await client.post("/api/task/async", json={"query": "买帐篷"})
-    assert resp.status_code == 503
-
-
 async def test_task_async_returns_id_then_state_endpoint_tracks_it(
     client: AsyncClient, queue: InProcessQueue, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -247,28 +233,6 @@ async def _state_is(client: AsyncClient, task_id: str, state: str) -> bool:
 async def test_task_state_404_when_unknown(client: AsyncClient, queue: InProcessQueue) -> None:
     """状态键有 TTL，过期即 404：它是给一次提交轮询几分钟用的，不是历史存储。"""
     assert (await client.get("/api/task/nope")).status_code == 404
-
-
-# ---------- QUEUE_ENABLED=0（默认）：这套代码一个字节都不执行 ----------
-async def test_default_mode_does_not_touch_the_queue(
-    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """默认路径仍在 API 进程里跑 run_agent、仍占准入槽，队列深度纹丝不动。"""
-    q = InProcessQueue()
-    set_task_queue(q)
-    started = asyncio.Event()
-
-    async def _fake_run(query: str, thread_id: str, **_kw: Any) -> dict[str, Any]:
-        started.set()
-        return {"thread_id": thread_id}
-
-    monkeypatch.setattr(server, "run_agent", _fake_run)  # 注意是 server 侧那个名字，不是 worker 的
-    resp = await client.post("/api/task", json={"query": "买帐篷", "thread_id": "q-g"})
-
-    assert resp.json()["status"] == "started"
-    assert "task_id" not in resp.json()  # 默认路径的响应体逐字节不变
-    await asyncio.wait_for(started.wait(), 2.0)
-    assert await q.depth() == 0
 
 
 # ---------- 跨进程取消 / 澄清（批2-4）----------

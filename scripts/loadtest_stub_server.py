@@ -2,7 +2,7 @@
 
 只量排队 / WS / 事件推送这条链路的开销，不碰 LLM。跑法（另一个终端跑 loadtest.k6.js）：
 
-    AUTH_ENABLED=false TURN_CACHE_ENABLED=0 TASK_NORMAL_SLOTS=20 TASK_QUEUE_DEPTH=20 \
+    AUTH_ENABLED=false TURN_CACHE_ENABLED=0 QUEUE_MAX_DEPTH=2000 \
       uv run python scripts/loadtest_stub_server.py --port 8199 --sleep 3
 """
 

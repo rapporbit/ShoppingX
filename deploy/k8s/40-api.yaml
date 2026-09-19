@@ -1,5 +1,5 @@
 # API —— 收请求、鉴权、配额、幂等、入队，然后立刻回 thread_id。它**不跑 AgentLoop**
-# （QUEUE_ENABLED=1 时），所以 CPU 曲线平、可以按 QPS 扩，跟 worker 各扩各的。这正是把两者
+# （API 只入队），所以 CPU 曲线平、可以按 QPS 扩，跟 worker 各扩各的。这正是把两者
 # 拆开的收益：以前一个进程既收请求又烧 token，扩容只能整体扩。
 apiVersion: v1
 kind: Service

@@ -266,28 +266,13 @@ async def test_subscription_reconnects_after_error(monkeypatch: pytest.MonkeyPat
         await api.stop()
 
 
-# ── 5. 工厂开关：默认关，单进程部署一个字节都不执行 ──────────────────────────────
-def test_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("BACKPLANE_ENABLED", raising=False)
-    monkeypatch.delenv("QUEUE_ENABLED", raising=False)
-    assert bp.backplane_enabled() is False
+# ── 5. 工厂：恒开（阶段 1 条 7 删掉 BACKPLANE_ENABLED / QUEUE_ENABLED 两个开关）───────
+def test_factory_returns_none_when_client_cannot_be_built(monkeypatch: pytest.MonkeyPatch) -> None:
+    """URL 非法 → 返回 None 降级为单进程行为，不把 API 进程带下去（可达性那道闸在 lifespan）。"""
+    monkeypatch.setattr(bp, "_backplane", None)
+    monkeypatch.setattr(bp, "_resolved", False)
+    monkeypatch.setenv("BACKPLANE_REDIS_URL", "notredis://nowhere")
     assert bp.get_backplane() is None
-
-
-def test_follows_queue_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """默认跟随 QUEUE_ENABLED：开了队列就必须开背板，否则前端一条实时事件都收不到。"""
-    monkeypatch.delenv("BACKPLANE_ENABLED", raising=False)
-    monkeypatch.setenv("QUEUE_ENABLED", "1")
-    assert bp.backplane_enabled() is True
-    monkeypatch.setenv("BACKPLANE_ENABLED", "0")  # 显式关掉仍然说了算
-    assert bp.backplane_enabled() is False
-
-
-async def test_start_forwarding_noop_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """关着时 lifespan 那一行什么也不做（不 import redis、不起 task）。"""
-    monkeypatch.delenv("BACKPLANE_ENABLED", raising=False)
-    monkeypatch.delenv("QUEUE_ENABLED", raising=False)
-    assert await bp.start_forwarding(ConnectionManager()) is None
 
 
 # ── 6. 与 monitor 的接线：只在本地投不到时才广播 ────────────────────────────────
@@ -335,12 +320,13 @@ async def test_monitor_skips_broadcast_when_delivered_locally(
     await backplane.stop()
 
 
-async def test_monitor_is_noop_when_backplane_off(
+async def test_monitor_survives_an_unavailable_backplane(
     quiet_event_log: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """默认（单进程）路径：monitor 里那两行一个字节都不执行，行为与批2-2 末态逐字相同。"""
-    monkeypatch.delenv("BACKPLANE_ENABLED", raising=False)
-    monkeypatch.delenv("QUEUE_ENABLED", raising=False)
+    """背板建不起来时上报照常返回：事件侧一律静默降级，不能把主链路带下去。"""
+    monkeypatch.setattr(bp, "_backplane", None)
+    monkeypatch.setattr(bp, "_resolved", False)
+    monkeypatch.setenv("BACKPLANE_REDIS_URL", "notredis://nowhere")
     monkeypatch.setattr(monitor, "_manager", ConnectionManager())
     await monitor.report_error("boom", "出事了", thread_id="t-1")  # 不抛即可
     assert bp.get_backplane() is None

@@ -30,10 +30,8 @@ x-logging: &logging
 x-app-env: &app-env
   # 账户 / 会话归属 / holds 全在 MySQL —— 多副本正确性的判据几乎都落在这几张表上。
   DATABASE_URL: "mysql+aiomysql://root:globex@mysql:3306/globex?charset=utf8mb4"
-  QUEUE_ENABLED: "1"
   QUEUE_REDIS_URL: "redis://redis:6379/0"
   EVENT_REDIS_URL: "redis://redis:6379/1"
-  CONTROL_ENABLED: "1"
   # **鉴权必须开**：holds 跟着 quota 走，而 quota 要求 auth_enabled()——关着鉴权时所有人共用
   # 假身份，限并发等于「一个人在跑、全体排队」。关着跑这套验收，run_holds 会是空表，1-1 那几刀
   # 一条都验不到（第一次跑正是这么翻的车）。AUTH_DEV_TOKEN 另开一个发证口给脚本换 token 用。

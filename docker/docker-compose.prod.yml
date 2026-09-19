@@ -72,6 +72,33 @@ services:
       timeout: 3s
       retries: 5
 
+  # MySQL —— 账户 / 会话归属 / run_holds 的唯一真相（阶段 1 条 7 起 SQLite 不再是合法形态：
+  # 起服时会校验 DATABASE_URL，不是 MySQL 直接拒绝启动）。老库搬数见
+  # scripts/migrate_sqlite_to_mysql.py，搬完把 .env 的 DATABASE_URL 指到这里。
+  mysql:
+    image: mysql:8.0
+    container_name: globex-mysql
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?compose 需要它，写进 .env}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-globex}
+      MYSQL_USER: ${MYSQL_USER:-globex}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?compose 需要它，写进 .env}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mysql-data:/var/lib/mysql
+    networks: [internal]
+    healthcheck:
+      # 用 root 密码 ping：库还没建好时应用连上去也是失败，健康判据要比「端口通了」严。
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
   backend:
     build:
       context: ..
@@ -85,13 +112,13 @@ services:
       - ../data:/app/data:ro # 品类卡片 / 评测集等只读语料
       - output:/app/output # 每会话产物
       - uploaded:/app/uploaded
-      # 账户与会话归属库（M16 的 SQLite：users / threads）。**漏了这行 = 容器一重建，注册用户全没**。
-      # 必须单独挂一个卷：上面的 data 是 :ro 只读（放语料），而 SQLite 要写；output 是会话产物、
-      # 语义也不同。库文件路径由 DATABASE_URL 决定，缺省即 /app/var/globex.db。
+      # var/ 仍挂着：搬去 MySQL 之前的那份 SQLite 还在里面（scripts/migrate_sqlite_to_mysql.py
+      # 的源），另外分词器缓存等也落这儿。账户真相已在 mysql 服务的 mysql-data 卷上。
       - appdb:/app/var
     depends_on:
       opensearch: { condition: service_healthy }
       redis: { condition: service_healthy }
+      mysql: { condition: service_healthy }
     networks: [internal, vaultwarden_web] # 后者供 Caddy 反代
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8000/docs')\""]
@@ -100,7 +127,7 @@ services:
       retries: 5
       start_period: 40s
 
-  # worker —— 跑 AgentLoop 的那一半（QUEUE_ENABLED=1 时 backend 只入队，真正的活在这里）。
+  # worker —— 跑 AgentLoop 的那一半（backend 只入队，真正的活在这里）。
   # 与 backend **同一个镜像、同一份 .env**，只换 command：两边跑的必须是同一版代码，否则「API 说
   # 有这个字段、worker 那版还没有」这种错会以最难查的形式出现（任务照跑，结果字段缺一块）。
   worker:
@@ -125,6 +152,7 @@ services:
     depends_on:
       opensearch: { condition: service_healthy }
       redis: { condition: service_healthy }
+      mysql: { condition: service_healthy }
     networks: [internal] # 不接 Caddy 网络：它不收 HTTP 请求，只从 Redis Stream 领任务
     # 关停宽限必须 > WORKER_GRACE_SECONDS（默认 330）+ 收尾余量，否则 compose 的默认 10s 会让
     # SIGKILL 抢在收尾前面——应用侧那套 interrupted 收尾一步都跑不了（同 k8s 的三个数，见
@@ -147,10 +175,11 @@ networks:
     external: true
 
 volumes:
+  mysql-data: # 账户 / 会话归属 / holds：丢了没法从别处重建
   qdrant-data:
   qdrant-snapshots:
   os-data:
   redis-data:
   output:
   uploaded:
-  appdb: # 账户库（M16）：注册用户与会话归属的唯一真源，丢了没法从别处重建
+  appdb: # 搬去 MySQL 之前的那份 SQLite + 本地缓存（账户真相现在在 mysql-data）

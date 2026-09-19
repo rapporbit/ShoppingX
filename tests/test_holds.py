@@ -19,6 +19,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, update
 
 import app.api.server as server
+from app import worker
 from app.agent.session_io import charge_quota
 from app.db import holds, quota
 from app.db.models import RunHold, User
@@ -45,13 +46,13 @@ async def client() -> AsyncIterator[AsyncClient]:
 
 
 @pytest.fixture(autouse=True)
-async def _fake_agent(monkeypatch: Any) -> AsyncIterator[None]:
+async def _fake_agent(monkeypatch: Any, queue_worker: None) -> AsyncIterator[None]:
     """API 用例验的是准入，不是 Agent：run_agent 换成立刻返回的假实现。"""
 
     async def _noop(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         return {"final": "ok"}
 
-    monkeypatch.setattr(server, "run_agent", _noop)
+    monkeypatch.setattr(worker, "run_agent", _noop)
     yield
     for handle in list(server.active_tasks.values()):
         if not handle.task.done():
@@ -282,7 +283,7 @@ async def test_already_running_returns_the_hold(client: AsyncClient, monkeypatch
         await asyncio.sleep(60)
         return {}
 
-    monkeypatch.setattr(server, "run_agent", _hang)
+    monkeypatch.setattr(worker, "run_agent", _hang)
     uid, headers = await _signup(client, "h-api-dup")
     body = {"query": "同一句话", "thread_id": "t-dup"}
 
