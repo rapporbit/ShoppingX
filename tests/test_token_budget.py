@@ -211,7 +211,9 @@ def test_charge_tool_llm_usage(tmp_path: Path, fixed_price: None) -> None:
         # 入参形状：model_name → 用量字典（charge_usage 内部也翻译成这一份口径）
         tb.charge_tool_llm_usage(
             {
-                "deepseek-v4-flash": {
+                # 模型名取一个**不在 _PRICES 里**的，这条用例量的是「工具内用量入同一棵树」，
+                # 名字只要能走 fixed_price 那档就行；按名分价另有 test_price_for_model_by_name。
+                "tool-side-model": {
                     "input_tokens": 1_000_000,
                     "output_tokens": 1_000_000,
                     "total_tokens": 2_000_000,
@@ -232,3 +234,15 @@ def test_charge_tool_llm_usage(tmp_path: Path, fixed_price: None) -> None:
 def test_charge_tool_llm_usage_no_scope_is_noop() -> None:
     """无会话作用域（单测直调工具）→ 静默跳过，绝不抛。"""
     tb.charge_tool_llm_usage({"m": {"input_tokens": 1, "output_tokens": 1}})
+
+
+def test_price_for_model_by_name(fixed_price: None) -> None:
+    """planner 的 qwen3.8-flash 按名单列价，不跟着主模型的默认档走。
+
+    两者的价差落在三档的不同方向上（qwen 输入 -20%、输出 +35%、缓存命中 ×5），共用一档会把
+    两边都算错。键取 `qwen3.8` 而非 `qwen`——qwen3.5（judge / vision）费率没核实，不许被它盖住。
+    """
+    assert tb._price_for("dashscope/qwen3.8-flash") == (0.112, 0.378, 0.014)
+    # 主模型与 qwen3.5 都吃 env 默认档（这里被 fixed_price 覆盖成 1.0 / 2.0 / 0.0）
+    assert tb._price_for("dashscope/deepseek-v4.1-flash") == (1.0, 2.0, 0.0)
+    assert tb._price_for("dashscope/qwen3.5-flash") == (1.0, 2.0, 0.0)
