@@ -129,6 +129,21 @@ class CircuitBreaker:
         """记一次失败（放行后必调其一）。"""
         self._on_failure()
 
+    def record_neutral(self) -> None:
+        """记一次「这次结果说明不了依赖健不健康」（放行后必调其一）。
+
+        LLM 断路器要的：撞 429 说明的是**我们发太快**，不是对面挂了——那种错误既不该累计失败、
+        也不该清零失败计数（清零等于用一次限流把前面五次 5xx 洗白）。所以给一条中立路径。
+
+        ``HALF_OPEN`` 必须处理：探测放行后若什么都不记，状态会永远卡在 ``HALF_OPEN``、
+        :meth:`allow` 从此恒真，断路器静默失效（见 :meth:`allow` 的「悬空」告警）。这里退回
+        ``OPEN`` 且**不刷新** ``_opened_at``——恢复窗口本来就已经过了，下一次调用照样能探测一次，
+        等于「这次探测不算数，重来」。
+        """
+        if self._state == HALF_OPEN:
+            self._state = OPEN
+            logger.info("断路器 %s 的半开探测结果中立（不计），下次调用再探", self.name)
+
     async def call(self, fn: Callable[[], Awaitable[T]]) -> T:
         """经断路器执行一次异步调用 ``fn()``。OPEN 且未到恢复窗口时抛 ``CircuitOpenError``。
 

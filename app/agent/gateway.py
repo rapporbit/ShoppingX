@@ -13,6 +13,10 @@
 **流式的坑**：``stream=True`` 时 ``__call__`` 立刻返回一个 async generator，请求其实还在飞。
 如果这时就把信号量还回去，并发上限形同虚设（N 个流可以同时挂着）。所以流式路径把 slot 一直
 持有到**生成器耗尽或被关闭**为止，见 :meth:`ThrottledChatModel._stream_holding_slot`。
+
+**断路器挂在同一层**（阶段 2 第 1 条，口径见 :mod:`app.agent.llm_breaker`）：闸在取 slot 之前，
+记账在调用/流结束之后，首 token 预算在第一片上。放这层是因为它和闸门问的是同一个问题的两半
+——闸门管「发不发得出去」，断路器管「还值不值得发」。
 """
 
 import asyncio
@@ -20,10 +24,18 @@ import logging
 import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from typing import Any
 
 from agentscope.model import OpenAIChatModel
 
+from app.agent.llm_breaker import (
+    CircuitOpenError,
+    FirstTokenTimeout,
+    first_token_timeout,
+    get_llm_breaker,
+    record_outcome,
+)
 from app.agent.transient import is_rate_limited
 
 logger = logging.getLogger(__name__)
@@ -76,6 +88,25 @@ class GatewayThrottle:
         logger.warning("gateway 撞到限流，后续请求推迟 %.1fs", seconds)
 
 
+class _Attempt:
+    """一次**尝试**的起点（不是一次调用的起点）。
+
+    重试跑在 ``ChatModelBase.__call__`` 里面，我们在外面看不见。若首 token 预算从「取到 slot」
+    起算，前两次失败尝试的耗时会被算进第三次的预算里——限流风暴时最后那次本来要成功的调用会被
+    误掐、还记一次故障，正好把「429 不计」的设计绕过去。所以每进一次 ``_call_api`` 就重新打点。
+    """
+
+    __slots__ = ("started",)
+
+    def __init__(self) -> None:
+        self.started = time.monotonic()
+
+
+# 只用于把 holder 从 ``__call__`` 递到 ``_call_api``（同一个 task 内），不跨协程共享：
+# 并发调用各在各的 task，context 天然隔离。
+_current_attempt: ContextVar[_Attempt | None] = ContextVar("llm_attempt", default=None)
+
+
 class ThrottledChatModel(OpenAIChatModel):
     """走闸门的 ``OpenAIChatModel``：并发/间隔受控，限流自动降速，备用模型上报 AGUI。
 
@@ -111,34 +142,103 @@ class ThrottledChatModel(OpenAIChatModel):
 
     async def __call__(self, *args: Any, **kwargs: Any) -> Any:
         await self._report_fallback_once()
+        # 断路器的闸放在**取 slot 之前**：OPEN 态的意义就是不占资源直接拒，占了并发位再拒等于
+        # 把快速失败的收益还回去。键用 ``self.model``——2-1 之后它在两条出口路上都是 provider/model。
+        breaker = get_llm_breaker(self.model)
+        if breaker is not None and not breaker.allow():
+            raise CircuitOpenError(f"模型出口 {self.model} 断路器 OPEN，快速失败")
         cm = self._throttle.slot()
         await cm.__aenter__()
+        # 计时从**拿到 slot 之后**开始：排队等并发位、等起点间隔是我们自己的节流，算进首 token
+        # 预算里就会在高并发时集体误判对面挂了。真正的打点在 ``_call_api``（每次尝试一次）。
+        attempt = _Attempt()
+        token = _current_attempt.set(attempt)
         try:
             res = await super().__call__(*args, **kwargs)
         except BaseException as exc:
             if is_rate_limited(exc):
                 self._throttle.penalize(self._rate_limit_backoff)
+            record_outcome(breaker, exc)
             await cm.__aexit__(type(exc), exc, exc.__traceback__)
             raise
+        finally:
+            _current_attempt.reset(token)
         if isinstance(res, AsyncGenerator):
-            # 流式：请求还在飞，slot 交给包装生成器持有到耗尽/关闭。
-            return self._stream_holding_slot(res, cm)
+            # 流式：请求还在飞，slot 与断路器的记账都交给包装生成器。
+            return self._stream_holding_slot(res, cm, breaker, attempt.started)
+        record_outcome(breaker, None)
         await cm.__aexit__(None, None, None)
         return res
+
+    async def _call_api(self, *args: Any, **kwargs: Any) -> Any:
+        """每次**尝试**进来时重新打点首 token 预算的起点（重试的坑见 :class:`_Attempt`）。"""
+        attempt = _current_attempt.get()
+        if attempt is not None:
+            attempt.started = time.monotonic()
+        return await super()._call_api(*args, **kwargs)
+
+    async def _first_chunk(self, agen: Any, started: float) -> Any:
+        """取第一片，超预算就掐断并抛 :class:`FirstTokenTimeout`。
+
+        预算是「从请求发出到首片到达」，所以要减掉 ``super().__call__`` 里已经花掉的那段
+        （建连 + 拿响应头就发生在那里，流式下它先于任何一片返回）。
+
+        掐断用的是 ``aclose()``：不关的话 slot 还回去了、HTTP 连接还挂着，对面真卡住时
+        连接数会随请求一起涨——那正是我们要止的血。
+        """
+        budget = first_token_timeout()
+        if budget <= 0:
+            return await agen.__anext__()
+        remaining = budget - (time.monotonic() - started)
+
+        # **不能用 asyncio.wait_for**：它靠取消 ``__anext__`` 来实现超时，再拿任务的最终结果说话。
+        # 而 AgentScope 的流包装 ``_stream()`` 把 ``CancelledError`` 吞了（catch 之后还会 yield
+        # 一片累计结果），于是任务「成功」返回、wait_for 原样把那片空响应交回来——超时静默失效，
+        # 表现是一次没内容的模型调用，不是报错。所以这里自己判定：只看时间到没到，不看任务结局。
+        task = asyncio.ensure_future(agen.__anext__())
+        done, _pending = await asyncio.wait({task}, timeout=max(remaining, 0.0))
+        if not done:
+            task.cancel()
+            try:
+                await task
+            except BaseException:  # noqa: BLE001 - 取消后的任何结局都不改变「已超时」这个判定
+                pass
+            try:
+                await agen.aclose()
+            except Exception:  # pragma: no cover - 关流失败不该盖过超时本身
+                logger.debug("首 token 超时后关流失败", exc_info=True)
+            raise FirstTokenTimeout(self.model, budget)
+        # 正常到片（或 ``StopAsyncIteration`` / 真实异常）都由这里原样抛出去。
+        return task.result()
 
     async def _stream_holding_slot(
         self,
         stream: AsyncGenerator[Any, None],
         cm: Any,
+        breaker: Any = None,
+        started: float = 0.0,
     ) -> AsyncGenerator[Any, None]:
-        """转发流式响应，把 slot 持有到生成器耗尽或被 ``aclose()``。"""
+        """转发流式响应，把 slot 持有到生成器耗尽或被 ``aclose()``。
+
+        断路器在这里才记账：流式下 ``__call__`` 返回时请求其实刚发出去，成败要等流走完才知道。
+        """
         try:
-            async for chunk in stream:
-                yield chunk
+            agen = stream.__aiter__()
+            empty = False
+            try:
+                first = await self._first_chunk(agen, started)
+            except StopAsyncIteration:  # 空流：对面直接结束，不是超时
+                empty = True
+            if not empty:
+                yield first
+                async for chunk in agen:
+                    yield chunk
         except BaseException as exc:
             if is_rate_limited(exc):
                 self._throttle.penalize(self._rate_limit_backoff)
+            record_outcome(breaker, exc)
             await cm.__aexit__(type(exc), exc, exc.__traceback__)
             raise
         else:
+            record_outcome(breaker, None)
             await cm.__aexit__(None, None, None)
