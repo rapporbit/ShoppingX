@@ -217,6 +217,18 @@ def test_task_dict_roundtrip_and_tolerates_missing_fields() -> None:
     # 滚动更新期间旧进程写的 payload 缺新字段——只有三个必需键在就该能跑起来。
     lean = IntentTask.from_dict({"task_id": "a", "thread_id": "t", "query": "q"})
     assert (lean.kind, lean.platforms, lean.user_id) == ("normal", (), None)
+    assert lean.request_id == "", "老消息没有 request_id，不该炸也不该编一个"
+
+
+def test_request_id_survives_the_queue() -> None:
+    """request_id 要跨序列化活下来（阶段 4-5）——它是 API 与 worker 两个进程唯一的那根线。
+
+    盯的是 ``to_dict``：字段加在 dataclass 上而忘了加进 payload，本地跑全绿（同进程直接传对象），
+    上了队列才静默丢——而丢了不会报错，只会让日志再也串不起来。
+    """
+    task = IntentTask.create(task_id="a", thread_id="t", query="q", request_id="ab12cd34")
+    assert task.to_dict()["request_id"] == "ab12cd34"
+    assert IntentTask.from_dict(task.to_dict()).request_id == "ab12cd34"
 
 
 async def test_enqueue_routes_by_kind(rq: RedisStreamQueue, fake: FakeRedis) -> None:

@@ -46,7 +46,7 @@ from app.db.holds import mark_running, release
 from app.db.runs import release_thread_run
 from app.db.session import init_db
 from app.deployment import assert_deployment_deps
-from app.observability.logging import configure_logging
+from app.observability.logging import bind_log_context, configure_logging, unbind_log_context
 from app.queue import IntentTask, TaskQueue, TaskStatus, get_task_queue
 from app.utils.env import env_int
 from app.utils.tokens import warm_tokenizer
@@ -128,6 +128,9 @@ async def handle_task(task: IntentTask, queue: TaskQueue | None = None) -> None:
     if current is not None:
         control.register_inflight(task.task_id, task.thread_id, current)
     agent_started = False
+    # 绑在整个 handle_task 外层，而不是只靠 run_agent 里那次（阶段 4-5）：取消、关停掐断、
+    # 重投超限这几条路根本走不到 run_agent，而它们恰恰是最需要跨进程对账的日志。
+    log_tokens = bind_log_context(request_id=task.request_id or None)
     try:
         # 排队期间就被取消的：领到手先自查标记，一步都不用跑。这是「还在排队的任务也取消得掉」
         # 的落点——广播只能送到已经领走它的那个 worker，还没被领走的只能靠这张标记。
@@ -164,6 +167,8 @@ async def handle_task(task: IntentTask, queue: TaskQueue | None = None) -> None:
             platforms=list(task.platforms) or None,
             image_paths=list(task.image_paths) or None,
             skill=task.skill or None,
+            # API 那次 HTTP 请求的 id：绑回日志上下文，两个进程的日志才拼得成一条线。
+            request_id=task.request_id,
         )
     except asyncio.CancelledError:
         if not control.was_cancelled_locally(task.task_id):
@@ -216,6 +221,7 @@ async def handle_task(task: IntentTask, queue: TaskQueue | None = None) -> None:
         # 摘登记放 finally：任何收尾路径（正常 / 用户取消 / 优雅退出 / 异常）都不能把句柄留在表里
         # ——留着就是让下一次同 task_id 的取消去 cancel 一个早已结束的 task，静默无效。
         control.unregister_inflight(task.task_id)
+        unbind_log_context(log_tokens)
     await q.set_status(
         TaskStatus(
             task_id=task.task_id,

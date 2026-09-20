@@ -277,6 +277,7 @@ async def run_agent(
     image_paths: Sequence[str] | None = None,
     skill: str | None = None,
     run_id: str | None = None,
+    request_id: str = "",
 ) -> dict[str, Any]:
     """主 AgentLoop 的入口：一轮任务从这里进、从这里出。
 
@@ -285,6 +286,9 @@ async def run_agent(
     为 ``None`` 时退回老账本（``add_usage``），预扣开关关着或调用方没走准入时就是这条路。
     它同时是**写工具的幂等锚**：整轮重跑时 run_id 不变，同一轮重复调 ``create_order`` 只落一张
     确认卡（见 :mod:`app.trade.confirmations` 的 ``request_key``），所以它要进 ContextVar。
+
+    ``request_id``：API 那边那次 HTTP 请求的 id，随队列消息带过来（阶段 4-5），只用于日志关联。
+    **与返回值里的 ``trace_id`` 无关**——后者是 Langfuse 的，由下面的根 span 自己生成。
 
     ``skill``：用户在输入框 ``/`` 显式选中的 skill 目录名。服务端在首次模型调用前校验归属并把
     正文拼进本轮用户消息（``authority=reference_only``）；找不到就报错结束本轮，**不静默降级
@@ -299,7 +303,15 @@ async def run_agent(
     # 会在「刚好跨过热更新」的那一轮记出互相矛盾的归属——A/B 报告最怕的就是这种错行。
     ab_assign = assign_prompt_version(user_id)
     with (
-        thread_scope(thread_id, session_dir, user_id=user_id, run_id=run_id or ""),
+        thread_scope(
+            thread_id,
+            session_dir,
+            user_id=user_id,
+            run_id=run_id or "",
+            # 队列消息带过来的 HTTP 请求 id（阶段 4-5）：绑回日志上下文，API 那边的几行和这里
+            # 的整轮日志才串得起来。空串 = 不是从队列来的（离线脚本 / 单测），不绑。
+            request_id=request_id or None,
+        ),
         platform_scope(platforms) as enabled_platforms,
         # 一轮 = 一条 trace 的根 span。主 loop 与 worker 的 span 靠 OTEL 上下文自动挂进来
         # （不必手工传 trace_id），多轮再靠 session_id=thread_id 聚成 Session。

@@ -14,6 +14,7 @@ ContextVar 现在只服务多用户隔离与产物归档。）
 
 import os
 import time
+import uuid
 from collections.abc import Sequence
 from contextvars import ContextVar
 from pathlib import Path
@@ -38,6 +39,24 @@ _user_id_var: ContextVar[str | None] = ContextVar("shoppingx_user_id", default=N
 # （见 app.trade.confirmations 的 request_key）。空串 = 没有 run 作用域（HTTP 表单入口 / 离线
 # 脚本 / 单测），此时写工具退回「每次新建一张卡」的老行为。
 _run_id_var: ContextVar[str] = ContextVar("shoppingx_run_id", default="")
+
+# 跨进程的日志关联 id（阶段 4-5）：HTTP 入口生成一次，随 IntentTask 进队列，worker 消费时绑回
+# 日志上下文。**不是 run_id 的重复**：run_id 只在幂等判定通过、真开出一个 run 之后才有意义，而
+# 被判成 already_running / duplicate 的请求同样要能在日志里被找到——排查「用户点了三次，为什么
+# 只跑了一次」时，串起那三条 HTTP 请求的就是它。也**不是 Langfuse 的 trace_id**（那个由 worker
+# 侧根 span 生成、只覆盖 run_agent 内部，且已经占用了 trace_id 这个名字）。
+_request_id_var: ContextVar[str] = ContextVar("shoppingx_request_id", default="")
+
+
+def new_request_id() -> str:
+    """生成一个新的日志关联 id（16 位十六进制，够短好在日志里扫、碰撞概率可忽略）。"""
+    return uuid.uuid4().hex[:16]
+
+
+def get_request_id() -> str:
+    """当前请求的日志关联 id；不在请求作用域内返回空串。"""
+    return _request_id_var.get()
+
 
 # 当前会话的短期偏好状态 P_t（本会话逐轮累积的约束）——run_agent 入口从 session.json 读回后
 # 写入、**planner 在识别出本轮约束后当轮改写**，供 item_picker 等工具机制性读取并强制执行

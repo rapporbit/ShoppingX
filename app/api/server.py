@@ -48,6 +48,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Request,
     Response,
     UploadFile,
     WebSocket,
@@ -84,6 +85,7 @@ from app.api.concurrency import (
     classify_request,
     estimated_wait_seconds,
 )
+from app.api.context import _request_id_var, new_request_id
 from app.config import store as config_store
 from app.db.accounts import MIN_PASSWORD_LEN, assert_owner, claim_thread, ensure_dev_admin
 from app.db.holds import REASON_CONCURRENCY, HoldResult, acquire_hold, release
@@ -104,7 +106,7 @@ from app.memory.session_state import (
 )
 from app.memory.store import FavoriteItem, get_store
 from app.observability import alerts, metrics
-from app.observability.logging import configure_logging
+from app.observability.logging import bind_log_context, configure_logging, unbind_log_context
 from app.queue import (
     TERMINAL_STATES,
     IntentTask,
@@ -272,6 +274,30 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _bind_request_id(request: Request, call_next: Any) -> Any:
+    """给每个 HTTP 请求绑一个 request_id，并在响应头回显（阶段 4-5）。
+
+    入口在中间件而不是各 endpoint 里：``/api/task`` 的三条幂等分支（already_running /
+    duplicate / 429）各自提前返回，逐个手绑迟早漏一条——而恰恰是这几条最需要在日志里被找到
+    （「用户点了三次，为什么只跑了一次」）。
+
+    ``X-Request-Id`` 有就沿用：前面挡着 nginx 时那才是真正的请求入口，自己再生成一个等于在
+    链路中间断一次。回显是给排障的人用的——出问题时截图里就带着这个 id。
+    """
+    incoming = (request.headers.get("X-Request-Id") or "").strip()[:64]
+    request_id = incoming or new_request_id()
+    token = _request_id_var.set(request_id)
+    log_tokens = bind_log_context(request_id=request_id)
+    try:
+        response = await call_next(request)
+    finally:
+        unbind_log_context(log_tokens)
+        _request_id_var.reset(token)
+    response.headers["X-Request-Id"] = request_id
+    return response
 
 
 app.include_router(accounts.router)  # M16：注册 / 登录 / 我是谁 / 我的会话清单
@@ -687,6 +713,8 @@ def _start_queued(
         platforms=req.platforms,
         image_paths=req.image_paths,
         skill=req.skill,
+        # 带上本次 HTTP 请求的 id：worker 是另一个进程，ContextVar 过不去，只能随消息走。
+        request_id=_request_id_var.get(),
     )
     position = depth + 1
     task = asyncio.create_task(_queued_runner(intent, position))
@@ -854,6 +882,7 @@ async def create_task_async(
         platforms=req.platforms,
         image_paths=req.image_paths,
         skill=req.skill,
+        request_id=_request_id_var.get(),
     )
     try:
         await _enqueue_intent(intent, depth)
