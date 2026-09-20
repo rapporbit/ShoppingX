@@ -27,6 +27,7 @@ from functools import lru_cache
 
 import httpx
 
+from app.api.context import clamp_timeout
 from app.utils.circuit_breaker import CircuitBreaker, CircuitOpenError
 from app.utils.env import env_float, env_int
 from app.utils.retry import call_with_retry
@@ -149,7 +150,11 @@ class RerankerClient:
             payload = {"query": query, "candidates": candidates}
 
         async def _do() -> httpx.Response:
-            resp = await client.post(self._endpoint or "", json=payload)
+            # per-request 超时而不是客户端默认：deadline 快到时这一次就别按满 10 秒等了（精排是
+            # 锦上添花，失败会降级成本地重叠打分，早点降级比拖死整轮强）。
+            resp = await client.post(
+                self._endpoint or "", json=payload, timeout=clamp_timeout(self._timeout)
+            )
             resp.raise_for_status()  # 4xx 立即抛（不重试），5xx 交给 call_with_retry 退避重试
             return resp
 

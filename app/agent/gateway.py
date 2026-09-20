@@ -44,6 +44,7 @@ from app.agent.token_bucket import acquire as bucket_acquire
 from app.agent.token_bucket import estimate_prompt_tokens
 from app.agent.token_bucket import settle as bucket_settle
 from app.agent.transient import is_rate_limited
+from app.api.context import clamp_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -204,10 +205,18 @@ class ThrottledChatModel(OpenAIChatModel):
         return res
 
     async def _call_api(self, *args: Any, **kwargs: Any) -> Any:
-        """每次**尝试**进来时重新打点首 token 预算的起点（重试的坑见 :class:`_Attempt`）。"""
+        """每次**尝试**进来时重新打点首 token 预算的起点（重试的坑见 :class:`_Attempt`）。
+
+        顺带把本次请求的超时收到本轮 deadline 以内（阶段 4-2）。放在这一层是因为它**同时覆盖两条
+        出口路**：直连那条 openai SDK 认每次调用的 ``timeout``（盖过建客户端时的默认值），Router
+        那条 ``_RouterCompletions.create`` 是 ``setdefault``，我们给了它就不再塞自己那份。
+        """
         attempt = _current_attempt.get()
         if attempt is not None:
             attempt.started = time.monotonic()
+        base = (self.client_kwargs or {}).get("timeout")
+        if isinstance(base, int | float):
+            kwargs.setdefault("timeout", clamp_timeout(float(base)))
         return await super()._call_api(*args, **kwargs)
 
     async def _first_chunk(self, agen: Any, started: float) -> Any:

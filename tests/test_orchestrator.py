@@ -531,3 +531,39 @@ async def test_assembled_agent_runs_with_terminal_discipline(
         "终结" in m.get_text_content() or "收尾" in m.get_text_content()
         for m in agent.state.context
     )
+
+
+# ---------- 本轮 deadline（阶段 4-2）----------
+async def test_run_agent_sets_the_turn_deadline(
+    monkeypatch: pytest.MonkeyPatch, patched: dict[str, Any]
+) -> None:
+    """入口给本轮设 deadline，Agent 跑起来时下游读得到（出站点据它收紧自己的超时）。
+
+    与外面那层 ``asyncio.timeout(MAIN_AGENT_TIMEOUT_SEC)`` 是同一个预算，区别只在**谁看得见**：
+    timeout 从外面一刀砍下来，出站点对它一无所知；deadline 把同一个数下传到每个出站点。
+    这条断了不会报错，只会悄悄退回「谁都没有 deadline」，于是又开始白等——所以钉一下。
+    """
+    from app.agent.limits import MAIN_AGENT_TIMEOUT_SEC
+    from app.api.context import remaining_seconds, reset_deadline
+
+    reset_deadline()
+    seen: list[float | None] = []
+    agent = _fake_agent("已为你整理好清单。")
+    inner = agent.reply_stream
+
+    async def _probe(inputs: Any, yield_final_msg: bool = False) -> Any:
+        seen.append(remaining_seconds())
+        async for msg in inner(inputs, yield_final_msg=yield_final_msg):
+            yield msg
+
+    agent.reply_stream = _probe
+
+    async def _build(**_kw: Any) -> Any:
+        return agent, SimpleNamespace()
+
+    monkeypatch.setattr(orch, "build_main_agent", _build)
+    await orch.run_agent("买个旅行包", thread_id="as-dl")
+
+    assert seen and seen[0] is not None
+    assert 0 < seen[0] <= MAIN_AGENT_TIMEOUT_SEC
+    reset_deadline()

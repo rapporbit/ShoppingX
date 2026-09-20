@@ -51,6 +51,7 @@ from app.api.context import (
     reset_original_query,
     reset_session_pt,
     reset_session_tasks,
+    set_deadline,
     set_original_query,
     set_session_pt,
 )
@@ -383,6 +384,10 @@ async def run_agent(
         # 从这个下标往后找，否则第二轮用 chat_fallback 收尾时会把上一轮的清单当成本轮产物。
         turn_start = len(agent.state.context)
 
+        # 本轮的截止时刻：与下面那个 asyncio.timeout 同一个预算，区别只在**谁看得见它**。
+        # timeout 是从外面一刀砍下来，出站点对它一无所知，只能按自己的超时傻等；deadline 把同一个
+        # 数下传到每个出站点，让「再等也没意义了」当场生效（clamp_timeout，阶段 4-2）。
+        set_deadline(MAIN_AGENT_TIMEOUT_SEC)
         try:
             async with asyncio.timeout(MAIN_AGENT_TIMEOUT_SEC):
                 final_msg = await pump_events(agent.reply_stream(inputs, yield_final_msg=True))

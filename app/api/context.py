@@ -13,10 +13,13 @@ ContextVar 现在只服务多用户隔离与产物归档。）
 """
 
 import os
+import time
 from collections.abc import Sequence
 from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from app.utils.env import env_bool
 
 if TYPE_CHECKING:
     from app.memory.session_state import SessionPrefState
@@ -104,6 +107,65 @@ def get_run_id() -> str:
     ——复用错了是「用户要的第二张单被吞掉」，不复用最多是重投时多一张待决议的卡。
     """
     return _run_id_var.get()
+
+
+# 本轮的截止时刻（``time.monotonic()`` 刻度），None = 没有 deadline 作用域。
+#
+# 各出站超时各自为政会出现这种事：主 loop 还剩 3 秒，某次检索照样按自己的 5 秒等下去——那 5 秒
+# 注定等不到结果被用上，纯属让用户多晾 3 秒再看到一句「超时」。deadline 由 ``run_agent`` 入口写一次
+# （= now + MAIN_AGENT_TIMEOUT_SEC），各出站点取 ``min(自身超时, 剩余)``。
+#
+# 形态照抄 ``_run_id_var``：入口写一次、下游只读，ContextVar 的快照继承正好够用（工具在各自的
+# context 里跑，读得到父的值，回写不冒泡——这里不需要回写）。
+#
+# 刻度用 monotonic 不用 wall clock：这是个纯相对量，而后者会被改系统时间 / NTP 回拨拽着跳。
+_deadline_var: ContextVar[float | None] = ContextVar("shoppingx_deadline", default=None)
+
+# 剩余时间见底后仍要给出站一个正数超时：0 或负数传进 httpx / Qdrant 有的当「无限等」、有的直接
+# 抛参数错误，两种都比「立刻失败」难查。给 50ms 让它按正常路径超时返回。
+_DEADLINE_FLOOR = 0.05
+
+
+def deadline_enabled() -> bool:
+    """这道闸开着没有（``DEADLINE_ENABLED``，默认开）。
+
+    关掉 = 各出站点照自己的超时来。默认开是因为它只会把超时**往小了收**，而收掉的那一段本来也会
+    被主 loop 的 ``asyncio.timeout`` 整体掐掉——区别只在「早几秒知道」还是「白等几秒」。
+    """
+    return env_bool("DEADLINE_ENABLED", True)
+
+
+def set_deadline(seconds: float) -> None:
+    """把本轮的截止时刻设为 ``now + seconds``（``run_agent`` 入口调，一轮一次）。"""
+    _deadline_var.set(time.monotonic() + seconds)
+
+
+def reset_deadline() -> None:
+    """清掉本轮 deadline（离线脚本 / 单测复位用）。
+
+    线上不需要显式清：``run_agent`` 每轮进来重设一次，而 ContextVar 随 task 结束自然回收。
+    """
+    _deadline_var.set(None)
+
+
+def remaining_seconds() -> float | None:
+    """距本轮截止还剩几秒；没有 deadline 作用域（工具单测 / 离线脚本）时返回 ``None``。"""
+    deadline = _deadline_var.get()
+    return None if deadline is None else deadline - time.monotonic()
+
+
+def clamp_timeout(base: float) -> float:
+    """把一个出站超时收到本轮剩余时间以内——**出站超时的唯一入口**，调用方别自己比大小。
+
+    没有 deadline、闸关着、或 ``base`` 本就比剩余小，都原样返回 ``base``：这道闸只收紧，不放宽。
+    一个出站点该等多久是它自己的事（对面正常响应要多久），deadline 只管「再等也没意义了」。
+    """
+    if not deadline_enabled():
+        return base
+    left = remaining_seconds()
+    if left is None or base <= left:
+        return base
+    return max(left, _DEADLINE_FLOOR)
 
 
 def set_session_pt(pt: "SessionPrefState | None") -> None:

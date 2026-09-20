@@ -33,6 +33,7 @@ from typing import Any
 
 import numpy as np
 
+from app.api.context import clamp_timeout
 from app.recall.category_kb import CategoryCard
 from app.recall.towers import TowerClient, get_tower_client
 
@@ -54,6 +55,9 @@ HYBRID_WEIGHTS = (0.7, 0.3)
 RESOLVE_COARSE_K = 15
 # 第二段按品类取卡的上限（一个品类当前 ≈8 张卡，32 给足余量）。
 FETCH_SIZE = 32
+# 一次 OpenSearch 请求最多等多久（秒）。opensearch-py 不传就是 10s，这里显式化好让 deadline 收得动
+# （阶段 4-2）——后端挂着时这 10 秒是干等，而品类知识只是锦上添花，主 loop 不该为它耗掉整个预算。
+OS_REQUEST_TIMEOUT_SEC = float(os.environ.get("OPENSEARCH_TIMEOUT_SEC", "10"))
 
 # query 含这些「语义化 token」时关掉 BM25 子路：纯气质/口语 query 下 BM25 几乎全是
 # 字面命中的杂卡，反把 KNN 准命中的卡挤出 Top-K（refdocs 13-1 §3.3）。
@@ -262,7 +266,12 @@ class KBClient:
             body = self._hybrid_body(query, qvec, coarse_k, disable_bm25)
             params = {"search_pipeline": HYBRID_PIPELINE}
         try:
-            resp = self._client().search(index=INDEX_NAME, body=body, params=params)
+            resp = self._client().search(
+                index=INDEX_NAME,
+                body=body,
+                params=params,
+                request_timeout=clamp_timeout(OS_REQUEST_TIMEOUT_SEC),
+            )
         except Exception as exc:  # noqa: BLE001 —— OpenSearch 不可用不该让工具崩
             # refdocs §6.4：检索后端挂了不抛异常，返回空让上层给低置信度结果。
             logger.warning("OpenSearch 检索失败，降级为空召回：%s", exc)
@@ -278,7 +287,9 @@ class KBClient:
         """term 精确取一个品类的全部卡片（不走 hybrid pipeline，纯结构化查询）。"""
         body = {"size": FETCH_SIZE, "query": {"term": {"category.raw": category}}}
         try:
-            resp = self._client().search(index=INDEX_NAME, body=body)
+            resp = self._client().search(
+                index=INDEX_NAME, body=body, request_timeout=clamp_timeout(OS_REQUEST_TIMEOUT_SEC)
+            )
         except Exception as exc:  # noqa: BLE001 —— 同 _search_remote：后端挂了降级为空
             logger.warning("OpenSearch 取卡失败，降级为空：%s", exc)
             return []

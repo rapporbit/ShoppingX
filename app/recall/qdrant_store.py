@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Sequence
 from functools import lru_cache
@@ -22,6 +23,7 @@ from functools import lru_cache
 import numpy as np
 from qdrant_client import QdrantClient, models
 
+from app.api.context import clamp_timeout
 from app.recall.schemas import ItemRecord, RecallCandidate
 
 COLLECTION = os.environ.get("QDRANT_COLLECTION", "shoppingx_items")
@@ -31,6 +33,21 @@ DEFAULT_QDRANT_PATH = "./data/qdrant"
 # 一条 1024 维 dense point（向量 JSON 序列化 ~18KB + payload）约 22KB，512 条 ≈ 11MB，留足余量。
 # 不分批时 amazon 单平台 5 万点 ≈ 1.1GB → 400 Bad Request（payload too large）。
 UPSERT_BATCH = 512
+
+
+# 一次检索最多等多久（秒）。没配 timeout 时 qdrant-client 的 REST 客户端走 httpx 默认 5s，这里取
+# 同一个数当基线，好让「服务端搜索超时」与「客户端读超时」说的是一回事。
+QUERY_TIMEOUT_SEC = float(os.environ.get("QDRANT_QUERY_TIMEOUT_SEC", "5"))
+
+
+def _query_timeout() -> int:
+    """本次查询给 Qdrant 的超时（秒，整数——协议只认整秒），收到本轮 deadline 以内。
+
+    **只收服务端这一侧**：客户端的 httpx 读超时是建 client 时定死的（``make_client``），改不动。
+    所以主 loop 只剩 1 秒时，这次查询会让服务端 1 秒放弃，而不是让它慢悠悠搜完 5 秒再把结果送给
+    一个已经超时的 run。向上取整 + 至少 1 秒：协议不接受 0（那是「不限」），压到 0 反而放开了闸。
+    """
+    return max(1, math.ceil(clamp_timeout(QUERY_TIMEOUT_SEC)))
 
 
 def make_client(timeout: float | None = None) -> QdrantClient:
@@ -168,6 +185,7 @@ class QdrantRecall:
             query_filter=flt,
             limit=top_k,
             with_payload=True,
+            timeout=_query_timeout(),
         )
         out: list[RecallCandidate] = []
         for p in res.points:
@@ -227,6 +245,7 @@ class QdrantRecall:
             using=DENSE_VEC,
             limit=top_k + 1,
             with_payload=True,
+            timeout=_query_timeout(),
         )
         out: list[RecallCandidate] = []
         for p in res.points:
