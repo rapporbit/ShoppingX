@@ -32,7 +32,8 @@ from typing import Any
 
 from app.api import backplane, event_log
 from app.api.connection import ConnectionManager
-from app.api.context import get_session_dir, get_thread_id
+from app.api.context import get_session_dir, get_thread_id, take_first_event_latency
+from app.observability import metrics
 
 logger = logging.getLogger("shoppingx.monitor")
 
@@ -222,7 +223,15 @@ async def report_session_created(session_dir: Path | None = None) -> None:
 
 
 async def report_assistant_call(step: str = "thinking", preview: str | None = None) -> None:
-    """主 AgentLoop 进入 Think 阶段时上报（前端显示「Agent 思考中…」）。"""
+    """主 AgentLoop 进入 Think 阶段时上报（前端显示「Agent 思考中…」）。
+
+    这也是 SLO 第二条的终点：**用户第一次看见「有反应了」的那一刻**。记在推送之前而不是之后
+    ——``_emit`` 里还有 Redis 落盘与背板广播，那是投递链路的耗时，算进「Agent 多久有反应」会把
+    两件事混成一个数。
+    """
+    latency = take_first_event_latency()
+    if latency is not None:
+        metrics.record_first_event(latency)
     await _emit(EVENT_ASSISTANT_CALL, "Agent 思考中", {"step": step, "preview": _clip(preview)})
 
 

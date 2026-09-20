@@ -64,6 +64,39 @@ GATE_EVENTS = Counter("shoppingx_gate_events_total", "硬闸拒绝/逃生事件"
 # 两条都不该常亮：degraded 抬头查 Redis，overflow 抬头说明限额配小了或副本开多了。
 LLM_BUCKET_EVENTS = Counter("shoppingx_llm_bucket_events_total", "LLM 令牌桶事件", ["event"])
 
+# --- SLO 两条（阶段 6）-------------------------------------------------------
+#
+# **为什么成功率不是一条 Gauge。** 计划写的是「补两条 Gauge」，落地成 Counter + Histogram +
+# 目标线 Gauge：Gauge 存的是「当前值」，多副本 scrape 回来只能取最后一个或求和，成功率求和没有
+# 意义；分位数更是**根本不能在副本间聚合**（两个副本各自的 P95 平均一下不等于整体 P95）。
+# Prometheus 的惯例是「原始计数交给服务端，聚合交给查询」，所以：
+#   成功率 = sum(rate(run_outcome_total{outcome="success"}[5m]))
+#          / sum(rate(run_outcome_total{outcome=~"success|failed"}[5m]))
+#   P95    = histogram_quantile(0.95, sum by (le) (rate(first_event_latency_seconds_bucket[5m])))
+# 两条 SLO 的**目标线**才是 Gauge（见 SLO_TARGET），让看板和告警规则不必各自硬编码 0.99 / 3。
+#
+# outcome 四档，**分母只算 success + failed**：
+#   success             正常跑完
+#   failed              跑挂了（含超时）—— 这才是 SLO 要压的
+#   cancelled           用户自己掐的 / worker 排空掐的，不是服务质量问题
+#   dependency_rejected 依赖不可用（Qdrant / OpenSearch 熔断或宕），Agent 如实告知用户，
+#                       是**设计内的降级**不是故障；混进分母会让一次 Qdrant 维护把 SLO 打穿
+RUN_OUTCOME = Counter("shoppingx_run_outcome_total", "一次 run 的收尾结果", ["outcome"])
+# 首事件延迟 = 任务入队 → 前端收到第一条 assistant_call。用入队时刻而非「POST 返回时刻」作起点：
+# 二者只差 API 进程内的几毫秒，且入队更早 —— 算出来的延迟只会偏大，不会把不达标的测成达标。
+FIRST_EVENT_LATENCY = Histogram(
+    "shoppingx_first_event_latency_seconds",
+    "任务入队到第一条 assistant_call 的延迟（秒）",
+    buckets=(0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 15.0, 30.0),
+)
+# SLO 目标线：查询侧拿它和实测曲线相减就是 error budget，改目标只改这一处。
+SLO_TARGET = Gauge("shoppingx_slo_target", "SLO 目标值", ["slo"])
+SLO_TARGET.labels(slo="run_success_rate").set(0.99)
+SLO_TARGET.labels(slo="first_event_p95_seconds").set(3.0)
+
+# 进 SLO 成功率分母的两档（其余是「不算故障」的收尾），供调用方与测试共用同一份口径。
+SLO_DENOMINATOR: frozenset[str] = frozenset({"success", "failed"})
+
 _STATE_CODE = {OPEN: 1, HALF_OPEN: 2}  # 其余（CLOSED）记 0
 
 
@@ -98,6 +131,21 @@ def record_gate_event(gate: str, outcome: str) -> None:
 def record_llm_bucket(event: str) -> None:
     """记一次 LLM 令牌桶事件。``event`` 取 ``degraded`` / ``overflow``。"""
     LLM_BUCKET_EVENTS.labels(event=event).inc()
+
+
+def record_run_outcome(outcome: str) -> None:
+    """记一次 run 的收尾结果（SLO 第一条）。
+
+    ``outcome`` 取 ``success`` / ``failed`` / ``cancelled`` / ``dependency_rejected``；只有前两档
+    进成功率分母，见 :data:`SLO_DENOMINATOR`。
+    """
+    RUN_OUTCOME.labels(outcome=outcome).inc()
+
+
+def record_first_event(seconds: float) -> None:
+    """记一次首事件延迟（SLO 第二条）。负数丢弃——时钟回拨算不出有意义的延迟。"""
+    if seconds >= 0:
+        FIRST_EVENT_LATENCY.observe(seconds)
 
 
 def record_tier_change(tier: str) -> None:

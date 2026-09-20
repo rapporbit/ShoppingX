@@ -14,6 +14,8 @@ reranker / web_search / category_insight 不用——它们各自有本地兜底
 
 from __future__ import annotations
 
+from contextvars import ContextVar
+
 
 class DependencyDown(RuntimeError):
     """某个外部依赖当前不可用（连不上 / 超时 / 熔断中），重试无意义。
@@ -34,3 +36,36 @@ class DependencyDown(RuntimeError):
 #: 各写各的字面量——分级一旦漏读就是静默失效（提示不贴，模型照旧重试三次）。
 ERROR_CODE_KEY = "code"
 DEPENDENCY_DOWN_CODE = "dependency_down"
+
+#: 本轮 run 里是否撞上过依赖不可用。**为什么需要这个旗子**：``DependencyDown`` 在工具壳里就被
+#: 吞成 ``state=ERROR`` 了（有意为之——抛出去会掐死整条 loop），所以收尾处看不到它。没有旗子的
+#: 话，一次 Qdrant 维护会让这批 run 全记成 ``success``（Agent 确实如实收了尾）或 ``failed``，
+#: 两种都不对：它是**设计内的降级**，不该进 SLO 成功率的分母。
+#:
+#: 存的是**可变盒子**而非裸 bool：工具跑在框架 ``create_task`` 出来的子 context 里，在那里
+#: ``ContextVar.set`` 回不到父 context，收尾处读到的会永远是 False（静默失效，且测试里单调
+#: 工具一样测不出来）。盒子的引用是继承下去的，往里写才跨得回来。
+_dependency_down: ContextVar[dict[str, bool] | None] = ContextVar(
+    "shoppingx_dependency_down", default=None
+)
+
+
+def mark_dependency_down() -> None:
+    """标记本轮撞上过依赖不可用（由工具壳在捕获 :class:`DependencyDown` 时调用）。
+
+    没开盒子（离线脚本 / 单测直调工具）时是空操作。
+    """
+    box = _dependency_down.get()
+    if box is not None:
+        box["seen"] = True
+
+
+def dependency_down_seen() -> bool:
+    """本轮是否撞上过依赖不可用。没开盒子时按「没撞上」算。"""
+    box = _dependency_down.get()
+    return bool(box and box.get("seen"))
+
+
+def reset_dependency_down() -> None:
+    """开一个新盒子（``run_agent`` 每轮开局调）。**必须在派生任何工具协程之前**。"""
+    _dependency_down.set({"seen": False})
