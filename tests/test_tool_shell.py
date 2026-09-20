@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from app.tools._args import StrListArg
 from app.tools._shell import InjectedToolArg, to_function_tool, tool
+from app.utils.dependency import DependencyDown
 
 
 class _Out(BaseModel):
@@ -43,6 +44,16 @@ async def _boomer(x: str) -> _Out:
       - x：随便。
     """
     raise RuntimeError(f"炸了：{x}")
+
+
+@tool
+async def _dependency_boomer(x: str) -> _Out:
+    """依赖挂了的探针工具。
+
+    参数：
+      - x：随便。
+    """
+    raise DependencyDown("qdrant", f"dense 检索失败：{x}")
 
 
 @tool(response_format="content_and_artifact")
@@ -104,6 +115,28 @@ async def test_implementation_error_becomes_error_chunk_not_raise() -> None:
     resp = await _run(to_function_tool(_boomer), x="ok")
     assert resp.state == ToolResultState.ERROR
     assert _text(resp).startswith("[error] RuntimeError: 炸了：ok")
+
+
+@pytest.mark.asyncio
+async def test_dependency_down_is_tagged_in_metadata() -> None:
+    """依赖不可用要在 metadata 里分出级来（阶段 4-3）。
+
+    文本对模型是同一种 ``[error] ...``，分级信息只在 metadata 里；adapter 靠它决定贴「别重试、
+    直接如实收尾」还是默认的「换个思路再来」。漏标就是静默退回老行为，所以这条断言盯的是
+    ``code`` 键本身。
+    """
+    resp = await _run(to_function_tool(_dependency_boomer), x="ok")
+    assert resp.state == ToolResultState.ERROR
+    assert resp.metadata["code"] == "dependency_down"
+    assert resp.metadata["dependency"] == "qdrant"
+    assert "qdrant 暂时不可用" in _text(resp)
+
+
+@pytest.mark.asyncio
+async def test_ordinary_error_has_no_dependency_code() -> None:
+    """普通错误不带分级键——带了就会让模型对一个其实该重试的错误直接放弃。"""
+    resp = await _run(to_function_tool(_boomer), x="ok")
+    assert "code" not in resp.metadata
 
 
 @pytest.mark.asyncio

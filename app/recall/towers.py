@@ -22,6 +22,7 @@ import httpx
 import numpy as np
 
 from app.api.context import clamp_timeout
+from app.utils.dependency import DependencyDown
 
 # 远程编码瞬时错误（429/5xx/连接抖动）的重试次数。
 _REMOTE_RETRIES = 3
@@ -145,7 +146,9 @@ class TowerClient:
                 last_exc = exc
                 if attempt < _REMOTE_RETRIES - 1:
                     await asyncio.sleep(2**attempt)  # 1s → 2s → 4s
-        raise last_exc  # type: ignore[misc]
+        # 退避三次都没成 → 归到「重试无意义」那一档（阶段 4-3）。embedding 是主检索的前置：它挂了
+        # item_search 必然空手而归，让模型换个检索词再来一次只是把 7 秒退避再走一遍。
+        raise DependencyDown("embedding", f"编码 {len(texts)} 条文本失败") from last_exc
 
     def _encode_local(self, texts: list[str]) -> np.ndarray:
         """确定性本地回退编码：字符 n-gram 哈希进固定维度的词袋向量。

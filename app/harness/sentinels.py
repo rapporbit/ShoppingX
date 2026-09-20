@@ -117,6 +117,19 @@ def tool_breaker_open(tool_name: str) -> str:
     )
 
 
+# 主检索依赖（Qdrant / embedding）不可用：重试无意义那一档，见 app/utils/dependency.py。
+# 与 tool_breaker_open 的分工：那条说的是「这个工具先别用了，换个工具继续干活」，这条说的是
+# 「货源本身断了，本轮没法交付商品，如实收尾」——后者必须点名 chat_fallback，否则模型会退而
+# 求其次去 web_search 拼几个商品名给用户，那是拿搜索结果冒充库存，踩 P0。
+def dependency_down_notice(dependency: str, tool_name: str) -> str:
+    return (
+        f"[依赖暂时不可用] 商品检索依赖（{dependency}）当前连不上，{tool_name} 本次没有拿到任何"
+        "数据。**这不是检索词的问题，换个词重试同样拿不到**，请不要再调用检索类工具。"
+        "请直接调用 chat_fallback，如实告诉用户「商品检索服务暂时不可用，请稍后重试」——"
+        "不要用 web_search 的结果或你自己的记忆拼凑商品清单，那不是我们库里的货。"
+    )
+
+
 # 全部内部控制文案的方括号前缀——output_guard（hooks/session_hooks.py）据此清洗模型鹦鹉学舌
 # 抄进最终回复的控制行。**新增哨兵时前缀必须同步登记在这里**，否则清洗漏网（曾漏
 # [阶段推进] 等一整批，而它恰是每条正常链路必然出现的通告）。哨兵与清洗表共用这一份，杜绝漂移。
@@ -145,6 +158,7 @@ INTERNAL_MARKERS: tuple[str, ...] = (
     "[research 未执行]",
     "[工具不存在]",
     "[工具暂时不可用]",
+    "[依赖暂时不可用]",
     "[…工具结果过长已截断",
 )
 
