@@ -216,6 +216,10 @@ async def lifespan(_app: FastAPI):
         "Qwen 本地" if ok else "无 tokenizer",
     )
 
+    # 参数覆盖对账（阶段 1 条 8）：库是唯一真相，本进程每 30s 跟进一次。worker 那边起的是同一个
+    # 循环——后台改参数只打在 API 进程上，不对账的话 AgentLoop 所在的 worker 永远用着旧值。
+    config_sync_task = asyncio.create_task(config_store.sync_loop())
+
     alert_task: asyncio.Task[None] | None = None
     if alerts.alerts_enabled():
         alert_task = asyncio.create_task(alerts.alert_loop())
@@ -231,6 +235,9 @@ async def lifespan(_app: FastAPI):
         if event_backplane is not None:
             await event_backplane.stop()
         await control.close_control_bus()  # 只关已经建出来的那个（发布端是懒加载的）
+        config_sync_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await config_sync_task
         if alert_task is not None:
             alert_task.cancel()
             with suppress(asyncio.CancelledError):
