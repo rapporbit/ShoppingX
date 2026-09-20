@@ -25,6 +25,15 @@ Action = Literal["create", "cancel"]
 Status = Literal["pending", "approved", "rejected"]
 
 
+class DuplicateRequestError(Exception):
+    """确认记录撞上唯一键（``request_key`` / ``operation_id``）。
+
+    仓储层把数据库的 ``IntegrityError`` 翻成这个领域异常，用例层才不用 import SQLAlchemy
+    （见 :mod:`app.trade.ports` 的 docstring）。它不是错误路径而是**并发路径**：先到的那行
+    就是权威，用例接住它重读一次即可。
+    """
+
+
 class ConfirmationError(ValueError):
     """确认记录层的业务错误（找不到 / 已决议 / 过期 / hash 不符）。``code`` 给 HTTP 映射状态码。"""
 
@@ -43,6 +52,22 @@ def new_confirmation_id() -> str:
 
 def new_operation_id() -> str:
     return f"operation-{uuid.uuid4().hex}"
+
+
+def request_key(run_id: str, action: str, snapshot: str) -> str | None:
+    """写工具的请求级幂等键：``{run_id}:{action}:{快照 hash 前 32 位}``。
+
+    锚点为什么不是计划里写的 ``tool_call_id``：AgentScope 的 ``ToolMiddlewareBase`` 不把
+    tool_call 的 id 传给中间件（``harness/adapter.py`` 里那行 ``ctx["tool_call_id"] = ""``
+    就是它拿不到的证据），工具层根本没有这个值。同轮同载荷的调用本来就该收敛成同一张卡，
+    ``snapshot_hash`` 是能拿到的、等价的锚。
+
+    ``run_id`` 为空（HTTP 表单入口 / 离线脚本 / 单测）返回 ``None``——不参与唯一约束，
+    行为与加这道之前一致。
+    """
+    if not run_id:
+        return None
+    return f"{run_id}:{action}:{snapshot[:32]}"
 
 
 def snapshot_hash(action: str, payload: dict[str, Any]) -> str:
@@ -78,6 +103,8 @@ class Confirmation:
     result: dict[str, Any] | None = None
     created_at: datetime = field(default_factory=_now)
     resolved_at: datetime | None = None
+    #: 请求级幂等键（见 :func:`request_key`）。None = 不参与唯一约束的那条老路。
+    request_key: str | None = None
 
     def expired(self, now: datetime | None = None) -> bool:
         return self.status == "pending" and (now or _now()) >= self.expires_at

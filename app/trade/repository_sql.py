@@ -11,15 +11,30 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from app.db.models import ConfirmationRow, OrderLineRow, OrderRow
 from app.db.session import session_factory
 from app.trade.address import Address
-from app.trade.confirmation import Confirmation
+from app.trade.confirmation import Confirmation, DuplicateRequestError
 from app.trade.money import Money
 from app.trade.order import Order, OrderLine, OrderStatus
 
 ORDER_ID_PREFIX = "GBX-"
+
+
+async def _commit(db: Any) -> None:
+    """提交，把唯一键冲突翻成领域异常 :class:`DuplicateRequestError`。
+
+    翻译放在这一层，用例层才能只依赖 :mod:`app.trade.ports` 那份协议、不 import SQLAlchemy。
+    冲突不是错误而是并发路径：订单幂等键、确认卡 ``request_key`` / ``operation_id`` 三道唯一
+    约束，撞上就说明先到的那行已经是权威，调用方重读即可。
+    """
+    try:
+        await db.commit()
+    except IntegrityError as e:
+        await db.rollback()
+        raise DuplicateRequestError(str(e)) from e
 
 
 def _to_domain(row: OrderRow) -> Order:
@@ -62,6 +77,11 @@ class SqlOrderRepository:
             if row is None:
                 row = OrderRow(order_id=order.order_id, created_at=order.created_at)
                 db.add(row)
+            elif row.idempotency_key != order.idempotency_key:
+                # 抢到了别人已经用掉的订单号（``next_order_id`` 按行数编号，两路并发算得出同一个）。
+                # 没有这道守卫，upsert 会把先到的那张单**原地覆盖**成这一张——库里还是一张单，
+                # 但先下单的人那张凭空变成了别人的。撞号不是错误路径，调用方重新分号再来即可。
+                raise DuplicateRequestError(f"订单号 {order.order_id} 已被占用")
             row.user_id = order.user_id
             row.thread_id = order.thread_id
             row.status = order.status.value
@@ -84,7 +104,7 @@ class SqlOrderRepository:
                 )
                 for line in order.lines
             ]
-            await db.commit()
+            await _commit(db)
 
     async def find_by_id(self, order_id: str) -> Order | None:
         async with session_factory()() as db:
@@ -140,6 +160,7 @@ def _confirmation_to_domain(row: ConfirmationRow) -> Confirmation:
         expires_at=_aware(row.expires_at),
         created_at=_aware(row.created_at),
         resolved_at=_aware(row.resolved_at) if row.resolved_at else None,
+        request_key=row.request_key,
     )
 
 
@@ -170,12 +191,21 @@ class SqlConfirmationRepository:
             row.result = confirmation.result
             row.expires_at = confirmation.expires_at
             row.resolved_at = confirmation.resolved_at
-            await db.commit()
+            row.request_key = confirmation.request_key
+            await _commit(db)
 
     async def find_by_id(self, confirmation_id: str) -> Confirmation | None:
         async with session_factory()() as db:
             row = await db.get(ConfirmationRow, confirmation_id)
             return _confirmation_to_domain(row) if row else None
+
+    async def find_by_request_key(self, key: str) -> Confirmation | None:
+        async with session_factory()() as db:
+            rows = await db.execute(
+                select(ConfirmationRow).where(ConfirmationRow.request_key == key)
+            )
+            found = rows.scalars().first()
+            return _confirmation_to_domain(found) if found else None
 
     async def list_by_thread(
         self, user_id: str, thread_id: str, limit: int = 20

@@ -14,16 +14,22 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from app.api.context import _session_dir_var, _thread_id_var, _user_id_var
+from app.api.context import _run_id_var, _session_dir_var, _thread_id_var, _user_id_var
 from app.observability.logging import bind_log_context, unbind_log_context
 
 
 @contextmanager
-def thread_scope(thread_id: str, session_dir: Path, user_id: str | None = None) -> Iterator[None]:
-    """作用域内绑定 thread_id / session_dir（可选 user_id），离开自动还原到进入前的值。
+def thread_scope(
+    thread_id: str,
+    session_dir: Path,
+    user_id: str | None = None,
+    run_id: str | None = None,
+) -> Iterator[None]:
+    """作用域内绑定 thread_id / session_dir（可选 user_id / run_id），离开自动还原到进入前的值。
 
     ``user_id`` 缺省（None）时**不动** user_id 上下文——fork 子 Agent 只覆盖 thread_id /
     session_dir，user_id 沿用父任务的绑定（子任务仍属同一用户，黑名单/偏好继续生效）。
+    ``run_id`` 同理缺省不动：只有 ``run_agent`` 这一个入口知道本轮的 run_id。
 
     同一处还把 thread_id / user_id 绑进 structlog 的日志上下文（A 块）——「请求隔离」与「日志
     上下文传播」共用这一个入口，本作用域内打的结构化日志自动带上这些字段。
@@ -31,6 +37,7 @@ def thread_scope(thread_id: str, session_dir: Path, user_id: str | None = None) 
     token_t = _thread_id_var.set(thread_id)
     token_s = _session_dir_var.set(session_dir)
     token_u = _user_id_var.set(user_id) if user_id is not None else None
+    token_r = _run_id_var.set(run_id) if run_id is not None else None
     log_tokens = bind_log_context(thread_id=thread_id, user_id=user_id)
     try:
         yield
@@ -39,4 +46,6 @@ def thread_scope(thread_id: str, session_dir: Path, user_id: str | None = None) 
         _session_dir_var.reset(token_s)
         if token_u is not None:
             _user_id_var.reset(token_u)
+        if token_r is not None:
+            _run_id_var.reset(token_r)
         unbind_log_context(log_tokens)

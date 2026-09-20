@@ -13,7 +13,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from app.api import monitor
-from app.api.context import get_user_id
+from app.api.context import get_run_id, get_user_id
 from app.tools._shell import tool
 from app.trade.confirmation import ConfirmationError
 from app.trade.confirmations import prepare_cancel_confirmation
@@ -49,6 +49,8 @@ async def cancel_order(order_id: str, reason: str) -> CancelOrderOutput:
             thread_id=thread_id,
             order_id=order_id,
             reason=reason,
+            # 同一轮重跑复用同一张卡，理由同 create_order。
+            run_id=get_run_id(),
         )
     except OrderNotFoundError as e:
         await monitor.report_tool_end("cancel_order", error=str(e))

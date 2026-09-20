@@ -471,12 +471,20 @@ class ConfirmationRow(Base):
 
     ``payload`` / ``result`` 整块 JSON：确认卡是快照，不按其中字段查询，拆列只会得到一堆空列。
     ``operation_id`` 唯一——approved 时拿它当订单的 ``idempotency_key``，同一张卡点两次只落一张单。
+
+    ``request_key`` 唯一——**出卡这一侧**的幂等键（``run_id:action:快照 hash``，见
+    :func:`app.trade.confirmation.request_key`）：整轮重跑时 run_id 不变，模型再调一次
+    ``create_order`` 命中同一行、复用那张卡，而不是出第二张。可空：HTTP 表单入口与离线脚本没有
+    run 作用域，NULL 不参与唯一约束（SQLite 与 MySQL 都允许多行 NULL）。
     """
 
     __tablename__ = "trade_confirmations"
 
     confirmation_id: Mapped[str] = mapped_column(String(32), primary_key=True)
     operation_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    request_key: Mapped[str | None] = mapped_column(
+        String(128), unique=True, index=True, nullable=True
+    )
     user_id: Mapped[str] = mapped_column(String(64), index=True)
     thread_id: Mapped[str] = mapped_column(String(64), index=True)
     action: Mapped[str] = mapped_column(String(16))  # create / cancel

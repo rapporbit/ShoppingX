@@ -30,6 +30,12 @@ _session_dir_var: ContextVar[Path | None] = ContextVar("shoppingx_session_dir", 
 # 当前请求的登录用户（用于工具层读长期偏好 / 黑名单）。匿名任务为 None。
 _user_id_var: ContextVar[str | None] = ContextVar("shoppingx_user_id", default=None)
 
+# 当前这一轮的 run_id（队列模式下 = task_id）。除了 credit 预扣结算的幂等键，它还是**写工具的
+# 幂等锚**：消息被 PEL 重投、整轮重跑时 run_id 不变，同一轮重复调 create_order 只落一张确认卡
+# （见 app.trade.confirmations 的 request_key）。空串 = 没有 run 作用域（HTTP 表单入口 / 离线
+# 脚本 / 单测），此时写工具退回「每次新建一张卡」的老行为。
+_run_id_var: ContextVar[str] = ContextVar("shoppingx_run_id", default="")
+
 # 当前会话的短期偏好状态 P_t（本会话逐轮累积的约束）——run_agent 入口从 session.json 读回后
 # 写入、**planner 在识别出本轮约束后当轮改写**，供 item_picker 等工具机制性读取并强制执行
 # （把「不要塑料」「预算 ≤X」从 prompt 建议升为硬保证，不靠模型每轮转述）。
@@ -89,6 +95,15 @@ def get_thread_id() -> str | None:
 def get_user_id() -> str | None:
     """读取当前任务的登录用户 id；匿名 / 无上下文时返回 None。"""
     return _user_id_var.get()
+
+
+def get_run_id() -> str:
+    """读取本轮 run_id；无 run 作用域（HTTP 表单入口 / 离线脚本 / 单测）时返回空串。
+
+    空串是安全侧：写工具据它决定**要不要**按幂等键复用确认卡，判不出来就按老行为每次新建一张
+    ——复用错了是「用户要的第二张单被吞掉」，不复用最多是重投时多一张待决议的卡。
+    """
+    return _run_id_var.get()
 
 
 def set_session_pt(pt: "SessionPrefState | None") -> None:

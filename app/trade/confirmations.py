@@ -20,8 +20,10 @@ from app.trade.confirmation import (
     CONFIRMATION_TTL,
     Confirmation,
     ConfirmationError,
+    DuplicateRequestError,
     new_confirmation_id,
     new_operation_id,
+    request_key,
     snapshot_hash,
 )
 from app.trade.money import Money
@@ -39,6 +41,11 @@ ADDRESS_FIELDS = (
     "postal_code",
     "phone",
 )
+
+
+#: 落订单撞唯一键时的重试次数。撞键有两种：幂等键（重读即得，一次就够）与订单号（要重新分号）。
+#: 3 次是「并发写同时撞号」的现实上限，再多说明的是别的毛病，不该靠重试掩过去。
+_PLACE_RETRIES = 3
 
 
 def _now() -> datetime:
@@ -119,8 +126,14 @@ async def prepare_order_confirmation(
     lines: list[LineRequest],
     shipping_address: dict[str, Any],
     hydrate: Callable[[list[str]], list[Any]],
+    run_id: str = "",
 ) -> Confirmation:
-    """下单确认卡：候选 hydrate → 组行 → 落一条 pending 记录。不落订单、不扣任何东西。"""
+    """下单确认卡：候选 hydrate → 组行 → 落一条 pending 记录。不落订单、不扣任何东西。
+
+    ``run_id`` 由调用方传（工具侧取 :func:`app.api.context.get_run_id`，HTTP 表单入口没有），
+    作用是同轮重跑复用同一张卡，见 :func:`_save_pending`。领域层不自己去读 ContextVar——
+    上下文是调用方的事，这里收参数就够。
+    """
     if not user_id:
         raise ConfirmationError("匿名会话不能下单，请先登录", code="unauthorized")
     if not lines:
@@ -146,12 +159,42 @@ async def prepare_order_confirmation(
         "amount_scope": "merchandise_only",
         "order_kind": "purchase_intent",
     }
-    return await _save_pending(repo, user_id, thread_id, "create", payload)
+    return await _save_pending(repo, user_id, thread_id, "create", payload, run_id)
+
+
+def _order_insensitive(payload: dict[str, Any]) -> dict[str, Any]:
+    """载荷的行顺序归一版，**只用于算幂等键**（落库的仍是原 payload）。"""
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return payload
+    return {**payload, "items": sorted(items, key=lambda ln: str(ln.get("item_id", "")))}
 
 
 async def _save_pending(
-    repo: ConfirmationRepository, user_id: str, thread_id: str, action: str, payload: dict[str, Any]
+    repo: ConfirmationRepository,
+    user_id: str,
+    thread_id: str,
+    action: str,
+    payload: dict[str, Any],
+    run_id: str = "",
 ) -> Confirmation:
+    """落一条 pending 记录，**同一轮同一份载荷只落一条**。
+
+    幂等靠 ``request_key``（``run_id:action:快照 hash``）：先查一次挡住顺序重跑，唯一约束挡住
+    并发——两路同时查空、同时插，后插的那路撞键，接住 :class:`DuplicateRequestError` 重读就拿到
+    先到的那张卡。只查不建约束是「读-判-写」，两个 worker 同时重投时照样出两张卡。
+
+    命中的旧卡可能已被用户拒绝或已过期，这里照样原样返回：同轮同载荷再来一次，语义就是「还是
+    刚才那件事」，该让模型看到它已经被拒（卡的 ``status`` 在返回值里），而不是绕过去再出一张。
+    """
+    # 幂等键用**行顺序无关**的指纹，不复用 snapshot_hash：后者要和 payload 严格一一对应（前端
+    # 拿它比对「点的是不是看到的那张」），而它的行顺序来自模型给的 item_ids 顺序——重跑时模型把
+    # 同样两件商品换个顺序报上来，严格 hash 就变了、幂等键跟着失效，照出第二张卡。
+    key = request_key(run_id, action, snapshot_hash(action, _order_insensitive(payload)))
+    if key:
+        hit = await repo.find_by_request_key(key)
+        if hit is not None:
+            return hit
     now = _now()
     conf = Confirmation(
         confirmation_id=new_confirmation_id(),
@@ -163,8 +206,15 @@ async def _save_pending(
         snapshot_hash=snapshot_hash(action, payload),
         expires_at=now + CONFIRMATION_TTL,
         created_at=now,
+        request_key=key,
     )
-    await repo.save(conf)
+    try:
+        await repo.save(conf)
+    except DuplicateRequestError:
+        hit = await repo.find_by_request_key(key) if key else None
+        if hit is None:
+            raise
+        return hit
     return conf
 
 
@@ -176,8 +226,12 @@ async def prepare_cancel_confirmation(
     thread_id: str,
     order_id: str,
     reason: str,
+    run_id: str = "",
 ) -> Confirmation:
-    """取消确认卡：先核归属与状态（只有 CONFIRMED 能取消），再落一条 pending 记录。"""
+    """取消确认卡：先核归属与状态（只有 CONFIRMED 能取消），再落一条 pending 记录。
+
+    ``run_id`` 同 :func:`prepare_order_confirmation`：同轮重跑复用同一张卡。
+    """
     if not user_id:
         raise ConfirmationError("匿名会话没有订单，无法取消", code="unauthorized")
     reason = (reason or "").strip()
@@ -207,7 +261,7 @@ async def prepare_cancel_confirmation(
         "amount_scope": "merchandise_only",
         "order_kind": "cancel_intent",
     }
-    return await _save_pending(repo, user_id, thread_id, "cancel", payload)
+    return await _save_pending(repo, user_id, thread_id, "cancel", payload, run_id)
 
 
 def _shipping_from_address(addr: Address) -> dict[str, str]:
@@ -293,32 +347,44 @@ async def resolve_confirmation(
 
 async def _place_from_snapshot(orders: OrderRepository, conf: Confirmation) -> Order:
     """按确认卡快照落订单：**不再回候选池 hydrate**——刷新页面后候选池可能已空，而卡上的行
-    就是用户看到并同意的那份。幂等键 = operation_id。"""
-    existing = await orders.find_by_idempotency_key(conf.operation_id)
-    if existing is not None:
-        return existing
+    就是用户看到并同意的那份。幂等键 = operation_id。
+
+    「先查 ``find_by_idempotency_key`` 再插」只挡得住**先后**两次点击；同一张卡被**同时**点两下
+    （双击、两个标签页、重试的前端），两路都查空、都往下插，靠的是 ``orders.idempotency_key``
+    的唯一约束。撞上了就重读先到的那张单返回——两路拿到同一个 order_id，等价于点了一次。
+    撞的是**订单号**（``next_order_id`` 按行数编号，并发会算出同一个）时重读查不到，退回去重新
+    分号再试。
+    """
     payload = conf.payload
-    order = Order(
-        order_id=await orders.next_order_id(),
-        user_id=conf.user_id,
-        thread_id=conf.thread_id,
-        lines=[
-            OrderLine(
-                platform=str(ln["platform"]),
-                item_id=str(ln["item_id"]),
-                title=str(ln["title"]),
-                unit_price=Money(int(ln["unit_price_minor"]), str(ln["currency"])),
-                quantity=int(ln["quantity"]),
-                landed_usd=ln.get("landed_usd"),
-            )
-            for ln in payload["items"]
-        ],
-        address=address_from_shipping(payload["shipping_address"]),
-        idempotency_key=conf.operation_id,
-    )
-    order.place()
-    await orders.save(order)
-    return order
+    for _ in range(_PLACE_RETRIES):
+        existing = await orders.find_by_idempotency_key(conf.operation_id)
+        if existing is not None:
+            return existing
+        order = Order(
+            order_id=await orders.next_order_id(),
+            user_id=conf.user_id,
+            thread_id=conf.thread_id,
+            lines=[
+                OrderLine(
+                    platform=str(ln["platform"]),
+                    item_id=str(ln["item_id"]),
+                    title=str(ln["title"]),
+                    unit_price=Money(int(ln["unit_price_minor"]), str(ln["currency"])),
+                    quantity=int(ln["quantity"]),
+                    landed_usd=ln.get("landed_usd"),
+                )
+                for ln in payload["items"]
+            ],
+            address=address_from_shipping(payload["shipping_address"]),
+            idempotency_key=conf.operation_id,
+        )
+        order.place()
+        try:
+            await orders.save(order)
+        except DuplicateRequestError:
+            continue
+        return order
+    raise ConfirmationError("下单撞上并发写，请重试", code="conflict")
 
 
 async def list_confirmations(
