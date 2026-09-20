@@ -58,6 +58,37 @@ def get_request_id() -> str:
     return _request_id_var.get()
 
 
+# 首事件延迟的计时盒（SLO 第二条，阶段 6）：``{"started_at": <入队时刻的 wall clock>}``，
+# 第一条 ``assistant_call`` 上报时把它取走并记进 Histogram，之后的事件读到空盒直接跳过。
+#
+# **为什么是可变 dict 而不是两个裸 ContextVar**：``report_assistant_call`` 由主 loop 的钩子触发，
+# 可能跑在 ``create_task`` 派生出的子 context 里，在那里 ``set`` 的值回不到父 context——用「父置
+# 一个盒子、子往里掏」的形态，写才跨得回来（同 ``_learned_prefs_var``）。
+#
+# 刻度是 wall clock 不是 monotonic：起点来自**另一个进程**（API 入队），monotonic 跨进程没有可比性。
+# 同机部署下时钟一致；真跨机时 NTP 偏差会算进延迟里，这是已知误差，不值得为它上一套时钟同步。
+_first_event_var: ContextVar[dict[str, float] | None] = ContextVar(
+    "shoppingx_first_event", default=None
+)
+
+
+def begin_first_event_timer(started_at: float | None = None) -> None:
+    """开一个首事件计时盒（``run_agent`` 入口调）。``started_at`` 缺省取当下。"""
+    _first_event_var.set({"started_at": started_at if started_at is not None else time.time()})
+
+
+def take_first_event_latency() -> float | None:
+    """取走首事件延迟（秒）。**只有第一次调返回数**，之后返回 ``None``——「首」事件只有一个。
+
+    没开计时盒（离线脚本 / 单测直调 monitor）时也返回 ``None``。
+    """
+    box = _first_event_var.get()
+    if box is None:
+        return None
+    started = box.pop("started_at", None)
+    return None if started is None else time.time() - started
+
+
 # 当前会话的短期偏好状态 P_t（本会话逐轮累积的约束）——run_agent 入口从 session.json 读回后
 # 写入、**planner 在识别出本轮约束后当轮改写**，供 item_picker 等工具机制性读取并强制执行
 # （把「不要塑料」「预算 ≤X」从 prompt 建议升为硬保证，不靠模型每轮转述）。

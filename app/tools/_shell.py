@@ -30,7 +30,12 @@ from agentscope.tool import FunctionTool, ToolMiddlewareBase
 from agentscope.tool._response import ToolChunk, ToolResultState
 from pydantic import BaseModel, create_model
 
-from app.utils.dependency import DEPENDENCY_DOWN_CODE, ERROR_CODE_KEY, DependencyDown
+from app.utils.dependency import (
+    DEPENDENCY_DOWN_CODE,
+    ERROR_CODE_KEY,
+    DependencyDown,
+    mark_dependency_down,
+)
 
 
 class InjectedToolArg:
@@ -237,6 +242,9 @@ def to_function_tool(
             if isinstance(exc, DependencyDown):
                 meta[ERROR_CODE_KEY] = DEPENDENCY_DOWN_CODE
                 meta["dependency"] = exc.dependency
+                # 同时给本轮插个旗子：收尾把这次 run 记成 dependency_rejected 而不是
+                # success / failed，免得一次 Qdrant 维护把 SLO 成功率打穿（阶段 6）。
+                mark_dependency_down()
             return ToolChunk(
                 content=[TextBlock(type="text", text=f"[error] {type(exc).__name__}: {exc}")],
                 state=ToolResultState.ERROR,

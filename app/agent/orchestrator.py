@@ -21,6 +21,7 @@ import logging
 import os
 import time
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,7 @@ from app.agent.tracing import current_trace_id, turn_span
 from app.agent.usage import summarize_usage
 from app.api import monitor
 from app.api.context import (
+    begin_first_event_timer,
     begin_learned_prefs,
     get_learned_pref_items,
     get_learned_prefs,
@@ -81,6 +83,7 @@ from app.tools._bundle import reset_session_bundle
 from app.tools._candidates import reset_candidates
 from app.tools._diagnostics import reset_diagnostics
 from app.tools.shopping_summary import ShoppingSummaryOutput
+from app.utils.dependency import dependency_down_seen, reset_dependency_down
 from app.utils.path_utils import ensure_session_dir
 from app.utils.thread_ctx import thread_scope
 
@@ -269,6 +272,16 @@ def _called_tool_names(messages: Sequence[Msg]) -> set[str]:
     return names
 
 
+def _parse_enqueued_at(raw: str) -> float | None:
+    """把队列消息里的 ISO 入队时刻转成 wall clock 秒；空 / 解析不了返回 ``None``（按此刻起算）。"""
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw).timestamp()
+    except ValueError:
+        return None
+
+
 async def run_agent(
     query: str,
     thread_id: str,
@@ -278,6 +291,49 @@ async def run_agent(
     skill: str | None = None,
     run_id: str | None = None,
     request_id: str = "",
+    enqueued_at: str = "",
+) -> dict[str, Any]:
+    """:func:`_run_turn` 的薄壳，只多做一件事：把这一轮的**收尾结果**记进 SLO 成功率（阶段 6）。
+
+    **为什么单独一层壳而不是在 _run_turn 里打点**：那函数有多个正常出口（整轮缓存命中会提前
+    return），逐个出口补一行迟早漏；而异常侧要区分「用户取消」与「真挂了」，只有在调用边界才
+    看得全。壳里除了计数不做任何事，出错原样往上抛。
+    """
+    try:
+        result = await _run_turn(
+            query,
+            thread_id,
+            user_id=user_id,
+            platforms=platforms,
+            image_paths=image_paths,
+            skill=skill,
+            run_id=run_id,
+            request_id=request_id,
+            enqueued_at=enqueued_at,
+        )
+    except asyncio.CancelledError:
+        # 用户自己掐的、或 worker 排空掐的：不是服务质量问题，不进分母。
+        metrics.record_run_outcome("cancelled")
+        raise
+    except BaseException:
+        # 依赖挂了这一档要单列：Agent 如实告知用户是**设计内的降级**，混进 failed 会让一次
+        # Qdrant 维护把 SLO 打穿。超时算 failed —— 那确实是我们没在预算内给出答案。
+        metrics.record_run_outcome("dependency_rejected" if dependency_down_seen() else "failed")
+        raise
+    metrics.record_run_outcome("dependency_rejected" if dependency_down_seen() else "success")
+    return result
+
+
+async def _run_turn(
+    query: str,
+    thread_id: str,
+    user_id: str | None = None,
+    platforms: Sequence[str] | None = None,
+    image_paths: Sequence[str] | None = None,
+    skill: str | None = None,
+    run_id: str | None = None,
+    request_id: str = "",
+    enqueued_at: str = "",
 ) -> dict[str, Any]:
     """主 AgentLoop 的入口：一轮任务从这里进、从这里出。
 
@@ -289,6 +345,9 @@ async def run_agent(
 
     ``request_id``：API 那边那次 HTTP 请求的 id，随队列消息带过来（阶段 4-5），只用于日志关联。
     **与返回值里的 ``trace_id`` 无关**——后者是 Langfuse 的，由下面的根 span 自己生成。
+
+    ``enqueued_at``：任务入队时刻（ISO 串，同样随队列消息带过来），首事件延迟 SLO 的计时起点。
+    空串 / 解析不了 = 按「此刻」起算（直连模式、离线脚本），那时排队耗时本来就是 0。
 
     ``skill``：用户在输入框 ``/`` 显式选中的 skill 目录名。服务端在首次模型调用前校验归属并把
     正文拼进本轮用户消息（``authority=reference_only``）；找不到就报错结束本轮，**不静默降级
@@ -323,6 +382,11 @@ async def run_agent(
             ab_bucket=ab_assign.bucket,
         ),
     ):
+        # SLO 计时（阶段 6）：起点是**入队时刻**，所以排队等待也算进首事件延迟——用户不关心
+        # 他等的那 8 秒是队列里排的还是模型在想，只关心「多久有反应」。
+        begin_first_event_timer(_parse_enqueued_at(enqueued_at))
+        reset_dependency_down()  # 旗子是 ContextVar，同一任务跨轮沿用，开局清掉
+
         activity_rec = monitor.begin_activity_capture()
         await monitor.report_session_created(session_dir)
 
