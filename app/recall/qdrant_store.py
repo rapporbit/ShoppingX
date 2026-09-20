@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import math
 import os
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from functools import lru_cache
 
 import numpy as np
@@ -25,6 +26,7 @@ from qdrant_client import QdrantClient, models
 
 from app.api.context import clamp_timeout
 from app.recall.schemas import ItemRecord, RecallCandidate
+from app.utils.dependency import DependencyDown
 
 COLLECTION = os.environ.get("QDRANT_COLLECTION", "shoppingx_items")
 DENSE_VEC = "dense"
@@ -48,6 +50,22 @@ def _query_timeout() -> int:
     一个已经超时的 run。向上取整 + 至少 1 秒：协议不接受 0（那是「不限」），压到 0 反而放开了闸。
     """
     return max(1, math.ceil(clamp_timeout(QUERY_TIMEOUT_SEC)))
+
+
+@contextmanager
+def _qdrant_call(op: str) -> Iterator[None]:
+    """把一次 Qdrant 往返的故障统一翻成 :class:`DependencyDown`（重试无意义那一档）。
+
+    **只包客户端调用那几行**，不包外面的 payload → ``RecallCandidate`` 构造：后者失败是建库数据
+    与 schema 对不上，属于该修的代码问题，翻成「依赖挂了」会把真 bug 藏起来，还会让模型对着一个
+    其实能修的错误放弃检索。
+    """
+    try:
+        yield
+    except DependencyDown:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 底层异常类型随 client/传输层浮动，统一归口
+        raise DependencyDown("qdrant", f"{op} 失败：{type(exc).__name__}") from exc
 
 
 def make_client(timeout: float | None = None) -> QdrantClient:
@@ -178,15 +196,16 @@ class QdrantRecall:
             must.append(models.FieldCondition(key="rating", range=models.Range(gte=min_rating)))
         flt = models.Filter(must=must) if must else None
         dense = [float(x) for x in np.asarray(dense_vec, dtype=np.float32).ravel()]
-        res = self._client.query_points(
-            COLLECTION,
-            query=dense,
-            using=DENSE_VEC,
-            query_filter=flt,
-            limit=top_k,
-            with_payload=True,
-            timeout=_query_timeout(),
-        )
+        with _qdrant_call("dense 检索"):
+            res = self._client.query_points(
+                COLLECTION,
+                query=dense,
+                using=DENSE_VEC,
+                query_filter=flt,
+                limit=top_k,
+                with_payload=True,
+                timeout=_query_timeout(),
+            )
         out: list[RecallCandidate] = []
         for p in res.points:
             payload = p.payload or {}
@@ -203,15 +222,16 @@ class QdrantRecall:
         ids = [i for i in dict.fromkeys(item_ids) if i]
         if not ids:
             return []
-        found, _ = self._client.scroll(
-            COLLECTION,
-            scroll_filter=models.Filter(
-                must=[models.FieldCondition(key="item_id", match=models.MatchAny(any=ids))]
-            ),
-            limit=len(ids),
-            with_payload=True,
-            with_vectors=False,
-        )
+        with _qdrant_call("按 id 回源"):
+            found, _ = self._client.scroll(
+                COLLECTION,
+                scroll_filter=models.Filter(
+                    must=[models.FieldCondition(key="item_id", match=models.MatchAny(any=ids))]
+                ),
+                limit=len(ids),
+                with_payload=True,
+                with_vectors=False,
+            )
         by_id = {
             str((pt.payload or {}).get("item_id")): RecallCandidate(**(pt.payload or {}))
             for pt in found
@@ -228,25 +248,29 @@ class QdrantRecall:
         商品自身必然是自己的最近邻（score≈1），多取一条再按 item_id 剔除自身。
         item_id 在库里不存在（老会话的收藏、换过库）时返回空列表，由上层决定怎么呈现。
         """
-        found, _ = self._client.scroll(
-            COLLECTION,
-            scroll_filter=models.Filter(
-                must=[models.FieldCondition(key="item_id", match=models.MatchValue(value=item_id))]
-            ),
-            limit=1,
-            with_payload=False,
-            with_vectors=False,
-        )
+        with _qdrant_call("搜同款定位"):
+            found, _ = self._client.scroll(
+                COLLECTION,
+                scroll_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(key="item_id", match=models.MatchValue(value=item_id))
+                    ]
+                ),
+                limit=1,
+                with_payload=False,
+                with_vectors=False,
+            )
         if not found:
             return []
-        res = self._client.query_points(
-            COLLECTION,
-            query=found[0].id,  # 按 point id 取近邻：向量不出服务端，省一趟 1024 维往返
-            using=DENSE_VEC,
-            limit=top_k + 1,
-            with_payload=True,
-            timeout=_query_timeout(),
-        )
+        with _qdrant_call("搜同款近邻"):
+            res = self._client.query_points(
+                COLLECTION,
+                query=found[0].id,  # 按 point id 取近邻：向量不出服务端，省一趟 1024 维往返
+                using=DENSE_VEC,
+                limit=top_k + 1,
+                with_payload=True,
+                timeout=_query_timeout(),
+            )
         out: list[RecallCandidate] = []
         for p in res.points:
             payload = p.payload or {}

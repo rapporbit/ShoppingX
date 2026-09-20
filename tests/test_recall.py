@@ -8,6 +8,9 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import httpx
 import numpy as np
 import pytest
 from qdrant_client import QdrantClient
@@ -19,6 +22,7 @@ from app.recall.schemas import ItemRecord
 from app.recall.shipping import estimate_shipping
 from app.recall.towers import TowerClient
 from app.utils.clean import _parse_int, _parse_number
+from app.utils.dependency import DependencyDown
 
 
 # ---------- 清洗：脏文本数字解析（建索引前的前置步骤，逻辑在 app/utils/clean.py） ----------
@@ -117,10 +121,33 @@ async def test_recall_single_platform_filter() -> None:
 
 
 def test_recall_missing_collection_raises() -> None:
-    # 没建 collection 直接检索 → 报错，不静默返垃圾。
+    """没建 collection 直接检索 → 报错，不静默返垃圾。
+
+    错误类型是 ``DependencyDown``（阶段 4-3）：collection 不存在严格说是配置问题而不是「服务挂
+    了」，但对这一轮请求来说两者后果相同——重试拿不到货。归到同一档，模型据此如实收尾，不会换
+    着检索词撞三次。
+    """
     recall = QdrantRecall(QdrantClient(location=":memory:"))
-    with pytest.raises(Exception):  # noqa: B017,PT011 (qdrant 本地模式抛 collection 不存在)
+    with pytest.raises(DependencyDown) as err:
         recall.search(np.zeros(32, dtype="float32"), top_k=3)
+    assert err.value.dependency == "qdrant"
+
+
+@pytest.mark.asyncio
+async def test_embedding_failure_becomes_dependency_down() -> None:
+    """远程 embedding 退避重试用尽 → DependencyDown，而不是把 httpx 异常原样抛给工具壳。
+
+    它是主检索的前置：编码失败时 item_search 必然空手而归，和 Qdrant 挂了是同一档。
+    """
+    tower = TowerClient(model="bge-m3", base_url="http://127.0.0.1:1/v1", api_key="k")
+
+    async def always_fail(*_a: object, **_kw: object) -> None:
+        raise httpx.ConnectError("连不上")
+
+    tower._get_client = lambda: SimpleNamespace(post=always_fail)  # type: ignore[assignment,method-assign]
+    with pytest.raises(DependencyDown) as err:
+        await tower.encode_query("帆布包")
+    assert err.value.dependency == "embedding"
 
 
 # ---------- 汇率归一 ----------

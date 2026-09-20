@@ -398,6 +398,66 @@ async def test_tool_error_is_not_counted_as_progress(isolated_harness: HarnessMi
     assert session.guard.last_progress_at == before, "失败的调用不该给看门狗续命"
 
 
+async def _drain_tool(session: HarnessSession, chunk: ToolChunk) -> ToolChunk:
+    """直接走 HarnessToolAdapter 跑一次工具，返回模型最终看到的那个 chunk。
+
+    不经 Agent：ERROR 分支不跑 post_tool_call，探针 hook 挂不上去，从 Agent 侧拿不到改写后的
+    文本；而改写恰恰是这里要测的东西。
+    """
+    adapter = HarnessToolAdapter(session)
+
+    async def handler(**_kwargs: object):  # type: ignore[no-untyped-def]
+        yield chunk
+
+    out = [
+        c
+        async for c in adapter.on_tool_call(
+            SimpleNamespace(name="item_search"),  # type: ignore[arg-type]
+            {"query": "帆布包"},
+            handler,
+        )
+    ]
+    return out[-1]
+
+
+@pytest.mark.asyncio
+async def test_dependency_down_tells_model_to_stop_retrying(
+    isolated_harness: HarnessMiddleware,
+) -> None:
+    """依赖挂了 → 贴「别重试、调 chat_fallback 如实说」，而不是等 LoopDetector 撞够三次。"""
+    final = await _drain_tool(
+        HarnessSession(),
+        ToolChunk(
+            content=[TextBlock(type="text", text="[error] DependencyDown: qdrant 暂时不可用")],
+            state=ToolResultState.ERROR,
+            metadata={"code": "dependency_down", "dependency": "qdrant", "tool": "item_search"},
+        ),
+    )
+    text = "".join(b.text for b in final.content if b.type == "text")
+    assert final.state == ToolResultState.ERROR
+    assert "[依赖暂时不可用]" in text
+    assert "chat_fallback" in text
+    # 原始错误文本要留着——提示是追加的，不是替换的。
+    assert "[error] DependencyDown" in text
+
+
+@pytest.mark.asyncio
+async def test_ordinary_tool_error_keeps_old_behaviour(
+    isolated_harness: HarnessMiddleware,
+) -> None:
+    """没有分级键的普通错误照旧：第一次不贴任何提示（撞够阈值才由 LoopDetector 说话）。"""
+    final = await _drain_tool(
+        HarnessSession(),
+        ToolChunk(
+            content=[TextBlock(type="text", text="[error] ValidationError: 参数不对")],
+            state=ToolResultState.ERROR,
+            metadata={"tool": "item_search"},
+        ),
+    )
+    text = "".join(b.text for b in final.content if b.type == "text")
+    assert "[依赖暂时不可用]" not in text
+
+
 @pytest.mark.asyncio
 async def test_injection_persists_into_state_context(
     isolated_harness: HarnessMiddleware,

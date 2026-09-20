@@ -42,6 +42,7 @@ from app.harness.middleware import harness
 from app.harness.msgs import _attr, block_text, iter_tool_results, terminal_summary, text_of
 from app.harness.phase_machine import get_phase_machine
 from app.harness.prefill import prefill
+from app.harness.sentinels import dependency_down_notice
 from app.harness.session import HarnessSession, collect_call_signals
 from app.harness.signals import (
     _observe_tool,
@@ -50,6 +51,7 @@ from app.harness.signals import (
 from app.harness.streaming import charge_stream
 from app.harness.tiering import first_round_tier, resolve_model_tier
 from app.harness.token_budget import charge_usage
+from app.utils.dependency import DEPENDENCY_DOWN_CODE, ERROR_CODE_KEY
 
 if TYPE_CHECKING:  # pragma: no cover
     from agentscope.agent import Agent
@@ -509,6 +511,19 @@ class HarnessToolAdapter(ToolMiddlewareBase):
         # 不跑 post_tool_call。只喂 LoopDetector——硬撞同一个错误正是打转。
         if last is not None and last.state == ToolResultState.ERROR:
             _observe_tool(tool_name, time.monotonic() - start, "error")
+            meta = dict(last.metadata or {})
+            # 错误分级（阶段 4-3）：依赖挂了的那一档，提示优先于循环提示——LoopDetector 要撞够
+            # 阈值才说话，而依赖不可用第一次就该停，等它撞满就是三次超时白等。record 仍照记
+            # （硬撞同一个错误本来就是打转，计数不该因为换了条提示就断）。
+            if meta.get(ERROR_CODE_KEY) == DEPENDENCY_DOWN_CODE:
+                s.guard.detector.record(tool_name)
+                notice = dependency_down_notice(str(meta.get("dependency", "检索服务")), tool_name)
+                yield ToolChunk(
+                    content=[TextBlock(type="text", text=f"{result_text}\n\n{notice}")],
+                    state=ToolResultState.ERROR,
+                    metadata=meta,
+                )
+                return
             if s.guard.detector.record(tool_name):
                 nudge = f"\n\n[系统提示] {s.guard.detector.nudge_message(tool_name)}"
                 yield ToolChunk(

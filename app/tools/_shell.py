@@ -30,6 +30,8 @@ from agentscope.tool import FunctionTool, ToolMiddlewareBase
 from agentscope.tool._response import ToolChunk, ToolResultState
 from pydantic import BaseModel, create_model
 
+from app.utils.dependency import DEPENDENCY_DOWN_CODE, ERROR_CODE_KEY, DependencyDown
+
 
 class InjectedToolArg:
     """标记「这个参数由程序注入，不给模型看」。用法：``Annotated[T, InjectedToolArg]``。
@@ -229,10 +231,16 @@ def to_function_tool(
             args = {name: getattr(validated, name) for name in type(validated).model_fields}
             out = _unwrap(await impl(**args))
         except Exception as exc:  # noqa: BLE001 - 工具内部错误不外抛，见模块 docstring
+            meta: dict[str, Any] = {"tool": shell.name}
+            # 错误分级（阶段 4-3）：依赖挂了与参数写错在这里分道。metadata 带上 code，
+            # adapter 的 ERROR 分支据此贴「别重试」而不是默认的「换个思路再来」。
+            if isinstance(exc, DependencyDown):
+                meta[ERROR_CODE_KEY] = DEPENDENCY_DOWN_CODE
+                meta["dependency"] = exc.dependency
             return ToolChunk(
                 content=[TextBlock(type="text", text=f"[error] {type(exc).__name__}: {exc}")],
                 state=ToolResultState.ERROR,
-                metadata={"tool": shell.name},
+                metadata=meta,
             )
         return ToolChunk(
             content=[TextBlock(type="text", text=_to_text(out))],
