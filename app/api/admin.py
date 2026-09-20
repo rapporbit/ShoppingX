@@ -164,6 +164,8 @@ async def update_config(req: UpdateRequest, admin: str = Depends(require_admin))
     except overrides.ParamValidationError as e:
         raise HTTPException(400, str(e)) from e
 
+    # 先落库再改内存：库是唯一真相（阶段 1 条 8），落库失败就整体不算数。本地这次 apply 只为了让
+    # 本进程立刻反映到下面的 _snapshot() 回显上——别的进程（worker）靠 store.sync_loop 对账跟进。
     await store.save(normalized, updated_by=admin)
     overrides.apply(normalized)
     # 日志里绝不能出现密钥明文——它会进 structlog、进磁盘、进任何日志收集管道，
@@ -177,11 +179,13 @@ async def update_config(req: UpdateRequest, admin: str = Depends(require_admin))
 async def reset_config(req: ResetRequest, admin: str = Depends(require_admin)) -> ConfigView:
     """恢复默认：删覆盖行，值退回 ``.env`` 基线或代码默认值。"""
     keys = req.keys if req.keys else [p.key for p in PARAMS]
-    try:
-        overrides.reset(keys)
-    except overrides.ParamValidationError as e:
-        raise HTTPException(400, str(e)) from e
+    unknown = [k for k in keys if k not in BY_KEY]
+    if unknown:
+        raise HTTPException(400, f"未知参数：{', '.join(unknown)}")
+    # 与改参同一个顺序：**先删库行再改内存**。反过来的话，删库失败会留下「本进程已恢复默认、库里
+    # 还写着覆盖值」，下一轮对账又把旧值加回来——管理员看到的是点了恢复、30 秒后值自己长回去。
     await store.remove(keys)
+    overrides.reset(keys)
     logger.info("管理员 %s 恢复默认：%s", admin, "全部" if not req.keys else keys)
     return _snapshot()
 

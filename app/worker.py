@@ -338,7 +338,16 @@ async def amain() -> None:
     # 且空转是无声的——没有任何日志会说「我领不到任务」。
     await assert_deployment_deps()
     await bootstrap()
-    await run_worker()
+    # 参数覆盖对账（阶段 1 条 8）。**这个进程才是真正用这些参数的那个**：后台改模型 / 检索参数打在
+    # API 进程上，AgentLoop 却在这里跑。挂在 amain 而不是 run_worker 里，是因为 run_worker 还是测试
+    # 的注入入口，不该让每个用例都连上库轮询。
+    config_sync = asyncio.create_task(config_store.sync_loop())
+    try:
+        await run_worker()
+    finally:
+        config_sync.cancel()
+        with suppress(asyncio.CancelledError):
+            await config_sync
 
 
 def main() -> None:
