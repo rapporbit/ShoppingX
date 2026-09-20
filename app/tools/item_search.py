@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -38,6 +38,7 @@ from app.harness.retrieval_budget import note_filtered_probe, note_item_search
 from app.memory.assemble import assemble
 from app.recall import get_recall_client, get_tower_client
 from app.recall.schemas import RecallCandidate
+from app.recall.search_cache import cached_recall
 from app.tools._args import StrListArg
 from app.tools._bundle import note_slot_searched, register_slot
 from app.tools._candidates import compact_candidates, enrich, register
@@ -390,16 +391,38 @@ async def item_search(
     tower = get_tower_client()
     recall = get_recall_client()
 
-    request_vec = await tower.encode_query(effective_query)  # dense 通路（偏好词已并入检索词）
+    # 编码做成惰性（阶段 3）：下面三次召回（主 / 放宽重试 / 探测）都经两级缓存，全命中时
+    # 一次 embedding 往返都不该发——而它是这条链路上更贵的那一跳。真回源时只编码一次。
+    vec_box: list[Any] = []
 
-    recalled = await asyncio.to_thread(
-        recall.search,
-        request_vec,
-        fetch_k,
-        search_platforms,
-        price_usd_max=price_usd_max,
-        min_rating=min_rating,
-    )
+    async def _vec() -> Any:
+        if not vec_box:
+            vec_box.append(await tower.encode_query(effective_query))
+        return vec_box[0]
+
+    async def _recall(
+        top_k: int, *, price_max: float | None, rating_min: float | None
+    ) -> list[RecallCandidate]:
+        async def _fetch() -> list[RecallCandidate]:
+            return await asyncio.to_thread(
+                recall.search,
+                await _vec(),
+                top_k,
+                search_platforms,
+                price_usd_max=price_max,
+                min_rating=rating_min,
+            )
+
+        return await cached_recall(
+            effective_query,
+            top_k,
+            search_platforms,
+            price_usd_max=price_max,
+            min_rating=rating_min,
+            fetch=_fetch,
+        )
+
+    recalled = await _recall(fetch_k, price_max=price_usd_max, rating_min=min_rating)
     relevant, memory_dropped = _apply_filters(
         recalled,
         floor=RELEVANCE_FLOOR,
@@ -420,14 +443,7 @@ async def item_search(
     relaxed = False
     if len(relevant) < RETRY_MIN_HITS and min_rating is not None:
         # 评分门槛是 Qdrant 召回阶段的 filter，只能重搜一次才能摘掉（预算照旧硬卡）。
-        widened = await asyncio.to_thread(
-            recall.search,
-            request_vec,
-            fetch_k,
-            search_platforms,
-            price_usd_max=price_usd_max,
-            min_rating=None,
-        )
+        widened = await _recall(fetch_k, price_max=price_usd_max, rating_min=None)
         candidates_wo_rating, mem_dropped_wo = _apply_filters(
             widened,
             floor=RELEVANCE_FLOOR,  # 相关度红线照旧
@@ -461,7 +477,7 @@ async def item_search(
         or bool(brand_exclude)
     )
     if PROBE_LIMIT > 0 and has_hard_filter and len(relevant) < capped_k:
-        probed = await asyncio.to_thread(recall.search, request_vec, PROBE_LIMIT, search_platforms)
+        probed = await _recall(PROBE_LIMIT, price_max=None, rating_min=None)
         filtered_out, price_blocked, other_blocked = _probe_filtered_out(
             probed,
             {rc.item_id for rc in relevant},
