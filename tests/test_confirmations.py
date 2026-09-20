@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from app.tools.schemas import ItemCandidate
-from app.trade.confirmation import Confirmation, ConfirmationError
+from app.trade.confirmation import Confirmation, ConfirmationError, DuplicateRequestError
 from app.trade.confirmations import (
     prepare_cancel_confirmation,
     prepare_order_confirmation,
@@ -20,15 +21,39 @@ from app.trade.usecases import LineRequest, NoCandidateError
 pytestmark = pytest.mark.anyio
 
 
+async def _yield_point() -> None:
+    """让出一次事件循环。
+
+    内存仓储的方法虽然是 ``async``，里面却全是同步 dict 操作——没有任何挂起点，
+    ``asyncio.gather`` 出来的几路会一路跑到底、根本不交错，并发用例就成了顺序用例（写第一版时
+    就是这样，四路 gather 全绿但什么也没验到）。每个方法开头让出一次，「都查空、再都插」这个
+    交错才真的发生。
+    """
+    await asyncio.sleep(0)
+
+
 class MemConfirmations:
+    """内存确认仓储。**带唯一约束**：真库靠 ``request_key`` 的 unique 挡并发，内存实现不模拟
+    这道就测不出并发路径（两路同时查空、同时插，只有约束能判谁先到）。"""
+
     def __init__(self) -> None:
         self.rows: dict[str, Confirmation] = {}
 
     async def save(self, c: Confirmation) -> None:
+        await _yield_point()
+        if c.request_key and any(
+            r.request_key == c.request_key and r.confirmation_id != c.confirmation_id
+            for r in self.rows.values()
+        ):
+            raise DuplicateRequestError(c.request_key)
         self.rows[c.confirmation_id] = c
 
     async def find_by_id(self, cid: str) -> Confirmation | None:
         return self.rows.get(cid)
+
+    async def find_by_request_key(self, key: str) -> Confirmation | None:
+        await _yield_point()
+        return next((c for c in self.rows.values() if c.request_key == key), None)
 
     async def list_by_thread(self, user_id: str, thread_id: str, limit: int = 20):  # type: ignore[no-untyped-def]
         found = [c for c in self.rows.values() if (c.user_id, c.thread_id) == (user_id, thread_id)]
@@ -36,10 +61,27 @@ class MemConfirmations:
 
 
 class MemOrders:
+    """内存订单仓储。同 :class:`MemConfirmations`，模拟 ``idempotency_key`` 与主键两道唯一约束
+    ——并发下单能不能只落一张单，全押在这两道上。"""
+
     def __init__(self) -> None:
         self.rows: dict[str, Order] = {}
 
     async def save(self, order: Order) -> None:
+        await _yield_point()
+        clash = next(
+            (
+                o
+                for o in self.rows.values()
+                if o.idempotency_key == order.idempotency_key and o.order_id != order.order_id
+            ),
+            None,
+        )
+        if clash is not None:  # 幂等键唯一
+            raise DuplicateRequestError(order.idempotency_key)
+        prev = self.rows.get(order.order_id)
+        if prev is not None and prev.idempotency_key != order.idempotency_key:  # 订单号是主键
+            raise DuplicateRequestError(order.order_id)
         self.rows[order.order_id] = order
 
     async def find_by_id(self, order_id: str) -> Order | None:
@@ -49,9 +91,11 @@ class MemOrders:
         return [o for o in self.rows.values() if o.user_id == user_id][:limit]
 
     async def next_order_id(self) -> str:
+        await _yield_point()
         return f"GBX-{len(self.rows) + 1:06d}"
 
     async def find_by_idempotency_key(self, key: str) -> Order | None:
+        await _yield_point()
         return next((o for o in self.rows.values() if o.idempotency_key == key), None)
 
 
@@ -81,7 +125,7 @@ ADDR = {
 }
 
 
-async def _prepare(crepo: MemConfirmations, thread: str = "t1", items=("B01",)):  # type: ignore[no-untyped-def]
+async def _prepare(crepo: MemConfirmations, thread: str = "t1", items=("B01",), run_id: str = ""):  # type: ignore[no-untyped-def]
     return await prepare_order_confirmation(
         crepo,
         user_id="u1",
@@ -89,6 +133,7 @@ async def _prepare(crepo: MemConfirmations, thread: str = "t1", items=("B01",)):
         lines=[LineRequest(i) for i in items],
         shipping_address=ADDR,
         hydrate=_hydrate,
+        run_id=run_id,
     )
 
 
@@ -127,6 +172,104 @@ async def test_prepare_rejects_bad_input() -> None:
             shipping_address=ADDR,
             hydrate=_hydrate,
         )
+
+
+async def test_same_run_reuses_one_card_but_no_run_id_keeps_old_behaviour() -> None:
+    """同一 run 里重复调 create_order（整轮重投重跑）只出一张卡；载荷不同则照出新卡。
+
+    没有 run_id（HTTP 表单入口 / 离线脚本）时退回老行为：每次一张新卡——这条一起测，是因为
+    「加了幂等键之后表单入口也被顺手收窄」会是一个没人发现的回归。
+    """
+    crepo = MemConfirmations()
+    first = await _prepare(crepo, run_id="run-1")
+    again = await _prepare(crepo, run_id="run-1")
+    assert again.confirmation_id == first.confirmation_id and len(crepo.rows) == 1
+
+    other_payload = await _prepare(crepo, items=("B02",), run_id="run-1")
+    other_run = await _prepare(crepo, run_id="run-2")
+    assert (
+        len({first.confirmation_id, other_payload.confirmation_id, other_run.confirmation_id}) == 3
+    )
+
+    anon = [await _prepare(crepo), await _prepare(crepo)]
+    assert anon[0].confirmation_id != anon[1].confirmation_id
+    assert all(c.request_key is None for c in anon)
+
+
+async def test_same_run_reuses_card_even_if_item_order_differs() -> None:
+    """重跑时模型把同样两件商品换个顺序报上来，还是那张卡。
+
+    幂等键故意不复用 ``snapshot_hash``（它要和 payload 严格对应、行顺序随模型入参走），
+    用的是行顺序归一后的指纹。没这道，一次顺序抖动就是第二张卡。
+    """
+    crepo = MemConfirmations()
+    first = await _prepare(crepo, items=("B01", "B02"), run_id="run-1")
+    again = await _prepare(crepo, items=("B02", "B01"), run_id="run-1")
+    assert again.confirmation_id == first.confirmation_id and len(crepo.rows) == 1
+    # 落库的仍是模型给的原顺序，snapshot_hash 与 payload 严格一一对应（前端比对靠它）。
+    assert [ln["item_id"] for ln in first.payload["items"]] == ["B01", "B02"]
+
+
+async def test_concurrent_prepare_same_run_lands_one_card() -> None:
+    """两路同时出卡：都查空、都往下插，靠唯一键判先到——后到的那路重读，拿回同一张卡。"""
+    crepo = MemConfirmations()
+    cards = await asyncio.gather(*(_prepare(crepo, run_id="run-1") for _ in range(4)))
+    assert len({c.confirmation_id for c in cards}) == 1 and len(crepo.rows) == 1
+
+
+async def test_concurrent_resolve_places_exactly_one_order() -> None:
+    """同一张卡被同时点两下（双击 / 两个标签页）：只落一张单，两路拿到同一个 order_id。
+
+    这条挡的是「先查 find_by_idempotency_key 再插」的竞态——两路都查空时，只有唯一约束能判先到。
+    """
+    crepo, orepo = MemConfirmations(), MemOrders()
+    conf = await _prepare(crepo, items=("B01", "B02"))
+    done = await asyncio.gather(
+        *(
+            resolve_confirmation(
+                crepo,
+                orepo,
+                user_id="u1",
+                thread_id="t1",
+                confirmation_id=conf.confirmation_id,
+                snapshot_hash=conf.snapshot_hash,
+                approved=True,
+            )
+            for _ in range(3)
+        )
+    )
+    assert len(orepo.rows) == 1
+    order_ids = {c.result["order_id"] for c in done if c.result}
+    assert len(order_ids) == 1 and next(iter(order_ids)) in orepo.rows
+
+
+async def test_concurrent_resolve_of_two_cards_keeps_both_orders() -> None:
+    """**两张不同的卡**同时被同意：各落各的单，谁也不许覆盖谁。
+
+    ``next_order_id`` 按行数编号，两路并发会算出同一个号；仓储 ``save`` 是 upsert，没有守卫时
+    后到的那张会把先到的那张**原地改写**——库里还是一张单，但先下单的人那张成了别人的。
+    这条就是钉死那个守卫：撞号要抛出来、让调用方重新分号，而不是悄悄覆盖。
+    """
+    crepo, orepo = MemConfirmations(), MemOrders()
+    cards = [await _prepare(crepo, items=("B01",)), await _prepare(crepo, items=("B02",))]
+    done = await asyncio.gather(
+        *(
+            resolve_confirmation(
+                crepo,
+                orepo,
+                user_id="u1",
+                thread_id="t1",
+                confirmation_id=c.confirmation_id,
+                snapshot_hash=c.snapshot_hash,
+                approved=True,
+            )
+            for c in cards
+        )
+    )
+    assert len(orepo.rows) == 2
+    assert len({c.result["order_id"] for c in done if c.result}) == 2
+    assert {o.idempotency_key for o in orepo.rows.values()} == {c.operation_id for c in cards}
+    assert {o.total().amount_minor for o in orepo.rows.values()} == {1999, 500}
 
 
 async def test_resolve_approved_places_order_once_and_is_idempotent() -> None:

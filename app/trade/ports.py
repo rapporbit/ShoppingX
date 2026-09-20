@@ -22,6 +22,14 @@ class ConfirmationRepository(Protocol):
 
     async def find_by_id(self, confirmation_id: str) -> Confirmation | None: ...
 
+    async def find_by_request_key(self, key: str) -> Confirmation | None:
+        """幂等查询：同一轮（run_id）同一份载荷已经出过卡就把那张取回来。
+
+        为什么必须有：整轮重跑是常态（队列消息被 PEL 重投、worker 崩了重领），而出确认卡是
+        写操作。没有这道，一次重投就是两张待决议的卡，用户点哪张都对不上另一张。
+        """
+        ...
+
     async def list_by_thread(
         self, user_id: str, thread_id: str, limit: int = 20
     ) -> list[Confirmation]:

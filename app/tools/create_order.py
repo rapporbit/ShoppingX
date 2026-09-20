@@ -17,7 +17,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.api import monitor
-from app.api.context import get_user_id
+from app.api.context import get_run_id, get_user_id
 from app.tools._args import StrListArg
 from app.tools._candidates import hydrate
 from app.tools._shell import tool
@@ -82,6 +82,8 @@ async def create_order(
             lines=lines,
             shipping_address=shipping,
             hydrate=hydrate,
+            # 同一轮重跑（队列重投 / worker 重领）复用同一张卡，不出第二张。
+            run_id=get_run_id(),
         )
     except (ConfirmationError, NoCandidateError, ValueError) as e:
         await monitor.report_tool_end("create_order", error=str(e))
