@@ -119,8 +119,31 @@ def estimate_cost_tokens(prompt_tokens: int) -> int:
     return max(1, int(prompt_tokens) + max(0, reserve))
 
 
+def _content_tokens(content: Any) -> int:
+    """一条消息正文的 token 估算。正文是 str，或一串内容块（文本 / 工具调用 / 工具结果）。"""
+    if isinstance(content, str):
+        return count_tokens(content)
+    if not isinstance(content, list):
+        return count_tokens(str(content)) if content else 0
+    total = 0
+    for block in content:
+        text = block.get("text") if isinstance(block, dict) else getattr(block, "text", None)
+        if isinstance(text, str):
+            total += count_tokens(text)
+            continue
+        # 工具调用的入参、工具结果的正文都在输入里，且常常比文本块大得多。整块序列化着数，
+        # 比只认 text 字段稳——块的形状随框架版本漂移，漏认一种就少算一大截。
+        total += count_tokens(json.dumps(block, ensure_ascii=False, default=str))
+    return total
+
+
 def estimate_prompt_tokens(messages: Any, tools: Any = None) -> int:
     """粗估这次请求的输入 token：消息正文 + 工具 schema。
+
+    **入参可能是 ``Msg`` 对象，不是 OpenAI 的 dict**：AgentScope 把 ``formatter.format()`` 放在
+    ``OpenAIChatModel._call_api`` **内部**，所以闸门这一层（``__call__``）看到的还是没格式化的
+    ``Msg``。只认 dict 的话这里会恒返回 0——不报错、不告警，只是 TPM 预扣悄悄只剩输出那一笔预留，
+    桶在突发时挡不住任何东西（2026-09-20 部署时实测撞到）。两种形态都收。
 
     **工具 schema 必须算进来**：本仓 18 个工具的 JSON schema 每轮都随请求发，量级和一段中等
     长度的对话相当，漏掉它预扣就会系统性偏小（再由 :func:`settle` 一次次补扣，桶永远滞后一轮）。
@@ -130,19 +153,15 @@ def estimate_prompt_tokens(messages: Any, tools: Any = None) -> int:
     try:
         total = 0
         for msg in messages or []:
-            content = msg.get("content") if isinstance(msg, dict) else None
-            if isinstance(content, str):
-                total += count_tokens(content)
-            elif isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict):
-                        total += count_tokens(str(block.get("text") or ""))
-            # tool_calls 的入参也在输入里，只是不常见地大，用字符串长度粗折。
-            calls = msg.get("tool_calls") if isinstance(msg, dict) else None
+            if isinstance(msg, dict):
+                content, calls = msg.get("content"), msg.get("tool_calls")
+            else:
+                content, calls = getattr(msg, "content", None), getattr(msg, "tool_calls", None)
+            total += _content_tokens(content)
             if calls:
-                total += count_tokens(json.dumps(calls, ensure_ascii=False))
+                total += count_tokens(json.dumps(calls, ensure_ascii=False, default=str))
         if tools:
-            total += count_tokens(json.dumps(tools, ensure_ascii=False))
+            total += count_tokens(json.dumps(tools, ensure_ascii=False, default=str))
         return total
     except Exception:  # pragma: no cover - 形状随框架版本漂移，估不出就算了
         logger.debug("输入 token 估算失败，按 0 记", exc_info=True)

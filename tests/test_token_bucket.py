@@ -82,6 +82,33 @@ def test_estimate_counts_tool_schema():
     assert 0 < bare < with_tools
 
 
+def test_estimate_counts_agentscope_msg():
+    """**真实链路传的是 Msg 对象，不是 dict**——只认 dict 会恒返回 0，而且不报错不告警。
+
+    AgentScope 把 formatter.format() 放在 OpenAIChatModel._call_api 内部，闸门这一层看到的
+    还是没格式化的 Msg（2026-09-20 部署时实测撞到）。文本块与工具调用块都要数上。
+    """
+    from agentscope.message import Msg, TextBlock, ToolCallBlock
+
+    msgs = [
+        Msg(
+            name="user",
+            role="user",
+            content=[TextBlock(type="text", text="想买便宜又抗造的旅行三件套")],
+        ),
+        Msg(
+            name="assistant",
+            role="assistant",
+            content=[
+                ToolCallBlock(id="c1", name="item_search", input='{"query": "抗造 旅行背包"}')
+            ],
+        ),
+    ]
+    text_only = tb.estimate_prompt_tokens([msgs[0]])
+    assert text_only > 0
+    assert tb.estimate_prompt_tokens(msgs) > text_only  # 工具调用块也算进输入
+
+
 def test_estimate_bad_shape_returns_zero():
     """形状认不出来返回 0，绝不抛——预估是为了少撞 429，不是记账。"""
     assert tb.estimate_prompt_tokens(object()) == 0
