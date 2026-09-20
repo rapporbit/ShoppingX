@@ -9,10 +9,10 @@
 - `--live`：对真 provider 打少量小请求，产出阶段 2 第 3 条的能力矩阵。这段判的是 provider，
   不是 LiteLLM。
 
-跑法::
+跑法（阶段 2 落地后 litellm 已进主依赖，不再需要 ``--group spike``）::
 
-    uv run --group spike python scripts/spike_litellm.py          # mock 段
-    uv run --group spike python scripts/spike_litellm.py --live   # 加跑能力矩阵
+    uv run python scripts/spike_litellm.py          # mock 段
+    uv run python scripts/spike_litellm.py --live   # 加跑能力矩阵
 """
 
 import argparse
@@ -78,6 +78,18 @@ async def _handler(request: web.Request) -> web.StreamResponse:
     for delta in _STREAM_TOOL_DELTAS:
         await resp.write(_sse_chunk(delta))
     await resp.write(_sse_chunk({}, finish="tool_calls"))
+    # include_usage 时真 OpenAI 会在最后补一片「没有 choices、只有 usage」的 chunk。
+    # 少了它就看不出「谁报的 usage」——litellm 在上游不给时会自己按 token 数补算一份，
+    # 而 credit 结算是按 usage 走的，两者混为一谈会让计费悄悄换了口径。
+    usage_chunk = {
+        "id": "chatcmpl-spike",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": "spike-model",
+        "choices": [],
+        "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+    }
+    await resp.write(f"data: {json.dumps(usage_chunk)}\n\n".encode())
     await resp.write(b"data: [DONE]\n\n")
     await resp.write_eof()
     return resp
@@ -204,6 +216,9 @@ async def probe_litellm(base_url: str) -> dict[str, Any]:
     )
     name, args = "", ""
     async for chunk in stream:
+        # include_usage 会在末尾补一片没有 choices 的 usage chunk，硬取 [0] 会 IndexError。
+        if not chunk.choices:
+            continue
         calls = chunk.choices[0].delta.tool_calls or []
         for call in calls:
             if call.function.name:
@@ -247,6 +262,8 @@ async def probe_openai(base_url: str) -> dict[str, Any]:
     )
     name, args = "", ""
     async for chunk in stream:
+        if not chunk.choices:
+            continue
         for call in chunk.choices[0].delta.tool_calls or []:
             if call.function and call.function.name:
                 name = call.function.name
@@ -377,6 +394,8 @@ async def _drain_tool_call(stream: Any) -> tuple[str, str]:
     """
     name, args = "", ""
     async for chunk in stream:
+        if not chunk.choices:
+            continue
         for call in chunk.choices[0].delta.tool_calls or []:
             if call.function and call.function.name:
                 name = call.function.name
