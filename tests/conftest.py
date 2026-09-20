@@ -124,6 +124,24 @@ class FakeRedis:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_search_cache() -> Iterator[None]:
+    """检索缓存（阶段 3）一测一份：L2 摘掉、L1 清空。
+
+    **必须 autouse**：L2 的 URL 缺省跟着 ``QUEUE_REDIS_URL`` 走，而开发机的 .env 里那个地址
+    往往是通的——不摘掉，测试就会把召回结果写进真 Redis，然后下一次跑测试命中它。症状是
+    「encode_query 没被调用」这种与改动毫不相干的红（已经踩过一次），而且单跑复现不了：
+    第一遍是它自己把缓存填上的。L1 同理，进程内跨用例照样串。
+    """
+    from app.recall import search_cache
+
+    search_cache.set_client(None)
+    search_cache.reset_cache()
+    yield
+    search_cache.set_client(None)
+    search_cache.reset_cache()
+
+
+@pytest.fixture(autouse=True)
 def fake_redis() -> Iterator[FakeRedis]:
     """给幂等第 3 层一份进程内的去重窗口（阶段 1-2 起它在 Redis 上）。
 
