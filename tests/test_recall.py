@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from types import SimpleNamespace
 
 import httpx
@@ -15,6 +16,7 @@ import numpy as np
 import pytest
 from qdrant_client import QdrantClient
 
+from app.recall import qdrant_store
 from app.recall.duty import estimate_duty, lookup_duty_rate
 from app.recall.fx import UnknownCurrencyError, to_base
 from app.recall.qdrant_store import QdrantRecall
@@ -131,6 +133,57 @@ def test_recall_missing_collection_raises() -> None:
     with pytest.raises(DependencyDown) as err:
         recall.search(np.zeros(32, dtype="float32"), top_k=3)
     assert err.value.dependency == "qdrant"
+
+
+class _BoomClient:
+    """每次检索都连不上的假 Qdrant 客户端，用来数「到底发了几次请求」。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def query_points(self, *_a: object, **_kw: object) -> None:
+        self.calls += 1
+        raise RuntimeError("连不上")
+
+
+@pytest.fixture
+def _fresh_qdrant_breaker() -> Iterator[None]:
+    """断路器是进程级单例，用完必须丢——OPEN 状态留给后面的用例就是跨用例串台。"""
+    qdrant_store._remote_breaker.cache_clear()
+    yield
+    qdrant_store._remote_breaker.cache_clear()
+
+
+def test_qdrant_breaker_stops_sending_after_threshold(
+    monkeypatch: pytest.MonkeyPatch, _fresh_qdrant_breaker: None
+) -> None:
+    """连续失败到阈值后不再发请求（阶段 4-4）。
+
+    测的是「有没有真的省掉那次往返」，不是「有没有抛错」——抛错在熔断前后都成立，只有请求
+    计数能证明快速失败真的发生了。
+    """
+    monkeypatch.setenv("QDRANT_URL", "http://127.0.0.1:6333")
+    monkeypatch.setenv("QDRANT_CB_THRESHOLD", "3")
+    boom = _BoomClient()
+    monkeypatch.setattr(qdrant_store, "make_client", lambda *_a, **_kw: boom)
+    recall = QdrantRecall()
+    vec = np.zeros(32, dtype="float32")
+
+    for _ in range(3):
+        with pytest.raises(DependencyDown):
+            recall.search(vec, top_k=3)
+    assert boom.calls == 3
+
+    with pytest.raises(DependencyDown) as err:
+        recall.search(vec, top_k=3)
+    assert boom.calls == 3, "熔断后仍然发了请求"
+    assert "熔断" in str(err.value)
+
+
+def test_local_qdrant_has_no_breaker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """本地 / 内存模式不挂断路器：没有网络往返，失败是配置或代码问题，熔断只会把它藏起来。"""
+    monkeypatch.delenv("QDRANT_URL", raising=False)
+    assert QdrantRecall(QdrantClient(location=":memory:"))._breaker is None
 
 
 @pytest.mark.asyncio

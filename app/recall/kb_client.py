@@ -36,6 +36,8 @@ import numpy as np
 from app.api.context import clamp_timeout
 from app.recall.category_kb import CategoryCard
 from app.recall.towers import TowerClient, get_tower_client
+from app.utils.circuit_breaker import CircuitBreaker
+from app.utils.env import env_float, env_int
 
 logger = logging.getLogger("shoppingx.kb")
 
@@ -58,6 +60,22 @@ FETCH_SIZE = 32
 # 一次 OpenSearch 请求最多等多久（秒）。opensearch-py 不传就是 10s，这里显式化好让 deadline 收得动
 # （阶段 4-2）——后端挂着时这 10 秒是干等，而品类知识只是锦上添花，主 loop 不该为它耗掉整个预算。
 OS_REQUEST_TIMEOUT_SEC = float(os.environ.get("OPENSEARCH_TIMEOUT_SEC", "10"))
+
+
+@lru_cache(maxsize=1)
+def _os_breaker() -> CircuitBreaker:
+    """OpenSearch 的进程级断路器（阶段 4-4）。
+
+    这里**不改降级语义**——挂了照旧静默返回空、由上层给低置信度结果；断路器只省掉「每次都干等
+    10 秒」。品类知识是锦上添花，后端挂着时让每轮开局的 ``category_insight`` 预取各等 10s，等于
+    把主 loop 的时间预算白送给一个必然拿不到结果的调用。
+    """
+    return CircuitBreaker(
+        "opensearch",
+        failure_threshold=env_int("OPENSEARCH_CB_THRESHOLD", 3),
+        recovery_timeout=env_float("OPENSEARCH_CB_RECOVERY", 30.0),
+    )
+
 
 # query 含这些「语义化 token」时关掉 BM25 子路：纯气质/口语 query 下 BM25 几乎全是
 # 字面命中的杂卡，反把 KNN 准命中的卡挤出 Top-K（refdocs 13-1 §3.3）。
@@ -252,7 +270,19 @@ class KBClient:
     async def _search_remote(
         self, query: str, coarse_k: int, disable_bm25: bool
     ) -> list[tuple[CategoryCard, float]]:
-        qvec = [float(x) for x in await self._tower.encode_query(query)]
+        breaker = _os_breaker()
+        # 熔断判定放在 encode 之前：OpenSearch 已经挂了就没必要再花一次 embedding 往返去编码
+        # 一个注定发不出去的查询。
+        if not breaker.allow():
+            logger.warning("OpenSearch 已熔断（%.0fs），本次跳过检索", breaker.open_seconds)
+            return []
+        try:
+            qvec = [float(x) for x in await self._tower.encode_query(query)]
+        except Exception:
+            # embedding 挂了不是 OpenSearch 的锅，但放行过就必须记一笔：什么都不记会让半开探测
+            # 永远卡在 HALF_OPEN，断路器从此恒放行、静默失效。
+            breaker.record_neutral()
+            raise
         # 关 BM25 后只剩单子路：**不能**再走 hybrid + pipeline——归一化管道的融合权重
         # 是两个（KNN/BM25），子路数与权重数不匹配直接 400（口语金标的语义 token query
         # 实测踩中）。退成裸 KNN 查询，分数即原始余弦，排序语义不变。
@@ -274,8 +304,10 @@ class KBClient:
             )
         except Exception as exc:  # noqa: BLE001 —— OpenSearch 不可用不该让工具崩
             # refdocs §6.4：检索后端挂了不抛异常，返回空让上层给低置信度结果。
+            breaker.record_failure()
             logger.warning("OpenSearch 检索失败，降级为空召回：%s", exc)
             return []
+        breaker.record_success()
         out: list[tuple[CategoryCard, float]] = []
         for hit in resp.get("hits", {}).get("hits", []):
             src = dict(hit.get("_source", {}))
@@ -286,13 +318,19 @@ class KBClient:
     async def _fetch_remote(self, category: str) -> list[CategoryCard]:
         """term 精确取一个品类的全部卡片（不走 hybrid pipeline，纯结构化查询）。"""
         body = {"size": FETCH_SIZE, "query": {"term": {"category.raw": category}}}
+        breaker = _os_breaker()
+        if not breaker.allow():
+            logger.warning("OpenSearch 已熔断（%.0fs），本次跳过取卡", breaker.open_seconds)
+            return []
         try:
             resp = self._client().search(
                 index=INDEX_NAME, body=body, request_timeout=clamp_timeout(OS_REQUEST_TIMEOUT_SEC)
             )
         except Exception as exc:  # noqa: BLE001 —— 同 _search_remote：后端挂了降级为空
+            breaker.record_failure()
             logger.warning("OpenSearch 取卡失败，降级为空：%s", exc)
             return []
+        breaker.record_success()
         cards: list[CategoryCard] = []
         for hit in resp.get("hits", {}).get("hits", []):
             src = dict(hit.get("_source", {}))

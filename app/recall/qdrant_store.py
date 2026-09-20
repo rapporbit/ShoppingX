@@ -26,7 +26,9 @@ from qdrant_client import QdrantClient, models
 
 from app.api.context import clamp_timeout
 from app.recall.schemas import ItemRecord, RecallCandidate
+from app.utils.circuit_breaker import CircuitBreaker
 from app.utils.dependency import DependencyDown
+from app.utils.env import env_float, env_int
 
 COLLECTION = os.environ.get("QDRANT_COLLECTION", "shoppingx_items")
 DENSE_VEC = "dense"
@@ -52,20 +54,46 @@ def _query_timeout() -> int:
     return max(1, math.ceil(clamp_timeout(QUERY_TIMEOUT_SEC)))
 
 
+@lru_cache(maxsize=1)
+def _remote_breaker() -> CircuitBreaker:
+    """远程 Qdrant 的进程级断路器（阶段 4-4）。
+
+    阈值比 reranker（5 次）低：reranker 挂了只是排序退化，多试几次代价小；主检索挂了这一轮
+    必然交付不出商品，早一次熔断就少等一次 5 秒超时。恢复窗口 30s 与其余外呼一致。
+    """
+    return CircuitBreaker(
+        "qdrant",
+        failure_threshold=env_int("QDRANT_CB_THRESHOLD", 3),
+        recovery_timeout=env_float("QDRANT_CB_RECOVERY", 30.0),
+    )
+
+
 @contextmanager
-def _qdrant_call(op: str) -> Iterator[None]:
+def _qdrant_call(op: str, breaker: CircuitBreaker | None = None) -> Iterator[None]:
     """把一次 Qdrant 往返的故障统一翻成 :class:`DependencyDown`（重试无意义那一档）。
 
     **只包客户端调用那几行**，不包外面的 payload → ``RecallCandidate`` 构造：后者失败是建库数据
     与 schema 对不上，属于该修的代码问题，翻成「依赖挂了」会把真 bug 藏起来，还会让模型对着一个
     其实能修的错误放弃检索。
+
+    ``breaker`` 非空时本次往返计入熔断：OPEN 期直接抛 ``DependencyDown``、不发请求——超时值是
+    钉死的 5s，而同轮 batch 常有 3~5 条 ``item_search`` 并发，Qdrant 真挂时它们会各等各的 5s。
+    熔断把「每条都等满」压成「第一条等满，其余立刻返回」。
     """
+    if breaker is not None and not breaker.allow():
+        raise DependencyDown(
+            "qdrant", f"连续失败已熔断（{breaker.open_seconds:.0f}s），本次未发起请求"
+        )
     try:
         yield
-    except DependencyDown:
-        raise
-    except Exception as exc:  # noqa: BLE001 - 底层异常类型随 client/传输层浮动，统一归口
+    except Exception as exc:
+        if breaker is not None:
+            breaker.record_failure()
+        if isinstance(exc, DependencyDown):
+            raise
         raise DependencyDown("qdrant", f"{op} 失败：{type(exc).__name__}") from exc
+    if breaker is not None:
+        breaker.record_success()
 
 
 def make_client(timeout: float | None = None) -> QdrantClient:
@@ -92,6 +120,12 @@ class QdrantRecall:
 
     def __init__(self, client: QdrantClient | None = None) -> None:
         self._client = client or make_client()
+        # 只有「按 env 自己连的远程 server」才挂断路器。本地 / 内存模式没有网络往返，失败是
+        # 配置或代码问题（collection 没建、向量维度不对），熔断只会把该暴露的错误压成一句
+        # 「服务不可用」；外部传进来的 client 同理——离线脚本与测试不该共享一个熔断状态。
+        self._breaker: CircuitBreaker | None = (
+            _remote_breaker() if client is None and os.environ.get("QDRANT_URL") else None
+        )
 
     @property
     def client(self) -> QdrantClient:
@@ -196,7 +230,7 @@ class QdrantRecall:
             must.append(models.FieldCondition(key="rating", range=models.Range(gte=min_rating)))
         flt = models.Filter(must=must) if must else None
         dense = [float(x) for x in np.asarray(dense_vec, dtype=np.float32).ravel()]
-        with _qdrant_call("dense 检索"):
+        with _qdrant_call("dense 检索", self._breaker):
             res = self._client.query_points(
                 COLLECTION,
                 query=dense,
@@ -222,7 +256,7 @@ class QdrantRecall:
         ids = [i for i in dict.fromkeys(item_ids) if i]
         if not ids:
             return []
-        with _qdrant_call("按 id 回源"):
+        with _qdrant_call("按 id 回源", self._breaker):
             found, _ = self._client.scroll(
                 COLLECTION,
                 scroll_filter=models.Filter(
@@ -248,7 +282,7 @@ class QdrantRecall:
         商品自身必然是自己的最近邻（score≈1），多取一条再按 item_id 剔除自身。
         item_id 在库里不存在（老会话的收藏、换过库）时返回空列表，由上层决定怎么呈现。
         """
-        with _qdrant_call("搜同款定位"):
+        with _qdrant_call("搜同款定位", self._breaker):
             found, _ = self._client.scroll(
                 COLLECTION,
                 scroll_filter=models.Filter(
@@ -262,7 +296,7 @@ class QdrantRecall:
             )
         if not found:
             return []
-        with _qdrant_call("搜同款近邻"):
+        with _qdrant_call("搜同款近邻", self._breaker):
             res = self._client.query_points(
                 COLLECTION,
                 query=found[0].id,  # 按 point id 取近邻：向量不出服务端，省一趟 1024 维往返
