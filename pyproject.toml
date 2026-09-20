@@ -41,9 +41,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# 换库驱动（批 2）。**刻意不进主依赖**：默认部署是 SQLite（``var/globex.db``），多装两个数据库
-# 驱动只是让镜像变大、且 asyncpg 要编译。真把 DATABASE_URL 指向 MySQL / PostgreSQL 时才装：
-# ``uv sync --extra db``。app/db/session.py 已按驱动分支好池参数，装上即用，代码零改动。
+# 换库驱动。阶段 1 条 7 之后，**任何真实部署都要装它**：起服闸要求 DATABASE_URL 是 MySQL，
+# 没有 aiomysql 就连不上库。留在 optional 而不是并入主依赖，是因为单元测试跑 SQLite fixture、
+# 不需要驱动，而 asyncpg 要编译、装一次好几十秒。部署侧装法：``uv sync --extra db``，或让
+# Dockerfile 的 UV_EXTRAS 带上（prod / multi 两份 compose 都已在 build.args 里传）。
+# app/db/session.py 已按驱动分支好池参数，装上即用，代码零改动。
 db = [
     "aiomysql>=0.3.2",
     "asyncpg>=0.31.0",
