@@ -90,3 +90,31 @@ def test_thread_scope_binds_log_context() -> None:
         assert ctx.get("user_id") == "u-7"
     # 离开作用域后还原。
     assert "thread_id" not in structlog.contextvars.get_contextvars()
+
+
+def test_thread_scope_binds_request_id_from_queue() -> None:
+    """worker 侧把队列消息带来的 request_id 绑回日志（阶段 4-5）。
+
+    这是跨进程对账的落点：API 进程那几行和 worker 这一整轮，靠这一个字段才拼得起来。
+    """
+    from app.api.context import get_request_id
+    from app.utils.thread_ctx import thread_scope
+
+    configure_logging()
+    structlog.contextvars.clear_contextvars()
+
+    with thread_scope("thr-1", Path("/tmp/x"), request_id="ab12cd34"):
+        assert structlog.contextvars.get_contextvars().get("request_id") == "ab12cd34"
+        assert get_request_id() == "ab12cd34"
+    assert "request_id" not in structlog.contextvars.get_contextvars()
+    assert get_request_id() == ""
+
+
+def test_thread_scope_without_request_id_adds_no_empty_field() -> None:
+    """离线脚本 / 单测没有 request_id：不绑，别给每条日志加一列空字段。"""
+    from app.utils.thread_ctx import thread_scope
+
+    configure_logging()
+    structlog.contextvars.clear_contextvars()
+    with thread_scope("thr-2", Path("/tmp/x")):
+        assert "request_id" not in structlog.contextvars.get_contextvars()

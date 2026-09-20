@@ -557,9 +557,7 @@ async def test_clear_preferences_bumps_purge_generation(
 
 
 # ---------- GET /api/similar：不再按长期记忆过滤（M4）----------
-async def test_similar_returns_neighbors_unfiltered(
-    client: AsyncClient, monkeypatch: Any
-) -> None:
+async def test_similar_returns_neighbors_unfiltered(client: AsyncClient, monkeypatch: Any) -> None:
     """搜同款不走 AgentLoop，也**不再**自己按记忆挡一遍。
 
     记忆现在只有一种生效方式——模型把它写进工具入参——而这条通路没有模型。留一条看不见的
@@ -631,3 +629,17 @@ async def test_download_upload_missing_404(
 
     resp = await client.get("/api/uploads/t-img/gone.png")
     assert resp.status_code == 404
+
+
+# ---------- request_id（阶段 4-5：API 与 worker 两个进程的日志关联）----------
+async def test_response_carries_request_id(client: AsyncClient) -> None:
+    """每个响应都回显 request_id——出问题时用户截图里就带着它。"""
+    resp = await client.get("/api/task/nope/inflight")
+    rid = resp.headers.get("X-Request-Id", "")
+    assert len(rid) == 16, f"没生成 request_id：{rid!r}"
+
+
+async def test_incoming_request_id_is_reused(client: AsyncClient) -> None:
+    """前面挡着 nginx 时它才是真正的入口，自己再生成一个等于在链路中间断一次。"""
+    resp = await client.get("/api/task/nope/inflight", headers={"X-Request-Id": "from-edge-1"})
+    assert resp.headers["X-Request-Id"] == "from-edge-1"

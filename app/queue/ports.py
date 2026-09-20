@@ -64,6 +64,12 @@ class IntentTask:
     skill: str = ""
     kind: RequestClass = "normal"
     enqueued_at: str = field(default_factory=_now_iso)
+    # 跨进程的日志关联 id（阶段 4-5）：API 收到请求时生成，随消息进队列，worker 消费时绑回
+    # 日志上下文，是把两个进程的日志接起来的唯一一根线。
+    # **刻意不叫 trace_id**：``run_agent`` 的返回值里已经有一个 trace_id（Langfuse 的，由 worker
+    # 侧根 span 生成、只覆盖 run_agent 内部），两个同名不同物的 id 会让排查时对着日志猜是哪个。
+    # 老消息没有这个字段，留空即可。
+    request_id: str = ""
 
     @classmethod
     def create(
@@ -77,6 +83,7 @@ class IntentTask:
         platforms: Sequence[str] | None = None,
         image_paths: Sequence[str] | None = None,
         skill: str | None = None,
+        request_id: str = "",
     ) -> IntentTask:
         """按历史轮数判池并构造任务——分流阈值的唯一入口，调用方不要自己拿轮数比大小。"""
         return cls(
@@ -88,6 +95,7 @@ class IntentTask:
             image_paths=tuple(image_paths or ()),
             skill=skill or "",
             kind=classify_request(history_turns),
+            request_id=request_id,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -101,6 +109,7 @@ class IntentTask:
             "skill": self.skill,
             "kind": self.kind,
             "enqueued_at": self.enqueued_at,
+            "request_id": self.request_id,
         }
 
     @staticmethod
@@ -121,6 +130,7 @@ class IntentTask:
             skill=str(raw.get("skill") or ""),
             kind="heavy" if kind == "heavy" else "normal",
             enqueued_at=raw.get("enqueued_at", ""),
+            request_id=str(raw.get("request_id") or ""),
         )
 
 
