@@ -60,6 +60,9 @@ QUEUE_PENDING = Gauge("shoppingx_queue_pending", "当前排队等待的任务数
 # 「哪堵墙被模型撞得最多」是闸立错位置的直接信号——某 gate 的 escape 抬头说明它依据的
 # 上游判定常失准；reject 持续高但零 escape 的多半是安全闸被反复试探，值得翻 trace。
 GATE_EVENTS = Counter("shoppingx_gate_events_total", "硬闸拒绝/逃生事件", ["gate", "outcome"])
+# LLM 令牌桶事件：event=degraded（Redis 不可用，退进程内桶）/ overflow（等满上限仍无令牌，放行）。
+# 两条都不该常亮：degraded 抬头查 Redis，overflow 抬头说明限额配小了或副本开多了。
+LLM_BUCKET_EVENTS = Counter("shoppingx_llm_bucket_events_total", "LLM 令牌桶事件", ["event"])
 
 _STATE_CODE = {OPEN: 1, HALF_OPEN: 2}  # 其余（CLOSED）记 0
 
@@ -90,6 +93,11 @@ def record_security_event(kind: str) -> None:
 def record_gate_event(gate: str, outcome: str) -> None:
     """记一次硬闸事件。``outcome`` 取 ``reject`` / ``escape``。"""
     GATE_EVENTS.labels(gate=gate, outcome=outcome).inc()
+
+
+def record_llm_bucket(event: str) -> None:
+    """记一次 LLM 令牌桶事件。``event`` 取 ``degraded`` / ``overflow``。"""
+    LLM_BUCKET_EVENTS.labels(event=event).inc()
 
 
 def record_tier_change(tier: str) -> None:

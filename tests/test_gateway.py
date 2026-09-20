@@ -10,8 +10,10 @@ from collections.abc import AsyncGenerator
 
 import pytest
 from agentscope.credential import OpenAICredential
-from agentscope.model import ChatResponse
+from agentscope.message import TextBlock
+from agentscope.model import ChatResponse, ChatUsage
 
+from app.agent import gateway
 from app.agent.gateway import GatewayThrottle, ThrottledChatModel
 
 
@@ -277,3 +279,91 @@ def test_fallback_model_disabled_when_unset_or_same(monkeypatch: pytest.MonkeyPa
     # Agent 层不再叠加重试：模型自己那层已经重试过，两层相乘会把 429 火上浇油
     assert llm.get_model_config().max_retries == 0
     _clear_factory_caches()
+
+
+# ── 令牌桶挂点（阶段 2 第 4 条）────────────────────────────────────────────────
+class _BucketSpy:
+    """替掉 gateway 里那两个桶入口，只记「拿什么参数调的」。"""
+
+    def __init__(self, reserved: int = 4096) -> None:
+        self.reserved = reserved
+        self.acquired: list[tuple[str, int]] = []
+        self.settled: list[tuple[str, int, int]] = []
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def fake_acquire(ref: str, prompt_tokens: int) -> int:
+            self.acquired.append((ref, prompt_tokens))
+            return self.reserved
+
+        async def fake_settle(ref: str, reserved: int, actual: int) -> None:
+            self.settled.append((ref, reserved, actual))
+
+        monkeypatch.setattr(gateway, "bucket_acquire", fake_acquire)
+        monkeypatch.setattr(gateway, "bucket_settle", fake_settle)
+
+
+@pytest.mark.asyncio
+async def test_bucket_settles_with_real_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """非流式：预扣按估算的输入走，结算用**真实 usage 的输入+输出**。"""
+    spy = _BucketSpy()
+    spy.install(monkeypatch)
+    model = _model(GatewayThrottle(max_concurrency=2))
+
+    async def fake_call_api(*_args: object, **_kwargs: object) -> ChatResponse:
+        return ChatResponse(
+            content=[], is_last=True, usage=ChatUsage(input_tokens=900, output_tokens=120, time=0.1)
+        )
+
+    model._call_api = fake_call_api  # type: ignore[method-assign]
+    await model(messages=[{"role": "user", "content": "买个旅行三件套"}])
+
+    assert len(spy.acquired) == 1 and spy.acquired[0][0] == "test-model"
+    assert spy.acquired[0][1] > 0  # 估算的输入 token
+    assert spy.settled == [("test-model", 4096, 1020)]
+
+
+@pytest.mark.asyncio
+async def test_bucket_settles_stream_with_last_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """流式：usage 只有后面的片带，结算要用**最后看到的那份**，且等流走完才结。"""
+    spy = _BucketSpy()
+    spy.install(monkeypatch)
+    model = _model(GatewayThrottle(max_concurrency=2))
+
+    async def fake_call_api(
+        *_args: object, **_kwargs: object
+    ) -> AsyncGenerator[ChatResponse, None]:
+        async def gen() -> AsyncGenerator[ChatResponse, None]:
+            # 片要带内容：空内容的片会被 AgentScope 的流包装丢掉，断言就落空了
+            yield ChatResponse(content=[TextBlock(type="text", text="旅")], is_last=False)
+            yield ChatResponse(
+                content=[TextBlock(type="text", text="旅行三件套")],
+                is_last=True,
+                usage=ChatUsage(input_tokens=700, output_tokens=55, time=0.1),
+            )
+
+        return gen()
+
+    model._call_api = fake_call_api  # type: ignore[method-assign]
+    stream = await model(messages=[{"role": "user", "content": "hi"}])
+    chunks = [chunk async for chunk in stream]
+
+    assert len(chunks) == 2
+    assert spy.settled == [("test-model", 4096, 755)]
+
+
+@pytest.mark.asyncio
+async def test_bucket_does_not_settle_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """失败路径不结算：没有 usage 就没有真实用量，按 0 补回去等于宣称这次没花 token。"""
+    spy = _BucketSpy()
+    spy.install(monkeypatch)
+    model = _model(GatewayThrottle(max_concurrency=2))
+
+    async def boom(*_args: object, **_kwargs: object) -> ChatResponse:
+        raise RuntimeError("boom")
+
+    model._call_api = boom  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        await model(messages=[{"role": "user", "content": "hi"}])
+
+    assert len(spy.acquired) == 1
+    assert spy.settled == []

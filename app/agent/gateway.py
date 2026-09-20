@@ -17,6 +17,10 @@
 **断路器挂在同一层**（阶段 2 第 1 条，口径见 :mod:`app.agent.llm_breaker`）：闸在取 slot 之前，
 记账在调用/流结束之后，首 token 预算在第一片上。放这层是因为它和闸门问的是同一个问题的两半
 ——闸门管「发不发得出去」，断路器管「还值不值得发」。
+
+**令牌桶也在这一层**（阶段 2 第 4 条，见 :mod:`app.agent.token_bucket`）。它和上面那两个的分工
+按「管谁」切：信号量管**本进程**同时在飞几条，桶管**所有副本**一分钟内总共发几条、烧多少 token。
+顺序是断路器 → 桶 → slot：前两道都是「先别发」的判断，占着并发位去做这种判断是浪费。
 """
 
 import asyncio
@@ -36,9 +40,29 @@ from app.agent.llm_breaker import (
     get_llm_breaker,
     record_outcome,
 )
+from app.agent.token_bucket import acquire as bucket_acquire
+from app.agent.token_bucket import estimate_prompt_tokens
+from app.agent.token_bucket import settle as bucket_settle
 from app.agent.transient import is_rate_limited
 
 logger = logging.getLogger(__name__)
+
+
+def _usage_total(res: Any) -> int:
+    """从 ``ChatResponse.usage`` 取「这次一共烧了多少 token」。取不到返回 0（= 不结算）。
+
+    输入 + 输出都算：供应商的 TPM 限的是总量，不是只数输入。命中前缀缓存的那部分**照样计入**
+    ——按量付费档没有缓存折扣（计划 §4 第 6 条核过），按打折算会让桶比真实配额放得更宽。
+    """
+    usage = getattr(res, "usage", None)
+    if usage is None:
+        return 0
+    try:
+        return int(getattr(usage, "input_tokens", 0) or 0) + int(
+            getattr(usage, "output_tokens", 0) or 0
+        )
+    except (TypeError, ValueError):  # pragma: no cover - 供应商回了奇怪的形状
+        return 0
 
 
 class GatewayThrottle:
@@ -147,6 +171,12 @@ class ThrottledChatModel(OpenAIChatModel):
         breaker = get_llm_breaker(self.model)
         if breaker is not None and not breaker.allow():
             raise CircuitOpenError(f"模型出口 {self.model} 断路器 OPEN，快速失败")
+        # 令牌桶（跨副本）排在**取 slot 之前**：等令牌等的是全局配额，占着本进程的并发位去等，
+        # 等于拿 20 个槽换一条跨副本的队——槽要留给真正在飞的请求。顺序与断路器同理。
+        messages = kwargs.get("messages") or (args[0] if args else None)
+        reserved = await bucket_acquire(
+            self.model, estimate_prompt_tokens(messages, kwargs.get("tools"))
+        )
         cm = self._throttle.slot()
         await cm.__aenter__()
         # 计时从**拿到 slot 之后**开始：排队等并发位、等起点间隔是我们自己的节流，算进首 token
@@ -159,14 +189,17 @@ class ThrottledChatModel(OpenAIChatModel):
             if is_rate_limited(exc):
                 self._throttle.penalize(self._rate_limit_backoff)
             record_outcome(breaker, exc)
+            # 失败路径**不结算**：拿不到 usage 就没有「真实用量」可言，按 0 补回去等于宣称这次
+            # 调用没花 token。失败的请求多半也确实在对面烧过算力，预扣留在账上是保守的那一侧。
             await cm.__aexit__(type(exc), exc, exc.__traceback__)
             raise
         finally:
             _current_attempt.reset(token)
         if isinstance(res, AsyncGenerator):
-            # 流式：请求还在飞，slot 与断路器的记账都交给包装生成器。
-            return self._stream_holding_slot(res, cm, breaker, attempt.started)
+            # 流式：请求还在飞，slot / 断路器记账 / 桶结算都交给包装生成器。
+            return self._stream_holding_slot(res, cm, breaker, attempt.started, reserved)
         record_outcome(breaker, None)
+        await bucket_settle(self.model, reserved, _usage_total(res))
         await cm.__aexit__(None, None, None)
         return res
 
@@ -217,11 +250,15 @@ class ThrottledChatModel(OpenAIChatModel):
         cm: Any,
         breaker: Any = None,
         started: float = 0.0,
+        reserved: int = 0,
     ) -> AsyncGenerator[Any, None]:
         """转发流式响应，把 slot 持有到生成器耗尽或被 ``aclose()``。
 
         断路器在这里才记账：流式下 ``__call__`` 返回时请求其实刚发出去，成败要等流走完才知道。
+        令牌桶结算同理，而且 usage **只有最后几片带**（前面的片连这个属性都可能没有），所以
+        一路记着最后一次看到的那份，流走完再拿它找平。
         """
+        usage_total = 0
         try:
             agen = stream.__aiter__()
             empty = False
@@ -230,15 +267,19 @@ class ThrottledChatModel(OpenAIChatModel):
             except StopAsyncIteration:  # 空流：对面直接结束，不是超时
                 empty = True
             if not empty:
+                usage_total = _usage_total(first) or usage_total
                 yield first
                 async for chunk in agen:
+                    usage_total = _usage_total(chunk) or usage_total
                     yield chunk
         except BaseException as exc:
             if is_rate_limited(exc):
                 self._throttle.penalize(self._rate_limit_backoff)
             record_outcome(breaker, exc)
+            # 中途断掉（含用户 aclose）同样不结算，理由见 ``__call__`` 的失败路径。
             await cm.__aexit__(type(exc), exc, exc.__traceback__)
             raise
         else:
             record_outcome(breaker, None)
+            await bucket_settle(self.model, reserved, usage_total)
             await cm.__aexit__(None, None, None)
