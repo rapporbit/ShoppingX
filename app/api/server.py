@@ -108,6 +108,7 @@ from app.observability.logging import configure_logging
 from app.queue import (
     TERMINAL_STATES,
     IntentTask,
+    TaskQueue,
     TaskStatus,
     get_task_queue,
 )
@@ -158,6 +159,13 @@ QUEUE_POLL_SECONDS = env_int("QUEUE_POLL_MS", 1000) / 1000
 # 等结果的上限。worker 整批挂掉时，API 侧的 waiter 不能就这么挂着——active_tasks 里留一条永不退休的
 # 记录，会让同 thread 同 query 永远被幂等第 1 层判成 already_running。
 QUEUE_WAIT_TIMEOUT_SEC = env_int("QUEUE_WAIT_TIMEOUT_SEC", 1800)
+# 等「开始跑」的上限（阶段 4-1）。上面那条守的是「跑起来了但永远不收尾」，这条守的是**根本没人领**
+# ——worker 整批挂了、或队列深度远超消费能力。两者的处置必须不同：那条只能报错认栽（任务可能真在跑，
+# 作废它就是双跑），这条能连消息一起作废，因为「一直是 queued」本身就说明没有任何 worker 碰过它。
+#
+# 60s 不是拍的：正常排队等的是前面几条任务，estimated_wait_seconds 按 WORKER_CONCURRENCY 摊完通常
+# 在几十秒内；真等过一分钟还没人领，多半不是忙而是没人在了。设 0 关掉这道闸。
+QUEUE_START_TIMEOUT_SEC = env_int("QUEUE_START_TIMEOUT_SEC", 60)
 
 
 def _safe_session_dir(root: Path, thread_id: str) -> Path:
@@ -526,6 +534,56 @@ async def _report_cancel_if_queued(task_id: str, thread_id: str) -> None:
         await monitor.report_task_cancelled(thread_id=thread_id)
 
 
+async def _abandon_queued(intent: IntentTask, queue: TaskQueue) -> bool:
+    """排队等太久还没人领：作废这条任务，把进门占下的东西原路还回。返回「是否真的作废了」。
+
+    **先落标记、再复查状态**，顺序不能反。反过来有个窗口：复查时还是 ``queued``，落标记之前 worker
+    把它领走并跑过了自查，标记就成了没人看的废纸——而我们这边已经按作废收了尾（用户看见超时、预扣
+    还了），worker 那头照跑不误，一轮 run 白烧还没人认账。先落标记则 worker 只剩两种下场：自查在
+    标记之后 → 看见标记、跳过；自查在标记之前 → 它必然已把状态推过 ``queued``，复查读得到，我们撤
+    回标记继续等。
+
+    剩下的窄窗口是「worker 已过自查、``running`` 还没落库」那几个 await。这一刻两边都以为自己说了
+    算，用户会看到超时而任务其实在跑。收窄到这就够了——代价是一条多余的 ``queue_timeout`` 事件，
+    不是重复下单（写边界另有确认卡与 run_id 幂等键守着）。
+
+    没有控制面（单进程模式 / Redis 不可用）时**不作废**：标记落不下去就没人拦得住 worker 将来领走
+    它，此时报超时等于骗用户——他看到失败去重发，而十分钟后那条老消息又跑了一遍。
+    """
+    if not await control.mark_cancel_only(intent.task_id):
+        return False
+    status = await queue.get_status(intent.task_id)
+    if status is not None and status.state != "queued":
+        await control.clear_cancel_mark(intent.task_id)
+        return False
+    logger.warning(
+        "排队超时未开跑（%ds），已作废：task=%s thread=%s",
+        QUEUE_START_TIMEOUT_SEC,
+        intent.task_id,
+        intent.thread_id,
+    )
+    metrics.record_task_rejected("queue_start_timeout")
+    # 顺序同 worker 的 _finalize_interrupted：事件 → 还预扣/占位/指纹 → **最后**写终态。占位还挂着
+    # 时就写终态，用户看到失败立刻重发，会被自己刚作废的这一轮以 already_running 挡在门外。
+    await monitor.report_error(
+        "queue_timeout", "排队超时，任务未能开始执行，请重发", thread_id=intent.thread_id
+    )
+    await _rollback_claim(
+        intent.task_id, intent.thread_id, user_id=intent.user_id, query=intent.query
+    )
+    # 终态用 failed 而不是 cancelled：``cancelled`` 的约定是「用户自己掐的，别再重试」，而这里任务
+    # 本身没毛病，重发就能好（口径见 queue/ports.py 的 TaskState 注释）。
+    await queue.set_status(
+        TaskStatus(
+            task_id=intent.task_id,
+            state="failed",
+            thread_id=intent.thread_id,
+            error="排队超时，任务未开始执行，请重发",
+        )
+    )
+    return True
+
+
 async def _queued_runner(intent: IntentTask, position: int) -> None:
     """队列模式下 API 侧的影子协程：入队 → 报排位 → 等 worker 跑完。
 
@@ -562,11 +620,22 @@ async def _queued_runner(intent: IntentTask, position: int) -> None:
                 estimated_wait_seconds(position - 1, WORKER_CONCURRENCY),
                 intent.kind,
             )
-        while asyncio.get_running_loop().time() < deadline:
+        loop = asyncio.get_running_loop()
+        start_deadline = (
+            loop.time() + QUEUE_START_TIMEOUT_SEC if QUEUE_START_TIMEOUT_SEC > 0 else None
+        )
+        while loop.time() < deadline:
             await asyncio.sleep(QUEUE_POLL_SECONDS)
             status = await queue.get_status(intent.task_id)
             if status is not None and status.state in TERMINAL_STATES:
                 return
+            still_queued = status is None or status.state == "queued"
+            if start_deadline is not None and still_queued and loop.time() >= start_deadline:
+                # 作废失败（没控制面 / worker 刚领走）就把这道闸关掉，继续等到 wait 超时。不重试：
+                # 重试每轮都要打一次 Redis，而作废不掉的两个原因都不会在秒级内变。
+                if await _abandon_queued(intent, queue):
+                    return
+                start_deadline = None
         logger.warning(
             "等结果超时（%ds）：task=%s thread=%s",
             QUEUE_WAIT_TIMEOUT_SEC,

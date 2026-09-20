@@ -264,6 +264,17 @@ class _SpyBus:
         while task_id in self.marked:
             self.marked.remove(task_id)
 
+    # 订阅端三件套：用例里起 worker 时 start_control_plane 会挂处理器。本替身不投递任何广播
+    # （跨进程指令的送达在 tests/test_clarification.py），有这三个方法只是为了让接线跑得起来。
+    def on(self, _kind: str, _handler: Any) -> None:
+        return None
+
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
     async def load(self, _key: str) -> str | None:
         return None  # 澄清令牌不在本文件的射程内（见 tests/test_clarification.py）
 
@@ -492,3 +503,100 @@ async def test_clarify_endpoint_404_when_nobody_is_waiting(client: AsyncClient) 
     """没人在等（从没提问 / 已超时 / 令牌过期）→ 404，绝不把迟到的回复塞给下一个问题。"""
     resp = await client.post("/api/clarify/cl-b", json={"text": "无人问津"})
     assert resp.status_code == 404
+
+
+# ---------- 入队等待上限（阶段 4-1）----------
+#
+# 守的是「worker 整批挂了 / 队列堆到消费不过来」这一类：任务入了队却没人领。老行为是干等到
+# QUEUE_WAIT_TIMEOUT_SEC（30 分钟）才报一句超时，而那条消息仍躺在队列里，十分钟后可能被
+# XAUTOCLAIM 重投给某个 worker 静默跑一遍——用户早关了页面，事件推给没人听的 thread，账还要再记
+# 一次。所以这里不只报错，还要**连消息一起作废**（落取消标记，worker 领到时自查跳过）。
+
+
+async def test_queued_task_is_abandoned_when_nobody_picks_it_up(
+    client: AsyncClient, queue: InProcessQueue, monkeypatch: pytest.MonkeyPatch, spy_bus: Any
+) -> None:
+    """等够 QUEUE_START_TIMEOUT_SEC 仍是 queued → 报超时 + 落标记 + 终态 failed + 摘掉账本。"""
+    ran = _stub_agent(monkeypatch)
+    monkeypatch.setattr(server, "QUEUE_START_TIMEOUT_SEC", 0.05)
+    errors: list[tuple[str, str | None]] = []
+
+    async def _spy(error_type: str, message: str, thread_id: str | None = None) -> None:
+        errors.append((error_type, thread_id))
+
+    monkeypatch.setattr(monitor, "report_error", _spy)
+    resp = await client.post("/api/task", json={"query": "买帐篷", "thread_id": "qt-a"})
+    task_id = resp.json()["task_id"]
+
+    # 等终态而不是等事件：收尾顺序是「事件 → 还占位 → 终态」，终态落库才算这一轮真的收干净
+    await _wait(lambda: _state_is(client, task_id, "failed"))
+    # failed 而不是 cancelled：任务本身没毛病，重发就能好（口径见 queue/ports.py 的 TaskState）
+    assert errors[0] == ("queue_timeout", "qt-a")
+    assert spy_bus.marked == [task_id]  # 按 task_id 作废，不按 thread（会误伤覆盖重发的新任务）
+    await _wait(lambda: "qt-a" not in server.active_tasks)  # 账本摘干净，同 thread 能立刻重发
+
+    # 消息还躺在队列里，但 worker 领到时自查标记即跳过——不会在十分钟后偷偷跑一遍
+    stop = asyncio.Event()
+    runner = asyncio.create_task(
+        worker.run_worker(queue, concurrency=1, stop=stop, install_signals=False)
+    )
+    try:
+        await _wait(lambda: _state_is(client, task_id, "cancelled"))
+    finally:
+        stop.set()
+        await asyncio.wait_for(runner, 3.0)
+    assert ran == []  # 一次 run_agent 都没跑
+
+
+async def test_running_task_is_never_abandoned(
+    client: AsyncClient, queue: InProcessQueue, monkeypatch: pytest.MonkeyPatch, spy_bus: Any
+) -> None:
+    """这道闸只管「没人领」：状态已推过 queued 就撤回标记继续等，不能把正在跑的任务掐了。"""
+    _stub_agent(monkeypatch)
+    monkeypatch.setattr(server, "QUEUE_START_TIMEOUT_SEC", 0.05)
+    errors: list[str] = []
+
+    async def _spy(error_type: str, message: str, thread_id: str | None = None) -> None:
+        errors.append(error_type)
+
+    monkeypatch.setattr(monitor, "report_error", _spy)
+    resp = await client.post("/api/task", json={"query": "买帐篷", "thread_id": "qt-b"})
+    task_id = resp.json()["task_id"]
+    await _wait(queue.depth)  # 等影子协程真的入完队（它写的 queued 会盖掉我们先写的 running）
+    await queue.set_status(server.TaskStatus(task_id=task_id, state="running", thread_id="qt-b"))
+
+    await asyncio.sleep(0.3)  # 跨过超时点好几轮轮询
+    assert errors == []
+    assert spy_bus.marked == []  # 标记落过一次，复查读到 running 后撤了回去
+    status = await queue.get_status(task_id)
+    assert status is not None and status.state == "running"
+    assert "qt-b" in server.active_tasks  # 影子协程照常在等结果
+
+
+async def test_no_control_plane_means_no_abandon(
+    client: AsyncClient, queue: InProcessQueue, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """没有控制面（单进程 / Redis 不可用）时不作废：标记落不下去，就没人拦得住 worker 将来领走它。
+
+    此刻报超时等于骗用户——他看到失败去重发，而十分钟后那条老消息又跑了一遍，两轮都记了账。
+    宁可让他继续等到 QUEUE_WAIT_TIMEOUT_SEC。
+    """
+    _stub_agent(monkeypatch)
+    control.set_control_bus(None)
+    monkeypatch.setattr(server, "QUEUE_START_TIMEOUT_SEC", 0.05)
+    errors: list[str] = []
+
+    async def _spy(error_type: str, message: str, thread_id: str | None = None) -> None:
+        errors.append(error_type)
+
+    monkeypatch.setattr(monitor, "report_error", _spy)
+    try:
+        resp = await client.post("/api/task", json={"query": "买帐篷", "thread_id": "qt-c"})
+        task_id = resp.json()["task_id"]
+        await asyncio.sleep(0.3)
+        assert errors == []
+        status = await queue.get_status(task_id)
+        assert status is not None and status.state == "queued"
+        assert "qt-c" in server.active_tasks
+    finally:
+        control.reset_control_bus()
