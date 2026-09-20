@@ -118,11 +118,17 @@ def get_gateway_throttle() -> GatewayThrottle:
     """进程内共享的一份闸门（主 / 快档 / 判官 / 备用共用一个并发池）。
 
     共享是刻意的：网关的 RPM 是按 API key 算的，分开各建各的池子等于把限流让给运气。
+
+    **默认 20 而不是 4**（阶段 2 第 5 条）：4 是单进程时代用来代替限流的——多副本一拆它既挡不住
+    供应商的配额（N 个进程 × 4），又把本进程的吞吐锁死在 4 条在飞请求上。限流的活现在归
+    :mod:`app.agent.token_bucket`（跨副本的 RPM/TPM 双桶）；这里只剩「一个进程别把自己的事件
+    循环塞爆」这一件事，20 是给它的。**全局在飞数不做**：RPM 桶作代理——按 RPM 限住起点速率，
+    在飞数自然被「速率 × 单条时长」框住，为一个派生量再建一套跨进程状态不值当。
     """
     global _throttle
     if _throttle is None:
         _throttle = GatewayThrottle(
-            max_concurrency=_env_int("LLM_MAX_CONCURRENCY", 4),
+            max_concurrency=_env_int("LLM_MAX_CONCURRENCY", 20),
             min_interval=_env_float("LLM_MIN_INTERVAL_SECONDS", 0.0),
         )
     return _throttle
