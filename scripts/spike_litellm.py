@@ -17,6 +17,7 @@
 
 import argparse
 import asyncio
+import contextlib
 import json
 import os
 import statistics
@@ -28,6 +29,9 @@ from aiohttp import web
 # ── mock OpenAI 兼容端点 ─────────────────────────────────────────────────────
 
 RECEIVED: list[dict[str, Any]] = []
+# 与 RECEIVED 并行记录每条请求打到了哪个 path（Router 的 deployment 分布靠它看）。
+# 不塞进 body 里是刻意的：body 要逐字比对，多一个键会污染 `_sent_keys` 那几行输出。
+SEEN: list[str] = []
 
 _NON_STREAM = {
     "id": "chatcmpl-spike",
@@ -65,6 +69,7 @@ def _sse_chunk(delta: dict[str, Any], finish: str | None = None) -> bytes:
 async def _handler(request: web.Request) -> web.StreamResponse:
     body = await request.json()
     RECEIVED.append(body)
+    SEEN.append(request.path)
     if not body.get("stream"):
         return web.json_response(_NON_STREAM)
     resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
@@ -81,14 +86,43 @@ async def _handler(request: web.Request) -> web.StreamResponse:
 async def _handler_fail(request: web.Request) -> web.Response:
     """恒 500 的端点：给 Router fallback 用（5xx 才是断路器与 fallback 该接的那类错）。"""
     RECEIVED.append(await request.json())
+    SEEN.append(request.path)
     return web.json_response({"error": {"message": "spike: upstream down"}}, status=500)
+
+
+async def _handler_half(request: web.Request) -> web.StreamResponse:
+    """**流到一半断**：200 + 两片 tool call 增量之后直接掐掉连接。
+
+    这是 spike 记录里点名「没测」的那条线——200 已经回了、fallback 的窗口早关上，坏消息发生在
+    流中途。要问的不是「能不能切」（切不了），而是「客户端拿到的是异常还是半截 JSON」：
+    静默返回半截 arguments 会让上层拼出 ``{"qu`` 这种废字符串当成功用，比抛错危险得多。
+    """
+    body = await request.json()
+    RECEIVED.append(body)
+    SEEN.append(request.path)
+    resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+    await resp.prepare(request)
+    await resp.write(_sse_chunk({"role": "assistant", "content": ""}))
+    await resp.write(_sse_chunk(_STREAM_TOOL_DELTAS[0]))
+    await resp.write(_sse_chunk(_STREAM_TOOL_DELTAS[1]))
+    # 不发 finish_reason、不发 [DONE]，直接掐断底层连接。
+    transport = request.transport
+    if transport is not None:
+        transport.close()
+    with contextlib.suppress(Exception):
+        await resp.write_eof()
+    return resp
 
 
 async def start_mock() -> tuple[web.AppRunner, str]:
     """起 mock 端点，返回 (runner, base_url)。端口交给系统分配，避免撞占用。"""
     app = web.Application()
     app.router.add_post("/v1/chat/completions", _handler)
+    # /v2 与 /v1 指向同一个 handler，只为让 Router 有两个**健康**的 deployment 可挑——
+    # 并发那条探针要看它把请求分到哪几个，全压一个就说明选择逻辑被锁串行化了。
+    app.router.add_post("/v2/chat/completions", _handler)
     app.router.add_post("/down/chat/completions", _handler_fail)
+    app.router.add_post("/half/chat/completions", _handler_half)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
@@ -300,6 +334,176 @@ async def probe_router(base_url: str) -> dict[str, Any]:
     }
 
 
+# ── 补测：spike 记录里点名「没测」的三条（阶段 2 开工前补） ──────────────────
+#
+# 判据（照旧先写后跑）：
+#   R1 Router + stream=True + tools，坏 deployment 在**首 token 之前** 500 → 必须切到备用，
+#      且 tool call 逐片拼出 {"query": "bag"}。不过 → 流式路径不能靠 Router 做 fallback。
+#   R2 流**中途**断 → 必须抛异常，不得静默返回半截 arguments。半截被当成功用比抛错危险。
+#   R3 真 CacheAwareOpenAIFormatter 的输出喂 Router → cache_control 逐字仍在 body 里。
+#      （原 spike 的 MESSAGES 是手写复刻的，复刻对了不等于真 formatter 就是这个形状。）
+#   R4 并发 50 下 Router 相对裸 acompletion 的 p50 额外开销 < 20ms（与 P4 同门槛），
+#      且两个健康 deployment 都拿到 >10% 的请求（全压一个 = 选择逻辑被串行化了）。
+
+
+def _router(entries: list[tuple[str, str]], fallbacks: list[dict[str, list[str]]] | None = None):
+    """按 (model_name, api_base) 列表建一个 Router。``num_retries=0`` 是定死的口径：
+
+    重试只由 ``LLM_MAX_RETRIES`` 一处决定，让 Router 再叠一层就是「一个 429 被试 9 次」。
+    """
+    from litellm import Router
+
+    return Router(
+        model_list=[
+            {
+                "model_name": name,
+                "litellm_params": {
+                    "model": "openai/spike-model",
+                    "api_key": "sk-spike",
+                    "api_base": url,
+                },
+            }
+            for name, url in entries
+        ],
+        fallbacks=fallbacks or [],
+        num_retries=0,
+    )
+
+
+async def _drain_tool_call(stream: Any) -> tuple[str, str]:
+    """把流式 tool call 逐片拼起来，返回 (name, arguments)。
+
+    **逐片不 strip**：siliconflow 的首片带前导空格，strip 掉就把 JSON 拼坏（见能力矩阵那节）。
+    """
+    name, args = "", ""
+    async for chunk in stream:
+        for call in chunk.choices[0].delta.tool_calls or []:
+            if call.function and call.function.name:
+                name = call.function.name
+            if call.function and call.function.arguments:
+                args += call.function.arguments
+    return name, args
+
+
+async def probe_router_stream(base_url: str) -> dict[str, Any]:
+    """R1 + R2：Router × 流式 × tool call，分「首 token 前失败」与「流中途断」两种。"""
+    down_url = base_url.replace("/v1", "/down")
+    half_url = base_url.replace("/v1", "/half")
+
+    # R1：坏的先打，200 都没回来 → fallback 的窗口还开着。
+    RECEIVED.clear()
+    SEEN.clear()
+    r1 = _router([("main", down_url), ("backup", base_url)], [{"main": ["backup"]}])
+    stream = await r1.acompletion(
+        model="main", messages=MESSAGES, tools=TOOLS, tool_choice="auto", stream=True
+    )
+    name, args = await _drain_tool_call(stream)
+    r1_hit_down = any(p.startswith("/down") for p in SEEN)
+
+    # R2：200 已回、两片已发，然后连接断。
+    RECEIVED.clear()
+    SEEN.clear()
+    r2 = _router([("main", half_url), ("backup", base_url)], [{"main": ["backup"]}])
+    raised, partial, err = "", "", ""
+    try:
+        stream = await r2.acompletion(
+            model="main", messages=MESSAGES, tools=TOOLS, tool_choice="auto", stream=True
+        )
+        _, partial = await _drain_tool_call(stream)
+    except BaseException as exc:  # noqa: BLE001 - 要的就是「它到底抛什么」
+        raised, err = type(exc).__name__, str(exc)[:200]
+
+    return {
+        "r1_fallback_stream_ok": name == "item_search" and _parsed(args) == {"query": "bag"},
+        "r1_hit_down_first": r1_hit_down,
+        "r2_raised": raised or None,
+        "r2_error": err or None,
+        "r2_silent_partial": (not raised) and partial not in ("", '{"query": "bag"}'),
+        "_r2_partial_args": partial,
+        "_r2_requests_seen": list(SEEN),
+    }
+
+
+async def probe_real_formatter(base_url: str) -> dict[str, Any]:
+    """R3：**真** ``CacheAwareOpenAIFormatter`` 的输出喂 Router，标记还在不在。
+
+    原 spike 的 ``MESSAGES`` 是照 formatter 手写复刻的——复刻对了只证明「这个形状能透传」，
+    不证明 formatter 真就产这个形状。这里把两者接上：真 formatter 产 → Router 发 → 看 body。
+    """
+    from agentscope.message import Msg, TextBlock
+
+    from app.harness.formatter import MIN_CACHE_PREFIX_TOKENS, CacheAwareOpenAIFormatter
+
+    # 标记只在 system 段超过最小写入阈值时才打，system 要够长才测得到东西。
+    system_text = "你是全球电商购物 Agent。" * (MIN_CACHE_PREFIX_TOKENS // 2)
+    msgs = [
+        Msg(name="system", role="system", content=[TextBlock(type="text", text=system_text)]),
+        Msg(name="user", role="user", content=[TextBlock(type="text", text="帮我找个背包")]),
+    ]
+    formatted = await CacheAwareOpenAIFormatter().format(msgs)
+    marked_before = _find_cache_control({"messages": formatted})
+
+    RECEIVED.clear()
+    SEEN.clear()
+    router = _router([("main", base_url)])
+    await router.acompletion(model="main", messages=formatted, extra_body=EXTRA_BODY)
+    sent = RECEIVED[-1] if RECEIVED else {}
+    return {
+        "r3_formatter_marked": marked_before,
+        "r3_cache_control_through_router": _find_cache_control(sent),
+        "r3_enable_thinking_through_router": sent.get("enable_thinking") is False,
+        "_system_role": (formatted[0].get("role") if formatted else None),
+    }
+
+
+async def probe_router_concurrency(base_url: str, n: int) -> dict[str, Any]:
+    """R4：并发 n 条同时打，Router 的 deployment 选择有没有把并发串行化。
+
+    两个健康 deployment（/v1 与 /v2）。看两件事：额外延迟（对照裸 ``acompletion`` 同并发）、
+    以及请求是不是真分到了两边。
+    """
+    import litellm
+
+    litellm.suppress_debug_info = True
+    router = _router([("main", base_url), ("main", base_url.replace("/v1", "/v2"))])
+
+    async def _one_router() -> float:
+        t0 = time.perf_counter()
+        await router.acompletion(model="main", messages=MESSAGES)
+        return (time.perf_counter() - t0) * 1000
+
+    async def _one_plain() -> float:
+        t0 = time.perf_counter()
+        await litellm.acompletion(
+            model="openai/spike-model", api_key="sk-spike", base_url=base_url, messages=MESSAGES
+        )
+        return (time.perf_counter() - t0) * 1000
+
+    await asyncio.gather(*(_one_router() for _ in range(5)))  # 预热：建连接池
+    RECEIVED.clear()
+    SEEN.clear()
+    r_lat = await asyncio.gather(*(_one_router() for _ in range(n)))
+    dist = {
+        "/v1": sum(p.startswith("/v1") for p in SEEN),
+        "/v2": sum(p.startswith("/v2") for p in SEEN),
+    }
+    p_lat = await asyncio.gather(*(_one_plain() for _ in range(n)))
+
+    p50_r, p50_p = statistics.median(r_lat), statistics.median(p_lat)
+    spread = min(dist.values()) / max(1, sum(dist.values()))
+    return {
+        "r4_overhead_p50_lt_20ms": (p50_r - p50_p) < 20,
+        "r4_both_deployments_used": spread > 0.10,
+        "concurrency": n,
+        "router_p50_ms": round(p50_r, 3),
+        "plain_p50_ms": round(p50_p, 3),
+        "overhead_p50_ms": round(p50_r - p50_p, 3),
+        "router_p95_ms": round(sorted(r_lat)[int(n * 0.95)], 3),
+        "plain_p95_ms": round(sorted(p_lat)[int(n * 0.95)], 3),
+        "deployment_dist": dist,
+    }
+
+
 # ── live：provider 能力矩阵（阶段 2 第 3 条） ────────────────────────────────
 
 LIVE_MESSAGES = [
@@ -399,6 +603,9 @@ async def amain(args: argparse.Namespace) -> None:
         lite = await probe_litellm(base_url)
         base = await probe_openai(base_url)
         router = await probe_router(base_url)
+        rstream = await probe_router_stream(base_url)
+        rfmt = await probe_real_formatter(base_url)
+        rconc = await probe_router_concurrency(base_url, args.concurrency)
         timing = await bench(base_url, args.rounds)
     finally:
         await runner.cleanup()
@@ -409,12 +616,26 @@ async def amain(args: argparse.Namespace) -> None:
         "P3_stream_tool_call": lite["p3_stream_tool_call"],
         "P4_overhead_lt_20ms": timing["overhead_p50_ms"] < 20,
     }
+    # 补测三条单独记账：它们不改「切不切 LiteLLM」的结论（那是 P1~P4 的事），
+    # 改的是**阶段 2 那层包装怎么写**，所以不混进 all_pass。
+    followup = {
+        "R1_router_stream_fallback": rstream["r1_fallback_stream_ok"],
+        "R2_mid_stream_not_silent": not rstream["r2_silent_partial"],
+        "R3_real_formatter_through_router": rfmt["r3_cache_control_through_router"],
+        "R4_no_lock_contention": rconc["r4_overhead_p50_lt_20ms"],
+        "R4_both_deployments_used": rconc["r4_both_deployments_used"],
+    }
     report: dict[str, Any] = {
         "verdict": verdict,
         "all_pass": all(verdict.values()),
+        "followup_verdict": followup,
+        "followup_all_pass": all(followup.values()),
         "litellm_probe": lite,
         "openai_control_group": base,
         "router_probe": router,
+        "router_stream_probe": rstream,
+        "real_formatter_probe": rfmt,
+        "router_concurrency_probe": rconc,
         "timing": timing,
     }
 
@@ -439,6 +660,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="阶段 5 LiteLLM spike")
     parser.add_argument("--live", action="store_true", help="加跑真 provider 能力矩阵（花钱）")
     parser.add_argument("--rounds", type=int, default=200, help="P4 每条路的采样次数")
+    parser.add_argument("--concurrency", type=int, default=50, help="R4 并发探针的并发数")
     parser.add_argument("--out", default="", help="把报告 JSON 另存到这个路径")
     asyncio.run(amain(parser.parse_args()))
 
