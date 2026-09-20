@@ -103,6 +103,10 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.backend
+      # aiomysql 是 optional-dependency，不传这个 arg 镜像里就没有驱动。阶段 1 条 7 起 DATABASE_URL
+      # 必须是 MySQL，于是「没装驱动」不再是「降级回 SQLite」，而是起服直接失败。
+      args:
+        UV_EXTRAS: "--extra db"
     image: globex-backend:latest
     container_name: globex-backend
     restart: unless-stopped
@@ -134,6 +138,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.backend
+      args:
+        UV_EXTRAS: "--extra db" # 与 backend 逐字相同：两边是同一个镜像 tag，参数不一致会互相覆盖
     image: globex-backend:latest
     container_name: globex-worker
     restart: unless-stopped

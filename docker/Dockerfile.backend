@@ -10,8 +10,9 @@ WORKDIR /app
 # 依赖层单独 COPY：改代码不重装依赖，重建秒级。
 COPY pyproject.toml uv.lock ./
 # redis 已是主依赖（事件回放不再是可选降级路径），无需再点名 extra。
-# UV_EXTRAS 默认空 = 线上镜像一字不变。多副本验收那套要连 MySQL，build 时传
-# `--build-arg UV_EXTRAS=--extra db` 把 aiomysql 装进去（见 docker/docker-compose.multi.yml）。
+# UV_EXTRAS 是「要不要装数据库驱动」的开关。阶段 1 条 7 之后，**凡是真跑起来的形态都要 `--extra db`**：
+# 起服闸要求 DATABASE_URL 是 MySQL，没有 aiomysql 就连不上库，容器起来就退。prod 与 multi 两份
+# compose 都在 build.args 里传了它，这里的默认空只服务「只想 build 出个壳看看」的场合。
 ARG UV_EXTRAS=""
 RUN uv sync --frozen --no-dev --no-install-project ${UV_EXTRAS}
 
