@@ -352,6 +352,23 @@ async def consume_cancel_mark(task_id: str) -> bool:
     return True
 
 
+async def mark_cancel_only(task_id: str) -> bool:
+    """只落标记，**不本地掐、不广播**（阶段 4-1 的入队等待超时用）。
+
+    与 :func:`request_cancel` 的区别是「要作废的那条任务不在本进程里」：它还躺在队列中没人领，本地
+    掐无从掐起，广播也没有接收方——真正兑现这次作废的是 worker 将来领到它时的
+    :func:`consume_cancel_mark` 自查。少掉的那两步不是省事，是避免误伤：``cancel_local`` 按
+    thread 也能匹配，thread 上若正好有别的在飞任务会被一起砍掉。
+
+    返回「标记是否落下」。没有控制面（单进程模式）时返回 ``False`` —— 调用方据此决定还能不能安全
+    作废：作废不掉就只能继续等，否则用户以为超时了、worker 十分钟后又偷偷跑一遍。
+    """
+    bus = get_control_bus()
+    if bus is None:
+        return False
+    return await bus.mark_cancel(task_id)
+
+
 async def close_control_bus() -> None:
     """关服时收掉控制面（**只关已经建出来的那个**，不会顺手把它创建出来）。"""
     if _bus is not None:
