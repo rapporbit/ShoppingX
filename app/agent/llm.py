@@ -17,6 +17,7 @@
 import logging
 import os
 from functools import lru_cache
+from typing import Any
 
 from agentscope.agent import ModelConfig
 from agentscope.credential import OpenAICredential
@@ -26,6 +27,8 @@ from dotenv import load_dotenv
 from pydantic import SecretStr
 
 from app.agent.gateway import GatewayThrottle, ThrottledChatModel
+from app.agent.providers import fallback_chain, router_enabled
+from app.agent.router_model import build_routed_model
 
 # 模块导入即加载 .env，使后续 os.environ 读取生效（已设置的环境变量优先，不覆盖）。
 load_dotenv()
@@ -166,21 +169,39 @@ def build_model(
 
     ``max_retries`` 交给模型自己的重试环（``ChatModelBase.__call__``），Agent 层的
     ``ModelConfig.max_retries`` 另设 0，避免两层重试相乘——同一个 429 被试 9 次那种。
+
+    **出口有两条路**（阶段 2 第 2 条）：默认走 LiteLLM Router（模型名可带 ``provider/`` 前缀，
+    跨供应商 fallback 才成立），``LLM_PROVIDER_ROUTER=0`` 回退直连。没配任何 ``PROVIDER_*``
+    时两条路等价——Router 只有一个指向 ``OPENAI_*`` 的 deployment。
+
+    视觉档例外，恒走直连：它的出口是另一套 ``VISION_*`` env，不在 provider 寻址的模型里，
+    而且图片理解是链路外的一次性调用，跨家 fallback 对它没有收益。
     """
-    return ThrottledChatModel(
-        credential=_credential(vision=vision),
-        model=model,
-        parameters=OpenAIChatModel.Parameters(temperature=temperature),
-        stream=True,
-        formatter=_formatter(),
-        max_retries=LLM_MAX_RETRIES,
-        client_kwargs={"timeout": LLM_REQUEST_TIMEOUT},
+    common: dict[str, Any] = {
+        "parameters": OpenAIChatModel.Parameters(temperature=temperature),
+        "stream": True,
+        "formatter": _formatter(),
+        "max_retries": LLM_MAX_RETRIES,
+        "client_kwargs": {"timeout": LLM_REQUEST_TIMEOUT},
         # hybrid 模型（DashScope / Qwen / DeepSeek）经 OpenAI 兼容层读 extra_body 里的
         # enable_thinking；不支持的供应商忽略该字段（无害）。
-        extra_body=None if thinking else {"enable_thinking": False},
-        throttle=get_gateway_throttle(),
-        role=role,
-    )
+        "extra_body": None if thinking else {"enable_thinking": False},
+        "throttle": get_gateway_throttle(),
+        "role": role,
+    }
+    if vision or not router_enabled():
+        return ThrottledChatModel(credential=_credential(vision=vision), model=model, **common)
+    return build_routed_model(model, _fallback_refs(role), **common)
+
+
+def _fallback_refs(role: str) -> list[str]:
+    """哪些档吃 ``LLM_FALLBACK_CHAIN``。**当前只有主档**。
+
+    其余档（planner / judge / fast…）都是链路外的一次性调用，失败重来一轮的代价远小于
+    「悄悄换到另一家、结构化输出的形状跟着变」。跨家 fallback 要等阶段 2 第 3 条的能力矩阵门
+    落地——矩阵能证明目标家四列全绿之后，再把这里放开。
+    """
+    return fallback_chain() if role == "main" else []
 
 
 @lru_cache(maxsize=1)
@@ -322,7 +343,6 @@ def main_loop_tier_first() -> str:
     return os.environ.get("MAIN_LOOP_TIER_FIRST", "same").strip().lower()
 
 
-
 @lru_cache(maxsize=1)
 def get_vision_llm() -> ThrottledChatModel:
     """看图档（AgentScope 侧），对应 :func:`get_vision_llm`。"""
@@ -387,5 +407,11 @@ def get_model_config() -> ModelConfig:
 
     Agent 层 ``max_retries=0``：模型自己那层已经按 ``LLM_MAX_RETRIES`` 重试过了，两层相乘会把
     「重试 2 次」变成 9 次请求——限流时这等于火上浇油。这里只负责「主模型彻底不行了就换备用」。
+
+    **``LLM_FALLBACK_CHAIN`` 与老的 ``LLM_FALLBACK_MODEL`` 不叠加**：配了链就以链为准，这里
+    交回 ``None``。两套都挂着的话，Router 先切一次、AgentScope 再切一次，同一次失败会打出
+    两轮额外请求，而且日志里看不出是谁切的。
     """
+    if router_enabled() and fallback_chain():
+        return ModelConfig(max_retries=0, fallback_model=None)
     return ModelConfig(max_retries=0, fallback_model=get_fallback_llm())

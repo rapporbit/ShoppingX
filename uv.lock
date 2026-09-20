@@ -3394,6 +3394,7 @@ dependencies = [
     { name = "httpx" },
     { name = "langdetect" },
     { name = "langfuse" },
+    { name = "litellm" },
     { name = "mcp" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -3427,9 +3428,6 @@ dev = [
     { name = "types-cachetools" },
     { name = "types-pyyaml" },
 ]
-spike = [
-    { name = "litellm" },
-]
 train = [
     { name = "datasets" },
     { name = "huggingface-hub" },
@@ -3451,6 +3449,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "langdetect", specifier = ">=1.0.9" },
     { name = "langfuse", specifier = ">=4.12" },
+    { name = "litellm", specifier = ">=1.60" },
     { name = "mcp", specifier = ">=1.9" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "opensearch-py", specifier = ">=2.6" },
@@ -3478,7 +3477,6 @@ dev = [
     { name = "types-cachetools", specifier = ">=7.0.0.20260518" },
     { name = "types-pyyaml", specifier = ">=6.0" },
 ]
-spike = [{ name = "litellm", specifier = ">=1.60" }]
 train = [
     { name = "datasets", specifier = ">=3.0" },
     { name = "huggingface-hub", specifier = ">=0.26" },
