@@ -10,7 +10,7 @@ from collections.abc import AsyncGenerator
 
 import pytest
 from agentscope.credential import OpenAICredential
-from agentscope.message import TextBlock
+from agentscope.message import Msg, TextBlock
 from agentscope.model import ChatResponse, ChatUsage
 
 from app.agent import gateway
@@ -315,7 +315,13 @@ async def test_bucket_settles_with_real_usage(monkeypatch: pytest.MonkeyPatch) -
         )
 
     model._call_api = fake_call_api  # type: ignore[method-assign]
-    await model(messages=[{"role": "user", "content": "买个旅行三件套"}])
+    # 用 Msg 而不是 dict：真实链路到这一层时还没 format（formatter 在 _call_api 内部），
+    # 用 dict 测会让「估算认不出 Msg、预扣恒为 0」这种失效照样绿。
+    await model(
+        messages=[
+            Msg(name="user", role="user", content=[TextBlock(type="text", text="买个旅行三件套")])
+        ]
+    )
 
     assert len(spy.acquired) == 1 and spy.acquired[0][0] == "test-model"
     assert spy.acquired[0][1] > 0  # 估算的输入 token
