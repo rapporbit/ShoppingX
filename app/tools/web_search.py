@@ -16,12 +16,15 @@ import httpx
 from pydantic import BaseModel
 
 from app.api import monitor
+from app.api.context import clamp_timeout
 from app.tools._shell import tool
 from app.utils.circuit_breaker import CircuitBreaker
 from app.utils.env import env_float, env_int
 from app.utils.retry import call_with_retry
 
 _TAVILY_URL = "https://api.tavily.com/search"
+# 一次 Tavily 请求最多等多久（秒）。
+_HTTP_TIMEOUT = env_float("WEB_SEARCH_TIMEOUT_SEC", 20.0)
 
 # 返回截断：web_search 结果原样进主 loop 上下文，是最大的外部文本口子。实测（2026-09-15，5 条样本）
 # basic 深度每条 content 86~1482 字符，长的是几段正文用 [...] 拼成、封顶约 1500。上限定得略高于
@@ -88,7 +91,9 @@ async def search_web(query: str, max_results: int = 5) -> tuple[WebSearchOutput,
     try:
 
         async def _do() -> dict:
-            async with httpx.AsyncClient(timeout=20.0) as client:
+            # 超时收进本轮 deadline（阶段 4-2）：外部事实是补充信息，失败会退化成一条 note，
+            # 没必要在主 loop 只剩几秒时还按满 20 秒等 Tavily。
+            async with httpx.AsyncClient(timeout=clamp_timeout(_HTTP_TIMEOUT)) as client:
                 resp = await client.post(
                     _TAVILY_URL,
                     json={

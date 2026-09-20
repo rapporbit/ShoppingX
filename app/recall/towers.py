@@ -21,8 +21,13 @@ from functools import lru_cache
 import httpx
 import numpy as np
 
+from app.api.context import clamp_timeout
+
 # 远程编码瞬时错误（429/5xx/连接抖动）的重试次数。
 _REMOTE_RETRIES = 3
+# 一次远程编码最多等多久（秒）。批量建库时一批几百条文本，30s 是给那条路留的余量；
+# 线上单查询只编一条，实际几百毫秒。
+_REMOTE_TIMEOUT = float(os.environ.get("EMBED_TIMEOUT_SEC", "30"))
 
 # 本地回退编码的默认维度。真实 embedding 模型维度由其自身决定（见 _remote_dim）。
 DEFAULT_LOCAL_DIM = 256
@@ -113,7 +118,7 @@ class TowerClient:
             self._client = httpx.AsyncClient(
                 base_url=self._base_url or "",
                 headers={"Authorization": f"Bearer {self._api_key}"},
-                timeout=30.0,
+                timeout=_REMOTE_TIMEOUT,
             )
         return self._client
 
@@ -123,7 +128,11 @@ class TowerClient:
         for attempt in range(_REMOTE_RETRIES):
             try:
                 resp = await self._get_client().post(
-                    "/embeddings", json={"model": self._model, "input": texts}
+                    "/embeddings",
+                    json={"model": self._model, "input": texts},
+                    # per-request 超时收进本轮 deadline（阶段 4-2）：编码是检索的前置，主 loop
+                    # 只剩几秒时按满 30 秒等一次 embedding，等到了也没人用了。
+                    timeout=clamp_timeout(_REMOTE_TIMEOUT),
                 )
                 resp.raise_for_status()
                 data = resp.json()["data"]
