@@ -111,6 +111,25 @@ def router_enabled() -> bool:
     return raw.lower() in {"1", "true", "yes", "on"}
 
 
+def configure_litellm() -> None:
+    """进程级的 litellm 开关，**在 import 它之前**就得钉死两件事。
+
+    ``LITELLM_LOCAL_MODEL_COST_MAP``：不设它，litellm 会在首次用到价格/能力表时去网上拉
+    ``model_prices_and_context_window.json``——一个模型调用的起点上挂一次外网下载，正是
+    「首 token 延迟莫名其妙多两秒」这种查半天的账。钉成本地表。
+
+    ``telemetry``：不往外发使用统计。这是别人的服务，不是我们的可观测。
+
+    放在 provider 层而不是 ``router_model``：能力查询（:mod:`app.agent.capabilities`）也要读
+    同一张表，两处各 setdefault 一次早晚会漂。
+    """
+    os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+    import litellm
+
+    litellm.telemetry = False
+    litellm.suppress_debug_info = True
+
+
 def build_model_list(primary: Endpoint, fallbacks: list[Endpoint]) -> list[dict[str, Any]]:
     """Router 的 ``model_list``：每个出口一条 deployment，``model_name`` 就用 ``ref``。
 

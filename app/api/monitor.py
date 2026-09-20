@@ -471,11 +471,18 @@ async def report_error(error_type: str, message: str, thread_id: str | None = No
     )
 
 
-async def report_model_fallback(model: str) -> None:
-    """主模型失败、启用备用模型时上报（一条任务里只报一次，由网关侧去重）。"""
+async def report_model_fallback(model: str, degraded: list[str] | None = None) -> None:
+    """主模型失败、启用备用模型时上报（一条任务里只报一次，由网关侧去重）。
+
+    ``degraded`` 是「切过去之后少了什么」（如 ``prompt_cache_breakpoint``）。光报一个模型名
+    不够用——「今天怎么变慢/变贵了」要能一眼看到是降级造成的，而不是去翻两家的文档对。
+    """
+    text = "主模型不可用，已切到备用模型"
+    if degraded:
+        text += f"（能力降级：{'、'.join(degraded)}）"
     await _emit(
         EVENT_MODEL_FALLBACK,
-        "主模型不可用，已切到备用模型",
-        {"model": model},
+        text,
+        {"model": model, "degraded": degraded or []},
         transient=True,
     )

@@ -243,6 +243,82 @@ class TestFallbackChain:
         assert any(p.startswith("/v1") for p in paths), f"没切到好出口：{paths}"
         assert last is not None and last.content
 
+    async def test_切换会报_model_fallback_事件(
+        self, mock_api: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Router 的 fallback 发生在 litellm 内部、角色始终是 main，父类那条上报路径根本不触发。
+
+        不补这一下，配了 LLM_FALLBACK_CHAIN 之后的切换在前端和日志里都是隐形的——只表现为
+        「今天答得有点怪」。判据用 model_id 反查 deployment，不是 response.model（那个在非流式
+        是上游原样回的名字、流式首片又是另一个值）。
+        """
+        from app.agent import llm
+        from app.api import monitor
+
+        monkeypatch.setenv("PROVIDER_BAD_BASE_URL", f"{mock_api}/down")
+        monkeypatch.setenv("PROVIDER_BAD_API_KEY", "sk-bad")
+        monkeypatch.setenv("PROVIDER_GOOD_BASE_URL", f"{mock_api}/v1")
+        monkeypatch.setenv("PROVIDER_GOOD_API_KEY", "sk-good")
+        monkeypatch.setenv("OPENAI_BASE_URL", f"{mock_api}/v1")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.setenv("LLM_PROVIDER_ROUTER", "1")
+        monkeypatch.setenv("LLM_FALLBACK_CHAIN", "good/m")
+        llm._load_params()
+
+        reported: list[tuple[str, list[str]]] = []
+
+        async def fake_report(model: str, degraded: list[str] | None = None) -> None:
+            reported.append((model, degraded or []))
+
+        monkeypatch.setattr(monitor, "report_model_fallback", fake_report)
+
+        from agentscope.message import Msg, TextBlock
+
+        model = llm.build_model("bad/m", temperature=0.3, role="main", thinking=False)
+        SEEN.clear()
+        async for _chunk in await model(
+            [Msg(name="user", role="user", content=[TextBlock(type="text", text="嗨")])]
+        ):
+            pass
+
+        assert reported, "切到备用出口却没报 model_fallback"
+        assert reported[0][0] == "good/m"
+        # 同一个目标只报一次（模型实例活在 lru_cache 里，每轮都报会刷屏）。
+        SEEN.clear()
+        async for _chunk in await model(
+            [Msg(name="user", role="user", content=[TextBlock(type="text", text="再来")])]
+        ):
+            pass
+        assert len(reported) == 1
+
+    async def test_没切换时不报事件(self, mock_api: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        """主出口好好的就不该有 fallback 事件——误报一次，排障时就会往错的方向查半天。"""
+        from app.agent import llm
+        from app.api import monitor
+
+        monkeypatch.setenv("OPENAI_BASE_URL", f"{mock_api}/v1")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.setenv("LLM_PROVIDER_ROUTER", "1")
+        monkeypatch.delenv("LLM_FALLBACK_CHAIN", raising=False)
+        llm._load_params()
+
+        reported: list[str] = []
+
+        async def fake_report(model: str, degraded: list[str] | None = None) -> None:
+            reported.append(model)
+
+        monkeypatch.setattr(monitor, "report_model_fallback", fake_report)
+
+        from agentscope.message import Msg, TextBlock
+
+        model = llm.build_model("m", temperature=0.3, role="main", thinking=False)
+        SEEN.clear()
+        async for _chunk in await model(
+            [Msg(name="user", role="user", content=[TextBlock(type="text", text="嗨")])]
+        ):
+            pass
+        assert reported == []
+
     async def test_只有主档吃_fallback_链(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """链路外的一次性调用（planner / judge…）暂不跨家——等能力矩阵门落地再放开。"""
         from app.agent.llm import _fallback_refs
