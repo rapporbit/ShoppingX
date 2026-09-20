@@ -23,8 +23,14 @@ spike 的 P1~P4 与 R1~R4 量的正是「同样的 body 经 Router 发出去还�
 import logging
 from typing import Any
 
+from app.agent.capabilities import degraded_against
 from app.agent.gateway import ThrottledChatModel
-from app.agent.providers import Endpoint, build_model_list, resolve_endpoint
+from app.agent.providers import (
+    Endpoint,
+    build_model_list,
+    configure_litellm,
+    resolve_endpoint,
+)
 
 logger = logging.getLogger("shoppingx.llm.router")
 
@@ -49,8 +55,10 @@ class _UsageDefault:
 class _StreamShim:
     """把 litellm 的流包成 ``openai.AsyncStream`` 的形状：支持 ``async with`` + 每片带 usage。"""
 
-    def __init__(self, stream: Any) -> None:
+    def __init__(self, stream: Any, router: Any = None, on_served: Any = None) -> None:
         self._stream = stream
+        self._router = router
+        self._on_served = on_served
 
     async def __aenter__(self) -> "_StreamShim":
         return self
@@ -66,7 +74,15 @@ class _StreamShim:
         return False
 
     async def __aiter__(self) -> Any:
+        first = True
         async for chunk in self._stream:
+            if first:
+                first = False
+                # 首片就带 model_id（实测），所以切没切在第一片上就知道，不用等流走完。
+                if self._on_served is not None:
+                    ref = _served_ref(self._router, chunk)
+                    if ref:
+                        await self._on_served(ref)
             if not hasattr(chunk, "usage"):
                 try:
                     chunk.usage = None
@@ -75,12 +91,32 @@ class _StreamShim:
             yield chunk
 
 
+def _served_ref(router: Any, response: Any) -> str | None:
+    """这次响应实际是哪条 deployment 给的（回我们自己的 ``provider/model`` 名）。
+
+    **必须用 ``model_id`` 反查，不能看 ``response.model``**（2026-09-20 实测）：非流式时
+    ``response.model`` 是上游原样回的名字，流式首片又变成 ``litellm_params.model`` 的后半段，
+    两者都不是我们的 ref。``api_base`` 也不够——同一家的两个模型 base_url 相同，分不开。
+    ``_hidden_params["model_id"]`` 是 Router 给每条 deployment 的稳定 id，反查 ``model_list``
+    即得 ``model_name``，也就是 ``Endpoint.ref``。
+    """
+    hidden = getattr(response, "_hidden_params", None) or {}
+    model_id = hidden.get("model_id")
+    if not model_id:
+        return None
+    for deployment in getattr(router, "model_list", None) or []:
+        if (deployment.get("model_info") or {}).get("id") == model_id:
+            return deployment.get("model_name")
+    return None
+
+
 class _RouterCompletions:
     """``client.chat.completions`` 的替身。"""
 
-    def __init__(self, router: Any, timeout: float | None) -> None:
+    def __init__(self, router: Any, timeout: float | None, on_served: Any = None) -> None:
         self._router = router
         self._timeout = timeout
+        self._on_served = on_served
 
     async def create(self, **kwargs: Any) -> Any:
         # 超时在直连那条路上是 ``AsyncClient(timeout=…)`` 的构造参数，Router 这条路上是
@@ -89,8 +125,16 @@ class _RouterCompletions:
             kwargs.setdefault("timeout", self._timeout)
         response = await self._router.acompletion(**kwargs)
         if kwargs.get("stream"):
-            return _StreamShim(response)
+            return _StreamShim(response, self._router, self._on_served)
+        await self._notify(response)
         return response
+
+    async def _notify(self, response: Any) -> None:
+        if self._on_served is None:
+            return
+        ref = _served_ref(self._router, response)
+        if ref:
+            await self._on_served(ref)
 
 
 class _RouterChat:
@@ -101,26 +145,8 @@ class _RouterChat:
 class _RouterClient:
     """``openai.AsyncClient`` 的鸭子替身，只提供 ``.chat.completions.create``。"""
 
-    def __init__(self, router: Any, timeout: float | None) -> None:
-        self.chat = _RouterChat(_RouterCompletions(router, timeout))
-
-
-def _configure_litellm() -> None:
-    """进程级的 litellm 开关，**在 import 它之前**就得钉死两件事。
-
-    ``LITELLM_LOCAL_MODEL_COST_MAP``：不设它，litellm 会在首次用到价格表时去网上拉
-    ``model_prices_and_context_window.json``——一个模型调用的起点上挂一次外网下载，正是
-    「首 token 延迟莫名其妙多两秒」这种查半天的账。钉成本地表，价格数据我们本来也不用它的。
-
-    ``telemetry``：不往外发使用统计。这是别人的服务，不是我们的可观测。
-    """
-    import os
-
-    os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
-    import litellm
-
-    litellm.telemetry = False
-    litellm.suppress_debug_info = True
+    def __init__(self, router: Any, timeout: float | None, on_served: Any = None) -> None:
+        self.chat = _RouterChat(_RouterCompletions(router, timeout, on_served))
 
 
 def build_router(primary: Endpoint, fallbacks: list[Endpoint]) -> Any:
@@ -129,7 +155,7 @@ def build_router(primary: Endpoint, fallbacks: list[Endpoint]) -> Any:
     ``num_retries=0`` 是定死的口径：重试只由 ``LLM_MAX_RETRIES`` 一处决定（它走的是
     ``ChatModelBase.__call__`` 那层）。让 Router 再叠一层，一个 429 就会被试 9 次。
     """
-    _configure_litellm()
+    configure_litellm()
     from litellm import Router
 
     chain = [ep.ref for ep in fallbacks if ep.ref != primary.ref]
@@ -162,16 +188,45 @@ class RoutedChatModel(ThrottledChatModel):
         self.endpoint = endpoint
         self.fallback_endpoints = list(fallback_endpoints or [])
         self._router = build_router(endpoint, self.fallback_endpoints)
+        self._served_reported: set[str] = set()
         # 覆盖父类建好的 openai.AsyncClient。它是在 ``OpenAIChatModel.__init__`` 里建的，
         # 此处才换得掉；那个实例没发过任何请求，丢掉无副作用。
         timeout = (self.client_kwargs or {}).get("timeout")
-        self.client = _RouterClient(self._router, timeout)  # type: ignore[assignment]
+        self.client = _RouterClient(self._router, timeout, self._on_served)  # type: ignore[assignment]
         logger.info(
             "模型 %s 走 LiteLLM Router：主出口 %s，fallback %s",
             self.model,
             endpoint.provider,
             [ep.ref for ep in self.fallback_endpoints] or "无",
         )
+
+    async def _on_served(self, ref: str) -> None:
+        """Router 这条路上唯一能看见「真切了」的地方。
+
+        父类的 ``_report_fallback_once`` 靠 ``role="fallback"`` 触发——那是老的
+        ``ModelConfig.fallback_model`` 走法。Router 的 fallback 发生在 litellm 内部，
+        角色始终是 main，所以**不补这一下，配了 ``LLM_FALLBACK_CHAIN`` 之后的切换在前端
+        和日志里都是隐形的**：只表现为今天答得有点怪。
+
+        每个目标只报一次（模型实例活在 ``lru_cache`` 里，一直报会刷屏）；上报链路的任何
+        异常都不许冒泡进 AgentLoop。
+        """
+        if ref == self.endpoint.ref or ref in self._served_reported:
+            return
+        self._served_reported.add(ref)
+        degraded = degraded_against(self.endpoint.ref, ref)
+        logger.warning(
+            "模型出口已切到 %s（主出口 %s），能力降级：%s",
+            ref,
+            self.endpoint.ref,
+            degraded or "无",
+        )
+        try:
+            from app.api import monitor
+
+            await monitor.report_model_fallback(ref, degraded)
+        except Exception:  # pragma: no cover - 观测是附属品
+            logger.exception("model_fallback 事件上报失败")
 
 
 def build_routed_model(ref: str, fallback_refs: list[str], **kwargs: Any) -> RoutedChatModel:

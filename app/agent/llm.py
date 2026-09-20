@@ -26,6 +26,7 @@ from agentscope.model import OpenAIChatModel
 from dotenv import load_dotenv
 from pydantic import SecretStr
 
+from app.agent.capabilities import gate_fallback_refs
 from app.agent.gateway import GatewayThrottle, ThrottledChatModel
 from app.agent.providers import fallback_chain, router_enabled
 from app.agent.router_model import build_routed_model
@@ -195,13 +196,17 @@ def build_model(
 
 
 def _fallback_refs(role: str) -> list[str]:
-    """哪些档吃 ``LLM_FALLBACK_CHAIN``。**当前只有主档**。
+    """哪些档吃 ``LLM_FALLBACK_CHAIN``。**当前只有主档**，且过一道能力门。
 
     其余档（planner / judge / fast…）都是链路外的一次性调用，失败重来一轮的代价远小于
-    「悄悄换到另一家、结构化输出的形状跟着变」。跨家 fallback 要等阶段 2 第 3 条的能力矩阵门
-    落地——矩阵能证明目标家四列全绿之后，再把这里放开。
+    「悄悄换到另一家、结构化输出的形状跟着变」。
+
+    能力门（阶段 2 第 3 条）只拦一件事：目标调不了工具。它是**否决门不是放行门**——查不到
+    的目标照样放行，理由见 :mod:`app.agent.capabilities`。
     """
-    return fallback_chain() if role == "main" else []
+    if role != "main":
+        return []
+    return gate_fallback_refs(fallback_chain())
 
 
 @lru_cache(maxsize=1)
