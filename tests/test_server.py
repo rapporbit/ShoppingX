@@ -26,14 +26,16 @@ import pytest
 from conftest import FakeRedis  # tests/ 的 conftest（pytest 已把它放进 sys.path）
 from httpx import ASGITransport, AsyncClient
 
+import app.api.files as files_api
+import app.api.preferences as preferences_api
 import app.api.server as server
 from app import worker
 from app.api import dedup
-from app.queue import InProcessQueue, set_task_queue
 from app.db.models import User
 from app.db.session import init_db, session_factory
 from app.memory.fact_store import get_fact_store
 from app.memory.facts import MemoryCategory, MemoryFact
+from app.queue import InProcessQueue, set_task_queue
 
 
 @pytest.fixture
@@ -326,7 +328,7 @@ async def test_rejected_task_leaves_no_fingerprint(
 async def test_download_existing_file(
     client: AsyncClient, monkeypatch: Any, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(server, "OUTPUT_ROOT", tmp_path)
+    monkeypatch.setattr(files_api, "OUTPUT_ROOT", tmp_path)
     session = tmp_path / "t-dl"
     session.mkdir()
     (session / "summary.md").write_text("# 购物清单\n帆布旅行包", encoding="utf-8")
@@ -339,7 +341,7 @@ async def test_download_existing_file(
 async def test_download_missing_session_404(
     client: AsyncClient, monkeypatch: Any, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(server, "OUTPUT_ROOT", tmp_path)
+    monkeypatch.setattr(files_api, "OUTPUT_ROOT", tmp_path)
     resp = await client.get("/api/files/ghost/summary.md")
     assert resp.status_code == 404
 
@@ -347,7 +349,7 @@ async def test_download_missing_session_404(
 async def test_download_path_traversal_blocked(
     client: AsyncClient, monkeypatch: Any, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(server, "OUTPUT_ROOT", tmp_path)
+    monkeypatch.setattr(files_api, "OUTPUT_ROOT", tmp_path)
     (tmp_path / "t-dl").mkdir()
     # 编码的 ../ 想读会话目录外的文件 → safe_join 拦截 → 400。
     resp = await client.get("/api/files/t-dl/..%2f..%2fsecret.txt")
@@ -360,7 +362,7 @@ _PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"fake body"
 
 
 async def test_upload_writes_file(client: AsyncClient, monkeypatch: Any, tmp_path: Path) -> None:
-    monkeypatch.setattr(server, "UPLOAD_ROOT", tmp_path)
+    monkeypatch.setattr(files_api, "UPLOAD_ROOT", tmp_path)
     resp = await client.post(
         "/api/upload",
         data={"thread_id": "t-up"},
@@ -378,7 +380,7 @@ async def test_upload_rejects_non_image(
 
     认 magic bytes，不认扩展名、也不认 Content-Type——两者都是客户端随便填的。
     """
-    monkeypatch.setattr(server, "UPLOAD_ROOT", tmp_path)
+    monkeypatch.setattr(files_api, "UPLOAD_ROOT", tmp_path)
     resp = await client.post(
         "/api/upload",
         data={"thread_id": "t-up"},
@@ -392,7 +394,7 @@ async def test_upload_rejects_non_image(
 async def test_upload_thread_id_traversal_blocked(
     client: AsyncClient, monkeypatch: Any, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(server, "UPLOAD_ROOT", tmp_path)
+    monkeypatch.setattr(files_api, "UPLOAD_ROOT", tmp_path)
     # thread_id 来自表单、可控：用 ../ 想把目录建到 UPLOAD_ROOT 外 → _safe_session_dir 拦下 400。
     resp = await client.post(
         "/api/upload",
@@ -404,8 +406,8 @@ async def test_upload_thread_id_traversal_blocked(
 
 
 async def test_upload_oversize_413(client: AsyncClient, monkeypatch: Any, tmp_path: Path) -> None:
-    monkeypatch.setattr(server, "UPLOAD_ROOT", tmp_path)
-    monkeypatch.setattr(server, "MAX_UPLOAD_BYTES", 8)
+    monkeypatch.setattr(files_api, "UPLOAD_ROOT", tmp_path)
+    monkeypatch.setattr(files_api, "MAX_UPLOAD_BYTES", 8)
     resp = await client.post(
         "/api/upload",
         data={"thread_id": "t-up"},
@@ -463,7 +465,7 @@ async def test_add_and_get_preferences(
     """手填直接落库，无「先解析成草稿」那一步——三个字段用户自己填得出来。"""
     uid = _uid()
     store = get_fact_store()
-    monkeypatch.setattr(server, "get_fact_store", lambda: store)
+    monkeypatch.setattr(preferences_api, "get_fact_store", lambda: store)
 
     resp = await client.post(f"/api/preferences/{uid}", json=_fact_body())
     assert resp.status_code == 200
@@ -481,7 +483,7 @@ async def test_get_preferences_empty_user(
 ) -> None:
     uid = _uid()
     store = get_fact_store()
-    monkeypatch.setattr(server, "get_fact_store", lambda: store)
+    monkeypatch.setattr(preferences_api, "get_fact_store", lambda: store)
     resp = await client.get("/api/preferences/nobody")
     assert resp.status_code == 200
     assert resp.json()["preferences"] == []
@@ -496,7 +498,7 @@ async def test_add_preference_rejects_pii_without_echoing_value(
     """
     uid = _uid()
     store = get_fact_store()
-    monkeypatch.setattr(server, "get_fact_store", lambda: store)
+    monkeypatch.setattr(preferences_api, "get_fact_store", lambda: store)
 
     card = "4111 1111 1111 1111"
     resp = await client.post(f"/api/preferences/{uid}", json=_fact_body(value=f"我的卡号 {card}"))
@@ -512,7 +514,7 @@ async def test_update_preference_rekeys_and_deletes_old(
     uid = _uid()
     store = get_fact_store()
     await store.upsert_facts(uid, [MemoryFact(key="material_avoid", value="不要塑料")])
-    monkeypatch.setattr(server, "get_fact_store", lambda: store)
+    monkeypatch.setattr(preferences_api, "get_fact_store", lambda: store)
 
     resp = await client.put(
         f"/api/preferences/{uid}/entry/material_avoid",
@@ -531,7 +533,7 @@ async def test_delete_preference_is_idempotent(
     uid = _uid()
     store = get_fact_store()
     await store.upsert_facts(uid, [MemoryFact(key="material_avoid", value="不要塑料")])
-    monkeypatch.setattr(server, "get_fact_store", lambda: store)
+    monkeypatch.setattr(preferences_api, "get_fact_store", lambda: store)
 
     resp = await client.delete(f"/api/preferences/{uid}/material_avoid")
     assert resp.status_code == 200
@@ -547,7 +549,7 @@ async def test_clear_preferences_bumps_purge_generation(
     await _with_user(uid)
     store = get_fact_store()
     await store.upsert_facts(uid, [MemoryFact(key="k1", value="v1")])
-    monkeypatch.setattr(server, "get_fact_store", lambda: store)
+    monkeypatch.setattr(preferences_api, "get_fact_store", lambda: store)
     before = await store.purge_generation(uid)
 
     resp = await client.delete(f"/api/preferences/{uid}")
@@ -574,7 +576,7 @@ async def test_similar_returns_neighbors_unfiltered(client: AsyncClient, monkeyp
         def similar(self, item_id: str, top_k: int = 8) -> list[RecallCandidate]:
             return hits[:top_k]
 
-    monkeypatch.setattr(server, "get_recall_client", lambda: _FakeRecall())
+    monkeypatch.setattr(preferences_api, "get_recall_client", lambda: _FakeRecall())
 
     resp = await client.get("/api/similar/X1")
     assert [i["item_id"] for i in resp.json()["items"]] == ["L1", "C1"]
@@ -597,7 +599,7 @@ async def test_download_upload_returns_image(
     client: AsyncClient, monkeypatch: Any, tmp_path: Path
 ) -> None:
     """上传的图能按文件名取回——这是气泡里那张缩略图的来源。"""
-    monkeypatch.setattr(server, "UPLOAD_ROOT", tmp_path)
+    monkeypatch.setattr(files_api, "UPLOAD_ROOT", tmp_path)
     (tmp_path / "t-img").mkdir()
     (tmp_path / "t-img" / "ref.png").write_bytes(_PNG_BYTES)
 
@@ -610,7 +612,7 @@ async def test_download_upload_traversal_blocked(
     client: AsyncClient, monkeypatch: Any, tmp_path: Path
 ) -> None:
     """``../`` 拼接被 safe_join 拦下：取图口与 /api/files 同构，防线不能只装一半。"""
-    monkeypatch.setattr(server, "UPLOAD_ROOT", tmp_path)
+    monkeypatch.setattr(files_api, "UPLOAD_ROOT", tmp_path)
     (tmp_path / "t-img").mkdir()
     (tmp_path / "secret.txt").write_text("不该被读到")
 
@@ -624,7 +626,7 @@ async def test_download_upload_missing_404(
     client: AsyncClient, monkeypatch: Any, tmp_path: Path
 ) -> None:
     """图不在（比如老会话的上传目录已清）：404 而非 500。前端据此跳过这一张，不连坐其余张。"""
-    monkeypatch.setattr(server, "UPLOAD_ROOT", tmp_path)
+    monkeypatch.setattr(files_api, "UPLOAD_ROOT", tmp_path)
     (tmp_path / "t-img").mkdir()
 
     resp = await client.get("/api/uploads/t-img/gone.png")

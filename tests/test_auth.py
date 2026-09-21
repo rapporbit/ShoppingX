@@ -16,6 +16,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 import app.api.auth as auth
+import app.api.preferences as preferences_api
 import app.api.server as server
 from app import worker
 from app.memory.fact_store import get_fact_store
@@ -74,7 +75,7 @@ async def test_auth_disabled_allows_cross_user_read(
     monkeypatch.setenv("AUTH_ENABLED", "false")
     store = get_fact_store()
     await store.upsert_facts("u1", [MemoryFact(key="brand_taste", value="喜欢小众")])
-    monkeypatch.setattr(server, "get_fact_store", lambda: store)
+    monkeypatch.setattr(preferences_api, "get_fact_store", lambda: store)
 
     resp = await client.get("/api/preferences/u1")  # 不带 token
     assert resp.status_code == 200
@@ -89,7 +90,7 @@ async def test_auth_enabled_blocks_cross_user_read(
         "victim",
         [MemoryFact(key="secret", value="机密偏好", category=MemoryCategory.CONTEXT)],
     )
-    monkeypatch.setattr(server, "get_fact_store", lambda: store)
+    monkeypatch.setattr(preferences_api, "get_fact_store", lambda: store)
 
     alice_token = auth.create_access_token("alice")
     headers = {"Authorization": f"Bearer {alice_token}"}
@@ -106,7 +107,7 @@ async def test_auth_enabled_requires_token(
     client: AsyncClient, auth_on: None, monkeypatch: Any, tmp_path: Path
 ) -> None:
     store = get_fact_store()
-    monkeypatch.setattr(server, "get_fact_store", lambda: store)
+    monkeypatch.setattr(preferences_api, "get_fact_store", lambda: store)
     resp = await client.get("/api/preferences/anyone")  # 开启后缺 token
     assert resp.status_code == 401
 

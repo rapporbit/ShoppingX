@@ -152,12 +152,8 @@ def test_http_entry_is_registered() -> None:
     """按钮那条确定性路径必须真在路由表上——前端只认这一个路径，写错了是上线才发现的哑火。"""
     from app.api.server import app
 
-    routes = {
-        (r.path, tuple(sorted(r.methods)))  # type: ignore[attr-defined]
-        for r in app.routes
-        if "compare" in getattr(r, "path", "")
-    }
-    assert ("/api/threads/{thread_id}/compare", ("POST",)) in routes
+    # 查 OpenAPI 路径表而不是 app.routes：include_router 进来的路由不摊平在 app.routes 里。
+    assert "post" in app.openapi()["paths"].get("/api/threads/{thread_id}/compare", {})
 
 
 @pytest.fixture
@@ -165,11 +161,12 @@ async def _client(monkeypatch: pytest.MonkeyPatch, tmp_path):  # type: ignore[no
     """开着鉴权的 ASGI 客户端，输出根钉到 tmp（与 test_confirmations 同一套路）。"""
     from httpx import ASGITransport, AsyncClient
 
+    import app.api.orders as orders_api
     import app.api.server as server
 
     monkeypatch.setenv("AUTH_ENABLED", "true")
     monkeypatch.setenv("JWT_SECRET", "test-secret-not-real")
-    monkeypatch.setattr(server, "OUTPUT_ROOT", tmp_path / "output")
+    monkeypatch.setattr(orders_api, "OUTPUT_ROOT", tmp_path / "output")
     async with AsyncClient(transport=ASGITransport(app=server.app), base_url="http://test") as c:
         yield c
 

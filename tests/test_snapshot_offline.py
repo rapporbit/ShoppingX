@@ -37,11 +37,12 @@ async def _client(monkeypatch: pytest.MonkeyPatch, tmp_path):  # type: ignore[no
     """开着鉴权的 ASGI 客户端，输出根钉到 tmp。"""
     from httpx import ASGITransport, AsyncClient
 
+    import app.api.orders as orders_api
     import app.api.server as server
 
     monkeypatch.setenv("AUTH_ENABLED", "true")
     monkeypatch.setenv("JWT_SECRET", "test-secret-not-real")
-    monkeypatch.setattr(server, "OUTPUT_ROOT", tmp_path / "output")
+    monkeypatch.setattr(orders_api, "OUTPUT_ROOT", tmp_path / "output")
     async with AsyncClient(transport=ASGITransport(app=server.app), base_url="http://test") as c:
         yield c
 
