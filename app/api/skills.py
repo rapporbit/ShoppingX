@@ -2,6 +2,7 @@
 
 - ``GET  /api/skills/catalog``        内置 + 我的 skill 目录（name / description / source），
   喂输入框 ``/`` 菜单
+- ``GET  /api/skills/builtin/{name}`` 一份内置 skill 的全文（只读，Skill 页展示用）
 - ``GET  /api/skills``                我的 skill 全量（含正文，编辑面板用）
 - ``POST /api/skills``                新建
 - ``PUT  /api/skills/{name}``         改 description / body（name 是定位键，改名 = 删了重建）
@@ -19,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.skills import list_catalog
+from app.agent.skills import list_catalog, read_builtin_skill
 from app.api.auth import auth_enabled, get_current_user_id
 from app.db.session import get_db
 from app.db.user_skills import (
@@ -66,6 +67,18 @@ async def catalog(
 ) -> dict[str, Any]:
     uid = auth_uid if auth_enabled() else (auth_uid or user_id)
     return {"skills": await list_catalog(uid)}
+
+
+@router.get("/builtin/{name}")
+async def builtin_skill(
+    name: str,
+    auth_uid: str | None = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    """内置 skill 全文，只读。name 只拿去和 ``skills/`` 下已加载的目录名比对，不拼路径。"""
+    skill = await read_builtin_skill(name)
+    if skill is None:
+        raise HTTPException(404, "没有这个内置 Skill")
+    return skill
 
 
 @router.get("")
