@@ -93,16 +93,6 @@ def charge_tree_retrieval() -> int | None:
     return st.count
 
 
-def peek_tree_retrieval() -> int | None:
-    """只读当前全树检索累计（不自增），供「耗尽即夺权」在请求模型前判断要不要摘掉检索工具。
-
-    与 :func:`charge_tree_retrieval` 区别：charge 在工具**执行时**计数，peek 在**请求模型前**
-    读数——用它决定下一轮还把不把 item_search/web_search 放进模型可见工具表。无 session 作用域
-    或尚未检索过返回 None。
-    """
-    st = _state(create=False)
-    return st.count if st is not None else None
-
 
 def note_web_search() -> None:
     """web_search 执行时计一次（配额消耗）。挂在 retrieval_charge(45)——门控 websearch_gate(15)

@@ -129,16 +129,6 @@ _DEST_COUNTRY: dict[str, tuple[str, bool]] = {}
 _ORIGINAL_QUERY: dict[str, str] = {}
 
 
-def set_thread_context(thread_id: str, session_dir: Path, user_id: str | None = None) -> None:
-    """在请求入口写入本次任务的身份信息。
-
-    一般通过 ``thread_scope`` 调用以保证离开作用域时自动还原；直接调用时不返回
-    token，无法 reset，仅适用于进程级一次性绑定（如离线脚本）。
-    """
-    _thread_id_var.set(thread_id)
-    _session_dir_var.set(session_dir)
-    _user_id_var.set(user_id)
-
 
 def get_thread_id() -> str | None:
     """读取当前任务的 thread_id；无上下文（如离线脚本）时返回 None。"""

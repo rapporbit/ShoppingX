@@ -338,7 +338,7 @@ def test_user_in_variant_bucket_gets_variant_prompt(tmp_path: Any, monkeypatch: 
     _load_prompts.cache_clear()
     monkeypatch.setenv("PROMPT_AB_VARIANTS", "1.1.0:100")  # 全量给候选，桶号无关地生效
 
-    # 用 thread_scope 而不是裸 set_thread_context：后者只 set 不 reset，会把 thread_id /
+    # 用 thread_scope 而不是裸 ContextVar.set：后者只 set 不 reset，会把 thread_id /
     # session_dir 泄漏给同进程的后续用例（实测打挂了 test_token_budget 与 test_refine_turn）。
     try:
         with thread_scope("t-ab", tmp_path, user_id="alice"):

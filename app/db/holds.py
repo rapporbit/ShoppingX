@@ -237,12 +237,3 @@ async def settle(
 async def release(run_id: str) -> None:
     """零成本释放（入队失败、任务还没跑就没了）。结算成 0 credit，不记账。"""
     await settle(run_id, 0.0)
-
-
-async def hold_state(run_id: str) -> str | None:
-    """这条 run 的状态；没有 hold 行返回 ``None``。给消费侧去重（B4）与排障用。"""
-    if not holds_enabled():
-        return None
-    async with session_factory()() as db:
-        hold = await db.get(RunHold, run_id)
-        return hold.state if hold else None
