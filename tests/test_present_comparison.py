@@ -11,7 +11,8 @@ from pathlib import Path
 import pytest
 
 import app.tools.present_comparison as pc
-from app.tools._candidates import _REGISTRY, register
+from app.api.run_state import reset_run_state
+from app.tools._candidates import register
 from app.tools.present_comparison import ComparisonItem, _ComparisonDraft, compare_items
 from app.tools.schemas import ItemCandidate
 from app.utils.thread_ctx import thread_scope
@@ -32,9 +33,9 @@ def _cand(item_id: str, **kw: object) -> ItemCandidate:
 
 @pytest.fixture(autouse=True)
 def _clean() -> None:
-    _REGISTRY.pop(str(SESSION_DIR), None)
+    reset_run_state(SESSION_DIR)  # fixture 不在 thread_scope 内，显式传 session_dir
     yield
-    _REGISTRY.pop(str(SESSION_DIR), None)
+    reset_run_state(SESSION_DIR)
 
 
 def _draft(items: list[ComparisonItem], rec: str = "", reason: str = "为什么推荐它"):

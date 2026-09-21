@@ -23,7 +23,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.api.context import get_session_dir
+from app.api.run_state import clear_run_slot, peek_run_slot, run_slot
 from app.utils.env import env_float
 
 logger = logging.getLogger("shoppingx.token_budget")
@@ -93,9 +93,9 @@ def _budget_usd() -> float:
 
     优先取本任务被压低过的 cap（:func:`set_task_cap`，即用户今日剩余额度），否则走 env 默认。
     """
-    k = _key()
-    if k is not None and k in _CAPS:
-        return _CAPS[k]
+    cap = peek_run_slot(_RunCap)
+    if cap is not None:
+        return cap.cap_usd
     return env_float("TOKEN_BUDGET_USD", 0.50)
 
 
@@ -122,27 +122,25 @@ class _RunUsage:
     _seen: set[str] = field(default_factory=set)
 
 
-# session_dir(str) → 该任务一次 run 的累计用量。主 loop 与工具内部调用共享同一条目。
-_STATE: dict[str, _RunUsage] = {}
-# session_dir(str) → 本次任务被压低后的成本上限（见 set_task_cap）。缺省即走 env 默认。
-_CAPS: dict[str, float] = {}
+@dataclass
+class _RunCap:
+    """本次任务被压低后的成本上限（见 :func:`set_task_cap`）。缺省即走 env 默认。
 
+    **刻意与 _RunUsage 分成两格**，虽然两者同生同灭：``set_task_cap`` 在 run 一开始就会被调
+    （用户今日剩余额度），要是共用一格，``run_snapshot`` 就再也返回不了 ``None``——而
+    ``run_agent`` 收尾正是靠那个 ``None`` 判定「一个模型调用都没发生」、据此退掉 credit 预扣。
+    「这一格建没建过」在这里是信号，不能被另一件事的写入顺手抹平。
+    """
 
-def _key() -> str | None:
-    sd = get_session_dir()
-    return str(sd) if sd is not None else None
+    cap_usd: float = 0.0
 
 
 def _state(create: bool = True) -> _RunUsage | None:
-    """取当前 session 的用量状态；无 session 作用域（单测）返回 None。"""
-    k = _key()
-    if k is None:
-        return None
-    st = _STATE.get(k)
-    if st is None and create:
-        st = _RunUsage()
-        _STATE[k] = st
-    return st
+    """取当前 session 的用量状态；无 session 作用域（单测）返回 None。
+
+    ``create=False`` 时「本轮一次都没计过费」也返回 None（见 :func:`run_snapshot`）。
+    """
+    return run_slot(_RunUsage) if create else peek_run_slot(_RunUsage)
 
 
 def _msg_cost(meta: dict, model: str) -> tuple[int, int, int, float]:
@@ -285,19 +283,18 @@ def set_task_cap(cap_usd: float) -> None:
     就能透支近半个额度。把 cap 压成 ``min(单任务预算, 今日剩余)`` 后，透支最多只到「额度刚好用尽」
     为止，超出部分由 hard 闸夺权收尾。
 
-    与 ``_STATE`` 同样按 session_dir 归集（本次 run 全程共用同一个 cap），同样由 :func:`reset_run`
+    与用量账本同样按 session_dir 归集（本次 run 全程共用同一个 cap），同样由 :func:`reset_run`
     清掉。传 ``<=0`` 会被忽略——那等价于「不设闸」，而在这里它的语义恰恰
     相反（额度已耗尽），绝不能因此把闸门关掉。
     """
-    k = _key()
-    if k is None or cap_usd <= 0:
+    if cap_usd <= 0:
         return
-    _CAPS[k] = min(cap_usd, env_float("TOKEN_BUDGET_USD", 0.50))
+    cap = run_slot(_RunCap)
+    if cap is not None:
+        cap.cap_usd = min(cap_usd, env_float("TOKEN_BUDGET_USD", 0.50))
 
 
 def reset_run() -> None:
-    """清掉本 session 的用量条目（任务收尾时调，防模块级 dict 无界增长）。"""
-    k = _key()
-    if k is not None:
-        _STATE.pop(k, None)
-        _CAPS.pop(k, None)
+    """清掉本 session 的用量条目（任务收尾时调，防 run 状态表无界增长）。"""
+    clear_run_slot(_RunUsage)
+    clear_run_slot(_RunCap)

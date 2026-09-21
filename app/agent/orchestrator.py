@@ -49,20 +49,15 @@ from app.api.context import (
     get_learned_pref_items,
     get_learned_prefs,
     get_session_pt,
-    reset_dest_country,
-    reset_original_query,
-    reset_session_pt,
-    reset_session_tasks,
     set_deadline,
     set_original_query,
     set_session_pt,
 )
+from app.api.run_state import reset_run_state
 from app.db.quota import remaining_usd
 from app.harness.msgs import iter_tool_results
-from app.harness.retrieval_budget import reset_run as reset_retrieval_run
 from app.harness.setup import setup_harness
 from app.harness.token_budget import budget_status, run_snapshot, set_task_cap
-from app.harness.token_budget import reset_run as reset_token_run
 from app.memory.curator import curate_turn
 from app.memory.fact_store import get_fact_store
 from app.memory.facts import select_tier_one_facts
@@ -78,8 +73,6 @@ from app.recall.semantic_cache import (
     turn_cache_key,
     turn_is_cacheable,
 )
-from app.tools._bundle import reset_session_bundle
-from app.tools._candidates import reset_candidates
 from app.tools._diagnostics import reset_diagnostics
 from app.tools.shopping_summary import ShoppingSummaryOutput
 from app.utils.dependency import dependency_down_seen, reset_dependency_down
@@ -385,6 +378,10 @@ async def _run_turn(
         # 他等的那 8 秒是队列里排的还是模型在想，只关心「多久有反应」。
         begin_first_event_timer(_parse_enqueued_at(enqueued_at))
         reset_dependency_down()  # 旗子是 ContextVar，同一任务跨轮沿用，开局清掉
+        # 上一轮残留的 run 状态（收货国 / 任务清单 / 槽表 / 候选登记表 / 预算计数…）：同 thread
+        # 续聊时它们会让本轮 planner 还没跑就先按上轮结论走。**必须在这一行之后**才写本轮的任何
+        # run 状态（紧接着的 set_task_cap 就是第一处），否则刚写的当场被清掉。
+        reset_run_state()
 
         activity_rec = monitor.begin_activity_capture()
         await monitor.report_session_created(session_dir)
@@ -394,10 +391,6 @@ async def _run_turn(
         if quota_left is not None:
             set_task_cap(quota_left)
 
-        # 清掉上一轮残留的 ContextVar / 模块级状态（收货国、任务清单）：
-        # 同 thread 续聊时它们会让本轮 planner 还没跑就先按上轮结论走。
-        reset_dest_country()
-        reset_session_tasks()
         set_original_query(query)
         setup_harness()  # 幂等
 
@@ -478,8 +471,8 @@ async def _run_turn(
             await monitor.report_error(type(e).__name__, str(e))
             raise
         finally:
-            # 成本归集 + 全部按 session_dir / thread_id 聚合的模块级状态清理。放 finally：
-            # 取消 / 超时也照样记账 + 清理，绝不漏账或泄漏模块级 dict。
+            # 成本归集 + 本轮 run 状态清理。放 finally：取消 / 超时也照样记账 + 清理，
+            # 绝不漏账或把状态泄进下一轮。
             snap = run_snapshot()
             if snap is not None:
                 status = budget_status()
@@ -493,15 +486,13 @@ async def _run_turn(
                     snap["model_calls"],
                     status,
                 )
-            reset_token_run()
-            reset_retrieval_run()
-            reset_candidates()  # 候选登记表只活一轮；跨轮引用按 item_id 回源 Qdrant
+            # 一次 run 的全部状态住同一张表（app/api/run_state.py），一次清干净——用量 / 检索
+            # 预算 / 候选登记表 / 槽表 / 收货国 / 任务清单 / P_t。候选登记表只活一轮，跨轮引用
+            # 按 item_id 回源 Qdrant。
+            reset_run_state()
+            # 诊断侧信道的键是 thread_id 不是 session_dir（同一目录上的两个 loop 不该互相消费
+            # 对方的诊断），不在那张表里，单独清。
             reset_diagnostics(thread_id)
-            reset_session_bundle()
-            reset_dest_country()
-            reset_session_tasks()
-            reset_original_query()
-            reset_session_pt()
             if snap is not None:
                 await charge_quota(
                     user_id, snap, prompt_version=ab_assign.version, run_id=run_id or ""

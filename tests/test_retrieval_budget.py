@@ -9,11 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from app.api.context import _SESSION_TASKS, set_session_tasks
+from app.api.context import set_session_tasks
+from app.api.run_state import reset_run_state
 from app.harness.hooks.budget import charge_retrieval
 from app.harness.middleware import HookRejectSignal
 from app.harness.retrieval_budget import (
-    _STATE,
     WEB_SEARCH_TASK_QUOTA,
     note_item_search,
     note_web_search,
@@ -29,15 +29,12 @@ SESSION_DIR = Path("/tmp/shoppingx-test-retrieval-budget-session")
 def _clean_tree() -> None:
     """每条测试独立一棵树：避免 session_dir 键跨测试串台。
 
-    直接清 ``_STATE`` 的字典键，不用 ``reset_run()``——那个函数靠 ContextVar 读当前
-    session_dir，fixture 运行时不在任何 thread_scope 内（``get_session_dir()`` 返回 None），
-    调了也清不到 SESSION_DIR 这个键。
+    显式传 session_dir，不用无参形式——fixture 运行时不在任何 thread_scope 内
+    （``get_session_dir()`` 返回 None），不传就清不到 SESSION_DIR 这一份。
     """
-    _STATE.pop(str(SESSION_DIR), None)
-    _SESSION_TASKS.pop(str(SESSION_DIR), None)
+    reset_run_state(SESSION_DIR)
     yield
-    _STATE.pop(str(SESSION_DIR), None)
-    _SESSION_TASKS.pop(str(SESSION_DIR), None)
+    reset_run_state(SESSION_DIR)
 
 
 def test_unscoped_allows_before_any_search() -> None:

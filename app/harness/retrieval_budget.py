@@ -4,13 +4,13 @@
 都不会消失，压力只会顶到还开着的那个口（挤气球）。所以 ``item_search`` / ``web_search`` 计进
 **同一个计数器**，过阈值由 middleware 注入强制收尾信号。
 
-为什么用「按 session_dir 为键的模块级 dict」而不是裸 ContextVar：asyncio 子任务创建时会**拷贝**
-一份 context，子任务里对 ContextVar 的 ``set`` 不回传父 loop——同轮 batch 的几个工具各跑在自己的
-子任务里，用 ContextVar 就会静默漏计。``session_dir`` 由 ``thread_scope`` 设好后被子任务继承，
-按同一 key 自增才数得准。（历史：这套聚合最初是为跨 fork 树共享写的，2026-09-16 删子 Agent 后
-口径收窄为「一次 run_agent」，机制不变。）
+为什么按 session_dir 聚合（住 :mod:`app.api.run_state` 的 run 状态表）而不是裸 ContextVar：
+asyncio 子任务创建时会**拷贝**一份 context，子任务里对 ContextVar 的 ``set`` 不回传父 loop——
+同轮 batch 的几个工具各跑在自己的子任务里，用 ContextVar 就会静默漏计。``session_dir`` 由
+``thread_scope`` 设好后被子任务继承，按同一 key 自增才数得准。（历史：这套聚合最初是为跨 fork
+树共享写的，2026-09-16 删子 Agent 后口径收窄为「一次 run_agent」，机制不变。）
 
-模块级 dict 需要收尾清理（防无界增长）：``run_agent`` 结束时调 :func:`reset_run`。
+状态表需要收尾清理（防无界增长）：``run_agent`` 结束时调 :func:`reset_run`。
 
 三本账各管各的，互不透支：一次 run 的检索总量（``count``，堵找更好商品的动机）、web_search 任务配额
 （``WEB_SEARCH_TASK_QUOTA``）、research 搜索配额（``RESEARCH_SEARCH_QUOTA``，见下方长注释）。
@@ -20,7 +20,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.api.context import get_session_dir, get_session_tasks
+from app.api.context import get_session_tasks
+from app.api.run_state import clear_run_slot, peek_run_slot, run_slot
 from app.utils.env import env_int
 
 # 任务口径的 web_search 小配额（窄口径用途门）：planner 判 evaluate / category_intel 时，
@@ -63,25 +64,13 @@ class _RunRetrieval:
     probe_hits: int = 0  # 上述那些 item_search 各自的实际命中数之和
 
 
-# session_dir(str) → 该任务一次 run 的检索状态。同轮 batch 的各工具共享同一条目。
-_STATE: dict[str, _RunRetrieval] = {}
-
-
-def _key() -> str | None:
-    sd = get_session_dir()
-    return str(sd) if sd is not None else None
-
-
 def _state(create: bool = True) -> _RunRetrieval | None:
-    """取当前 session 的检索状态；无 session 作用域（单测）返回 None。"""
-    k = _key()
-    if k is None:
-        return None
-    st = _STATE.get(k)
-    if st is None and create:
-        st = _RunRetrieval()
-        _STATE[k] = st
-    return st
+    """取当前 session 的检索状态；无 session 作用域（单测）返回 None。
+
+    ``create=False`` 时「本轮还没建过这一格」也返回 None——几处门控靠这个区分「还没进入购物
+    检索流程」与「搜过但计数是 0」。
+    """
+    return run_slot(_RunRetrieval) if create else peek_run_slot(_RunRetrieval)
 
 
 def charge_retrieval_count() -> int | None:
@@ -105,8 +94,6 @@ def note_web_search() -> None:
 
 def research_remaining() -> int:
     """本会话 ``research`` 还剩几条搜索额度（无 session 作用域＝单测，回满额）。"""
-    if _key() is None:
-        return RESEARCH_SEARCH_QUOTA
     st = _state(create=False)
     used = st.research_searches if st is not None else 0
     return max(0, RESEARCH_SEARCH_QUOTA - used)
@@ -123,11 +110,9 @@ def charge_research(planned: int) -> bool:
     模型，不会诱发重试。
     """
     planned = max(0, planned)
-    if _key() is None:
-        return True  # 无 session 作用域（单测直调）：失效方向中性，不拦
     st = _state()
     if st is None:
-        return True
+        return True  # 无 session 作用域（单测直调）：失效方向中性，不拦
     if st.research_searches + planned > RESEARCH_SEARCH_QUOTA:
         return False
     st.research_searches += planned
@@ -193,11 +178,9 @@ def web_search_allowed() -> bool:
     点名评价 / 比较具体商品走场景 2（planner 判 evaluate）。原来那套「定点调查按子任务隔离
     信号」已删（2026-09-16，真实会话 0 次使用）。
     """
-    if _key() is None:
-        return True  # 无 session 作用域（单测）
     st = _state(create=False)
     if st is None:
-        return True  # 还没进入购物检索流程 → 允许独立知识查询
+        return True  # 无 session 作用域（单测），或还没进入购物检索流程 → 允许独立知识查询
     if st.item_search_runs == 0:
         return True  # 同上：session 存在但还没搜过商品
     if _TASKS_WANT_WEB & set(get_session_tasks()) and st.web_search_runs < WEB_SEARCH_TASK_QUOTA:
@@ -206,7 +189,5 @@ def web_search_allowed() -> bool:
 
 
 def reset_run() -> None:
-    """清掉本 session 的检索预算条目（任务收尾时调，防模块级 dict 无界增长）。"""
-    k = _key()
-    if k is not None:
-        _STATE.pop(k, None)
+    """清掉本 session 的检索预算条目（任务收尾时调，防 run 状态表无界增长）。"""
+    clear_run_slot(_RunRetrieval)

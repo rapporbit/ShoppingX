@@ -138,13 +138,9 @@ def build_fallback_answer(user_query: str = "") -> str:
 def _top_candidates(n: int) -> list[ItemCandidate]:
     """从候选登记表取前 n 个候选。读不到（无会话作用域）返回空列表——绝不抛。"""
     try:
-        from app.api.context import get_session_dir
-        from app.tools._candidates import _REGISTRY
+        from app.tools._candidates import registry_snapshot
 
-        sd = get_session_dir()
-        if sd is None:
-            return []
-        return list(_REGISTRY.get(str(sd), {}).values())[:n]
+        return registry_snapshot()[:n]
     except Exception:
         logger.debug("读取候选失败，fallback 回答退化为无候选版本", exc_info=True)
         return []
