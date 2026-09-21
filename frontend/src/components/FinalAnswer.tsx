@@ -6,7 +6,7 @@ import { DownloadIcon } from "./icons";
 // 回来的内容，marked 默认不消毒，直接 dangerouslySetInnerHTML 就给了 <img onerror> 这类注入
 // 可乘之机。转义 < > & 后，markdown 语法（#、*、[]() 等不含尖括号）照常渲染，但任何裸 HTML 失效。
 // 这是零依赖的最小消毒；要更强（保留部分安全标签）可上 DOMPurify，属生产化硬化、非本主线。
-function safeMarkdown(md: string): string {
+export function safeMarkdown(md: string): string {
   const escaped = md.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   return marked.parse(escaped, { async: false }) as string;
 }

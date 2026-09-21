@@ -502,6 +502,13 @@ export async function fetchMySkills(userId: string): Promise<UserSkill[]> {
   return (await resp.json()).skills ?? [];
 }
 
+// 内置 skill 全文（Skill 页只读详情用）。拿不到就 null，页面退回只显示用途一句话。
+export async function fetchBuiltinSkill(name: string): Promise<{ name: string; description: string; body: string } | null> {
+  const resp = await authFetch(`/api/skills/builtin/${encodeURIComponent(name)}`);
+  if (!resp.ok) return null;
+  return await resp.json();
+}
+
 async function skillWrite(url: string, method: "POST" | "PUT", payload: object): Promise<UserSkill> {
   const resp = await authFetch(url, {
     method,

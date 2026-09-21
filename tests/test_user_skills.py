@@ -92,6 +92,19 @@ async def test_validation_and_anonymous(client: AsyncClient) -> None:
     assert {s["name"] for s in cat} >= {"bundle-planning", "cross-border-duty", "image-shopping"}
 
 
+async def test_builtin_skill_body_is_readable_but_scoped(client: AsyncClient) -> None:
+    """内置 skill 全文只读口：登录可读、匿名 401、不认个人 skill 名也不认路径。"""
+    _, alice = await _signup(client, "sk-erin")
+    await client.post("/api/skills", json=SKILL, headers=alice)
+
+    assert (await client.get("/api/skills/builtin/bundle-planning")).status_code == 401
+    got = (await client.get("/api/skills/builtin/bundle-planning", headers=alice)).json()
+    assert got["name"] == "bundle-planning" and got["description"] and len(got["body"]) > 100
+    # 个人 skill 不从这个口出（它有自己的 GET /api/skills，带归属校验）
+    for bad in ("weekend-backpack", "..%2F..%2Fprompt"):
+        assert (await client.get(f"/api/skills/builtin/{bad}", headers=alice)).status_code == 404
+
+
 async def test_catalog_and_loader_expose_my_skill(client: AsyncClient, tmp_path: Path) -> None:
     uid, alice = await _signup(client, "sk-dave")
     await client.post("/api/skills", json=SKILL, headers=alice)

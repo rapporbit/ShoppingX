@@ -131,6 +131,18 @@ async def list_catalog(user_id: str | None) -> list[dict[str, str]]:
     return items
 
 
+async def read_builtin_skill(name: str) -> dict[str, str] | None:
+    """按名取一份**内置** skill 的全文（前端 Skill 页只读展示用）。只扫 ``skills/``，不碰个人库。"""
+    name = (name or "").strip()
+    for loader in skill_loaders():
+        if isinstance(loader, UserSkillLoader):
+            continue
+        for s in await loader.list_skills():
+            if s.name == name:
+                return {"name": s.name, "description": s.description, "body": s.markdown}
+    return None
+
+
 async def resolve_selected_skill(name: str) -> tuple[str, str] | None:
     """按目录名找 skill 正文（``my/`` 走当前用户的库，其余走 ``skills/``）。找不到 → None。
 

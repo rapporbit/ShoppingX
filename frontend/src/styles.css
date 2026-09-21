@@ -3797,11 +3797,71 @@ button:disabled {
   justify-content: flex-end;
   gap: 8px;
 }
-.skill-list-head {
-  margin: 0 20px 10px;
-}
 .skill-row {
   cursor: pointer;
+}
+.skill-row.active {
+  border-color: var(--text);
+  background: var(--surface-soft);
+}
+.skill-row .fav-meta {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.skill-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 20px 8px;
+  min-height: 30px;
+}
+.skill-group-head .drawer-section-title {
+  margin-bottom: 0;
+  color: var(--text-2);
+}
+/* 「返回列表」只在单列（抽屉 / 窄屏整页）露出，两栏并排时左列一直在，用不着 */
+.skill-back {
+  display: none;
+  margin: 0 20px 10px;
+  padding-left: 0;
+}
+.skill-detail {
+  margin: 0 20px 14px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+.skill-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.skill-detail-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  word-break: break-all;
+}
+.skill-detail-desc {
+  margin: 8px 0 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text-2);
+}
+.skill-detail-body {
+  font-size: 13.5px;
+  max-height: 62vh;
+  overflow-y: auto;
 }
 
 /* ===== 弹窗（详情 / 对比 / 下单意向）===== */
@@ -4567,9 +4627,22 @@ button:disabled {
   }
 }
 /* 抽屉视图（非 .page）里 Skill 两栏退回二选一 */
-.panel-host:not(.page) .skill-page-grid.editing .skill-list-col,
-.panel-host:not(.page) .skill-page-grid:not(.editing) .skill-editor-col {
+.panel-host:not(.page) .skill-page-grid.detail-open .skill-list-col,
+.panel-host:not(.page) .skill-page-grid:not(.detail-open) .skill-editor-col {
   display: none;
+}
+.panel-host:not(.page) .skill-back {
+  display: inline-flex;
+}
+/* 整页但窄到单列时同样二选一：否则右列（编辑器 / 详情）排在整条列表下面，点了「新建」要滚到底才看得见 */
+@media (max-width: 900px) {
+  .panel-host.page .skill-page-grid.detail-open .skill-list-col,
+  .panel-host.page .skill-page-grid:not(.detail-open) .skill-editor-col {
+    display: none;
+  }
+  .panel-host.page .skill-back {
+    display: inline-flex;
+  }
 }
 
 /* ============================ 结果区标题 / 脚注 / 骨架 / 空态 / 追问 ============================ */
