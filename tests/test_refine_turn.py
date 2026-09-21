@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 
 from app.harness.hooks.progress import BACKFILL_LATCH, check_refine_backfill
-from app.harness.phase_machine import Phase, PhaseStateMachine, set_phase_machine
 from app.harness.signals import _count_candidates, candidate_count
 from app.harness.state import GuardState
 from app.tools._candidates import register
@@ -69,9 +68,8 @@ async def test_polluted_first_search_triggers_backfill(tmp_path: Path) -> None:
     """
 
     with thread_scope("t-polluted", tmp_path):
-        machine = PhaseStateMachine(initial=Phase.COMPARING)
-        set_phase_machine(machine)
         guard = GuardState()
+        guard.progress_marks.update({"candidates", "picks"})
 
         ctx = await check_refine_backfill(
             {
@@ -84,7 +82,7 @@ async def test_polluted_first_search_triggers_backfill(tmp_path: Path) -> None:
             }
         )
 
-        assert machine.phase is Phase.SEARCHING
+        assert "candidates" not in guard.progress_marks  # 检索已重开
         assert BACKFILL_LATCH in guard.notified_transitions  # 只触发一次，不会无限回退
         # 污染批不再算「本轮已搜到货」：同轮 40 号钩子不得凭它把 SEARCHING 立刻推回 COMPARING。
         assert ctx is not None and ctx["total_candidates"] == 0
@@ -95,14 +93,20 @@ async def test_sparse_but_clean_pool_no_backfill(tmp_path: Path) -> None:
     """池子小但干净（oncat=2、offcat=0）是库存稀疏，不是检索词的错——重搜同样的词只会拿回
     同一池货，不触发。"""
     with thread_scope("t-sparse", tmp_path):
-        machine = PhaseStateMachine(initial=Phase.COMPARING)
-        set_phase_machine(machine)
+        guard = GuardState()
+        guard.progress_marks.update({"candidates", "picks"})
 
         await check_refine_backfill(
-            {"picker_attempted": True, "picks_count": 2, "oncat_count": 2, "offcat_count": 0}
+            {
+                "picker_attempted": True,
+                "picks_count": 2,
+                "oncat_count": 2,
+                "offcat_count": 0,
+                "_guard": guard,
+            }
         )
 
-        assert machine.phase is Phase.COMPARING
+        assert "candidates" in guard.progress_marks  # 未触发补搜
 
 
 # ---------- 硬淘汰杀池分支：预算/排除把干净池杀空 → 补搜（交接遗留洞 #1） ----------
@@ -116,9 +120,8 @@ async def test_hard_cull_first_search_triggers_backfill(tmp_path: Path) -> None:
     同型未爆洞）。"""
 
     with thread_scope("t-hard-cull", tmp_path):
-        machine = PhaseStateMachine(initial=Phase.COMPARING)
-        set_phase_machine(machine)
         guard = GuardState()
+        guard.progress_marks.update({"candidates", "picks"})
 
         ctx = await check_refine_backfill(
             {
@@ -131,7 +134,7 @@ async def test_hard_cull_first_search_triggers_backfill(tmp_path: Path) -> None:
             }
         )
 
-        assert machine.phase is Phase.SEARCHING
+        assert "candidates" not in guard.progress_marks  # 检索已重开
         assert BACKFILL_LATCH in guard.notified_transitions  # 只触发一次
         assert ctx is not None and ctx["total_candidates"] == 0
         assert ctx["reset_fresh_candidates"] is True
@@ -141,8 +144,8 @@ async def test_sparse_pool_without_cull_no_backfill(tmp_path: Path) -> None:
     """池子小但淘汰为 0（库存稀疏）不触发——与污染分支「小但干净不触发」同一纪律；
     诊断缺席（None）同样不触发（失效方向中性）。"""
     with thread_scope("t-cull-sparse", tmp_path):
-        machine = PhaseStateMachine(initial=Phase.COMPARING)
-        set_phase_machine(machine)
+        guard = GuardState()
+        guard.progress_marks.update({"candidates", "picks"})
 
         await check_refine_backfill(
             {
@@ -150,12 +153,13 @@ async def test_sparse_pool_without_cull_no_backfill(tmp_path: Path) -> None:
                 "picks_count": 2,
                 "excluded_count": 0,
                 "over_budget_count": 0,
+                "_guard": guard,
             }
         )
-        assert machine.phase is Phase.COMPARING
+        assert "candidates" in guard.progress_marks  # 未触发补搜
 
         await check_refine_backfill({"picker_attempted": True, "picks_count": 2})
-        assert machine.phase is Phase.COMPARING
+        assert "candidates" in guard.progress_marks  # 未触发补搜
 
 
 async def test_hard_cull_notice_points_to_price_filter(tmp_path: Path) -> None:
@@ -164,8 +168,8 @@ async def test_hard_cull_notice_points_to_price_filter(tmp_path: Path) -> None:
     from app.harness.hooks.progress import append_transition_notice
 
     with thread_scope("t-cull-notice", tmp_path):
-        machine = PhaseStateMachine(initial=Phase.COMPARING)
-        set_phase_machine(machine)
+        guard = GuardState()
+        guard.progress_marks.update({"candidates", "picks"})
 
         ctx = {
             "tool_name": "item_picker",
@@ -184,9 +188,8 @@ async def test_hard_cull_notice_points_to_price_filter(tmp_path: Path) -> None:
 async def test_pollution_backfill_fires_only_once(tmp_path: Path) -> None:
     """已补搜过一次（闩已写）后即使仍污染也不再回退——防「重搜还是脏 → 无限回退」。"""
     with thread_scope("t-once", tmp_path):
-        machine = PhaseStateMachine(initial=Phase.COMPARING)
-        set_phase_machine(machine)
         guard = GuardState()
+        guard.progress_marks.update({"candidates", "picks"})
         guard.notified_transitions.add(BACKFILL_LATCH)  # 已补搜过一次
 
         await check_refine_backfill(
@@ -199,21 +202,26 @@ async def test_pollution_backfill_fires_only_once(tmp_path: Path) -> None:
             }
         )
 
-        assert machine.phase is Phase.COMPARING
-        assert machine.phase is Phase.COMPARING  # 没有第二次回退
+        assert "candidates" in guard.progress_marks  # 没有第二次回退
 
 
 async def test_no_rerank_signal_no_pollution_judgement(tmp_path: Path) -> None:
     """本轮没跑相关性门（oncat=None）→ 判不了污染就不判；失效方向 = 维持现状。"""
     with thread_scope("t-no-rerank", tmp_path):
-        machine = PhaseStateMachine(initial=Phase.COMPARING)
-        set_phase_machine(machine)
+        guard = GuardState()
+        guard.progress_marks.update({"candidates", "picks"})
 
         await check_refine_backfill(
-            {"picker_attempted": True, "picks_count": 2, "oncat_count": None, "offcat_count": None}
+            {
+                "picker_attempted": True,
+                "picks_count": 2,
+                "oncat_count": None,
+                "offcat_count": None,
+                "_guard": guard,
+            }
         )
 
-        assert machine.phase is Phase.COMPARING
+        assert "candidates" in guard.progress_marks  # 未触发补搜
 
 
 def test_picker_head_counts_visible_to_model_only_when_polluted() -> None:

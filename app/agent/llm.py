@@ -334,7 +334,7 @@ def get_tier_llm(tier: str) -> ThrottledChatModel:
 
 
 def main_loop_tier_base() -> str:
-    """主 loop 基座档。默认 ``fast``——第 2 轮之后决策空间已被阶段机 + 候选 id 化夹死，
+    """主 loop 基座档。默认 ``fast``——第 2 轮之后决策空间已被收线通告 + 候选 id 化夹死，
     模型基本只是在允许的一两个工具里挑一个、把几个 item_id 传进去，thinking token 买不到东西。
     """
     return os.environ.get("MAIN_LOOP_TIER_BASE", "fast").strip().lower()

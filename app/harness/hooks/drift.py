@@ -9,8 +9,8 @@ LoopDetector 检测"重复做同一件事"；Silent Drift 检测"做不同的事
 3. 偏好丢失 —— 推荐结果命中用户黑名单属性（会话级 P_t 的硬 dislike）
 4. 成本失控 —— 最近几轮 token 消耗远超均值（浪费在无效工具调用）
 
-纠正策略：轻微 → 注入提醒；严重 → 注入强纠正；连续严重 → 强制收尾（并把阶段机推到
-CONCLUDING 授权收尾，否则 phase gate 会把被强制的 shopping_summary 拦下来）。
+纠正策略：轻微 → 注入提醒；严重 → 注入强纠正；连续严重 → 强制收尾（并置
+``guard.force_conclude`` 授权，否则收尾资格门会把被强制的 shopping_summary 拦下来）。
 预算面不在这里管——budget_router 每轮 pre_think 都会按全树成本定档，无需旁路信号。
 """
 
@@ -23,6 +23,7 @@ from typing import Any
 
 from app.harness.middleware import harness_hook
 from app.harness.signals import blacklist_hits
+from app.harness.state import guard_of
 from app.security.content_filter import strip_fence_open
 from app.utils.env import env_bool, env_int
 from app.utils.terms import normalize_terms, term_hits
@@ -204,22 +205,19 @@ def _computational_precheck(
     return worst, signals
 
 
-def _force_conclude_phase() -> None:
-    """把主 loop 的阶段机推到 CONCLUDING，为强制收尾**授权**。
+def _force_conclude_phase(context: dict[str, Any]) -> None:
+    """给强制收尾**授权**：置 ``guard.force_conclude``。
 
-    ``phase_check`` 留了一道底线：阶段还在 PLANNING 时拒绝
-    shopping_summary（本轮未规划/精挑不许交卷）。强制收尾是漂移恶化下的兜底通路，必须
-    压过这道底线——否则注入「立即调 shopping_summary」的同时又拦下它，模型被一边逼着
-    收尾、一边不许收尾。推进 CONCLUDING 同时也让遥测如实反映「已进入收尾」。
+    ``phase_check`` 留了一道底线：本轮没调过 planner 时拒绝 shopping_summary（未规划不许
+    交卷）。强制收尾是漂移恶化下的兜底通路，必须压过这道底线——否则注入「立即调
+    shopping_summary」的同时又拦下它，模型被一边逼着收尾、一边不许收尾。
+
+    只压这一条：「本轮没精挑」那条照旧硬拒，没有 item_picker 定稿就没有清单来源。
     """
-    try:
-        from app.harness.phase_machine import Phase, get_phase_machine
-
-        machine = get_phase_machine()
-        if machine is not None and machine.phase != Phase.CONCLUDING:
-            machine.set_phase(Phase.CONCLUDING)
-    except Exception:
-        logger.debug("强制收尾时推进阶段机失败", exc_info=True)
+    guard = guard_of(context)
+    if guard is not None:
+        guard.force_conclude = True
+        logger.warning("强制收尾已授权（force_conclude）")
 
 
 def _apply_correction(
@@ -236,7 +234,7 @@ def _apply_correction(
         state.consecutive_severe += 1
 
         if state.consecutive_severe >= 2:
-            _force_conclude_phase()
+            _force_conclude_phase(context)
             context.setdefault("inject_messages", []).append(
                 {
                     "role": "system",

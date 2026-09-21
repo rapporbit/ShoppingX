@@ -1,6 +1,6 @@
 """Harness 的信号源：「一次工具调用产生了什么」与「会话此刻处于什么状态」只有一份读法。
 
-- 工具调用信号（纯函数）：候选数 / picks 数 / 参数摘要 / 观测出口。阶段机、补搜闸、漂移检测都按
+- 工具调用信号（纯函数）：候选数 / picks 数 / 参数摘要 / 观测出口。进度钩子、补搜闸、漂移检测都按
   这里的口径做决策——多一份读法就多一种口径，那种偏差查起来能耗掉一整天。
 - 会话状态信号（同步、零 IO、异常兜底回中性值）：候选登记表条数、会话级 P_t 的黑名单。Hook 判断
   「有没有候选」「有没有踩黑名单」一律走这里，不去 grep 工具返回的文本——返回格式会变，登记表不会。
@@ -25,9 +25,9 @@ def _count_picks(result: str) -> int:
     """从 item_picker 的返回里数出真实 picks 数量。
 
     不能拿「item_picker 被调用过」当作「picks 已就绪」：候选全超预算 / 全被排除词淘汰时，
-    item_picker 返回的是 ``picks: []``。把「调过」当成 picks_count=1 会有两个后果——阶段机在没有
-    任何精选结果时就推进到 CONCLUDING（→ shopping_summary 空输出，正是典型的失败模式），
-    且回退闸从此永远不再触发（picks_count 恒 >0）。
+    item_picker 返回的是 ``picks: []``。把「调过」当成 picks_count=1 会有两个后果——收线通告会在
+    一件都没精选出来时指路「直接 shopping_summary 收尾」（→ 空清单，正是典型的失败
+    模式），且回退闸从此永远不再触发（picks_count 恒 >0）。
     """
     try:
         data = json.loads(result)
@@ -62,8 +62,8 @@ def _count_candidates(result: str) -> int:
 
     **为什么不去数候选登记表**：登记表是个累积容器——上一轮的候选会被 ``load_candidates`` 读回来
     （供 item_picker 按 id hydrate），一旦拿它的总数当「本轮搜到了东西」的进展信号，换品类那轮就会
-    被旧候选骗过去：planner 一跑完，阶段机看见「已有 12 件候选」直接推进 COMPARING，模型想搜键盘
-    却发现 item_search 在 COMPARING 不放行。
+    被旧候选骗过去：planner 一跑完，收线通告看见「已有 12 件候选」就当场喊「检索收线，别再搜」，
+    模型想搜键盘却被指路停手。
     「仓库里有什么」与「这趟活干了什么」是两回事，不该共用一个计数器——和 :func:`_count_picks`
     坚持从 item_picker 的真实返回里数 picks 是同一条原则。
     """
@@ -71,7 +71,7 @@ def _count_candidates(result: str) -> int:
         data = json.loads(result)
     except (json.JSONDecodeError, ValueError):
         # 子 Agent 回传的是自然语言总结（非 JSON）：数不出来就不计数。宁可少算不可多算——
-        # 多算会把阶段机推过头，少算最多让模型多搜一次。
+        # 多算会让收线通告过早喊停，少算最多让模型多搜一次。
         return 0
     if not isinstance(data, dict):
         return 0

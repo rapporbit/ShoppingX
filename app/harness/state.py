@@ -50,10 +50,20 @@ class GuardState:
     #: 上一次生效的预算档位（main/lite/minimal/fallback）。只为「降档时上报一次 metric」去重——
     #: 一个 20 轮的任务不去重会把 minimal 记 15 次，降级率统计直接失真。
     last_tier: str = "main"
-    #: 已发过的阶段收线通告（"search_close" / "picks_close" / "reuse_skip"）——同一通告一个 loop
+    #: 已发过的收线通告（"search_close" / "picks_close" / "reuse_skip"）——同一通告一个 loop
     #: 只发一次，免得并行两条 item_search 都非空时结果尾部重复两遍。回退 / 补搜时由
     #: phase_rollback / refine_backfill 摘掉 "search_close" 重新武装（新一轮检索需要重新收线）。
     notified_transitions: set[str] = field(default_factory=set)
+    #: 已出现过的进展边沿（"candidates" / "picks"）。漂移的「连续」类计数器只在**首次**出现某个
+    #: 进展时重置——电平触发会让 total_candidates 一旦 >0 就永远重置，漂移检测直接失效。
+    #: 检索重开（补搜 / 回退）时摘掉对应标记，新一轮的进展重新算数。
+    progress_marks: set[str] = field(default_factory=set)
+    #: item_picker 连续几轮精挑不出东西（达 2 轮即回退扩搜）。picks>0 清零。
+    picker_empty_rounds: int = 0
+    #: 漂移恶化下的强制收尾授权：置上后 ``phase_check`` 不再用「本轮没规划过」拦
+    #: shopping_summary——否则一边注入「立即收尾」一边拦下它，模型被卡死。
+    #: 「本轮没精挑」那条仍然硬拒（它判的是清单有无来源，不是流程顺序）。
+    force_conclude: bool = False
     #: 硬闸拒绝计数（"{gate}:{escape_key}" → 次数），统一逃生门用（middleware._try_escape）：
     #: 效率闸对同一目标连拒达到阈值即放行——模型的反复坚持是「上游判定（如 planner 误判 reuse）
     #: 可能错了」的强信号，墙必须带门，否则死锁（2026-07-14 线上：reuse 误判 + item_search

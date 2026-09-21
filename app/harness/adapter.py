@@ -40,7 +40,6 @@ from app.api import monitor
 from app.harness.autopick import maybe_autopick
 from app.harness.middleware import harness
 from app.harness.msgs import _attr, block_text, iter_tool_results, terminal_summary, text_of
-from app.harness.phase_machine import get_phase_machine
 from app.harness.prefill import prefill
 from app.harness.sentinels import dependency_down_notice
 from app.harness.session import HarnessSession, collect_call_signals
@@ -238,10 +237,6 @@ class HarnessAgentAdapter(MiddlewareBase):
 
     async def _run_post_reflect(self, agent: Agent) -> None:
         s = self._s
-        # 「轮」的边界：解除上一轮的回退闭锁（回退后同轮不得再前进）。
-        machine = get_phase_machine()
-        if machine is not None:
-            machine.begin_round()
         ai_msg = _last_assistant(agent)
         ctx = s.base_context()
         ctx["recent_actions_summary"] = s.recent_actions_summary()

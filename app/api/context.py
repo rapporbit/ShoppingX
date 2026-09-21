@@ -110,7 +110,7 @@ _learned_prefs_var: ContextVar[list[dict[str, str]] | None] = ContextVar(
 )
 
 # planner 本轮判定的任务清单（recommend / price_compare / landed_cost / ...）——「用户要不要比价」
-# 同样是意图判断，只有 planner 有依据。阶段机的转移通告读它来定向（无比价诉求时提示模型跳过
+# 同样是意图判断，只有 planner 有依据。收线通告读它来定向（无比价诉求时提示模型跳过
 # price_compare / shipping_calc，见 harness.hooks.progress）。按 session_dir 聚合（理由见
 # _DEST_COUNTRY）。
 _SESSION_TASKS: dict[str, list[str]] = {}
@@ -279,7 +279,7 @@ def reset_original_query() -> None:
 
 
 def set_session_tasks(tasks: Sequence[str]) -> None:
-    """记下 planner 本轮判定的任务清单。由 planner 工具写，阶段机的转移通告读。"""
+    """记下 planner 本轮判定的任务清单。由 planner 工具写，收线通告读。"""
     sd = get_session_dir()
     if sd is not None:
         _SESSION_TASKS[str(sd)] = list(tasks)

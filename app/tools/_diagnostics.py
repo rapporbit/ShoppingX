@@ -1,6 +1,6 @@
 """工具 → harness 的结构化诊断侧信道（thread 作用域）。
 
-**为什么存在**：harness 的补搜闸 / 阶段机需要工具的执行诊断（picker 的 must_have_hits /
+**为什么存在**：harness 的补搜闸 / 进度钩子需要工具的执行诊断（picker 的 must_have_hits /
 oncat / offcat / picks 件数）。旧通路是「字段挤进模型可见 JSON 头部 + middleware 正则抠」——
 拿模型可见字符串当信号总线，与截断 Hook 的砍尾位置强耦合，每加一个字段都要「改序列化位置 +
 写正则 + 防截断」三连。本模块把两个受众解开：

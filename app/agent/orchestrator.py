@@ -59,7 +59,6 @@ from app.api.context import (
 )
 from app.db.quota import remaining_usd
 from app.harness.msgs import iter_tool_results
-from app.harness.phase_machine import fresh_phase_machine, reset_phase_machine
 from app.harness.retrieval_budget import reset_tree as reset_retrieval_tree
 from app.harness.setup import setup_harness
 from app.harness.token_budget import budget_status, set_task_cap, tree_snapshot
@@ -400,7 +399,6 @@ async def _run_turn(
         reset_dest_country()
         reset_session_tasks()
         set_original_query(query)
-        fresh_phase_machine()  # 会话级复位，与上面几个 reset 同列（曾是 on_session_start hook）
         setup_harness()  # 幂等
 
         begin_learned_prefs()
@@ -590,8 +588,6 @@ async def _run_turn(
         # 记忆抽取（后处理）：主回复已下发，用户零感知延迟。只读本轮对话文本、只写长期事实库。
         await curate_turn(user_id or "", query, final_text)
         await monitor.report_memory_updated(get_learned_pref_items())
-
-        reset_phase_machine()
 
         return {
             "thread_id": thread_id,

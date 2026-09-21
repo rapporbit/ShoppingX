@@ -24,7 +24,7 @@ def setup_harness() -> None:
     import app.harness.hooks.budget  # noqa: F401  检索 / fork / token 预算闸 + 预算档位路由
     import app.harness.hooks.context_shaping  # noqa: F401  上下文压缩 + 偏好注入 + 成功策略注入/结账
     import app.harness.hooks.drift  # noqa: F401  Silent Drift 漂移检测 + 结果信号追踪
-    import app.harness.hooks.progress  # noqa: F401  阶段机：复位 / 转移 / 回退 / 补搜 / 收线通告 / 收尾资格
+    import app.harness.hooks.progress  # noqa: F401  检索进度：进展标记 / 回退 / 补搜 / 收线通告 / 收尾资格
     import app.harness.hooks.repetition  # noqa: F401  循环检测提示 + 同参数回放 + 工具熔断
     import app.harness.hooks.safety  # noqa: F401  白名单 / 深度断言 / 内容过滤 / 截断 / 输出审核与脱敏
     import app.harness.hooks.sequencing  # noqa: F401  工具前置条件：软断言 + 取消前必先查单硬拒

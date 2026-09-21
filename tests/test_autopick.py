@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 
 from app.harness.autopick import arm_on_tool, maybe_autopick
-from app.harness.phase_machine import Phase, PhaseStateMachine, set_phase_machine
 from app.harness.session import HarnessSession
 from app.tools._candidates import get_last_picks, register
 from app.tools.schemas import ItemCandidate
@@ -42,7 +41,6 @@ async def test_autopick_runs_pricing_and_picking_once(monkeypatch: pytest.Monkey
     s = HarnessSession(original_query="旅行收纳三件套")
     s.autopick_armed = True
     with thread_scope("t-autopick", Path(tempfile.mkdtemp()), user_id="u-autopick"):
-        set_phase_machine(PhaseStateMachine(Phase.SEARCHING))
         register(_cands())
         await maybe_autopick(s)
         picks = get_last_picks()
@@ -52,10 +50,6 @@ async def test_autopick_runs_pricing_and_picking_once(monkeypatch: pytest.Monkey
         assert not s.autopick_armed
         # 结果经 inject 通道给模型，且带「无需再调」的指路。
         assert s.pending_inject and "[系统已自动执行]" in s.pending_inject[0]["content"]
-        # 阶段机被推到 COMPARING（精挑收尾通告的前提）。
-        from app.harness.phase_machine import get_phase_machine
-
-        assert get_phase_machine().phase is not Phase.SEARCHING
         # 未武装时再调是空操作（不会重复精挑、不会重复注入）。
         await maybe_autopick(s)
         assert len(s.pending_inject) == 1

@@ -1,4 +1,4 @@
-"""Harness 治理框架测试：Hook Pipeline + 阶段状态机 + 单步断言 + 漂移检测。"""
+"""Harness 治理框架测试：Hook Pipeline + 进展标记 + 单步断言 + 漂移检测。"""
 
 from __future__ import annotations
 
@@ -8,19 +8,14 @@ from types import SimpleNamespace
 import pytest
 
 from app.harness.hooks.drift import DriftState, _extract_keywords
+from app.harness.hooks.progress import _reopen_retrieval, mark_progress
 from app.harness.middleware import (
     HOOK_POINTS,
     HarnessMiddleware,
     HookRejectSignal,
     harness,
 )
-from app.harness.phase_machine import (
-    Phase,
-    PhaseStateMachine,
-    get_phase_machine,
-    reset_phase_machine,
-    set_phase_machine,
-)
+from app.harness.state import GuardState
 
 # ============================================================
 # HarnessMiddleware 核心
@@ -133,97 +128,62 @@ class TestHarnessMiddleware:
 
 
 # ============================================================
-# PhaseStateMachine
+# 进展标记（四阶段状态机 2026-09-21 删除后的接班人）
 # ============================================================
 
 
-class TestPhaseStateMachine:
-    """四阶段状态机。"""
+def _progress_ctx(guard: GuardState, **fields: object) -> dict:
+    drift = DriftState()
+    drift.consecutive_empty_results = 3
+    drift.consecutive_severe = 2
+    drift.blacklist_violations = 1
+    return {"_guard": guard, "_drift_state": drift, **fields}
 
-    def test_initial_phase(self) -> None:
-        m = PhaseStateMachine()
-        assert m.phase == Phase.PLANNING
 
-    def test_transition_planning_to_searching(self) -> None:
-        m = PhaseStateMachine()
-        assert m.try_transition("planner_output_ready")
-        assert m.phase == Phase.SEARCHING
+class TestProgressMarks:
+    """进展边沿 + 检索重开——曾由 PhaseStateMachine 的转移与 regress 事务承担。"""
 
-    def test_transition_searching_to_comparing(self) -> None:
-        m = PhaseStateMachine()
-        m.try_transition("planner_output_ready")
-        assert m.try_transition("candidates_available")
-        assert m.phase == Phase.COMPARING
+    @pytest.mark.asyncio
+    async def test_first_progress_resets_drift_counters(self) -> None:
+        guard = GuardState()
+        ctx = _progress_ctx(guard, total_candidates=9)
+        assert await mark_progress(ctx) is ctx
+        assert guard.progress_marks == {"candidates"}
+        assert ctx["_drift_state"].consecutive_empty_results == 0
+        assert ctx["_drift_state"].consecutive_severe == 0
+        # 推荐面出现用户排除的属性，不因有了进展而变得可接受。
+        assert ctx["_drift_state"].blacklist_violations == 1
 
-    def test_transition_comparing_to_concluding(self) -> None:
-        m = PhaseStateMachine()
-        m.try_transition("planner_output_ready")
-        m.try_transition("candidates_available")
-        assert m.try_transition("picks_ready")
-        assert m.phase == Phase.CONCLUDING
+    @pytest.mark.asyncio
+    async def test_marks_are_edge_not_level(self) -> None:
+        """电平触发 = 候选一旦 >0 就每轮重置漂移计数，漂移检测等于关掉。"""
+        guard = GuardState()
+        assert await mark_progress(_progress_ctx(guard, total_candidates=9)) is not None
+        ctx2 = _progress_ctx(guard, total_candidates=9)
+        assert await mark_progress(ctx2) is None
+        assert ctx2["_drift_state"].consecutive_empty_results == 3
 
-    def test_invalid_signal_returns_false(self) -> None:
-        m = PhaseStateMachine()
-        assert not m.try_transition("candidates_available")
-        assert m.phase == Phase.PLANNING
+    @pytest.mark.asyncio
+    async def test_each_signal_marks_once(self) -> None:
+        guard = GuardState()
+        ctx = _progress_ctx(guard, planner_output_ready=True, total_candidates=5, picks_count=3)
+        assert await mark_progress(ctx) is ctx
+        assert guard.progress_marks == {"planner", "candidates", "picks"}
 
-    def test_set_phase_for_rollback(self) -> None:
-        m = PhaseStateMachine()
-        m.try_transition("planner_output_ready")
-        m.try_transition("candidates_available")
-        assert m.phase == Phase.COMPARING
-        m.set_phase(Phase.SEARCHING)
-        assert m.phase == Phase.SEARCHING
-
-    def test_regress_blocks_same_round_advance(self) -> None:
-        """回退事务的核心不变量：回退后**同轮**一律不得再前进（曾靠钩子排序 + context 字段
-        清零的手抄纪律维持，40 号钩子凭旧计数同轮吞回退）；begin_round 后凭新证据放行。"""
-        m = PhaseStateMachine(Phase.COMPARING)
-        m.regress(Phase.SEARCHING, reason="test")
-        assert m.phase == Phase.SEARCHING
-        assert not m.try_transition("candidates_available")
-        assert m.phase == Phase.SEARCHING, "回退同轮被推回去 = 回退被吞"
-        m.begin_round()
-        assert m.try_transition("candidates_available")
-        assert m.phase == Phase.COMPARING
-
-    def test_regress_recovers_context_state(self) -> None:
-        """状态回收是回退语义的一部分，由本体一次做完：进展计数清零 + 收线通告重武装——
-        散在钩子里手抄、漏一处即静默失效，现在漏不掉。"""
-        from app.harness.state import GuardState
-
+    def test_reopen_recovers_state(self) -> None:
+        """状态回收一次做完：进展清零 + 标记摘掉 + 收线通告重武装——散在钩子里手抄会漏。"""
         guard = GuardState()
         guard.notified_transitions.add("search_close")
+        guard.progress_marks.update({"planner", "candidates", "picks"})
         ctx: dict = {"total_candidates": 9, "_guard": guard}
-        m = PhaseStateMachine(Phase.COMPARING)
-        m.regress(Phase.SEARCHING, reason="test", context=ctx)
+
+        _reopen_retrieval(ctx, guard, reason="test")
+
         assert ctx["total_candidates"] == 0
         assert ctx["reset_fresh_candidates"] is True
         assert "search_close" not in guard.notified_transitions
-
-    def test_no_progress_counter(self) -> None:
-        m = PhaseStateMachine()
-        assert m.record_no_progress() == 1
-        assert m.record_no_progress() == 2
-        m.reset_no_progress()
-        assert m.no_progress_rounds == 0
-
-    def test_reset(self) -> None:
-        m = PhaseStateMachine()
-        m.try_transition("planner_output_ready")
-        m.record_no_progress()
-        m.reset()
-        assert m.phase == Phase.PLANNING
-        assert m.no_progress_rounds == 0
-
-    def test_contextvar_lifecycle(self) -> None:
-        reset_phase_machine()
-        assert get_phase_machine() is None
-        m = PhaseStateMachine()
-        set_phase_machine(m)
-        assert get_phase_machine() is m
-        reset_phase_machine()
-        assert get_phase_machine() is None
+        # planner 不摘：重开的是检索，本轮的规划照样算数。
+        assert guard.progress_marks == {"planner"}
 
 
 # ============================================================
@@ -329,22 +289,18 @@ class TestPhaseHooks:
 
     @pytest.mark.asyncio
     async def test_phase_check_no_whitelist_ban(self) -> None:
-        """任何阶段调检索/比价类工具都不再被阶段闸拒绝。
+        """开局（什么都没调过）也不拦检索/比价类工具，只有 shopping_summary 有资格门。
 
         白名单禁令为什么撤见 docs/decisions/0001-阶段白名单降级为遥测.md——这条测试就是
         那个决定的执法者，它变红意味着白名单被人加回来了。
         """
         from app.harness.hooks.progress import check_phase_permission
 
-        set_phase_machine(PhaseStateMachine())  # PLANNING
-        try:
-            for tool in ("item_search", "price_compare", "web_search", "item_picker"):
-                assert await check_phase_permission({"tool_name": tool}) is None
-        finally:
-            reset_phase_machine()
+        for tool in ("item_search", "price_compare", "web_search", "item_picker"):
+            assert await check_phase_permission({"tool_name": tool, "called_tools": set()}) is None
 
     def test_session_tracks_planner_signal(self) -> None:
-        """控制面状态记录 planner 已执行（post_reflect 据它把 PLANNING 推到 SEARCHING）。"""
+        """控制面状态记录 planner 已执行（收尾资格门据它判「本轮规划过没有」）。"""
         session = _mw("test")
         assert not session.planner_done
         session.called_tools.add("planner")
@@ -516,59 +472,37 @@ class TestPhaseHooks:
         assert names == ["image_understand", "image_understand", "planner", "planner"]
 
     @pytest.mark.asyncio
-    async def test_phase_transition_on_planner(self) -> None:
-        from app.harness.hooks.progress import try_phase_transition
-
-        m = PhaseStateMachine()
-        set_phase_machine(m)
-        try:
-            ctx: dict = {"planner_output_ready": True}
-            await try_phase_transition(ctx)
-            assert m.phase == Phase.SEARCHING
-        finally:
-            reset_phase_machine()
-
-    @pytest.mark.asyncio
-    async def test_phase_transition_to_comparing_is_silent(self) -> None:
-        """转移本体不再经 inject 发通告——inject 通道晚一轮（perf-audit-r3 实测模型在读到
-        通告前就已决定再搜）。「检索收线」通告改由 transition_notice 缀在工具结果尾部
-        （见 test_transition_notice.py），这里只验证状态机推进。"""
-        from app.harness.hooks.progress import try_phase_transition
-
-        m = PhaseStateMachine()
-        m.try_transition("planner_output_ready")  # 先推进到 SEARCHING
-        set_phase_machine(m)
-        try:
-            ctx: dict = {"total_candidates": 10}
-            await try_phase_transition(ctx)
-            assert m.phase == Phase.COMPARING
-            assert not ctx.get("inject_messages")
-        finally:
-            reset_phase_machine()
+    async def test_candidates_progress_is_silent(self) -> None:
+        """记进展不经 inject 发通告——inject 通道晚一轮（perf-audit-r3 实测模型在读到通告前
+        就已决定再搜）。「检索收线」通告改由 transition_notice 缀在工具结果尾部
+        （见 test_transition_notice.py），这里只验证标记落下且不发消息。"""
+        guard = GuardState()
+        ctx: dict = {"_guard": guard, "total_candidates": 10}
+        await mark_progress(ctx)
+        assert "candidates" in guard.progress_marks
+        assert not ctx.get("inject_messages")
 
     @pytest.mark.asyncio
     async def test_phase_rollback(self) -> None:
         from app.harness.hooks.progress import check_phase_rollback
 
-        m = PhaseStateMachine()
-        m.try_transition("planner_output_ready")
-        m.try_transition("candidates_available")
-        assert m.phase == Phase.COMPARING
-        set_phase_machine(m)
-        try:
-            # 「无进展」= item_picker 跑过但精挑不出任何东西。
-            # 「还没调 item_picker」不算，见 TestRollbackRequiresPickerAttempt。
-            ctx: dict = {"picks_count": 0, "picker_attempted": True}
-            await check_phase_rollback(ctx)
-            assert m.phase == Phase.COMPARING  # 还没到阈值
+        guard = GuardState()
+        guard.progress_marks.update({"planner", "candidates"})
+        # 「无进展」= item_picker 跑过但精挑不出任何东西。
+        # 「还没调 item_picker」不算，见 TestRollbackRequiresPickerAttempt。
+        ctx: dict = {"_guard": guard, "picks_count": 0, "picker_attempted": True}
+        await check_phase_rollback(ctx)
+        assert guard.picker_empty_rounds == 1  # 还没到阈值
+        assert "candidates" in guard.progress_marks
 
-            # 第二轮仍精挑不出东西 → 回退
-            ctx2: dict = {"picks_count": 0, "picker_attempted": True}
-            result = await check_phase_rollback(ctx2)
-            assert m.phase == Phase.SEARCHING
-            assert any("回退" in msg["content"] for msg in result.get("inject_messages", []))
-        finally:
-            reset_phase_machine()
+        # 第二轮仍精挑不出东西 → 重开检索
+        ctx2: dict = {"_guard": guard, "picks_count": 0, "picker_attempted": True}
+        result = await check_phase_rollback(ctx2)
+        assert result is not None
+        assert guard.picker_empty_rounds == 0
+        assert "candidates" not in guard.progress_marks
+        assert ctx2["total_candidates"] == 0
+        assert any("回退" in msg["content"] for msg in result.get("inject_messages", []))
 
 
 # ============================================================
@@ -728,17 +662,18 @@ def _assistant(text: str = "ok", *, tool_calls: bool = True):
 
 @pytest.fixture()
 def clean_phase():
-    """注册全部 Hook + 给每个接线测试一个干净的阶段机。
+    """注册全部 Hook。
 
     setup_harness() 必须显式调——Hook 注册是全局副作用，不调的话这些测试会「因为没有 Hook 在跑」
     而空过（早期版本正是靠别的用例先调过 setup_harness 才碰巧通过，单独跑就挂）。
+
+    进展状态不必在这里清：它住在每个 loop 自己的 ``GuardState`` 上，每个用例新建一份
+    （曾经的阶段机是 ContextVar，跨用例串台，才需要这个 fixture 兜底）。
     """
     from app.harness.setup import setup_harness
 
     setup_harness()
-    reset_phase_machine()
     yield
-    reset_phase_machine()
 
 
 def _mw(query: str = "想买便宜又抗造的旅行三件套，预算300"):
@@ -992,7 +927,6 @@ class TestAssertionWiring:
     @pytest.mark.asyncio
     async def test_sequencing_assertion_reaches_model(self, clean_phase) -> None:
         """顺序断言在 pre_tool_call 产生，必须被接力通道接住变成注入提示。"""
-        set_phase_machine(PhaseStateMachine(Phase.COMPARING))
         mw = _mw()
         # item_picker 的前置是 item_search，此处未调过 → 触发 sequencing 断言
         await _run_tool(mw, "item_picker", {"query": "旅行三件套"})
@@ -1015,7 +949,6 @@ class TestDriftWiring:
             return "正常"
 
         monkeypatch.setattr(invoke_mod, "call_text", fake_call_text)
-        set_phase_machine(PhaseStateMachine(Phase.SEARCHING))
         mw = _mw("想买便宜又抗造的旅行三件套")
 
         # 三轮都在搜「旅行三件套」，方向没跑偏
@@ -1032,7 +965,6 @@ class TestDriftWiring:
     @pytest.mark.asyncio
     async def test_off_target_actions_trigger_goal_forgetting(self, clean_phase) -> None:
         """行为摘要与 query 毫无关键词交集 → 目标遗忘（轻微偏离）。"""
-        set_phase_machine(PhaseStateMachine(Phase.SEARCHING))
         mw = _mw("旅行三件套")
         await _run_tool(
             mw, "item_search", {"query": "帐篷 睡袋 露营"}, result='{"candidates": [1]}'
@@ -1048,7 +980,6 @@ class TestDriftWiring:
         from app.harness.hooks import drift as dd
 
         monkeypatch.setattr(dd, "blacklist_hits", lambda text: ["塑料"] if "塑料" in text else [])
-        set_phase_machine(PhaseStateMachine(Phase.COMPARING))
         mw = _mw("旅行三件套")
 
         await _run_tool(mw, "item_search", {"query": "旅行三件套"}, result='{"candidates": [1]}')
@@ -1070,7 +1001,6 @@ class TestDriftWiring:
         from app.harness.hooks import drift as dd
 
         monkeypatch.setattr(dd, "blacklist_hits", lambda text: ["塑料"] if "塑料" in text else [])
-        set_phase_machine(PhaseStateMachine(Phase.COMPARING))
         mw = _mw("旅行三件套")
 
         # 行为摘要与 query 零关键词交集 → 目标遗忘（轻微）；结果命中黑名单 → 偏好丢失（严重）
@@ -1089,7 +1019,6 @@ class TestDriftWiring:
         from app.harness.hooks import drift as dd
 
         monkeypatch.setattr(dd, "blacklist_hits", lambda text: ["塑料"] if "塑料" in text else [])
-        set_phase_machine(PhaseStateMachine(Phase.SEARCHING))
         mw = _mw("旅行三件套")
         await _run_tool(mw, "item_search", {"query": "三件套"}, result='{"candidates": ["塑料盒"]}')
         assert mw.drift_state.blacklist_violations == 0
@@ -1103,7 +1032,6 @@ class TestDriftWiring:
         monkeypatch.setattr(
             session_mod, "tree_snapshot", lambda: {"input_tokens": next(totals), "output_tokens": 0}
         )
-        set_phase_machine(PhaseStateMachine(Phase.SEARCHING))
         mw = _mw()
         for _ in range(3):
             await _run_model(mw, with_tool_results=False)
@@ -1112,7 +1040,11 @@ class TestDriftWiring:
 
 
 class TestPhaseGateTerminalExemption:
-    """阶段门不得与「强制收尾」通路顶死。"""
+    """收尾资格门不得与「强制收尾」通路顶死。
+
+    每个用例先把 planner 记进 ``called_tools``——底线 2 判的就是「本轮规划过没有」，
+    不先满足它，测的就不是想测的那条底线了。
+    """
 
     @pytest.mark.asyncio
     async def test_summary_rejected_without_picker_this_turn(
@@ -1126,8 +1058,8 @@ class TestPhaseGateTerminalExemption:
         from app.harness.hooks import progress as pc
 
         monkeypatch.setattr(pc, "candidate_count", lambda: 5)
-        set_phase_machine(PhaseStateMachine(Phase.SEARCHING))
         mw = _mw()
+        mw.called_tools.add("planner")
         result = await _run_tool(mw, "shopping_summary", {}, result='{"items": []}')
         assert "[Harness 拒绝]" in result.content
         assert "item_picker" in result.content
@@ -1138,8 +1070,8 @@ class TestPhaseGateTerminalExemption:
         from app.harness.hooks import progress as pc
 
         monkeypatch.setattr(pc, "candidate_count", lambda: 5)
-        set_phase_machine(PhaseStateMachine(Phase.SEARCHING))
         mw = _mw()
+        mw.called_tools.add("planner")
         await _run_tool(mw, "item_picker", {}, result='{"picks": []}')
         result = await _run_tool(mw, "shopping_summary", {}, result='{"items": []}')
         assert "[Harness 拒绝]" not in result.content
@@ -1150,8 +1082,8 @@ class TestPhaseGateTerminalExemption:
         from app.harness.hooks import progress as pc
 
         monkeypatch.setattr(pc, "candidate_count", lambda: 0)
-        set_phase_machine(PhaseStateMachine(Phase.SEARCHING))
         mw = _mw()
+        mw.called_tools.add("planner")
         result = await _run_tool(mw, "shopping_summary", {})
         assert "[Harness 拒绝]" in result.content
         assert "chat_fallback" in result.content
@@ -1161,24 +1093,38 @@ class TestPhaseGateTerminalExemption:
         from app.harness.hooks import progress as pc
 
         monkeypatch.setattr(pc, "candidate_count", lambda: 0)
-        set_phase_machine(PhaseStateMachine(Phase.COMPARING))
         mw = _mw()
         result = await _run_tool(mw, "chat_fallback", {})
         assert "[Harness 拒绝]" not in result.content
 
     @pytest.mark.asyncio
-    async def test_force_conclude_authorizes_concluding_phase(self, clean_phase) -> None:
-        """连续严重漂移强制收尾时，阶段机必须被推到 CONCLUDING，否则自家 gate 会拦住自家指令。"""
+    async def test_force_conclude_authorizes_summary(self, clean_phase) -> None:
+        """连续严重漂移强制收尾时必须置 force_conclude，否则自家 gate 会拦住自家指令。"""
         from app.harness.hooks.drift import _apply_correction
 
-        set_phase_machine(PhaseStateMachine(Phase.SEARCHING))
+        guard = GuardState()
         state = DriftState()
         state.consecutive_severe = 1  # 上一次已严重，本次是第二次
-        ctx = _apply_correction({"original_query": "旅行三件套"}, "严重偏离", state, ["探索发散"])
+        ctx = _apply_correction(
+            {"original_query": "旅行三件套", "_guard": guard}, "严重偏离", state, ["探索发散"]
+        )
 
         assert any("[强制收尾]" in m["content"] for m in ctx["inject_messages"])
-        machine = get_phase_machine()
-        assert machine.phase == Phase.CONCLUDING, "强制收尾未授权 CONCLUDING → 会与 phase gate 死锁"
+        assert guard.force_conclude, "强制收尾未授权 → 会与收尾资格门死锁"
+
+    @pytest.mark.asyncio
+    async def test_force_conclude_does_not_bypass_picker_requirement(
+        self, clean_phase, monkeypatch
+    ) -> None:
+        """授权只压「没规划过」那条：没 item_picker 定稿仍然硬拒——否则收尾必出空清单。"""
+        from app.harness.hooks import progress as pc
+
+        monkeypatch.setattr(pc, "candidate_count", lambda: 5)
+        mw = _mw()
+        mw.guard.force_conclude = True
+        result = await _run_tool(mw, "shopping_summary", {}, result='{"items": []}')
+        assert "[Harness 拒绝]" in result.content
+        assert "item_picker" in result.content
 
 
 @pytest.mark.asyncio
@@ -1211,7 +1157,6 @@ class TestToolErrorNotProgress:
 
     async def test_error_result_not_recorded_as_progress(self, clean_phase) -> None:
         """失败调用不进 called_tools / 阶段信号 / 看门狗，错误消息不被收线通告污染。"""
-        set_phase_machine(PhaseStateMachine(Phase.COMPARING))
         mw = _mw()
         watchdog_before = mw.guard.last_progress_at
         out = await self._run_error_tool(mw)
@@ -1238,8 +1183,8 @@ class TestToolErrorNotProgress:
         from app.harness.hooks import progress as pc
 
         monkeypatch.setattr(pc, "candidate_count", lambda: 5)
-        set_phase_machine(PhaseStateMachine(Phase.COMPARING))
         mw = _mw()
+        mw.called_tools.add("planner")
         await self._run_error_tool(mw)
         result = await _run_tool(mw, "shopping_summary", {}, result='{"items": []}')
         assert "[Harness 拒绝]" in result.content
@@ -1247,40 +1192,36 @@ class TestToolErrorNotProgress:
 
 
 class TestPhaseTransitionResetsDrift:
-    """跨模块耦合：阶段转移时重置漂移计数器。"""
+    """跨模块耦合：出现新进展时重置漂移计数器。"""
 
     @pytest.mark.asyncio
     async def test_transition_resets_consecutive_counters(self, clean_phase) -> None:
-        from app.harness.hooks.progress import try_phase_transition
-
-        set_phase_machine(PhaseStateMachine(Phase.SEARCHING))
+        guard = GuardState()
         state = DriftState()
         state.consecutive_empty_results = 2  # 搜了两次空
         state.consecutive_severe = 1
         state.blacklist_violations = 1
 
-        # 候选进了登记表 → SEARCHING → COMPARING
-        ctx = {"_drift_state": state, "total_candidates": 8}
-        await try_phase_transition(ctx)
+        # 候选进了登记表 → 记下 "candidates" 进展
+        ctx = {"_guard": guard, "_drift_state": state, "total_candidates": 8}
+        await mark_progress(ctx)
 
-        assert get_phase_machine().phase == Phase.COMPARING
-        assert state.consecutive_empty_results == 0, "转移后仍带着上一阶段的空结果计数"
+        assert guard.progress_marks == {"candidates"}
+        assert state.consecutive_empty_results == 0, "有进展后仍带着此前的空结果计数"
         assert state.consecutive_severe == 0
-        assert state.blacklist_violations == 1, "偏好违规不因阶段推进而清零"
+        assert state.blacklist_violations == 1, "偏好违规不因有了进展而清零"
 
     @pytest.mark.asyncio
     async def test_no_transition_keeps_counters(self, clean_phase) -> None:
-        """没转移就不该重置——否则漂移计数永远攒不起来。"""
-        from app.harness.hooks.progress import try_phase_transition
-
-        set_phase_machine(PhaseStateMachine(Phase.SEARCHING))
+        """没进展就不该重置——否则漂移计数永远攒不起来。"""
+        guard = GuardState()
         state = DriftState()
         state.consecutive_empty_results = 2
 
-        ctx = {"_drift_state": state, "total_candidates": 0}  # 还没候选
-        await try_phase_transition(ctx)
+        ctx = {"_guard": guard, "_drift_state": state, "total_candidates": 0}  # 还没候选
+        await mark_progress(ctx)
 
-        assert get_phase_machine().phase == Phase.SEARCHING
+        assert guard.progress_marks == set()
         assert state.consecutive_empty_results == 2
 
 
@@ -1336,22 +1277,20 @@ class TestPicksSignalIsReal:
 
     @pytest.mark.asyncio
     async def test_empty_picks_does_not_advance_to_concluding(self, clean_phase) -> None:
-        """item_picker 精挑出 0 件 → 不该进 CONCLUDING（否则 shopping_summary 空输出）。"""
-        set_phase_machine(PhaseStateMachine(Phase.COMPARING))
+        """item_picker 精挑出 0 件 → 不记 picks 进展（记了就会放过空清单收尾）。"""
         mw = _mw()
         await _run_tool(mw, "item_picker", {}, result='{"picks": [], "excluded": ["a"]}')
         await _run_model(mw)
 
-        assert get_phase_machine().phase == Phase.COMPARING, "空 picks 不该推进阶段"
+        assert "picks" not in mw.guard.progress_marks, "空 picks 不该算进展"
 
     @pytest.mark.asyncio
     async def test_nonempty_picks_advances(self, clean_phase) -> None:
-        set_phase_machine(PhaseStateMachine(Phase.COMPARING))
         mw = _mw()
         await _run_tool(mw, "item_picker", {}, result='{"picks": [{"item_id": "A1"}]}')
         await _run_model(mw)
 
-        assert get_phase_machine().phase == Phase.CONCLUDING
+        assert "picks" in mw.guard.progress_marks
 
 
 class TestRollbackRequiresPickerAttempt:
@@ -1359,25 +1298,31 @@ class TestRollbackRequiresPickerAttempt:
 
     @pytest.mark.asyncio
     async def test_no_rollback_before_picker_runs(self, clean_phase) -> None:
-        """COMPARING 里先 price_compare / 澄清是正常路径，不该被判无进展回退。"""
+        """精挑前先 price_compare / 澄清是正常路径，不该被判无进展回退。"""
         from app.harness.hooks.progress import check_phase_rollback
 
-        set_phase_machine(PhaseStateMachine(Phase.COMPARING))
+        guard = GuardState()
+        guard.progress_marks.add("candidates")
         for _ in range(3):
-            await check_phase_rollback({"picks_count": 0, "picker_attempted": False})
+            await check_phase_rollback(
+                {"_guard": guard, "picks_count": 0, "picker_attempted": False}
+            )
 
-        assert get_phase_machine().phase == Phase.COMPARING, "item_picker 都没跑就回退了"
+        assert guard.picker_empty_rounds == 0, "item_picker 都没跑就记无进展了"
+        assert "candidates" in guard.progress_marks, "item_picker 都没跑就回退了"
 
     @pytest.mark.asyncio
     async def test_rollback_after_picker_returns_empty_twice(self, clean_phase) -> None:
         from app.harness.hooks.progress import check_phase_rollback
 
-        set_phase_machine(PhaseStateMachine(Phase.COMPARING))
-        ctx = {"picks_count": 0, "picker_attempted": True}
+        guard = GuardState()
+        guard.progress_marks.add("candidates")
+        ctx = {"_guard": guard, "picks_count": 0, "picker_attempted": True}
         await check_phase_rollback(dict(ctx))
-        assert get_phase_machine().phase == Phase.COMPARING  # 第 1 轮只计数
+        assert guard.picker_empty_rounds == 1  # 第 1 轮只计数
+        assert "candidates" in guard.progress_marks
         await check_phase_rollback(dict(ctx))
-        assert get_phase_machine().phase == Phase.SEARCHING  # 第 2 轮回退
+        assert "candidates" not in guard.progress_marks  # 第 2 轮重开检索
 
 
 class TestSequencingAnyOf:

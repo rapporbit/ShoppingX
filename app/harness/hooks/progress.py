@@ -1,19 +1,22 @@
-"""检索进度机：PLANNING → SEARCHING → COMPARING → CONCLUDING。**它是进度机，不是权限机**——
+"""检索进度：候选入池 → 精挑 → 收尾这条路上的指路、补搜与回退。**它不是权限机**——
 写工具的保护在权限引擎 / 确认卡 / 幂等键 / 顺序断言四道防线（见 ``app/agent/permissions.py``），
 这里唯一的硬拒是 shopping_summary 的收尾资格。
 
-    pre_tool_call    20  phase_check         收尾资格底线：无候选 / 本轮没精挑 → 不许出清单
-    post_tool_call   19  transition_notice   收线通告缀在触发转移的工具结果尾部
+    pre_tool_call    20  phase_check         收尾资格底线：无候选 / 本轮没规划 / 没精挑 → 不许出清单
+    post_tool_call   19  transition_notice   收线通告缀在触发它的工具结果尾部
                                              （post_reflect 注入晚一轮）
-    post_reflect     40  phase_step          三步固定顺序：补搜判定（薄复用 / 污染 / 硬淘汰杀池
-                                             → 退回 SEARCHING）→ 按候选 / picks 推进 → COMPARING
-                                             连续 2 轮无进展回退（曾是 39/40/41 三个 hook）
+    post_reflect     40  phase_step          两步固定顺序：补搜判定（污染 / 硬淘汰杀池 → 重开
+                                             检索）→ 精挑连续 2 轮空则回退扩搜
 
-阶段机复位到 PLANNING 不在这里：``orchestrator.run_agent`` 开局与其它会话级 ContextVar 一起
-``fresh_phase_machine()``（曾是 on_session_start 的 phase_init hook）。
+**判据一律读已发生的事实**：本轮调过哪些工具（``called_tools``）、候选登记表里有几件
+（``total_candidates``）、picker 定稿几件（``picks_count``）——由适配器从可靠数据源填入 context，
+不 grep 文本。2026-09-21 删掉了曾经的四阶段状态机（PLANNING → SEARCHING → COMPARING →
+CONCLUDING）：阶段只是这些事实的影子，而影子一旦要自己维护不变量（转移顺序、同轮回退闭锁、
+回退事务），就变成了必须与事实对账的第二套真相。留下的只有两个具名事实位，见 ``GuardState``
+的 ``progress_marks`` / ``force_conclude``。
 
-转移信号由适配器从可靠数据源（工具名 + 候选登记表，见 ``signals.py``）填入 context，不 grep 文本。
-阶段推进会重置漂移的「连续」类计数器（``_reset_drift_counters``），``blacklist_violations`` 不重置。
+进展**首次**出现时重置漂移的「连续」类计数器（``_reset_drift_counters``），
+``blacklist_violations`` 不重置。
 """
 
 from __future__ import annotations
@@ -24,12 +27,11 @@ from typing import Any
 from app.api.context import get_session_tasks
 from app.harness.autopick import autopick_applies
 from app.harness.middleware import HookRejectSignal, harness_hook
-from app.harness.phase_machine import Phase, get_phase_machine
 from app.harness.retrieval_budget import (
     budget_relax_due,
 )
 from app.harness.signals import candidate_count
-from app.harness.state import GuardState
+from app.harness.state import GuardState, guard_of
 
 logger = logging.getLogger("shoppingx.harness.progress")
 
@@ -38,13 +40,13 @@ _ROLLBACK_THRESHOLD = 2
 
 
 def _reset_drift_counters(context: dict[str, Any]) -> None:
-    """阶段转移成功 → 重置漂移的「连续」类计数器。
+    """出现新进展 → 重置漂移的「连续」类计数器。
 
-    阶段推进是实打实的进展信号：planner 出了结构化字段、候选进了登记表、精挑出了结果。此前
-    攒下的「连续空结果」「连续严重漂移」是针对上一阶段的判断，不该带进新阶段继续累积——否则
-    「搜了三次空 → 换个方向搜到了 → 进 COMPARING」的正常曲折，会被算成仍在发散。
+    进展是实打实的信号：planner 出了结构化字段、候选进了登记表、精挑出了结果。此前攒下的
+    「连续空结果」「连续严重漂移」是针对进展之前那段的判断，不该带着继续累积——否则
+    「搜了三次空 → 换个方向搜到了」的正常曲折，会被算成仍在发散。
 
-    ``blacklist_violations`` **不重置**：推荐面出现用户明确排除的属性，不因阶段推进而变得可接受。
+    ``blacklist_violations`` **不重置**：推荐面出现用户明确排除的属性，不因有了进展而变得可接受。
     """
     state = context.get("_drift_state")
     if state is None:
@@ -53,38 +55,61 @@ def _reset_drift_counters(context: dict[str, Any]) -> None:
     state.consecutive_severe = 0
 
 
-async def try_phase_transition(context: dict[str, Any]) -> dict[str, Any] | None:
-    """根据当前执行状态判断是否触发阶段转移。仅 depth 0 生效。
+#: 进展边沿：(标记名, context 字段)。字段真值化即「这件事发生过了」。
+_PROGRESS_SIGNALS = (
+    ("planner", "planner_output_ready"),
+    ("candidates", "total_candidates"),
+    ("picks", "picks_count"),
+)
 
-    在 drift_detector（20）之后：本轮漂移判定基于「转移前」的计数器，判完再重置。
+
+async def mark_progress(context: dict[str, Any]) -> dict[str, Any] | None:
+    """记下本轮新出现的进展；**首次**出现即重置漂移计数器。仅 depth 0 生效。
+
+    边沿而非电平：``total_candidates`` 一旦 >0 就再也不会回到 0（除非检索重开），每轮都重置
+    等于把漂移检测关掉。标记存在 ``guard.progress_marks``，检索重开时由
+    :func:`_reopen_retrieval` 摘掉对应项——新一轮的候选重新算作进展。
+
+    在 drift_detector（20）之后：本轮漂移判定基于「重置前」的计数器，判完再重置。
     """
-
-    machine = get_phase_machine()
-    if machine is None:
+    guard = guard_of(context)
+    if guard is None:
         return None
 
-    current = machine.phase
-    moved = False
+    fresh = []
+    for mark, field_name in _PROGRESS_SIGNALS:
+        if mark in guard.progress_marks or not context.get(field_name):
+            continue
+        guard.progress_marks.add(mark)
+        fresh.append(mark)
 
-    if current == Phase.PLANNING:
-        if context.get("planner_output_ready"):
-            moved = machine.try_transition("planner_output_ready")
+    if not fresh:
+        return None
+    # 漏斗遥测就这一行：走到哪步看已有哪些标记，不另立阶段变量。
+    logger.info("进展 +%s（已有 %s）", "+".join(fresh), sorted(guard.progress_marks))
+    _reset_drift_counters(context)
+    return context
 
-    elif current == Phase.SEARCHING:
-        # 「检索收线」通告同样不在这里发（晚一轮，理由见上）——由 transition_notice 缀在
-        # 首个非空检索结果尾部，模型下一次解码当场看见。这里只推进状态机。
-        if context.get("total_candidates", 0) > 0:
-            moved = machine.try_transition("candidates_available")
 
-    elif current == Phase.COMPARING:
-        if context.get("picks_count", 0) > 0:
-            moved = machine.try_transition("picks_ready")
+def _reopen_retrieval(context: dict[str, Any], guard: GuardState | None, *, reason: str) -> None:
+    """判定「这池子不够用，得重搜」——回收进展状态，让新一轮检索重新算数、重新指路。
 
-    if moved:
-        _reset_drift_counters(context)
-        return context
+    曾是 ``PhaseStateMachine.regress`` 事务的三件事，删掉阶段后只剩两件（第三件「同轮回退
+    闭锁」随阶段推进步一起消失：没有推进步，就没有同轮把回退推回去的钩子）：
 
-    return None
+    1. 进展计数清零：``context["total_candidates"]`` 就地清零（同轮后续钩子读到 0）+ 置
+       ``reset_fresh_candidates``（适配器把跨轮累计一并清掉）。已判定「这池子不够用」，它就
+       不再是「本轮已搜到货」的进展信号；``progress_marks`` 同步摘掉 candidates / picks。
+    2. 重新武装「检索收线」通告：重开即新一轮检索，搜到货后仍需当场指路。
+    """
+    logger.warning("检索重开（%s）：候选进展清零，收线通告重新武装", reason)
+    context["total_candidates"] = 0
+    context["reset_fresh_candidates"] = True
+    if guard is None:
+        return
+    guard.notified_transitions.discard("search_close")
+    guard.progress_marks.discard("candidates")
+    guard.progress_marks.discard("picks")
 
 
 _REFINE_MIN_PICKS = 3
@@ -164,7 +189,7 @@ def _budget_relax_notice_due(
 
 
 async def check_refine_backfill(context: dict[str, Any]) -> dict[str, Any] | None:
-    """精挑后候选池被判「该补」→ 退回 SEARCHING 补搜一次（每轮最多一次）。
+    """精挑后候选池被判「该补」→ 重开检索补搜一次（每轮最多一次）。
 
     两条分支（判据函数与 transition_notice 共用，两边永远同步）：
     - 污染分支（:func:`_pollution_backfill_due`）：检索词被场景词稀释、品类一致性门沉底
@@ -175,19 +200,16 @@ async def check_refine_backfill(context: dict[str, Any]) -> dict[str, Any] | Non
     触发即写补搜闩 :data:`BACKFILL_LATCH`：既表达「已经在补搜了」的真实语义，也让本闸只触发
     一次——否则补搜回来若仍不足 3 件，会无限回退重搜。
 
-    **必须先于 try_phase_transition**（phase_step 内的固定顺序）：转移见 picks>0 就把阶段推进
-    CONCLUDING，本函数的 ``phase == COMPARING`` 前置条件随即失效。先判补搜、后判转移：补搜火了
-    阶段退回 SEARCHING，转移的 COMPARING 分支自然不再触发。
+    **必须先于 mark_progress**（phase_step 内的固定顺序）：本轮 picks>0 会被记成 "picks" 进展，
+    而补搜恰恰要把它摘掉重来。先判补搜、后记进展，补搜火了标记不留。
+
+    前置只要 ``picker_attempted``：精挑跑过就蕴含「候选入过池」，不必再问「走到哪个阶段」。
     """
-    machine = get_phase_machine()
-    if machine is None or machine.phase != Phase.COMPARING:
-        return None
     if not context.get("picker_attempted"):
         return None
 
     picks = context.get("picks_count", 0)
-    guard = context.get("_guard")
-    guard = guard if isinstance(guard, GuardState) else None
+    guard = guard_of(context)
     backfilled = _backfilled(guard)
     # 污染分支：检索词被场景词稀释、品类门沉底大半后池子吃空（见 _pollution_backfill_due——
     # 手表 badcase 就是全新会话的第一搜）。
@@ -202,13 +224,12 @@ async def check_refine_backfill(context: dict[str, Any]) -> dict[str, Any] | Non
     if not polluted and not hard_culled:
         return None
 
-    # 补搜闩先于回退写。回退本身连同状态回收（同轮闭锁 / 进展计数清零 / 收线通告重武装 /
-    # 直搜解锁）全在 regress 事务里——曾经散在这里手抄、转移步同轮吞回退，见
-    # PhaseStateMachine.regress 的 docstring。
+    # 补搜闩先于重开写。状态回收（进展清零 / 收线通告重武装）统一在 _reopen_retrieval 里，
+    # 不在这里手抄——曾经散装手抄漏过一项，回退当场被同轮的推进步吞掉。
     if guard is not None:
         guard.notified_transitions.add(BACKFILL_LATCH)
-    machine.regress(Phase.SEARCHING, reason="refine_backfill", context=context)
-    # picks_close 通告重武装是本闸专属；search_close 已由 regress 统一处理。
+    _reopen_retrieval(context, guard, reason="refine_backfill")
+    # picks_close 通告重武装是本闸专属：search_close 由 _reopen_retrieval 统一处理。
     if guard is not None:
         guard.notified_transitions.discard("picks_close")
     if polluted:
@@ -226,37 +247,34 @@ async def check_refine_backfill(context: dict[str, Any]) -> dict[str, Any] | Non
         )
     # 不再走 inject_messages 发「请重新检索」：那条消息要到**再下一轮**才被消费，而模型在
     # transition_notice 缀在 picker 结果上的指路（零时差）驱动下，多半这一轮已经在补搜了——
-    # 迟到的重复指令只会诱导它搜第二遍。本钩子只负责状态：退阶段、写闩、重新武装通告。
+    # 迟到的重复指令只会诱导它搜第二遍。本钩子只负责状态：重开检索、写闩、重新武装通告。
     return context
 
 
 async def check_phase_rollback(context: dict[str, Any]) -> dict[str, Any] | None:
-    """COMPARING 里 item_picker 精挑不出东西时回退到 SEARCHING：扩大搜索范围。
+    """item_picker 连续 2 轮精挑不出东西 → 重开检索，指路扩大搜索范围。
 
     触发条件严格按原方案——**ItemPicker 返回空** + 连续 2 轮无进展。
-    「item_picker 还没被调过」不算无进展：模型在 COMPARING 里先 price_compare / shipping_calc /
-    向用户澄清都是正常路径，那时回退纯属误伤（实测会打断正常链路，把阶段推回 SEARCHING）。
-    真正在 COMPARING 里卡死不动的情形由 TGM 的迭代上限兜底。
+    「item_picker 还没被调过」不算无进展：模型先 price_compare / shipping_calc / 向用户澄清
+    都是正常路径，那时回退纯属误伤（实测会打断正常链路，凭空把候选清零重搜）。
+    真正卡死不动的情形由主 loop 的迭代上限兜底。
     """
 
-    machine = get_phase_machine()
-    if machine is None or machine.phase != Phase.COMPARING:
+    guard = guard_of(context)
+    if guard is None:
         return None
 
-    picks = context.get("picks_count", 0)
-    if picks > 0:
-        machine.reset_no_progress()
+    if context.get("picks_count", 0) > 0:
+        guard.picker_empty_rounds = 0
         return None
 
     if not context.get("picker_attempted"):
         return None  # 还没精挑过，谈不上「精挑不出东西」
 
-    rounds = machine.record_no_progress()
-    if rounds >= _ROLLBACK_THRESHOLD:
-        # 状态回收（同轮闭锁 / 进展计数清零 / 收线通告重武装 / 直搜解锁）全在 regress 事务里。
-        # 旧散装版还漏了进展计数清零：本请求已搜到的候选数下一轮仍算「进展」，回退刚落地就被
-        # 40 号钩子凭旧计数推回 COMPARING——与 refine_backfill 曾踩的是同一族坑，事务一并治掉。
-        machine.regress(Phase.SEARCHING, reason="phase_rollback", context=context)
+    guard.picker_empty_rounds += 1
+    if guard.picker_empty_rounds >= _ROLLBACK_THRESHOLD:
+        guard.picker_empty_rounds = 0
+        _reopen_retrieval(context, guard, reason="picker_empty_rollback")
         context.setdefault("inject_messages", []).append(
             {
                 "role": "system",
@@ -271,9 +289,12 @@ async def check_phase_rollback(context: dict[str, Any]) -> dict[str, Any] | None
 
 @harness_hook("post_reflect", name="phase_step", priority=40)
 async def step_phase(context: dict[str, Any]) -> dict[str, Any] | None:
-    """一轮 post_reflect 的阶段机三步，顺序固定：补搜判定 → 推进 → 无进展回退。"""
+    """一轮 post_reflect 的进展三步，顺序固定：补搜判定 → 记进展 → 精挑连空回退。
+
+    补搜必须排在记进展之前：它要摘掉的正是本轮那个 picks 标记。
+    """
     changed = False
-    for step in (check_refine_backfill, try_phase_transition, check_phase_rollback):
+    for step in (check_refine_backfill, mark_progress, check_phase_rollback):
         if await step(context) is not None:
             changed = True
     return context if changed else None
@@ -314,11 +335,13 @@ async def append_transition_notice(context: dict[str, Any]) -> dict[str, Any] | 
     两条边、每 loop 各一次（回退 / 补搜会重新武装 search_close / picks_close）：
     - 检索类工具首次带回非空候选 → 「检索收线，别再搜」（+ 无比价诉求时的跳过提示）
     - item_picker 精挑非空 → 「直接 shopping_summary 收尾」；池子被污染 / 被硬淘汰杀空时
-      改发「请重新检索」——refine_backfill 马上要把阶段退回 SEARCHING，让模型提前拿到指路。
+      改发「请重新检索」——refine_backfill 马上要重开检索，让模型提前拿到指路。
+
+    通告文案里的「阶段推进 / 阶段回退」是**给模型的流程措辞**，不对应任何内部状态变量；
+    去重只靠 ``guard.notified_transitions`` 这本闩账。
     """
-    machine = get_phase_machine()
-    guard = context.get("_guard")
-    if machine is None or not isinstance(guard, GuardState):
+    guard = guard_of(context)
+    if guard is None:
         return None
     result = context.get("tool_result")
     if not isinstance(result, str) or not result:
@@ -328,7 +351,6 @@ async def append_transition_notice(context: dict[str, Any]) -> dict[str, Any] | 
     notice = ""
     if (
         tool in _SEARCH_NOTICE_TOOLS
-        and machine.phase is Phase.SEARCHING
         and context.get("call_candidates", 0) > 0
         and "search_close" not in guard.notified_transitions
     ):
@@ -350,13 +372,13 @@ async def append_transition_notice(context: dict[str, Any]) -> dict[str, Any] | 
                 "请基于已入池候选继续（price_compare / shipping_calc / item_picker → "
                 "shopping_summary）。"
             ) + _price_tasks_hint()
-    elif tool == "item_picker" and machine.phase is Phase.COMPARING:
+    elif tool == "item_picker":
         picks = context.get("call_picks", 0)
         oncat = context.get("call_oncat")
         offcat = context.get("call_offcat")
         backfilled = _backfilled(guard)
         if _pollution_backfill_due(backfilled, oncat, offcat):
-            # 污染补搜在即（refine_backfill 将在 post_reflect 退回 SEARCHING）：指路必须点明
+            # 污染补搜在即（refine_backfill 将在 post_reflect 重开检索）：指路必须点明
             # 「换聚焦品类词」——照原样重搜同一句被场景词稀释的 query，拿回的还是同一池西装皮鞋。
             # 判据与 refine_backfill 共用 _pollution_backfill_due，两边永远同步。
             notice = (
@@ -388,7 +410,7 @@ async def append_transition_notice(context: dict[str, Any]) -> dict[str, Any] | 
             context.get("call_excluded"),
             context.get("call_over_budget"),
         ):
-            # 硬淘汰杀池在即（refine_backfill 将退回 SEARCHING）：指路必须点明「换条件搜」——
+            # 硬淘汰杀池在即（refine_backfill 将重开检索）：指路必须点明「换条件搜」——
             # 照原样重搜拿回的还是同一批超预算/踩排除词的货。判据与闸共用，两边永远同步。
             # 排在 picks<=0 之前：0 件恰恰是被杀得最狠的形态，更需要指路而不是沉默。
             over_n = context.get("call_over_budget") or 0
@@ -422,11 +444,13 @@ async def append_transition_notice(context: dict[str, Any]) -> dict[str, Any] | 
 
 @harness_hook("pre_tool_call", name="phase_check", priority=20)
 async def check_phase_permission(context: dict[str, Any]) -> dict[str, Any] | None:
-    """shopping_summary 收尾资格底线，其余工具一律放行。"""
+    """shopping_summary 收尾资格底线，其余工具一律放行。
 
-    machine = get_phase_machine()
-    if machine is None:
-        return None
+    三条判据全是**本轮的既成事实**：候选登记表有货、planner 调过、item_picker 调过。
+    第二条曾写成「阶段还在 PLANNING」——那是同一件事的影子，PLANNING 的唯一出口信号就是
+    planner 出了结果。漂移强制收尾（``hooks/drift.py``）用 ``guard.force_conclude`` 压过第二条，
+    不压第三条：没精挑就没有清单来源，那时收尾只会产出空清单。
+    """
 
     if context.get("tool_name", "") != "shopping_summary":
         return None
@@ -436,7 +460,9 @@ async def check_phase_permission(context: dict[str, Any]) -> dict[str, Any] | No
             "当前还没有任何候选商品，无法生成购物清单。"
             "请先检索到候选再调 shopping_summary；若本轮并非购物意图，请改调 chat_fallback。"
         )
-    if machine.phase is Phase.PLANNING:
+    guard = guard_of(context)
+    forced = guard is not None and guard.force_conclude
+    if not forced and "planner" not in context.get("called_tools", set()):
         raise HookRejectSignal(
             "还没有为本轮做过精挑，不能直接出清单。手上的候选是上一轮按上一轮条件搜的，"
             "请先调 planner 判断本轮意图，再用 item_picker 按本轮条件精挑，然后收尾。"

@@ -113,7 +113,7 @@ async def build_main_agent(
     那条用户消息。``image_paths`` 同理交给控制面：开局预置要先把图看掉再拆意图
     （见 ``HarnessAgentAdapter._prefill``）。
 
-    基座档由 ``MAIN_LOOP_TIER_BASE`` 决定（默认 fast，关思考）：第 2 轮起决策空间已被阶段机与
+    基座档由 ``MAIN_LOOP_TIER_BASE`` 决定（默认 fast，关思考）：第 2 轮起决策空间已被收线通告与
     候选 id 化夹死，thinking token 买不到东西。第 1 轮是全链路唯一没被机制锁死的决策（购物还是
     闲聊、先拆解还是先查品类），由 ``MAIN_LOOP_TIER_FIRST`` 单独加档，
     落点在 ``HarnessAgentAdapter.on_model_call``。

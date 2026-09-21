@@ -10,7 +10,7 @@
 **不动的东西**：``price_compare`` / ``item_picker`` 工具本身保留（模型仍可显式调，显式调即
 解除武装）；套装轮（≥2 槽）不自动——它要经 ``ask_user`` 确认组成，入口不动。
 自动执行走与真实工具调用**同一条** post_tool_call 管线（截断 / 收线通告 / schema 断言 / 偏好
-注入），信号（picks 数 / oncat / 阶段机）与模型亲手调完全一致。任何异常都吞掉并解除武装：
+注入），信号（picks 数 / oncat / 进展标记）与模型亲手调完全一致。任何异常都吞掉并解除武装：
 失效方向 = 退回改前的「模型自己调」，不会更差。
 
 关 ``AUTOPICK=0`` 即回到改前行为（对照实验用）。
@@ -22,7 +22,6 @@ import logging
 import os
 from typing import TYPE_CHECKING, Any
 
-from app.harness.phase_machine import Phase, get_phase_machine
 from app.harness.signals import candidate_count
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -69,12 +68,6 @@ async def maybe_autopick(s: HarnessSession) -> None:
     from app.tools._shell import _to_text
     from app.tools.item_picker import item_picker
     from app.tools.price_compare import price_compare
-
-    # 阶段机先推到 COMPARING：item_picker 的「直接 shopping_summary 收尾」通告只在 COMPARING 发，
-    # 而真实链路里这一步转移发生在下一次 post_reflect（晚于本次注入）。
-    machine = get_phase_machine()
-    if machine is not None and machine.phase is Phase.SEARCHING:
-        machine.try_transition("candidates_available")
 
     texts: list[str] = []
     try:

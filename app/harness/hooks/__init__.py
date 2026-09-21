@@ -34,7 +34,7 @@ post_tool_call：
 
 pre_think：5 liveness_watchdog · 10 tool_result_pruner · 20 budget_router。
 （LLM 摘要式压缩仍交框架 compress_context；本仓这层只做零成本的「最旧工具返回换占位」。）
-post_reflect：20 drift_detector · 40 phase_step（补搜 → 推进 → 回退） · 60 terminal_enforcer。
+post_reflect：20 drift_detector · 40 phase_step（补搜 → 记进展 → 回退） · 60 terminal_enforcer。
 on_session_end：10 final_answer_audit（去噪 → 脱敏） · 90 strategy_feedback。
 on_system_prompt（装配期）：50 system_prompt_append（策略块 + 交易状态块）。
 

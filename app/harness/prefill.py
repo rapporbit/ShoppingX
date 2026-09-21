@@ -63,9 +63,9 @@ async def prefill(session: HarnessSession, agent: Agent) -> None:
     预置之后模型第 1 轮面对的是「plan 已在手，我该怎么检索」，那才是真需要推理的一步。
 
     **为什么在 loop 内（中间件）而不是在 orchestrator 里手工预跑**：域内长期偏好注入
-    （``hooks/context_shaping``）与阶段机 PLANNING→SEARCHING（``hooks/progress``
-    读 ``planner_output_ready``）都挂在「planner 在 loop 内被调过」这个事实上。走这里、照常
-    跑 ``post_tool_call`` 与阶段信号，它们一行都不用复刻。
+    （``hooks/context_shaping``）与收尾资格门的「本轮规划过」判据（``hooks/progress``
+    读 ``called_tools`` / ``planner_output_ready``）都挂在「planner 在 loop 内被调过」这个
+    事实上。走这里、照常跑 ``post_tool_call`` 与进展信号，它们一行都不用复刻。
 
     **有图时看图必须先于 planner**：planner 是拿用户原话拆结构化字段的，若图的结论晚于它
     产出，「只发一张图 + 想买这个」这类 query 会让 planner 拆出一片空白，后面全链路空转。
@@ -102,8 +102,8 @@ async def prefill(session: HarnessSession, agent: Agent) -> None:
         return
     text = out.model_dump_json() if isinstance(out, BaseModel) else str(out)
 
-    # 阶段信号与行为摘要：与工具适配器里真调一次 planner 记的东西完全一致——第 1 轮
-    # post_reflect 据 planner_output_ready 把阶段从 PLANNING 推到 SEARCHING。
+    # 进展信号与行为摘要：与工具适配器里真调一次 planner 记的东西完全一致——第 1 轮
+    # post_reflect 据 planner_output_ready 记下 planner 进展。
     s.planner_done = True
     s.called_tools.add("planner")
     s.recent_actions.append(_summarize_call("planner", args))

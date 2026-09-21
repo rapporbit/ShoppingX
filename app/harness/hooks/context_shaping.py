@@ -103,8 +103,9 @@ async def prune_old_tool_results(context: dict[str, Any]) -> dict[str, Any] | No
 
 @harness_hook("post_tool_call", name="preference_inject", priority=50)
 async def inject_long_term_memory(context: dict[str, Any]) -> dict[str, Any] | None:
-    """planner 返回后注入 tier-one 长期记忆。一轮至多注入一次——阶段机保证 planner 只成功跑一次
-    （跑完即离开 PLANNING，而 planner 不在后续阶段的白名单里）。
+    """planner 返回后注入 tier-one 长期记忆。一轮至多注入一次的前提是 planner 一轮只成功跑一次
+    （开局由 ``harness/prefill`` 预置，模型通常不会再调）——注意这是惯例不是机制：本 hook
+    自己没有闩，模型真的再调一次 planner 就会再注入一次。
 
     **选哪几条不再按品类域判，改按分类 + 新鲜度**（``select_tier_one_facts``：constraint 全进，
     其余补到 8 条）。域隔离原本是为了让「买鞋不穿皮革」别在搜背包时杀掉商品——那个风险来自
