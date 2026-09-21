@@ -6,8 +6,6 @@
         session_dir = ensure_session_dir(thread_id)
         with thread_scope(thread_id, session_dir):
             await agent(Msg("user", query, "user"))
-
-派 worker 时同样用它覆盖子 thread_id、但传入父 session_dir（产物归同一会话目录）。
 """
 
 from collections.abc import Iterator
@@ -34,8 +32,7 @@ def thread_scope(
 ) -> Iterator[None]:
     """作用域内绑定 thread_id / session_dir（可选 user_id / run_id），离开自动还原到进入前的值。
 
-    ``user_id`` 缺省（None）时**不动** user_id 上下文——fork 子 Agent 只覆盖 thread_id /
-    session_dir，user_id 沿用父任务的绑定（子任务仍属同一用户，黑名单/偏好继续生效）。
+    ``user_id`` 缺省（None）时**不动** user_id 上下文，沿用外层已有的绑定。
     ``run_id`` 同理缺省不动：只有 ``run_agent`` 这一个入口知道本轮的 run_id。``request_id``
     则是从队列消息里读回来的（阶段 4-5）——worker 是另一个进程，ContextVar 传不过去，只能
     随消息带；带回来绑上，两个进程的日志才拼得成一条线。

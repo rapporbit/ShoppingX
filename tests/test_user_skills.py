@@ -107,7 +107,7 @@ async def test_catalog_and_loader_expose_my_skill(client: AsyncClient, tmp_path:
         names = {s.name for s in await UserSkillLoader().list_skills()}
         assert names == {"my/weekend-backpack"}
         # 框架目录块里有它、正文不在目录块里
-        toolkit = await build_toolkit("main")
+        toolkit = await build_toolkit()
         block = await toolkit.get_skill_instructions(["basic"])
         assert "<name>my/weekend-backpack</name>" in block
         assert "只比可证实的规格" not in block

@@ -432,14 +432,12 @@ async def test_every_write_tool_is_allowlisted() -> None:
 
 
 async def test_trade_tools_are_main_only() -> None:
-    """TradeAgent 已删（A1）：交易工具只在主 Agent 手上，trade 角色不再存在。"""
+    """TradeAgent 已删（A1）：交易工具只在主 Agent 手上。"""
     from app.agent.tool_registry import build_toolkit
 
-    main = await build_toolkit("main")
+    main = await build_toolkit()
     names = {s["function"]["name"] for s in await main.get_tool_schemas()}
     assert {"create_order", "query_order", "cancel_order"} <= names
-    with pytest.raises(ValueError, match="未知角色"):
-        await build_toolkit("trade")
 
 
 def _fake_model() -> Any:

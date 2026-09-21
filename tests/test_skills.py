@@ -45,14 +45,14 @@ def test_frontmatter_name_matches_dir(name: str) -> None:
 
 async def test_loader_loads_every_skill_dir() -> None:
     """``scan_subdir=True`` 是必须的：默认只扫目录自身，会静默加载到 0 个。"""
-    loader = skill_loaders("main")[0]  # [0] 内置目录 loader，[1] 是个人 skill loader
+    loader = skill_loaders()[0]  # [0] 内置目录 loader，[1] 是个人 skill loader
     skills = await loader.list_skills()
     assert {s.name for s in skills} == EXPECTED_SKILLS
     assert all(s.markdown.strip() for s in skills)
 
 
 async def test_main_toolkit_injects_skill_directory() -> None:
-    toolkit = await build_toolkit("main")
+    toolkit = await build_toolkit()
     block = await toolkit.get_skill_instructions(["basic"])
     assert block is not None
     for name in EXPECTED_SKILLS:
@@ -62,7 +62,7 @@ async def test_main_toolkit_injects_skill_directory() -> None:
 
 
 async def test_skill_viewer_tool_is_available_to_main() -> None:
-    main = await build_toolkit("main")
+    main = await build_toolkit()
     assert SKILL_VIEWER_TOOL_NAME in {s["function"]["name"] for s in await main.get_tool_schemas()}
 
 
@@ -76,11 +76,7 @@ async def test_skill_viewer_is_whitelisted() -> None:
 
 def test_disabled_by_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SKILLS_ENABLED", "0")
-    assert skill_loaders("main") == []
-
-
-def test_workers_never_get_skills() -> None:
-    assert skill_loaders("search") == []
+    assert skill_loaders() == []
 
 
 async def test_strategy_block_precedes_skill_block_in_final_prompt() -> None:

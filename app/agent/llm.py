@@ -1,9 +1,7 @@
 """统一的大模型工厂。
 
-主 Agent 与 worker 共用同一个模型实例（``lru_cache`` 全局只建一次），一来省掉每次派发重建
-连接池的开销，二来「同一批工具、同一个模型」是 Supervisor-Workers 里 worker 不降智的前提——
-切的是**工具发放范围**，不是模型能力。快档 :func:`get_fast_llm` 是唯一的例外，它同款模型只关
-思考（见该函数 docstring 的实测取舍）。
+每个档位的模型实例全进程只建一次（``lru_cache``），省掉每轮任务重建连接池的开销。快档
+:func:`get_fast_llm` 与主档是同款模型、只关思考（见该函数 docstring 的实测取舍）。
 
 模型、endpoint、温度全部走 ``.env``（见 ``.env.example``），代码里不写死。
 判官模型 :func:`get_judge_llm` 给 Rubric 评测用，默认更强、temperature=0 保证评分稳定。
@@ -60,7 +58,7 @@ def _env_int(key: str, default: int) -> int:
 
 
 # 单次请求超时 + 有限重试：这是「一次卡死的 API 调用拖垮整条任务」的根因防线。
-# 同质 fork 下主/子共享一个连接池，高并发偶发某条连接焊死、服务端迟迟不回响应头时，
+# 全进程共享一个连接池，高并发偶发某条连接焊死、服务端迟迟不回响应头时，
 # 没有请求超时就会一直挂到主 loop 的全局预算（MAIN_AGENT_TIMEOUT_SEC）被 wait_for 杀掉，
 # 整条购物任务白跑。设了超时，卡住的调用 60s 内中断并换连接重试，任务得以自愈。
 LLM_REQUEST_TIMEOUT = _env_float("LLM_REQUEST_TIMEOUT", 60.0)
@@ -74,7 +72,7 @@ def _load_params() -> None:
     的话，改完 ``LLM_MAIN`` 只会继续拿到用旧模型建好的那个实例。清掉后下次调用即按新 env 重建。
 
     只对**新任务**生效：进行中的 loop 早已持有旧实例的引用，中途换模型反而会让同一条任务前后
-    半段用不同模型（同质 fork 的硬约束也就破了），故不追求「立刻换掉在跑的」。
+    半段用不同模型，故不追求「立刻换掉在跑的」。
     """
     global LLM_REQUEST_TIMEOUT, LLM_MAX_RETRIES, _throttle
     LLM_REQUEST_TIMEOUT = _env_float("LLM_REQUEST_TIMEOUT", 60.0)

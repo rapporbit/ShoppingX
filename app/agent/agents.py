@@ -30,7 +30,7 @@ from app.harness.setup import setup_harness
 # 消费点仍是本模块的名字——``monkeypatch.setattr(agents, "MAIN_MAX_ITERS", 2)`` 照旧有效。
 
 
-async def _run_system_prompt_hooks(prompt: str, *, role: str, query: str) -> str:
+async def _run_system_prompt_hooks(prompt: str, *, query: str) -> str:
     """跑 ``on_system_prompt`` 钩子，返回定稿后的 system prompt。
 
     钩子的契约是**只许往末尾追加**（``context["append"]`` 收集，本函数负责拼）——不给它们
@@ -42,7 +42,7 @@ async def _run_system_prompt_hooks(prompt: str, *, role: str, query: str) -> str
     """
     setup_harness()  # 幂等；服务启动时已初始化过，这里只兜离线脚本 / 单测
     ctx = await harness.run(
-        "on_system_prompt", {"role": role, "query": query, "system_prompt": prompt, "append": []}
+        "on_system_prompt", {"query": query, "system_prompt": prompt, "append": []}
     )
     extra = [str(x).strip() for x in (ctx.get("append") or []) if str(x).strip()]
     return prompt + "\n\n" + "\n\n".join(extra) if extra else prompt
@@ -51,7 +51,6 @@ async def _run_system_prompt_hooks(prompt: str, *, role: str, query: str) -> str
 async def _assemble(
     *,
     name: str,
-    role: str,
     max_iters: int,
     original_query: str = "",
     image_paths: Sequence[str] = (),
@@ -64,12 +63,10 @@ async def _assemble(
     context / permission / tool 上下文一并接上（见 orchestrator 的 session.json）。
     """
     session = HarnessSession(original_query=original_query, image_paths=image_paths)
-    base_prompt = await _run_system_prompt_hooks(
-        get_system_prompt(), role=role, query=original_query
-    )
+    base_prompt = await _run_system_prompt_hooks(get_system_prompt(), query=original_query)
     # 工具适配器挂在**工具实例**上，所以工具实例不能跨 loop 复用 —— build_toolkit 每次按需
     # 重建一批壳（壳很薄，底下的实现函数与 schema 仍是同一份，见 tool_registry）。
-    toolkit = await build_toolkit(role, tool_middlewares=[HarnessToolAdapter(session)])
+    toolkit = await build_toolkit(tool_middlewares=[HarnessToolAdapter(session)])
     agent_state = state if state is not None else AgentState()
     # 写工具精准放行：不用 BYPASS，见 app/agent/permissions.py。
     allow_tools(agent_state)
@@ -120,7 +117,6 @@ async def build_main_agent(
     """
     return await _assemble(
         name="shoppingx",
-        role="main",
         max_iters=MAIN_MAX_ITERS,
         original_query=original_query,
         image_paths=image_paths,

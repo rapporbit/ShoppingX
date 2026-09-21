@@ -10,7 +10,7 @@ token），一千多字的正文只有真被触发的那一轮才进上下文。
 prompt」的唯一理由——后者是每轮都付钱。**description 因此是唯一的触发面**：它写不准，正文
 写得再好也永远不会被读到。
 
-**发放范围（与 ``tool_registry`` 同一套思路）**：skill 发给 ``main``（A4 起也是唯一角色）。
+**发放范围**：全仓只有主 Agent 一个环，skill 只发给它。
 三个 skill 讲的都是主 Agent 的活——到手价口径、槽位规划、图搜流程。
 
 **与批 4-2 的 ``on_system_prompt`` 钩子怎么相处**（口径，改这里前先读）：两者拼在 system
@@ -49,9 +49,6 @@ logger = logging.getLogger(__name__)
 #: skill 根目录。每个子目录一个 skill，必须含 ``SKILL.md``。
 SKILLS_DIR: Path = PROJECT_ROOT / "skills"
 
-#: 拿得到 skill 的角色。见模块 docstring「发放范围」。
-SKILL_ROLES: frozenset[str] = frozenset({"main"})
-
 #: 框架内置的 skill 阅读器工具名（``agentscope.tool._builtin.SkillViewer.name``）。
 #: 注册了 skill 就会自动出现在可用工具表里，它是只读的、权限永远 ALLOW。
 #: 白名单（``app/security/tool_whitelist.py``）要认得它，否则将来这类内置工具一旦接进
@@ -59,8 +56,8 @@ SKILL_ROLES: frozenset[str] = frozenset({"main"})
 SKILL_VIEWER_TOOL_NAME = "Skill"
 
 
-def skill_loaders(role: str = "main") -> list[SkillLoaderBase]:
-    """按角色返回 skill loader（``main`` 一个，其余空表）。
+def skill_loaders() -> list[SkillLoaderBase]:
+    """返回主 Agent 的 skill loader（内置目录一个 + 个人 skill 一个）。
 
     ``scan_subdir=True`` 是必须的：``LocalSkillLoader`` 默认只在**给定目录自身**找
     ``SKILL.md``，而本仓的布局是 ``skills/<name>/SKILL.md``——不开这个开关会静默加载到 0 个
@@ -69,8 +66,6 @@ def skill_loaders(role: str = "main") -> list[SkillLoaderBase]:
     目录不存在时返回空表而不是让它去扫一个不存在的路径：loader 自己会 warning 后返回 []，
     但那条 warning 每次模型调用都打一遍，噪音比信息多。
     """
-    if role not in SKILL_ROLES:
-        return []
     if not env_bool("SKILLS_ENABLED", True):
         return []
     loaders: list[SkillLoaderBase] = []
@@ -84,7 +79,7 @@ class UserSkillLoader(SkillLoaderBase):
     """买家个人 Skill（``user_skills`` 表）→ 框架 ``Skill`` 对象。
 
     与内置 skill 走**同一条**框架通路：name + description 进 ``<agent-skills>`` 目录、正文由内置
-    ``Skill`` 工具按需读——不加新工具、不改 harness，worker 拿不到（``SKILL_ROLES``）。
+    ``Skill`` 工具按需读——不加新工具、不改 harness。
     归属靠 ContextVar 里的 user_id：``thread_scope`` 之外 / 匿名用户 → 空表。目录名加 ``my/``
     前缀，和 ``skills/`` 下的内置 skill 分命名空间，用户起名 ``bundle-planning`` 也撞不上。
 
@@ -125,7 +120,7 @@ class UserSkillLoader(SkillLoaderBase):
 async def list_catalog(user_id: str | None) -> list[dict[str, str]]:
     """内置 + 个人 skill 的目录（name / description / source），喂前端 ``/`` 菜单。正文不带。"""
     items: list[dict[str, str]] = []
-    for loader in skill_loaders("main"):
+    for loader in skill_loaders():
         source = "user" if isinstance(loader, UserSkillLoader) else "builtin"
         if source == "user":
             if not user_id:
@@ -144,7 +139,7 @@ async def resolve_selected_skill(name: str) -> tuple[str, str] | None:
     name = (name or "").strip()
     if not name:
         return None
-    for loader in skill_loaders("main"):
+    for loader in skill_loaders():
         for s in await loader.list_skills():
             if s.name == name:
                 return s.name, s.markdown

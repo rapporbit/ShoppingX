@@ -211,8 +211,6 @@ async def _trade_state_block() -> str | None:
 @harness_hook("on_system_prompt", name="system_prompt_append", priority=50)
 async def append_system_prompt_blocks(context: dict[str, Any]) -> dict[str, Any] | None:
     """主 loop 装配期往 system prompt 末尾追加：先策略块、后交易状态块（顺序即渲染顺序）。"""
-    if context.get("role") != "main":
-        return None
     blocks = [b for b in (await _strategy_block(context), await _trade_state_block()) if b]
     if not blocks:
         return None

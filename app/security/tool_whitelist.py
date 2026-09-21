@@ -25,10 +25,9 @@ logger = logging.getLogger("shoppingx.security.whitelist")
 
 @lru_cache(maxsize=1)
 def allowed_tools() -> frozenset[str]:
-    """当前进程允许调用的全部工具名（= 工具注册表里的全集，与角色发放无关）。
+    """当前进程允许调用的全部工具名（= 工具注册表里的全集）。
 
-    白名单对主 Agent 与各类 worker 是同一个——**授权的差异由发放范围表达**（``build_toolkit(role)``
-    发给谁哪些工具，见 ``tool_registry``），不在这里分叉。这层只回答「这个名字是不是本系统的工具」。
+    这层只回答「这个名字是不是本系统的工具」。
 
     批 4-3 起还包含两类**非本仓实现**、但由本仓主动挂进 Toolkit 的工具：框架内置的 skill
     阅读器（``Skill``）与 MCP 工具（``mcp__{server}__{tool}``）。它们今天走不到这道闸——
@@ -40,14 +39,13 @@ def allowed_tools() -> frozenset[str]:
     MCP 名单**不查 server**（走本地配置推导）：白名单不能依赖一次网络往返，对端一挂第一道
     安全闸自己先不可用。
     """
-    from app.agent.mcp_registry import MCP_ROLES, mcp_tool_names
+    from app.agent.mcp_registry import mcp_tool_names
     from app.agent.skills import SKILL_VIEWER_TOOL_NAME
     from app.agent.tool_registry import TOOLS
 
     names = {t.name for t in TOOLS}
     names.add(SKILL_VIEWER_TOOL_NAME)
-    for role in sorted(MCP_ROLES):
-        names.update(mcp_tool_names(role))
+    names.update(mcp_tool_names())
     return frozenset(names)
 
 

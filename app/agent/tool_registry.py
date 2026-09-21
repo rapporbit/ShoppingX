@@ -1,7 +1,7 @@
-"""工具注册表：一份工具全集 + 按角色发放。
+"""工具注册表：一份工具全集，发给唯一的主 Agent。
 
 每个业务工具一个文件（模块名 = 工具名），在这里汇总成 ``TOOLS``，再由 :func:`build_toolkit`
-发给主 Agent。A4 删掉 SearchAgent 后角色只剩 ``main``；``is_read_only`` 标记仍是
+发给主 Agent（全仓只有这一个环）；``is_read_only`` 标记仍是
 ``PermissionEngine`` 放行判定的依据（非只读工具必须进 ``permissions.DEFAULT_ALLOWED_TOOLS``）。
 
 ``TERMINAL_TOOLS`` 里的工具一旦被调用即终结循环（堵「不收尾死循环」这个最常见的 Agent 失败）。
@@ -109,37 +109,28 @@ TOOLS: list[FunctionTool] = _make_tools()
 
 TOOLS_BY_NAME: dict[str, FunctionTool] = {t.name: t for t in TOOLS}
 
-# 角色 → 该角色能拿到的工具名（None = 全集）。批 1 起曾有 ``search``（只读 SearchAgent）与
-# ``trade`` 两个 worker 角色，A1 / A4 先后删除：440 个会话里派发全是单跳壳，交易工具只出确认卡。
-# 发放口径（Skill / MCP 也按 role 切）仍保留这张表，将来真要加受限角色时从这里开口。
+# 曾有 ``search``（只读 SearchAgent）与 ``trade`` 两个 worker 角色和一张「角色 → 工具名」表，
+# A1 / A4 先后删除：440 个会话里派发全是单跳壳，交易工具只出确认卡。现在只有主 Agent，拿全集。
 #
-# 为什么不用 ``ToolGroup``：它是**运行时可激活 / 停用**的分组——模型可以调 meta tool 把组激活
-# 回来，工具对象照样住在 Toolkit 里。那是「按需露出」，不是权限边界。
-_ROLE_TOOLS: dict[str, frozenset[str] | None] = {
-    "main": None,
-}
+# 为什么不用 ``ToolGroup`` 表达权限：它是**运行时可激活 / 停用**的分组——模型可以调 meta tool
+# 把组激活回来，工具对象照样住在 Toolkit 里。那是「按需露出」，不是权限边界。
 
 
 async def build_toolkit(
-    role: str = "main",
     tool_middlewares: list[ToolMiddlewareBase] | None = None,
 ) -> Toolkit:
-    """按角色发一份 Toolkit（AgentScope 侧）。
+    """给主 Agent 发一份 Toolkit（AgentScope 侧）。
 
-    每次调用新建 Toolkit **与工具实例**：Toolkit 带角色态（激活的 tool group 等）不能跨 Agent
+    每次调用新建 Toolkit **与工具实例**：Toolkit 带运行态（激活的 tool group 等）不能跨 Agent
     共享，工具实例则因为要挂 per-loop 的中间件而必须一 loop 一份（见 :func:`_make_tools`）。
 
-    批 4-3 起同一个「发放范围」口径多管两样东西，都走框架原生、都按 role 切：
+    批 4-3 起同一份 Toolkit 多管两样东西，都走框架原生：
     **Skill**（``skills_or_loaders``，见 ``app.agent.skills``）与 **MCP**
     （``mcps``，只放只读白名单，见 ``app.agent.mcp_registry``）。它们都进
-    Toolkit 的 ``basic`` 组——本仓不用 ToolGroup 表达权限（理由见上方 ``_ROLE_TOOLS`` 注释），
+    Toolkit 的 ``basic`` 组——本仓不用 ToolGroup 表达权限（理由见上方注释），
     组只有一个，边界仍然是「这份 Toolkit 里有没有」。
     """
-    if role not in _ROLE_TOOLS:
-        raise ValueError(f"未知角色 {role!r}，可选：{sorted(_ROLE_TOOLS)}")
-    allowed = _ROLE_TOOLS[role]
-    toolkit = Toolkit(skills_or_loaders=skill_loaders(role), mcps=mcp_clients(role))
+    toolkit = Toolkit(skills_or_loaders=skill_loaders(), mcps=mcp_clients())
     for tool_obj in _make_tools(tool_middlewares) if tool_middlewares else TOOLS:
-        if allowed is None or tool_obj.name in allowed:
-            await toolkit.add_tool(tool_obj)
+        await toolkit.add_tool(tool_obj)
     return toolkit
