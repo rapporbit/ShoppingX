@@ -1,7 +1,9 @@
 /* ShoppingX 前端 —— 布局：窄侧栏 + 居中对话流 + 悬浮输入框，
    视觉语言是自己的：克制的单色系。
    规则：全站没有饱和色，纯白底 + 浅灰 / 炭黑几个明度档 + 一处暖灰做「选中 / 用户气泡」；
-   主按钮是炭黑不是彩色；线用发丝线，阴影几乎不用，圆角收到 6~8px；字体用系统默认，标题只加字距。
+   主按钮是炭黑不是彩色；线用发丝线，阴影几乎不用。
+   2026-09-21 对照 daydream.ing 调整：标题 / Agent 回复 / 品牌名走衬线（--serif），其余走 --sans；
+   按钮 / chip / 输入框一律胶囊；用户气泡黑底白字；商品卡直角无阴影、图 4:5。面板与表单控件仍是 6px。
    状态色（等待 / 出错）也压成沙色 / 砖红，只求能分辨、不求醒目。配色全在这组变量里。
    组件底座：弹层 / 菜单 / 下拉 / 提示 / 开关走 Radix（无头，样式在文末「基础组件」段），动效走 motion，
    轻提示走 sonner，图标走 lucide-react（旧名字在 components/icons.tsx 里做了薄壳）。 */
@@ -24,15 +26,18 @@
   --accent-strong: #000000;
   --accent-soft: #e9e6e0; /* 暖灰：用户气泡 / 选中胶囊底 */
   --accent-softer: #f1efea;
-  --user-bubble: #e9e6e0;
+  --user-bubble: #0a0a0a; /* 用户气泡：黑底白字 */
+  --user-bubble-text: #ffffff;
+  --assistant-bubble: rgba(0, 0, 0, 0.03);
   --warm: #a89c8a; /* 唯一带一点温度的灰：焦点环 / 次要强调 */
 
   --danger: #9e4a3c; /* 砖红，压暗 */
   --danger-soft: #f3e9e6;
 
-  /* 系统默认字体：标题与正文同一套，不再单配衬线。 */
-  --sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+  /* 两套字体：--serif 给标题 / Agent 回复 / 品牌名，--sans 给其余一切。字体文件在 main.tsx 里 import。 */
+  --sans: "Inter Variable", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
     "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --serif: "Newsreader Variable", "Noto Serif SC", "Songti SC", "Source Han Serif SC", Georgia, serif;
 
   /* 阴影分层：sm 给悬浮态的卡片 / 胶囊，md 给浮层菜单，lg 给弹窗与输入框，xl 给全屏弹窗。
      全是同色低透明度的多层叠加，不用单层大模糊——单层在暖白底上会发灰发脏。 */
@@ -52,7 +57,7 @@
   --ease-spring: cubic-bezier(0.34, 1.3, 0.64, 1);
 
   --sidebar-w: 264px;
-  --content-w: 1040px;
+  --content-w: 920px;
 }
 
 * {
@@ -94,28 +99,23 @@ button:disabled {
   overflow: hidden;
 }
 
-/* 唤出会话栏的汉堡：只属于窄屏。宽屏侧栏常驻，按钮没有存在意义，直接不渲染。 */
-.nav-toggle {
-  display: none;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  margin-left: -6px;
-  border: none;
-  background: transparent;
-  color: var(--text-2);
-  border-radius: 6px;
-  flex-shrink: 0;
-}
-.nav-toggle:hover {
-  background: var(--surface-soft);
-}
+/* 会话栏抽屉的遮罩。侧栏在所有宽度下都是抽屉（由顶栏胶囊导航的 ☰ 唤出），不再常驻占一列。 */
 .nav-scrim {
-  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  background: rgba(20, 22, 26, 0.28);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.22s;
+}
+.nav-scrim.show {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .workspace {
+  position: relative; /* 悬浮输入条的定位上下文 */
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -124,14 +124,28 @@ button:disabled {
 
 /* ============================ 左侧会话栏 ============================ */
 .sidebar {
-  width: var(--sidebar-w);
-  flex-shrink: 0;
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 60;
+  width: 288px;
+  max-width: 82vw;
+  height: 100vh;
+  height: 100dvh;
   background: var(--rail);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   padding: 14px 12px 14px;
   gap: 10px;
+  transform: translateX(-100%);
+  transition: transform 0.26s var(--ease-out);
+  /* 收起时不给阴影，否则它会从左边缘糊进屏内。 */
+  box-shadow: none;
+}
+.sidebar.open {
+  transform: none;
+  box-shadow: var(--shadow-xl);
 }
 
 .sidebar-head {
@@ -165,7 +179,7 @@ button:disabled {
   width: 100%;
   padding: 9px 12px;
   border: 1px solid var(--border-strong);
-  border-radius: 6px;
+  border-radius: var(--radius-pill);
   background: var(--surface);
   color: var(--text);
   font-weight: 550;
@@ -322,39 +336,87 @@ button:disabled {
 
 /* ============================ 顶栏 ============================ */
 .topbar {
-  height: 58px;
+  position: relative;
+  height: 80px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 22px;
+  padding: 0 24px;
   gap: 16px;
-  background: var(--bg);
-  border-bottom: 1px solid transparent;
+  background: transparent;
 }
 
-.topbar-title {
+/* 左上角的悬浮胶囊导航：☰ + 三个文字项。当前项炭黑，其余 45% 黑——只靠明度区分，不加底色。 */
+.topnav {
   display: flex;
   align-items: center;
-  gap: 10px;
-  min-width: 0;
+  height: 44px;
+  padding: 0 6px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
 }
-.title-text {
-  font-size: 16px;
-  font-weight: 500;
-  letter-spacing: 0.02em;
+.topnav-menu {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-2);
+}
+.topnav-menu:hover {
+  background: var(--surface-soft);
   color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 52vw;
-  transition: opacity 0.18s, max-width 0.18s;
 }
-/* 第一轮用户气泡还在视野里时藏起来（同一句话不在同屏出现两次），滚走后淡入。
-   宽度一并收成 0：只调透明度的话它仍占着位，状态点会被挤到顶栏中间悬空。 */
-.title-text.is-hidden {
-  opacity: 0;
-  max-width: 0;
+.topnav-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 32px;
+  padding: 0 11px;
+  border: none;
+  background: transparent;
+  color: rgba(0, 0, 0, 0.45);
+  font-size: 13px;
+  font-weight: 600;
+  transition: color 0.15s;
+}
+.topnav-item:hover,
+.topnav-item.active {
+  color: var(--text);
+}
+.topnav-count {
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+/* 字标：衬线、绝对居中（左右两段不等宽，flex 居中会偏）。状态点挂在字标右上。 */
+.wordmark {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 5px;
+  padding: 4px 8px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--serif);
+  font-size: 24px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+.wordmark .status-dot {
+  margin-top: 6px;
+  width: 6px;
+  height: 6px;
 }
 .status-dot {
   width: 8px;
@@ -442,7 +504,9 @@ button:disabled {
 .conversation {
   flex: 1;
   overflow-y: auto;
-  padding: 18px 22px 8px;
+  /* 底部留给悬浮输入条：--composer-h 由 InputBar 量实际高度写入（输入条会随多行文字 / 参考图变高），
+     125px 是单行态的高度，变量还没写入时用它。 */
+  padding: 8px 22px calc(var(--composer-h, 125px) + 45px);
 }
 .conversation-inner {
   max-width: var(--content-w);
@@ -452,56 +516,89 @@ button:disabled {
 /* ---- 空态欢迎 ---- */
 .welcome {
   text-align: center;
-  padding: 9vh 8px 0;
+  padding: 5vh 8px 0;
   display: flex;
   flex-direction: column;
   align-items: center;
 }
-.welcome-mark {
-  width: 56px;
-  height: 56px;
-  border-radius: 6px;
-  background: var(--accent-soft);
-  color: var(--accent-strong);
-  display: grid;
-  place-items: center;
-  margin-bottom: 18px;
-}
+/* 首屏只有一行大号衬线标题 + 一句说明 + 几颗示例胶囊，不放图标。 */
 .welcome h1 {
-  font-size: 30px;
+  font-family: var(--serif);
+  font-size: clamp(34px, 4.6vw, 54px);
   font-weight: 500;
-  letter-spacing: 0.02em;
-  margin: 0 0 10px;
+  line-height: 1.2;
+  letter-spacing: -0.012em;
+  margin: 0 0 16px;
 }
 .welcome p {
   color: var(--muted);
-  max-width: 460px;
-  margin: 0 0 26px;
-  line-height: 1.6;
+  max-width: 480px;
+  margin: 0 0 30px;
+  line-height: 1.65;
 }
 .welcome-samples {
   display: flex;
-  flex-direction: column;
-  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
   width: 100%;
-  max-width: 520px;
+  max-width: 760px;
 }
 .sample-chip {
-  text-align: left;
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: 13px 16px;
-  color: var(--text-2);
-  font-size: 13.5px;
-  transition: border-color 0.18s, box-shadow 0.18s, background 0.18s, transform 0.18s var(--ease-out);
-}
-.sample-chip:hover {
-  border-color: var(--border-strong);
-  background: var(--surface);
-  box-shadow: var(--shadow-md);
-  transform: translateY(-1px);
+  border: 1px solid rgba(0, 0, 0, 0.22);
+  border-radius: var(--radius-pill);
+  padding: 8px 16px;
   color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  transition: background 0.18s, border-color 0.18s;
+}
+.sample-chip:hover:not(:disabled) {
+  background: var(--surface-soft);
+  border-color: rgba(0, 0, 0, 0.4);
+}
+
+/* ---- 首屏态（.workspace.is-home）：标题 → 输入框 → 示例胶囊，整组居中偏上 ----
+   对话流不再撑满（否则输入框会被顶到页底），输入条回到文档流里并放大成 720×140 的卡，
+   外面是一圈靛蓝色的柔光——全站唯一带色相的地方，把视线钉在「从这里开始」。 */
+.workspace.is-home {
+  overflow-y: auto;
+}
+.workspace.is-home .conversation {
+  flex: 0 0 auto;
+  overflow: visible;
+  padding-bottom: 0;
+}
+.workspace.is-home .composer {
+  position: static;
+  padding: 0 22px;
+}
+.workspace.is-home .composer-box {
+  max-width: 720px;
+  min-height: 140px;
+  display: flex;
+  flex-direction: column;
+  border-radius: 24px;
+  padding: 18px 18px 14px 22px;
+  background: var(--surface);
+  box-shadow: 0 3px 16px rgba(0, 0, 0, 0.04), 0 10px 90px 16px rgba(67, 56, 202, 0.08),
+    0 0 52px rgba(67, 56, 202, 0.05);
+}
+.workspace.is-home .composer-box:focus-within {
+  box-shadow: 0 3px 16px rgba(0, 0, 0, 0.05), 0 10px 90px 16px rgba(67, 56, 202, 0.12),
+    0 0 52px rgba(67, 56, 202, 0.07);
+}
+.workspace.is-home .composer-input {
+  flex: 1;
+  font-size: 18px;
+}
+.workspace.is-home .composer-hint {
+  display: none;
+}
+.workspace.is-home .welcome-samples {
+  margin: 26px auto 40px;
+  padding: 0 22px;
 }
 
 /* ---- 对话气泡 ---- */
@@ -536,16 +633,38 @@ button:disabled {
 }
 .bubble {
   max-width: 80%;
-  padding: 11px 16px;
-  border-radius: 6px;
+  padding: 12px 18px;
+  border-radius: 24px;
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
 }
+/* 两种气泡的不对称圆角指向各自的说话方：用户收右下角，Agent 收左下角。 */
 .user-bubble {
   background: var(--user-bubble);
-  color: var(--text);
-  border-radius: 16px 16px 4px 16px;
+  color: var(--user-bubble-text);
+  font-size: 15px;
+  border-radius: 24px 24px 8px 24px;
+}
+/* Agent 回复：衬线正文放在极浅的灰底里。清单很长时也不撑满整行，留出右侧呼吸位。 */
+.final {
+  align-self: flex-start;
+  max-width: min(100%, 780px);
+  padding: 14px 20px;
+  background: var(--assistant-bubble);
+  border: 1px solid var(--assistant-bubble);
+  border-radius: 24px 24px 24px 8px;
+}
+.final .markdown {
+  font-family: var(--serif);
+  font-size: 16.5px;
+  line-height: 1.65;
+}
+.final .markdown > :first-child {
+  margin-top: 0;
+}
+.final .markdown > :last-child {
+  margin-bottom: 0;
 }
 .assistant-block {
   width: 100%;
@@ -844,58 +963,6 @@ button:disabled {
   font-weight: 600;
 }
 
-/* memory_applied：本轮长期记忆如何影响了结果。记忆最危险的失败是**静默**的——一条偏好误杀了
-   一批商品，用户只会觉得「怎么老是搜不出东西」，且归因不到记忆头上。所以这行不折叠、词全摊开：
-   ✕ 是真的从结果里删掉了（用户看不到那些商品），↓ 只是压低排序、仍在候选里。 */
-.memory-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 6px 10px;
-  margin: 4px 0;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--surface-soft);
-  font-size: 12.5px;
-  color: var(--text-2);
-}
-.memory-icon {
-  flex-shrink: 0;
-  line-height: 1.4;
-}
-.memory-body {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
-}
-.memory-domain {
-  color: var(--muted);
-  font-size: 11.5px;
-}
-.memory-terms {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-.memory-chip {
-  font-size: 10.5px;
-  font-family: ui-monospace, monospace;
-  padding: 1px 6px;
-  border-radius: 6px;
-  cursor: help;
-}
-.memory-chip.memory-excluded {
-  color: var(--danger);
-  background: var(--danger-soft);
-  border: 1px solid var(--danger);
-}
-.memory-chip.memory-attenuated {
-  color: var(--text-2);
-  background: var(--surface);
-  border: 1px dashed var(--border-strong);
-}
-
 /* 骨架占位：400% 宽的渐变横扫（Accio animate-shimmer 同款尺度）。 */
 .skeleton {
   display: flex;
@@ -1139,21 +1206,21 @@ button:disabled {
 .product-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px;
+  gap: 6px;
 }
 @media (max-width: 1000px) {
   .product-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+/* 卡片：直角、发丝线、无阴影，卡与卡只隔 6px——像杂志版面的格子，不像一张张浮起来的卡。 */
 .product-card {
   position: relative; /* 卡上的 ✕/♡ 与「已排除」角标都靠它定位（不可点的 <article> 也要） */
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+  border-radius: 0;
   overflow: hidden;
   background: var(--surface);
-  transition: box-shadow 0.22s var(--ease-out), transform 0.22s var(--ease-out),
-    border-color 0.22s, opacity 0.18s;
+  transition: border-color 0.22s, opacity 0.18s;
   display: flex;
   flex-direction: column;
   /* 入场错峰：animation-delay 由卡片内联（序号 × 55ms，见 ProductCards.staggerStyle）。
@@ -1185,7 +1252,9 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text-2);
+  font-family: var(--serif);
+  font-size: 15px;
+  color: var(--text);
   font-weight: 500;
 }
 .card-rating {
@@ -1217,9 +1286,9 @@ button:disabled {
   display: grid;
   place-items: center;
   border-radius: 999px;
-  border: 1px solid var(--border-strong);
-  background: rgba(255, 255, 255, 0.94);
-  backdrop-filter: blur(2px);
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.82);
+  backdrop-filter: blur(8px);
   color: var(--muted);
   font-size: 14px;
   line-height: 1;
@@ -1238,9 +1307,7 @@ button:disabled {
 }
 
 .product-card:hover {
-  box-shadow: var(--shadow-md);
-  border-color: var(--border-strong);
-  transform: translateY(-3px);
+  border-color: var(--text);
 }
 .product-card:hover .thumb-img {
   transform: scale(1.035);
@@ -1255,15 +1322,45 @@ button:disabled {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
-/* 图区 4:3 矮框 + 图按原比例完整缩进去（四周留白边），卡片变矮、图也变小，不裁切。
+.card-media {
+  position: relative;
+}
+/* 图左下角的「搜同款」胶囊：半透明白底压在图上，hover 才实。 */
+.card-more-like {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px 7px 11px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.07); /* 白底商品图上胶囊会隐形，留一圈极淡的描边 */
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 500;
+  transition: background 0.15s;
+}
+.card-more-like:hover {
+  background: #fff;
+}
+/* 图区方框 + 图按原比例完整缩进去（四周留白边），不裁切。库里的商品图基本是方图，
+   4:5 的框装方图上下各空一条，3 列下卡也高到一屏放不下一行，所以没跟 Daydream 的 4:5。
    img 必须绝对定位铺满：grid 行高不定时 height:100% 不生效，图会按原比例撑高后被 overflow 截掉。 */
 .card-thumb {
   position: relative;
+  /* 4:3 而不是方框：1:1 时图区占掉整张卡一半以上的高度，一屏看不全一行卡。方图在 4:3 的框里等比缩小、
+     左右各留一条灰边，平台标 / 收藏 / 「搜同款」正好落在灰边上，不压商品。 */
   aspect-ratio: 4 / 3;
   display: grid;
   place-items: center;
   overflow: hidden;
-  background: #fff;
+  background: #f5f5f3; /* 统一的浅灰底：白底商品图经 multiply 融进来，看不出图片自己的白框 */
 }
 .thumb-img {
   position: absolute;
@@ -1271,6 +1368,7 @@ button:disabled {
   width: calc(100% - 24px);
   height: calc(100% - 24px);
   object-fit: contain;
+  mix-blend-mode: multiply;
   transition: transform 0.6s var(--ease-out);
 }
 .thumb-platform {
@@ -1297,10 +1395,10 @@ button:disabled {
 }
 .card-title {
   margin: 0;
-  font-size: 13.5px;
-  font-weight: 500;
-  line-height: 1.4;
-  color: var(--text);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.45;
+  color: var(--text-2);
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -1312,9 +1410,10 @@ button:disabled {
   gap: 8px;
 }
 .price-num {
-  font-size: 19px;
-  font-weight: 700;
+  font-size: 16px;
+  font-weight: 600;
   color: var(--text);
+  font-variant-numeric: tabular-nums;
 }
 .price-label {
   font-size: 11px;
@@ -1363,50 +1462,92 @@ button:disabled {
 }
 
 /* ============================ 底部输入 ============================ */
+/* 对话态：输入条悬浮在对话流之上（内容从它底下滚过去），不再占一行。首屏态见下方 .is-home。 */
 .composer {
-  position: relative;
-  z-index: 1;
-  flex-shrink: 0;
-  padding: 6px 22px 16px;
-}
-/* 对话流滚到输入框底下时渐隐，而不是被一刀切断。挂在输入框上沿往上伸，不挡点击。 */
-.composer::before {
-  content: "";
   position: absolute;
   left: 0;
   right: 0;
-  bottom: 100%;
-  height: 32px;
-  background: linear-gradient(to bottom, rgba(255, 255, 255, 0), var(--bg));
+  bottom: 0;
+  z-index: 3;
+  padding: 0 22px 16px;
   pointer-events: none;
+}
+.composer > * {
+  pointer-events: auto;
 }
 /* 输入框：半透明 + 背景模糊的「玻璃」，浮在对话流上方；聚焦时边框收深、阴影抬高。 */
 .composer-box {
-  max-width: var(--content-w);
+  max-width: min(var(--content-w), 640px); /* 比对话流窄一截：悬浮的输入条，不是铺满的底栏 */
   margin: 0 auto;
-  background: rgba(255, 255, 255, 0.86);
+  background: rgba(255, 255, 255, 0.94);
   backdrop-filter: blur(16px) saturate(1.2);
   -webkit-backdrop-filter: blur(16px) saturate(1.2);
-  border: 1px solid var(--border-strong);
-  border-radius: 22px;
-  padding: 12px 14px 10px;
-  box-shadow: var(--shadow-lg);
+  border: none;
+  border-radius: 28px;
+  padding: 12px 14px 10px 18px;
+  /* 外圈 8px 的半透明灰环（Daydream 的输入条是「灰玻璃胶囊套白胶囊」），再叠一层落影。 */
+  box-shadow: 0 0 0 8px rgba(0, 0, 0, 0.1), var(--shadow-lg);
   transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s var(--ease-out);
 }
 .composer-box:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 4px rgba(31, 31, 30, 0.06), var(--shadow-xl);
+  box-shadow: 0 0 0 8px rgba(0, 0, 0, 0.16), var(--shadow-xl);
 }
 .composer-box.is-running {
-  border-color: var(--accent-soft);
-  box-shadow: 0 0 0 4px rgba(31, 31, 30, 0.08), var(--shadow-md);
+  box-shadow: 0 0 0 8px rgba(0, 0, 0, 0.1), var(--shadow-md);
 }
 .composer-box.is-waiting {
-  border-color: #b08d5b;
-  box-shadow: 0 0 0 4px rgba(176, 141, 91, 0.16), var(--shadow-md);
+  box-shadow: 0 0 0 8px rgba(176, 141, 91, 0.28), var(--shadow-md);
 }
 .send-btn.is-clarify.ready {
   background: #b08d5b;
+}
+
+/* 对话态的输入条收成单行胶囊：[图标] [输入] [发送] 排一行（Daydream 的「Chat to refine…」）。
+   DOM 里附件键和发送键同在 .composer-toolbar 里，用 display:contents 把它俩提成 grid 子项；
+   参考图 / skill chip / 报错这些偶发行各自独占一整行，排在输入行上面。 */
+.workspace:not(.is-home) .composer-box {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: end;
+  column-gap: 6px;
+  padding: 8px 8px 8px 10px;
+}
+.workspace:not(.is-home) .composer-box > * {
+  grid-column: 1 / -1;
+}
+.workspace:not(.is-home) .composer-toolbar {
+  display: contents;
+}
+.workspace:not(.is-home) .composer-input {
+  grid-column: 2;
+  grid-row: 20;
+  padding: 7px 4px;
+}
+/* InputBar 打字时把 textarea 的高度写成内联 style（按 scrollHeight 撑高），发送后文字清了高度却留着——
+   首屏那张大输入卡里量到的 70px 会带进对话态，把单行胶囊撑成两行。空着的时候一律收回单行。 */
+.composer-input:placeholder-shown {
+  height: auto !important;
+}
+.workspace:not(.is-home) .attach-btn {
+  grid-column: 1;
+  grid-row: 20;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  justify-content: center;
+  border-color: transparent;
+}
+.workspace:not(.is-home) .attach-btn span {
+  display: none;
+}
+.workspace:not(.is-home) .send-btn {
+  grid-column: 3;
+  grid-row: 20;
+}
+/* 输入条底下那一截用页面底色垫住：内容滚到这里淡出，免责小字也不会压在商品卡上。 */
+.workspace:not(.is-home) .composer {
+  background: linear-gradient(to bottom, rgba(255, 255, 255, 0), var(--bg) 62%);
+  padding-top: 28px;
 }
 
 /* ask_user 的问题：一条 assistant 消息（复用 .final），选项挂在下面 */
@@ -1429,41 +1570,6 @@ button:disabled {
   margin-top: 12px;
 }
 
-/* （旧）独立澄清卡壳：仍被多选清单/单选按钮的子样式引用，壳本身不再渲染 */
-.clarify-card {
-  margin-top: 10px;
-  padding: 14px 16px;
-  background: #faf8f4;
-  border: 1px solid #fde1a8;
-  border-radius: 6px;
-}
-.clarify-card.is-done {
-  opacity: 0.72;
-}
-.clarify-card-head {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-.clarify-card-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  flex-shrink: 0;
-  border-radius: 50%;
-  background: #b08d5b;
-  color: #fff;
-  font-size: 0.75rem;
-  font-weight: 700;
-}
-.clarify-card-q {
-  font-size: 0.9rem;
-  line-height: 1.55;
-  color: #7c3a06;
-}
 /* 多选：清单 */
 .clarify-checklist {
   display: flex;
@@ -1536,7 +1642,7 @@ button:disabled {
 .clarify-confirm {
   padding: 8px 18px;
   border: none;
-  border-radius: 6px;
+  border-radius: 999px;
   background: linear-gradient(135deg, #b08d5b, #9a7a4e);
   color: #fff;
   font-size: 0.86rem;
@@ -1557,7 +1663,7 @@ button:disabled {
   padding: 9px 16px;
   background: #fff;
   border: 1px solid #e3ddd0;
-  border-radius: 6px;
+  border-radius: 999px; /* 按钮一律胶囊（多选清单行与补充输入框是表单控件，仍 6px） */
   cursor: pointer;
   font-size: 0.88rem;
   color: var(--text);
@@ -1578,6 +1684,8 @@ button:disabled {
   background: transparent;
   color: var(--text);
   font: inherit;
+  font-family: var(--serif);
+  font-size: 16.5px;
   line-height: 1.5;
   padding: 4px 6px 6px;
   max-height: 160px;
@@ -1603,7 +1711,7 @@ button:disabled {
   height: 32px;
   padding: 0 12px 0 10px;
   border: 1px solid var(--border-strong);
-  border-radius: 6px;
+  border-radius: var(--radius-pill);
   background: transparent;
   color: #6b6f76;
   display: inline-flex;
@@ -1920,10 +2028,6 @@ button:disabled {
   padding: 1px 7px;
   border-radius: 999px;
 }
-.pref-conf {
-  font-size: 10.5px;
-  color: var(--muted);
-}
 
 /* ============================ 滚动条 + 响应式 ============================ */
 .conversation::-webkit-scrollbar,
@@ -1945,9 +2049,6 @@ button:disabled {
   }
   .topbar-actions .ghost-btn span {
     display: none;
-  }
-  .title-text {
-    max-width: 38vw;
   }
   .bubble {
     max-width: 90%;
@@ -1981,40 +2082,8 @@ button:disabled {
   margin: 4px 0 10px;
   line-height: 1.5;
 }
-.profile-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 8px;
-}
-.profile-row label {
-  width: 72px;
-  font-size: 12.5px;
-  color: var(--text-2);
-}
-.profile-row .select-trigger,
-.profile-row input,
-.pref-add input {
-  flex: 1;
-  padding: 7px 10px;
-  font-size: 13px;
-  color: var(--text);
-  background: var(--surface);
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  outline: none;
-}
-.profile-row .select-trigger:focus-visible,
-.profile-row input:focus,
-.pref-add input:focus {
-  border-color: var(--accent);
-}
-.profile-unit {
-  font-size: 11.5px;
-  color: var(--muted);
-}
-.pref-save,
-.pref-add button {
+
+.pref-save {
   padding: 7px 16px;
   font-size: 12.5px;
   font-weight: 500;
@@ -2024,8 +2093,7 @@ button:disabled {
   border-radius: 6px;
   cursor: pointer;
 }
-.pref-save:disabled,
-.pref-add button:disabled {
+.pref-save:disabled {
   background: var(--surface-soft);
   color: var(--faint);
   cursor: default;
@@ -2033,20 +2101,13 @@ button:disabled {
 .pref-save {
   margin-top: 6px;
 }
-.pref-add {
-  display: flex;
-  gap: 8px;
-  margin-top: 8px;
-}
+
 .pref-error {
   margin-top: 6px;
   font-size: 11.5px;
   color: var(--danger);
 }
-.pref-src {
-  font-size: 10.5px;
-  color: var(--muted);
-}
+
 .pref-item .pref-del {
   align-self: flex-start;
   padding: 2px 6px;
@@ -2205,12 +2266,13 @@ button:disabled {
   align-items: center;
   justify-content: center;
   gap: 5px;
-  padding: 6px 10px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--surface-2, #fafafa);
-  color: var(--muted);
-  font-size: 12px;
+  padding: 7px 12px;
+  border-radius: var(--radius-pill);
+  border: 1px solid rgba(0, 0, 0, 0.22);
+  background: transparent;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 500;
   cursor: pointer;
   transition: all 0.15s ease;
 }
@@ -2218,13 +2280,6 @@ button:disabled {
   border-color: var(--accent-strong);
   color: var(--accent-strong);
   background: #fff;
-}
-/* 抽屉：宽到能放下两列「看得清图」的卡。头部固定，只有网格区滚动。 */
-.drawer-similar {
-  width: min(920px, 94vw);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
 }
 
 /* 源商品条：图 + 标题 + 口径说明。标题两行截断，别再把第二行切一半。 */
@@ -2386,14 +2441,6 @@ button:disabled {
 }
 
 /* --- 结构化偏好卡（添加草稿 / 就地编辑共用）-------------------------------- */
-.pref-drafts {
-  margin-top: 10px;
-}
-.pref-drafts-title {
-  font-size: 11.5px;
-  color: var(--accent-strong);
-  margin-bottom: 6px;
-}
 .pref-editor {
   padding: 10px;
   margin-bottom: 8px;
@@ -2433,71 +2480,13 @@ button:disabled {
   border-radius: 6px;
   outline: none;
 }
-.pref-editor-label {
-  flex: 0 0 auto;
-  font-size: 11.5px;
-  color: var(--muted);
-  cursor: help;
-  border-bottom: 1px dotted var(--faint);
-}
-.pref-editor-slug {
-  font-family: ui-monospace, monospace;
-}
-/* 硬淘汰授权勾选。不是个轻飘飘的 toggle：勾上意味着这类商品再也不会出现在结果里，且删了什么
-   用户看不见。所以给它整块底 + 说明文案，勾上后转成 danger 色，视觉重量配得上后果。
-   但也不做二次确认弹窗——写入是廉价可逆的（不对就取消勾选）。 */
-.pref-editor-block {
-  display: flex;
-  gap: 8px;
-  align-items: flex-start;
-  margin-top: 8px;
-  padding: 8px 10px;
-  background: var(--surface-soft);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  cursor: pointer;
-}
-.pref-editor-block.on {
-  background: var(--danger-soft);
-  border-color: var(--danger);
-}
-.pref-editor-block input {
-  margin-top: 2px;
-  accent-color: var(--danger);
-  cursor: pointer;
-}
-.pref-editor-block-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.pref-editor-block-text strong {
-  font-size: 12.5px;
-  color: var(--text);
-}
-.pref-editor-block.on .pref-editor-block-text strong {
-  color: var(--danger);
-}
-.pref-editor-block-text em {
-  font-style: normal;
-  font-size: 11px;
-  line-height: 1.5;
-  color: var(--muted);
-}
+
 .pref-editor-actions {
   display: flex;
   gap: 8px;
   margin-top: 10px;
 }
-.pref-cancel {
-  padding: 7px 14px;
-  font-size: 12.5px;
-  color: var(--text-2);
-  background: var(--surface-soft);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  cursor: pointer;
-}
+
 .pref-manual {
   background: var(--surface-soft) !important;
   color: var(--text-2) !important;
@@ -2551,61 +2540,14 @@ button:disabled {
   color: var(--muted);
   line-height: 1.5;
 }
-.pref-effect {
-  font-size: 10.5px;
-  padding: 1px 7px;
-  border-radius: 999px;
-  border: 1px solid transparent;
-}
-/* 「命中即淘汰」是唯一会把商品从结果里删掉的档位（且用户看不见被删了什么）——给它最重的视觉分量 */
-.pref-effect.pref-blocking {
-  color: var(--danger);
-  background: var(--danger-soft);
-  border-color: var(--danger);
-  font-weight: 600;
-}
-.pref-effect.pref-soft {
-  color: var(--text-2);
-  background: var(--surface-soft);
-  border-color: var(--border);
-}
-/* 生效范围：普通品类域灰底；global 会跨品类杀商品，必须一眼区分得出来 */
-.pref-scope {
-  font-size: 10.5px;
-  padding: 1px 7px;
-  border-radius: 999px;
-  color: var(--text-2);
-  background: var(--surface-soft);
-  border: 1px solid var(--border);
-  cursor: help;
-}
-.pref-scope.pref-scope-global {
-  color: var(--danger);
-  background: var(--danger-soft);
-  border-color: var(--danger-soft);
-  font-weight: 600;
-}
+
 /* 久未复现：纯提示、不参与打分（后端已删半衰期衰减），所以低调，不做成警告色 */
 .pref-stale {
   font-size: 10.5px;
   color: var(--muted);
   cursor: help;
 }
-.pref-kw {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 6px;
-}
-.pref-kw-chip {
-  font-size: 10.5px;
-  font-family: ui-monospace, monospace;
-  color: var(--text-2);
-  background: var(--surface);
-  border: 1px dashed var(--border-strong);
-  padding: 1px 6px;
-  border-radius: 6px;
-}
+
 .pref-ops {
   display: flex;
   flex-direction: column;
@@ -2661,8 +2603,9 @@ button:disabled {
 .login-title {
   margin: 0;
   font-size: 24px;
-  font-weight: 650;
+  font-weight: 500;
   color: var(--text);
+  font-family: var(--serif);
 }
 
 .login-sub {
@@ -2886,10 +2829,11 @@ button:disabled {
 
 .landing-title {
   margin: 0 0 20px;
-  font-size: 46px;
+  font-family: var(--serif);
+  font-size: clamp(36px, 5vw, 56px);
   font-weight: 500;
-  line-height: 1.3;
-  letter-spacing: 0.03em;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
   color: var(--text);
 }
 
@@ -2910,7 +2854,6 @@ button:disabled {
   border: none;
   border-radius: 999px;
   cursor: pointer;
-  box-shadow: var(--shadow-md);
 }
 
 .landing-cta {
@@ -2975,8 +2918,9 @@ button:disabled {
 
 .landing-h2 {
   margin: 0 0 24px;
-  font-size: 22px;
-  font-weight: 650;
+  font-family: var(--serif);
+  font-size: 26px;
+  font-weight: 500;
   text-align: center;
   color: var(--text);
 }
@@ -3160,43 +3104,6 @@ button:disabled {
    下面按「先让它能用，再让它好看」的顺序：抽屉化侧栏（决定能不能用）→ 顶栏瘦身 → 网格降列 →
    补触控（手机没有 hover，靠 hover 才现形的按钮等于不存在）。 */
 @media (max-width: 768px) {
-  /* 会话栏从常驻列改成盖上来的抽屉。390px 的屏上，一根 264px 的侧栏要吃掉三分之二宽度，
-     对话区只剩一条缝——这一刀是整套适配里唯一真正决定「能不能用」的。 */
-  .sidebar {
-    position: fixed;
-    top: 0;
-    left: 0;
-    z-index: 60;
-    width: 272px;
-    max-width: 82vw;
-    height: 100dvh;
-    transform: translateX(-100%);
-    transition: transform 0.26s cubic-bezier(0.22, 1, 0.36, 1);
-    /* 同上：收起时不给阴影，否则它会从左边缘糊进屏内。 */
-    box-shadow: none;
-  }
-  .sidebar.open {
-    transform: none;
-    box-shadow: var(--shadow-lg);
-  }
-  .nav-scrim {
-    display: block;
-    position: fixed;
-    inset: 0;
-    z-index: 55;
-    background: rgba(20, 22, 26, 0.28);
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 0.22s;
-  }
-  .nav-scrim.show {
-    opacity: 1;
-    pointer-events: auto;
-  }
-  .nav-toggle {
-    display: inline-flex;
-  }
-
   /* 顶栏：退成图标条。文字标签在 720px 断点就已经藏了，这里进一步收紧内边距与间距，
      并砍掉 credit 进度条的**条**——数字保留（余额是要看的），54px 宽的槽在这儿只是占地方。 */
   .topbar {
@@ -3216,22 +3123,49 @@ button:disabled {
   .quota-meter {
     padding: 5px 8px;
   }
-  .title-text {
-    max-width: 34vw;
+  /* 胶囊导航只留 ☰：收藏 / 订单在抽屉里也有，窄屏把位置让给居中的字标。 */
+  .topnav {
+    padding: 0;
+    border-color: transparent;
   }
+  .topnav-item {
+    display: none;
+  }
+  .wordmark {
+    font-size: 20px;
+  }
+  /* 字标是绝对居中的，不参与 flex 排布——右边那组一宽就会直接叠上去。手机宽度下 credit 只留数字。 */
+  .quota-unit {
+    display: none;
+  }
+}
+/* 手机宽度：居中放不下了（字标约 110px，右边那组约 150px，400px 宽时只差几像素）。字标改成跟在 ☰ 后面靠左。 */
+@media (max-width: 560px) {
+  .wordmark {
+    left: 48px;
+    transform: translateY(-50%);
+  }
+}
+@media (max-width: 768px) {
 
   /* 正文区：把桌面版 22px 的横向留白收到 12–14px。手机上每一列像素都得省给内容。 */
+  /* 底部不能写死：对话态的输入条是悬浮的，留白要跟 --composer-h 走（见 .conversation 基础规则），
+     写成 8px 会让最后一段内容整个压在输入条底下。首屏态另有 padding-bottom: 0 的覆盖，不受影响。 */
   .conversation {
-    padding: 14px 12px 8px;
+    padding: 14px 12px calc(var(--composer-h, 125px) + 24px);
   }
   .composer {
     padding: 6px 12px 12px;
+  }
+  .workspace:not(.is-home) .compare-bar {
+    left: 12px;
+    right: 12px;
   }
   .welcome {
     padding: 5vh 4px 0;
   }
   .welcome h1 {
-    font-size: 22px;
+    font-size: 30px;
   }
   .bubble {
     max-width: 92%;
@@ -3243,6 +3177,19 @@ button:disabled {
   .composer-input {
     font-size: 16px;
     min-height: 52px;
+  }
+  /* 对话态是单行胶囊，两行的底只属于首屏那张大输入卡。占位文字在这个宽度放不下，
+     不折行、截断成省略号——折成两行会把胶囊撑高，还会冒出一根滚动条。 */
+  .workspace:not(.is-home) .composer-input {
+    min-height: 0;
+  }
+  .workspace:not(.is-home) .composer-input:placeholder-shown {
+    overflow: hidden;
+  }
+  .workspace:not(.is-home) .composer-input::placeholder {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   /* 商品网格：两列（每列约 175px，图 + 标题 + 价格还读得动），间距收紧。
@@ -3347,13 +3294,7 @@ button:disabled {
   }
 }
 
-/* --- 后台管理面板 --------------------------------------------------------
-   比其余四个抽屉宽（30 个参数 × 滑块 + 说明 + 告警，360px 会挤成一条），但仍走同一套
-   .drawer 基座——位置、动画、scrim 全部继承，这里只覆盖宽度与内部排版。 */
-.admin-drawer {
-  width: 520px;
-}
-
+/* --- 后台管理面板 -------------------------------------------------------- */
 /* 底部操作条固定，正文单独滚动：30 个参数滚到底才能点保存的话，改一项就要滚一屏。 */
 .admin-body {
   overflow-y: auto;
@@ -3560,9 +3501,7 @@ button:disabled {
 }
 
 @media (max-width: 560px) {
-  .admin-drawer {
-    width: 100vw;
-  }
+
   .admin-number {
     flex-wrap: wrap;
   }
@@ -3604,17 +3543,7 @@ button:disabled {
   border-radius: 6px;
   background: #fff;
 }
-.order-card-preview {
-  border-left-color: #f0a92c;
-  background: #fffdf7;
-}
-.order-card-confirmed {
-  border-left-color: var(--accent);
-}
-.order-card-cancelled {
-  border-left-color: var(--muted);
-  opacity: 0.85;
-}
+
 .order-card-head {
   display: flex;
   align-items: center;
@@ -3631,10 +3560,7 @@ button:disabled {
   padding: 2px 8px;
   border-radius: 999px;
 }
-.order-badge-pending {
-  background: #f3eee4;
-  color: #7a6240;
-}
+
 .order-badge-placed {
   background: var(--accent-soft);
   color: var(--accent-strong);
@@ -3669,15 +3595,6 @@ button:disabled {
 .order-line-meta {
   color: var(--muted);
   white-space: nowrap;
-}
-.order-address,
-.order-hint {
-  margin-top: 10px;
-  font-size: 12px;
-  color: var(--muted);
-}
-.order-hint {
-  color: #7a6240;
 }
 
 /* 订单抽屉里的一行（复用订单卡的内部类，外层给个卡片壳）。 */
@@ -3844,8 +3761,9 @@ button:disabled {
   border-bottom: 1px solid var(--border);
 }
 .modal-title {
-  font-weight: 600;
-  font-size: 15px;
+  font-family: var(--serif);
+  font-weight: 500;
+  font-size: 19px;
 }
 .modal-body {
   padding: 18px;
@@ -4084,6 +4002,21 @@ button:disabled {
 .compare-bar > span {
   margin-right: auto;
 }
+/* 对话态的输入条是悬浮贴底的（absolute; bottom:0），对比栏再 sticky 贴底就会压在它上面、盖住发送键。
+   抬到输入条上方：--composer-h 含输入条顶部 28px 的渐变留白，减掉它再让出 8px 灰环 + 8px 间距。
+   对话流的底部留白同步多让出对比栏这一行（56px 高，留白里本来就有余量，再加 58px）。 */
+.workspace:not(.is-home) .compare-bar {
+  position: absolute;
+  left: 22px;
+  right: 22px;
+  bottom: calc(var(--composer-h, 125px) - 12px);
+  margin: 0 auto;
+  width: auto;
+  max-width: var(--content-w);
+}
+.workspace:not(.is-home):has(.compare-bar) .conversation {
+  padding-bottom: calc(var(--composer-h, 125px) + 45px + 58px);
+}
 
 /* 卡内动作行 */
 .card-actions {
@@ -4100,8 +4033,8 @@ button:disabled {
 /* 卡内主动作「去下单」：实心炭黑，和次要的对比 / 搜同款拉开层级，宽度占一半多。 */
 .card-order {
   flex: 1.4 1 auto;
-  padding: 6px 12px;
-  border-radius: 6px;
+  padding: 7px 14px;
+  border-radius: var(--radius-pill);
   border: 1px solid var(--accent-strong);
   background: var(--accent);
   color: #fff;
@@ -4121,17 +4054,6 @@ button:disabled {
   border-color: var(--accent);
   color: var(--accent-strong);
   background: var(--accent-softer);
-}
-
-/* 确认卡按钮 / 有效期 */
-.order-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 12px;
-}
-.order-expiry {
-  color: #7a6240;
 }
 
 /* 下单意向表单 */
@@ -4215,7 +4137,6 @@ button:disabled {
   margin: 0;
   color: var(--text);
 }
-
 
 /* ===== 交易确认卡（配色对齐本仓变量）===== */
 .confirmations-section {
@@ -4515,9 +4436,10 @@ button:disabled {
   margin-bottom: 14px;
 }
 .panel-host.page .drawer-title {
-  font-size: 22px;
+  font-family: var(--serif);
+  font-size: 28px;
   font-weight: 500;
-  letter-spacing: 0.02em;
+  letter-spacing: -0.005em;
 }
 /* 整页里「关闭」的语义是「返回对话」：把 X 换成文字，靠 ::after 补，不动四个组件。 */
 .panel-host.page .drawer-tools .icon-btn[title="关闭"] {
@@ -4578,8 +4500,9 @@ button:disabled {
   align-items: baseline;
   gap: 8px;
   margin: 6px 0 12px;
-  font-size: 18px;
-  letter-spacing: 0.02em;
+  font-family: var(--serif);
+  font-size: 22px;
+  letter-spacing: -0.005em;
 }
 .results-heading strong {
   font-weight: 500;
@@ -4624,19 +4547,20 @@ button:disabled {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-top: 14px;
+  margin: -4px 0 6px;
 }
 .followup {
-  padding: 7px 14px;
-  border: 1px solid var(--border-strong);
+  padding: 8px 16px;
+  border: none;
   border-radius: 999px;
-  background: transparent;
-  color: var(--text-2);
-  font-size: 13px;
+  background: rgba(0, 0, 0, 0.05); /* 灰实底、无描边：和首屏的描边示例胶囊区分开——这是「细化」，那是「开始」 */
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
   transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
 .followup:hover {
-  background: var(--surface-soft);
+  background: rgba(0, 0, 0, 0.09);
   color: var(--text);
   border-color: var(--text-2);
 }

@@ -1,6 +1,6 @@
 import { memo, useMemo, useState } from "react";
 import type { ProductItem } from "../types";
-import { Check, Globe, Heart, Search } from "lucide-react";
+import { Check, Globe, Heart, Sparkles } from "lucide-react";
 import { Tooltip } from "./ui/Tooltip";
 import { platformName, shownPrice, splitReasons } from "./productText";
 
@@ -10,7 +10,8 @@ import { platformName, shownPrice, splitReasons } from "./productText";
 // 图区优先显示数据集里的真实商品图（image_url）；URL 缺失或加载失败时，才回退到「按 item_id
 // 派生的稳定柔和渐变 + 平台名」占位——不伪造图片，也不让裂图破坏版式。
 
-// 由 item_id 派生稳定色相，给图区一个不抖动的柔和渐变（同一商品每次渲染一致）。
+// 由 item_id 派生稳定色相，给**没有图**的占位一个不抖动的柔和渐变（同一商品每次渲染一致）。
+// 有真图时不用它：图区是统一的浅灰底（CSS），白底商品图靠 mix-blend-mode 融进去。
 function hueFrom(seed: string): number {
   let h = 0;
   for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) % 360;
@@ -25,7 +26,7 @@ function Thumb({ item }: { item: ProductItem }) {
   const showImage = Boolean(item.image_url) && !failed;
 
   return (
-    <div className="card-thumb" style={{ background: bg }}>
+    <div className="card-thumb" style={showImage ? undefined : { background: bg }}>
       {showImage ? (
         <img
           className="thumb-img"
@@ -52,7 +53,11 @@ export function MiniThumb({ item }: { item: ProductItem }) {
   const hue = hueFrom(item.item_id || item.title);
   const bg = `linear-gradient(135deg, hsl(${hue} 55% 92%), hsl(${(hue + 40) % 360} 50% 86%))`;
   return (
-    <span className="mini-thumb" style={{ background: bg }} title={item.title}>
+    <span
+      className="mini-thumb"
+      style={item.image_url && !failed ? undefined : { background: bg }}
+      title={item.title}
+    >
       {item.image_url && !failed && (
         <img src={item.image_url} alt="" loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(true)} />
       )}
@@ -125,7 +130,16 @@ const Card = memo(function Card({
           <Heart size={15} strokeWidth={1.75} fill={favorited ? "currentColor" : "none"} />
         </button>
       </Tooltip>
-      <Thumb item={item} />
+      {/* 搜同款压在图的左下角：一次纯向量近邻检索（不过 Agent、不烧 LLM），结果在右侧抽屉里给。 */}
+      <div className="card-media">
+        <Thumb item={item} />
+        <Tooltip content="按商品向量找相似商品（不经 Agent）">
+          <button className="card-more-like" onClick={stop(() => onSimilar(item))}>
+            <Sparkles size={14} strokeWidth={1.75} />
+            搜同款
+          </button>
+        </Tooltip>
+      </div>
       <div className="card-body">
         {/* 顶行：品牌 + 评分。评分只给分不给评价数（数据集评价数恒为 0，显示「(0)」等于说零评价）；
             两者都没有就整行不渲染，标题顶上去。 */}
@@ -183,9 +197,8 @@ const Card = memo(function Card({
           </div>
         )}
 
-        {/* 卡内动作：去下单（主）/ 对比 / 搜同款。详情不再单占一个按钮——点整卡就是详情。
-            去下单与详情弹窗同一条路（填收件信息 → Agent 出确认卡），任务跑着时发不出话，置灰。
-            搜同款是一次纯向量近邻检索（不过 Agent、不烧 LLM），结果在右侧抽屉里给。 */}
+        {/* 卡内动作：去下单（主）/ 对比。详情不再单占一个按钮——点整卡就是详情。
+            去下单与详情弹窗同一条路（填收件信息 → Agent 出确认卡），任务跑着时发不出话，置灰。 */}
         <div className="card-actions">
           <Tooltip content={busy ? "等这一轮跑完再下单" : "填写收件信息，让 Agent 先出确认卡"}>
             <button
@@ -203,12 +216,6 @@ const Card = memo(function Card({
               onClick={stop(() => onCompare(item))}
             >
               {compared ? "✓ 对比中" : "对比"}
-            </button>
-          </Tooltip>
-          <Tooltip content="按商品向量找相似商品（不经 Agent）">
-            <button className="card-similar" onClick={stop(() => onSimilar(item))}>
-              <Search size={13} strokeWidth={1.75} />
-              搜同款
             </button>
           </Tooltip>
         </div>
@@ -397,29 +404,32 @@ export function ProductCards({
         <strong>本轮精选</strong>
         <span className="results-count">{items.length} 件</span>
       </div>
-      <div className="results-tabs">
-        <button
-          className={`tab ${active === "all" ? "active" : ""}`}
-          onClick={() => setActive("all")}
-        >
-          <Globe size={14} strokeWidth={1.75} />
-          Global sites
-          <span className="tab-count">{items.length}</span>
-        </button>
-        {platforms.map((p) => {
-          const n = items.filter((it) => it.platform.toLowerCase() === p).length;
-          return (
-            <button
-              key={p}
-              className={`tab ${active === p ? "active" : ""}`}
-              onClick={() => setActive(p)}
-            >
-              {platformName(p)}
-              <span className="tab-count">{n}</span>
-            </button>
-          );
-        })}
-      </div>
+      {/* 平台筛选只在真的跨了平台时才有意义；单平台时「全部 3 / Amazon 3」两颗 tab 说的是同一件事。 */}
+      {platforms.length > 1 && (
+        <div className="results-tabs">
+          <button
+            className={`tab ${active === "all" ? "active" : ""}`}
+            onClick={() => setActive("all")}
+          >
+            <Globe size={14} strokeWidth={1.75} />
+            Global sites
+            <span className="tab-count">{items.length}</span>
+          </button>
+          {platforms.map((p) => {
+            const n = items.filter((it) => it.platform.toLowerCase() === p).length;
+            return (
+              <button
+                key={p}
+                className={`tab ${active === p ? "active" : ""}`}
+                onClick={() => setActive(p)}
+              >
+                {platformName(p)}
+                <span className="tab-count">{n}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       <div className="product-grid">
         {shown.map((it, i) => (

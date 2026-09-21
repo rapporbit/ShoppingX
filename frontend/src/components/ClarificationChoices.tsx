@@ -49,8 +49,10 @@ export function ClarificationChoices({
     const kept = options.filter((o) => checked.has(o));
     const add = extra.trim();
     const parts: string[] = [];
-    parts.push(kept.length ? `这套就要这些：${kept.join("、")}` : "这套先不要下面列的任何一件");
-    if (add) parts.push(`另外还想加：${add}`);
+    // 措辞保持中性：ask_user 的多选是通用能力（套装组成确认只是其中一种用法），写成「这套就要这些」
+    // 会让「你最看重哪些点」这类普通多选回给 Agent 一句语义不通的话。
+    parts.push(kept.length ? `我选：${kept.join("、")}` : "列出的这些我都不选");
+    if (add) parts.push(`另外补充：${add}`);
     onSubmit(parts.join("；"));
   };
 
@@ -79,7 +81,7 @@ export function ClarificationChoices({
           {!disabled && (
             <input
               className="clarify-extra"
-              placeholder="想加清单里没有的？（可选，如：再加个床垫）"
+              placeholder="想补充清单里没有的？（可选）"
               value={extra}
               onChange={(e) => setExtra(e.target.value)}
               onKeyDown={(e) => {
@@ -89,7 +91,7 @@ export function ClarificationChoices({
           )}
           <div className="clarify-actions">
             <button type="button" className="clarify-confirm" onClick={confirmMulti} disabled={disabled}>
-              {disabled ? "已确认" : "确认这套组成"}
+              {disabled ? "已确认" : "确认选择"}
             </button>
           </div>
         </>
