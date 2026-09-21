@@ -19,7 +19,7 @@ from app.api import monitor
 from app.api.context import clamp_timeout
 from app.tools._shell import tool
 from app.utils.circuit_breaker import CircuitBreaker
-from app.utils.env import env_float, env_int
+from app.utils.env import env_float
 from app.utils.retry import call_with_retry
 
 _TAVILY_URL = "https://api.tavily.com/search"
@@ -30,8 +30,8 @@ _HTTP_TIMEOUT = env_float("WEB_SEARCH_TIMEOUT_SEC", 20.0)
 # basic 深度每条 content 86~1482 字符，长的是几段正文用 [...] 拼成、封顶约 1500。上限定得略高于
 # 正常值——正常结果不截，只防 advanced 深度 / raw_content / 换搜索源时的异常长文。
 # 最坏 = max_results 上限 10 × 单条 1500 = 总上限 15000。
-_CONTENT_MAX_CHARS = env_int("WEB_SEARCH_CONTENT_MAX_CHARS", 1500)
-_TOTAL_MAX_CHARS = env_int("WEB_SEARCH_TOTAL_MAX_CHARS", 15000)
+_CONTENT_MAX_CHARS = 1500
+_TOTAL_MAX_CHARS = 15000
 _TRUNCATED_MARK = " [truncated]"
 
 
@@ -50,10 +50,12 @@ def _clip_contents(contents: list[str]) -> list[str]:
 
 # 韧性（B 块）：Tavily 外呼的断路器（模块级单例——web_search 是函数工具，主/子 Agent 共用）。
 # 连续失败到阈值即熔断，OPEN 期直接走降级 note、不再每次干等 20s 超时。
+_CB_FAILURE_THRESHOLD = 5
+_CB_RECOVERY_TIMEOUT = 30.0
 _breaker = CircuitBreaker(
     "web_search",
-    failure_threshold=env_int("WEB_SEARCH_CB_THRESHOLD", 5),
-    recovery_timeout=env_float("WEB_SEARCH_CB_RECOVERY", 30.0),
+    failure_threshold=_CB_FAILURE_THRESHOLD,
+    recovery_timeout=_CB_RECOVERY_TIMEOUT,
 )
 
 

@@ -20,7 +20,7 @@ from agentscope.tool._response import ToolChunk, ToolResultState
 from app.harness import adapter as adapter_mod
 from app.harness.adapter import HarnessAgentAdapter, HarnessSession, HarnessToolAdapter
 from app.harness.middleware import HarnessMiddleware, HookRejectSignal
-from app.harness.token_budget import reset_tree, tree_snapshot
+from app.harness.token_budget import reset_run, run_snapshot
 from app.utils.thread_ctx import thread_scope
 
 EXEC_LOG: list[str] = []
@@ -546,10 +546,10 @@ async def test_model_usage_charged_to_tree(
     agent = await _build(session, [resp])
 
     with thread_scope("t-charge", tmp_path):
-        reset_tree()
+        reset_run()
         await agent.reply(_user("你好"))
-        snap = tree_snapshot()
-        reset_tree()
+        snap = run_snapshot()
+        reset_run()
 
     assert snap is not None
     assert snap["input_tokens"] == 1000
@@ -581,10 +581,10 @@ async def test_streaming_usage_charged_once_not_per_chunk(
     agent.model._call_api = fake_stream  # type: ignore[method-assign]
 
     with thread_scope("t-charge-stream", tmp_path):
-        reset_tree()
+        reset_run()
         await agent.reply(_user("你好"))
-        snap = tree_snapshot()
-        reset_tree()
+        snap = run_snapshot()
+        reset_run()
 
     assert snap is not None
     assert snap["model_calls"] == 1  # 3 个 chunk，1 笔账

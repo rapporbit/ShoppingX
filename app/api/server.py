@@ -1,7 +1,11 @@
 """FastAPI 服务 —— 把主 AgentLoop 暴露给浏览器，落地 M10 前后端闭环。
 
 orchestrator 已经把 ``run_agent(query, thread_id, user_id)`` 跑通——本模块只补一层「对外
-接口」，让用户在浏览器里发起任务、实时看事件流、取消、下载产物。六个口子：
+接口」，让用户在浏览器里发起任务、实时看事件流、取消、下载产物。
+
+本模块只留**任务 / WS / 取消 / 澄清 / 历史 / 健康检查**这条主线；其余按领域拆成 router：
+``files``（下载 / 上传）、``preferences``（长期记忆 / 会话约束 / 收藏 / 找相似）、``orders``
+（订单 / 确认卡 / 对比）、``accounts``、``admin``、``skills``；共用守卫在 ``guards``。主要口子：
 
 ==============================  ============================================
 接口                            解决什么
@@ -11,9 +15,9 @@ orchestrator 已经把 ``run_agent(query, thread_id, user_id)`` 跑通——本�
 ``GET  /api/task/{task_id}``    查异步任务的状态 / 结果（轮询）
 ``WS   /ws/{thread_id}``        订阅该 thread 的 AGUI 事件流（长连接）
 ``POST /api/task/{tid}/cancel`` 用户主动取消长任务
-``GET  /api/files/{tid}/{name}``下载本次会话产物（summary.md / result.json）
-``POST /api/upload``            上传参考图到本次会话目录
-``GET  /api/preferences/{uid}`` 读用户长期偏好（前端偏好面板，原方案五接口外的补充）
+``GET  /api/files/{tid}/{name}``下载本次会话产物（在 ``files`` router）
+``POST /api/upload``            上传参考图到本次会话目录（在 ``files`` router）
+``GET  /api/preferences/{uid}`` 读用户长期偏好（在 ``preferences`` router）
 ``GET  /api/history/{tid}``     读该 thread 的逐轮对话（前端回看 / 续聊，同 thread 复用即接上文）
 ==============================  ============================================
 
@@ -39,26 +43,20 @@ import os
 import uuid
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from fastapi import (
     Depends,
     FastAPI,
-    File,
-    Form,
     HTTPException,
     Request,
     Response,
-    UploadFile,
     WebSocket,
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from app.agent.orchestrator import load_session_state, save_session_state
 from app.api import (
     accounts,
     admin,
@@ -67,7 +65,10 @@ from app.api import (
     control,
     dedup,
     event_log,
+    files,
     monitor,
+    orders,
+    preferences,
     skills,
 )
 from app.api.admin import dev_admin_username
@@ -86,6 +87,7 @@ from app.api.concurrency import (
     estimated_wait_seconds,
 )
 from app.api.context import _request_id_var, new_request_id
+from app.api.guards import guard_thread, safe_session_dir
 from app.config import store as config_store
 from app.db.accounts import MIN_PASSWORD_LEN, assert_owner, claim_thread, ensure_dev_admin
 from app.db.holds import REASON_CONCURRENCY, HoldResult, acquire_hold, release
@@ -94,17 +96,7 @@ from app.db.quota import get_quota, quota_enabled
 from app.db.runs import claim_thread_run, release_thread_run
 from app.db.session import init_db, session_factory
 from app.deployment import assert_deployment_deps
-from app.memory.fact_store import get_fact_store
-from app.memory.facts import MemoryFact, MemoryWriteRejected, validate_fact
 from app.memory.history import read_turns
-from app.memory.session_state import (
-    SessionPrefState,
-    constraint_rows,
-    drop_constraint,
-    pt_from_state,
-    pt_into_state,
-)
-from app.memory.store import FavoriteItem, get_store
 from app.observability import alerts, metrics
 from app.observability.logging import bind_log_context, configure_logging, unbind_log_context
 from app.queue import (
@@ -114,28 +106,12 @@ from app.queue import (
     TaskStatus,
     get_task_queue,
 )
-from app.recall import get_recall_client
 from app.recall.semantic_cache import turn_cache_status
-from app.tools._candidates import hydrate
-from app.tools.image_understand import sniff_image_mime
-from app.tools.present_comparison import compare_items
-from app.trade.confirmation import ConfirmationError
-from app.trade.confirmations import (
-    list_confirmations,
-    prepare_cancel_confirmation,
-    prepare_order_confirmation,
-    resolve_confirmation,
-)
-from app.trade.order import OrderStateError
-from app.trade.repository_sql import confirmation_repository, order_repository
-from app.trade.usecases import LineRequest, NoCandidateError, OrderNotFoundError, query_orders
 from app.utils.env import env_int
 from app.utils.path_utils import (
     OUTPUT_ROOT,
-    UPLOAD_ROOT,
     safe_join,
 )
-from app.utils.thread_ctx import thread_scope
 from app.utils.tokens import warm_tokenizer
 from app.worker import WORKER_CONCURRENCY
 
@@ -143,11 +119,6 @@ logger = logging.getLogger("shoppingx.server")
 
 # ``run_agent`` 在模块级 import 进来（而不是每次调用现取）：测试大量
 # ``monkeypatch.setattr(server, "run_agent", …)`` 靠的就是「它是本模块的一个名字」这点。
-
-# 上传文件大小上限（参考图通常是截图；防一把超大文件打爆磁盘/内存）。
-# **与 image_understand 读同一个 env**：两处各写一个数字的话，中间地带的图会「传得上去却看不了」——
-# 上传口放行 9MB，工具侧按 8MB 判超限降级，用户只看到「传成功了但 Agent 说没看到图」。
-MAX_UPLOAD_BYTES = env_int("UPLOAD_MAX_IMAGE_MB", 8) * 1024 * 1024
 
 # ── 队列的三个常数 ──
 #
@@ -168,20 +139,6 @@ QUEUE_WAIT_TIMEOUT_SEC = env_int("QUEUE_WAIT_TIMEOUT_SEC", 1800)
 # 60s 不是拍的：正常排队等的是前面几条任务，estimated_wait_seconds 按 WORKER_CONCURRENCY 摊完通常
 # 在几十秒内；真等过一分钟还没人领，多半不是忙而是没人在了。设 0 关掉这道闸。
 QUEUE_START_TIMEOUT_SEC = env_int("QUEUE_START_TIMEOUT_SEC", 60)
-
-
-def _safe_session_dir(root: Path, thread_id: str) -> Path:
-    """把 ``root/<thread_id>`` 经 ``safe_join`` 校验后返回——**thread_id 也是用户可控输入**。
-
-    download 的 ``thread_id`` 来自 URL 段、upload 的来自表单，二者都可能塞 ``..``（如编码的
-    ``%2e%2e`` 或表单里直接写 ``../../etc``）。若像最初那样 ``root / thread_id`` 直接拼，会在
-    ``safe_join(filename)`` 之前就已逃出 root——文件名那道 safe_join 守的是错的那半截路径。
-    这里对 thread_id 也走 safe_join，逃逸即 400（对齐 CONVENTIONS「文件路径一律 safe_join」）。
-    """
-    try:
-        return safe_join(root, thread_id)
-    except ValueError as exc:
-        raise HTTPException(400, "非法会话标识") from exc
 
 
 @asynccontextmanager
@@ -301,31 +258,11 @@ async def _bind_request_id(request: Request, call_next: Any) -> Any:
 
 
 app.include_router(accounts.router)  # M16：注册 / 登录 / 我是谁 / 我的会话清单
-app.include_router(admin.router)
-app.include_router(
-    skills.router
-)  # 买家个人 Skill CRUD + 目录  # 后台管理：热更新模型档位 / 检索 / 展示参数
-
-
-# --- 会话归属（M16：堵 thread 维度越权）------------------------------------
-
-
-async def _guard_thread(thread_id: str, auth_uid: str | None) -> None:
-    """校验当前用户有权访问这个 thread，否则 403。
-
-    **这是 auth.py 当初点名却没做的那半边洞。** 原先所有 thread 接口（history / files / ws /
-    cancel / upload）只按 thread_id 寻址、不问归属：thread_id 会出现在 URL 和事件流里，谁拿到
-    就能读别人的对话历史、下载他的产物、连他的实时事件流。有了归属表，这里一句校验就封死。
-
-    鉴权关闭时直接放行——demo 模式下没人认领会话，校验无从谈起（见 accounts.assert_owner）。
-    """
-    if not auth_enabled() or auth_uid is None:
-        return
-    async with session_factory()() as db:
-        try:
-            await assert_owner(db, thread_id, auth_uid)
-        except PermissionError as exc:
-            raise HTTPException(403, "无权访问该会话") from exc
+app.include_router(admin.router)  # 后台管理：热更新模型档位 / 检索 / 展示参数
+app.include_router(skills.router)  # 买家个人 Skill CRUD + 目录
+app.include_router(files.router)  # 产物下载 / 参考图上传
+app.include_router(preferences.router)  # 长期记忆 / 会话约束 / 收藏 / 找相似
+app.include_router(orders.router)  # 订单 / 确认卡 / 商品对比
 
 
 @dataclass
@@ -914,7 +851,7 @@ async def get_task_state(
     status = await get_task_queue().get_status(task_id)
     if status is None:
         raise HTTPException(404, "任务不存在或状态已过期")
-    await _guard_thread(status.thread_id, auth_uid)
+    await guard_thread(status.thread_id, auth_uid)
     body = status.to_dict()
     # queue_depth 是队列深度不是精确排位（Stream 没有「排第几」的查询），故预估等待也只给量级。
     body["estimated_wait_seconds"] = (
@@ -1028,7 +965,7 @@ async def cancel_task(
     先放开 ``ask_user`` 的等待再 cancel 任务本体，``run_agent`` 的 finally 照常上报
     ``task_cancelled`` 并把这一轮的账记完——「取消即免单」的口径一个字没变。
     """
-    await _guard_thread(thread_id, auth_uid)
+    await guard_thread(thread_id, auth_uid)
     handle = active_tasks.get(thread_id)
     if not handle or handle.task.done():
         raise HTTPException(404, f"任务 {thread_id} 不存在或已结束")
@@ -1062,7 +999,7 @@ async def submit_clarification(
     ``404`` 表示**没人在等这条 thread 的回复**（从没提问 / 已经超时 / 令牌过期）——令牌过期按取消
     处理，迟到的回复一律不投递，绝不能塞给下一个问题。
     """
-    await _guard_thread(thread_id, auth_uid)
+    await guard_thread(thread_id, auth_uid)
     route = await clarification.deliver_reply(thread_id, req.text)
     if route == "publish_failed":
         raise HTTPException(503, "澄清回复转发失败（控制面不可用），请稍后重试")
@@ -1089,7 +1026,7 @@ async def task_inflight(
     一份。故这里以「流里最后一条已是终结类事件」为准判其已结束（Redis 降级取不到事件时退回
     ``task.done()``，此窗口极短、可接受）。
     """
-    await _guard_thread(thread_id, auth_uid)  # M16：别人的 thread 不给回吐提问原文与事件流
+    await guard_thread(thread_id, auth_uid)  # M16：别人的 thread 不给回吐提问原文与事件流
     handle = active_tasks.get(thread_id)
     if handle is None or handle.task.done():
         return {"running": False, "query": None, "images": [], "events": []}
@@ -1097,384 +1034,6 @@ async def task_inflight(
     if events and events[-1].get("event") in _TERMINAL_EVENTS:
         return {"running": False, "query": None, "images": [], "events": []}
     return {"running": True, "query": handle.query, "images": handle.images, "events": events}
-
-
-# --- 文件接口 ---------------------------------------------------------------
-
-
-@app.get("/api/files/{thread_id}/{filename:path}")
-async def download_file(
-    thread_id: str, filename: str, auth_uid: str | None = Depends(get_current_user_id)
-) -> FileResponse:
-    """下载某次会话产物（summary.md / result.json）。
-
-    ``filename`` 用 ``:path`` 转换器（允许子目录形式的名字），**正因如此** ``safe_join`` 才是
-    真正起作用的防线：``../../`` 这类越权拼接会被它拦下返回 400，而不是靠路由「不匹配斜杠」
-    侥幸挡住。
-
-    ``safe_join`` 挡的是「越出目录」，属主校验（M16）挡的是「合法路径但不是你的会话」——
-    两道防线管的是两件事，缺一不可。
-    """
-    await _guard_thread(thread_id, auth_uid)
-    session_dir = _safe_session_dir(OUTPUT_ROOT, thread_id)
-    if not session_dir.exists():
-        raise HTTPException(404, "会话不存在")
-    try:
-        target = safe_join(session_dir, filename)
-    except ValueError as exc:  # 路径穿越企图：当 400 拒绝，不暴露内部路径
-        raise HTTPException(400, "非法文件名") from exc
-    if not target.is_file():
-        raise HTTPException(404, f"文件不存在：{filename}")
-    return FileResponse(target, filename=target.name)
-
-
-@app.post("/api/upload")
-async def upload_file(
-    thread_id: str = Form(...),
-    file: UploadFile = File(...),
-    auth_uid: str | None = Depends(get_current_user_id),
-) -> dict[str, str]:
-    """上传参考图（如复刻款截图）到本次会话目录 ``uploaded/<thread_id>/``。
-
-    两道最小防护：``safe_join`` 净化文件名（恶意 ``../../etc/passwd`` 落不出上传目录）+ 大小
-    上限（超限不落盘）。**诚实标注**：这里先整文件读进内存再校验大小，挡的是「写爆磁盘」，
-    挡不住「读爆内存」——真要防大文件得在读之前看 Content-Length / 流式分块校验，那属生产化
-    硬化（限流 / 类型白名单同级），不在本项目主线。Starlette 的 UploadFile 超阈值会自动落临时
-    文件而非全驻内存，已缓解大半。
-
-    属主校验（M16）先于读文件：别人的会话目录不给写（否则可以往他的会话里塞图）。
-
-    类型白名单（M20）：上传的图会被 image_understand 转 base64 送进 VL 模型，所以在**入口**就按
-    magic bytes 认图——不认扩展名（改个名就绕过），不认 Content-Type（客户端随便填）。挡在这里，
-    而不是等 provider 回一个 400 才知道用户传了个 PDF。"""
-    await _guard_thread(thread_id, auth_uid)
-    # thread_id 来自表单、完全可控：**先**校验路径合法（否则 ../ 会建到 root 外），再读文件——
-    # 路径都非法了就不必把请求体读进内存，且「非法会话标识」的返回码不会被后面的类型校验掩盖成 415。
-    upload_dir = _safe_session_dir(UPLOAD_ROOT, thread_id)
-    raw = await file.read()
-    if len(raw) > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, f"文件过大（上限 {MAX_UPLOAD_BYTES // 1024 // 1024}MB）")
-    if not sniff_image_mime(raw):
-        raise HTTPException(415, "只支持图片（jpg / png / webp / gif / bmp）")
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        target = safe_join(upload_dir, file.filename or "upload.bin")
-    except ValueError as exc:
-        raise HTTPException(400, "非法文件名") from exc
-    # 落盘是阻塞 IO，挪到线程池，别卡住事件循环（同 loop 还在推其他任务的事件 / 跑 agent）。
-    await asyncio.to_thread(target.write_bytes, raw)
-    return {"status": "ok", "filename": target.name}
-
-
-@app.get("/api/uploads/{thread_id}/{filename:path}")
-async def download_upload(
-    thread_id: str, filename: str, auth_uid: str | None = Depends(get_current_user_id)
-) -> FileResponse:
-    """取回本会话上传的参考图，供前端在对话气泡里回显。
-
-    与 ``/api/files`` 同构、但**根目录不同**（``uploaded/`` 而非 ``output/``）：那个口服务的是
-    Agent 产出的结论文件，这个口服务的是用户传上来的输入。两道防线照旧——``safe_join`` 挡路径
-    穿越，``_guard_thread`` 挡「路径合法但不是你的会话」（否则换个 thread_id 就能翻别人上传的图，
-    而图往往比文字更私人）。
-
-    为什么回看必须回服务端取、而不是前端缓一份 blob：blob URL 活不过一次刷新，而「我当时发的
-    那张图」是对话的一部分——用户点回一段旧会话，图该还在。
-    """
-    await _guard_thread(thread_id, auth_uid)
-    upload_dir = _safe_session_dir(UPLOAD_ROOT, thread_id)
-    if not upload_dir.exists():
-        raise HTTPException(404, "会话不存在")
-    try:
-        target = safe_join(upload_dir, filename)
-    except ValueError as exc:
-        raise HTTPException(400, "非法文件名") from exc
-    if not target.is_file():
-        raise HTTPException(404, f"图片不存在：{filename}")
-    return FileResponse(target, filename=target.name)
-
-
-# --- 长期记忆（前端偏好面板：读 / 手填 / 改 / 删 / 清空）----------------------
-
-
-def _fact_json(fact: MemoryFact) -> dict[str, Any]:
-    """一条事实的 JSON。字段就是模型看到的那四个，不多不少。
-
-    页面上给用户看的，必须**和注入给模型的是同一份东西**——上一版偏好页回吐 polarity /
-    blocking / domain / keywords 七八个字段，用户改了其中一个却看不出行为会怎么变，而模型
-    根本没见过这些字段。现在两边都只有 ``key / value / category``：用户看到什么，模型就读到什么。
-
-    ``updated_at`` 给前端显示「这条多久没更新了」——它只参与 tier-one 的补位排序（见
-    ``facts.select_tier_one_facts``）与保留期，不参与任何打分。
-    """
-    return {
-        "key": fact.key,
-        "value": fact.value,
-        "category": fact.category.value,
-        "updated_at": fact.updated_at.isoformat(),
-        "source_session": fact.source_session,
-    }
-
-
-def _assert_own(user_id: str, auth_uid: str | None) -> None:
-    """开启鉴权后只能读写**自己**的记忆（同 GET 的口径，写口尤其不能漏）。"""
-    if auth_enabled() and auth_uid != user_id:
-        raise HTTPException(403, "无权访问他人偏好")
-
-
-class FactWrite(BaseModel):
-    """偏好页手填 / 修改一条事实的请求体（POST 与 PUT 共用）。
-
-    三个字段与 ``save_memory`` 工具、回合后抽取**完全一致**，且同样过 ``validate_fact`` 这道门
-    （PII 过滤、长度、key 规范化）——三条写路径一个门，页面不是特权入口。
-    """
-
-    key: str
-    value: str
-    category: str = "preference"
-
-
-@app.get("/api/preferences/{user_id}")
-async def get_preferences(
-    user_id: str, auth_uid: str | None = Depends(get_current_user_id)
-) -> dict[str, Any]:
-    """读取某用户的长期记忆，供前端「偏好面板」展示。
-
-    **鉴权（堵越权读）：** 开启 ``AUTH_ENABLED`` 后，只能读**自己**的记忆——token 的 sub 与 URL
-    段 user_id 不一致即 403。关闭时退回现状（任意读）。
-
-    store 已按 ``updated_at`` 倒序返回，前端看到的第一条就是最近被写过的那条；保留期
-    （``MEMORY_RETENTION_DAYS``）内的才返回，与注入给模型的口径一致——页面上看得见的，
-    就是模型读得到的。
-    """
-    _assert_own(user_id, auth_uid)
-    facts = await get_fact_store().get_facts(user_id)
-    return {"user_id": user_id, "preferences": [_fact_json(f) for f in facts]}
-
-
-@app.post("/api/preferences/{user_id}")
-async def add_preference(
-    user_id: str,
-    body: FactWrite,
-    auth_uid: str | None = Depends(get_current_user_id),
-) -> dict[str, Any]:
-    """手填一条长期记忆（同 key 覆盖）。
-
-    **没有「先解析成结构化草稿」那一步了**：上一版要 LLM 把一句自然语言拆成 polarity /
-    category / keywords 再让用户确认，是因为那套模型有七八个字段、用户填不出来。事实只有
-    key / value / category 三个，直接填即可——省掉一次 LLM 调用，也省掉「解析不出来」的 400。
-
-    过 ``validate_fact``（PII 过滤 + 长度 + key 规范化）：被拒时回 400，**但不回显 value**
-    （被拒的多半正是不该扩散的东西，错误消息由 ``MemoryWriteRejected`` 给）。
-    """
-    _assert_own(user_id, auth_uid)
-    if not user_id:
-        raise HTTPException(400, "匿名用户无法沉淀记忆")
-    try:
-        fact = validate_fact(body.key, body.value, body.category, source_session="")
-    except MemoryWriteRejected as exc:
-        raise HTTPException(400, str(exc)) from exc
-    if not await get_fact_store().upsert_facts(user_id, [fact]):
-        raise HTTPException(503, "记忆库暂时写不进去，请稍后再试")
-    return {"added": [_fact_json(fact)]}
-
-
-@app.put("/api/preferences/{user_id}/entry/{key:path}")
-async def update_preference(
-    user_id: str,
-    key: str,
-    body: FactWrite,
-    auth_uid: str | None = Depends(get_current_user_id),
-) -> dict[str, Any]:
-    """就地修改一条记忆。改了 key 就是**换一条**：先删旧 key，再按新 key 写。
-
-    URL 里的 ``key`` 是**旧**的（前端本来就有），body 里的是改完的。两者相同时等价于覆盖写，
-    无副作用。``:path`` 转换器是历史沿用——``validate_fact`` 规范化后的 key 不含 ``/``，
-    但让路由宽容一点，免得前端传了脏 key 时拿到 404 而不是 400。
-    """
-    _assert_own(user_id, auth_uid)
-    try:
-        fact = validate_fact(body.key, body.value, body.category, source_session="")
-    except MemoryWriteRejected as exc:
-        raise HTTPException(400, str(exc)) from exc
-    store = get_fact_store()
-    if key != fact.key:
-        await store.delete_fact(user_id, key)
-    if not await store.upsert_facts(user_id, [fact]):
-        raise HTTPException(503, "记忆库暂时写不进去，请稍后再试")
-    return {"updated": [_fact_json(fact)]}
-
-
-@app.delete("/api/preferences/{user_id}")
-async def clear_preferences(
-    user_id: str, auth_uid: str | None = Depends(get_current_user_id)
-) -> dict[str, str]:
-    """清空该用户全部长期记忆（偏好页的「全部清除」）。
-
-    **同一个事务里把 ``memory_purge_gen`` 加一**：正在跑的回合后抽取会在写库前后各读一次代数，
-    发现变了就整批丢弃——否则用户刚点完清空，上一轮的抽取结果转头又落回空库里，看起来就是
-    「清了个寂寞」（见 ``fact_store.clear`` 与 ``curator``）。
-
-    幂等：没有记忆的用户照样返回 ok，连点两次不报错。
-    """
-    _assert_own(user_id, auth_uid)
-    await get_fact_store().clear(user_id)
-    return {"status": "ok"}
-
-
-@app.get("/api/session/{thread_id}/constraints")
-async def get_session_constraints(
-    thread_id: str, auth_uid: str | None = Depends(get_current_user_id)
-) -> dict[str, Any]:
-    """读本次会话累积的 P_t 约束集（偏好面板「本次会话」区；打开面板 / 断线重连时主动拉）。
-
-    可见可纠（P_t 重构步骤三①）：约束录入过 LLM 的手（极性判反 / keywords 抽漏照样进 P_t 且无
-    自愈性），抽错时唯一的兜底是用户看得见、点得掉。每条带 ``id``（删除按它打 DELETE）与
-    （``<词表>:<词>``，lite P_t 没有 source_quote）。会话无 session.json / 读坏 → 空列表（同
-    run_agent 开局的容错口径）。
-    """
-    await _guard_thread(thread_id, auth_uid)
-    pt = _read_session_pt(_safe_session_dir(OUTPUT_ROOT, thread_id))
-    return {
-        "thread_id": thread_id,
-        "epoch": 0,  # lite P_t 无代际；字段保留给前端契约
-        "budget_usd": pt.budget_usd,
-        "category": pt.category,
-        "constraints": constraint_rows(pt),
-    }
-
-
-@app.delete("/api/session/{thread_id}/constraints/{constraint_id}")
-async def delete_session_constraint(
-    thread_id: str, constraint_id: str, auth_uid: str | None = Depends(get_current_user_id)
-) -> dict[str, str]:
-    """从本次会话的 P_t 里删一条约束（面板每行的 ×）——抽取出错时的人纠错入口。
-
-    **不走撤回词面核验**：那道闸挡的是 LLM 幻觉 / 抄错 id，用户亲手点的就是那一条，他的删除
-    是最高权威（识别 / 授权分离里的「授权」端）。直接按 id 从 active 集移除、写回 session.json
-    的 middle_context；下一轮 run_agent 开局读回的就是删除后的状态。不存在的 id / 无 session.json
-    静默成功（幂等，连点两次不报错）。删完把新快照推给该 thread 的 WS 连接，面板不必自己再拉一次。
-
-    **与 run_agent 的写点不冲突**：任务在跑时 session.json 只在成功收尾那一刻被整体覆盖，
-    这里的删改若与之交错会被那次覆盖冲掉（用户再点一次即可）——不为这个极窄的窗口加锁。
-    """
-    await _guard_thread(thread_id, auth_uid)
-    session_dir = _safe_session_dir(OUTPUT_ROOT, thread_id)
-    state = load_session_state(session_dir)
-    if state is None:
-        return {"status": "ok"}
-    pt = pt_from_state(state.middle_context)
-    if drop_constraint(pt, constraint_id):
-        pt_into_state(state.middle_context, pt)
-        save_session_state(session_dir, state)
-        await monitor.report_session_constraints(pt, thread_id=thread_id)
-    return {"status": "ok"}
-
-
-def _read_session_pt(session_dir: Path) -> SessionPrefState:
-    """偏好面板读 P_t：从 session.json 的 middle_context 取；无文件 / 读坏 → 空。"""
-    state = load_session_state(session_dir)
-    return pt_from_state(state.middle_context) if state is not None else SessionPrefState()
-
-
-@app.delete("/api/preferences/{user_id}/{key:path}")
-async def delete_preference(
-    user_id: str,
-    key: str,
-    auth_uid: str | None = Depends(get_current_user_id),
-) -> dict[str, str]:
-    """删除一条记忆（页面上每行的 ×，以及回复下方「记住了 …」的撤销）。
-
-    **这是唯一的删除口，且只有用户能走**：模型侧的「忘掉 X」走 ``save_memory`` 用原 key 覆盖写
-    （计划 §3.2 第 2 条）——识别交给模型，授权留给用户。不存在的 key 静默成功（幂等，连点两次
-    不该报错）。
-
-    **删了会不会被 Agent 学回来？** 会，但只在用户重新提起同一件事时——那时他本来就是又说了
-    一遍。为此加一张 tombstone 表（删除记录 + TTL + 写入前查禁）不值，真被抱怨了再加。
-    """
-    _assert_own(user_id, auth_uid)
-    await get_fact_store().delete_fact(user_id, key)
-    return {"status": "ok"}
-
-
-@app.get("/api/favorites/{user_id}")
-async def get_favorites(
-    user_id: str, auth_uid: str | None = Depends(get_current_user_id)
-) -> dict[str, Any]:
-    """读取某用户收藏（♡）的商品，供前端「收藏抽屉」展示。新→旧。
-
-    **收藏是纯展示数据**：它不注入 prompt、不进长期偏好库、不影响检索与精挑——刻意如此。
-    收藏一件商品并不能可靠地推出任何偏好（可能只是想再比比价），拿它去改 Agent 行为是过度解读。
-    这跟同在 Store 里的偏好 / 行为历史是两码事，那两个都会被喂进上下文。
-    """
-    _assert_own(user_id, auth_uid)
-    return {
-        "user_id": user_id,
-        "favorites": [i.model_dump() for i in await get_store().read_favorites(user_id)],
-    }
-
-
-@app.post("/api/favorites/{user_id}")
-async def add_favorite(
-    user_id: str,
-    body: FavoriteItem,
-    auth_uid: str | None = Depends(get_current_user_id),
-) -> dict[str, Any]:
-    """收藏一件商品（点 ♡）。同 ``item_id`` 覆盖 → 重复点幂等。
-
-    存的是**商品快照**而非只存 id：收藏跨会话长期留着，而候选登记表（``tools._candidates``）
-    随会话清理，换个会话按 id 早捞不回商品了。前端点 ♡ 时手上正好有整张卡的数据，直接送来。
-    """
-    _assert_own(user_id, auth_uid)
-    await get_store().write_favorite(user_id, body)
-    return {"user_id": user_id, "item_id": body.item_id, "status": "ok"}
-
-
-@app.delete("/api/favorites/{user_id}/{item_id}")
-async def remove_favorite(
-    user_id: str, item_id: str, auth_uid: str | None = Depends(get_current_user_id)
-) -> dict[str, Any]:
-    """取消收藏。``item_id`` 不存在则静默成功（幂等）。"""
-    _assert_own(user_id, auth_uid)
-    await get_store().delete_favorite(user_id, item_id)
-    return {"user_id": user_id, "item_id": item_id, "status": "ok"}
-
-
-@app.get("/api/similar/{item_id}")
-async def get_similar(
-    item_id: str,
-    top_k: int = 8,
-    auth_uid: str | None = Depends(get_current_user_id),
-) -> dict[str, Any]:
-    """「搜同款」：拿这件商品的向量在全库找近邻，同步返回一组相似商品。
-
-    **刻意不走 AgentLoop**：这是一次纯向量检索（0 次 LLM 调用、亚秒级），塞进 Agent 只会换来
-    几十秒的规划-工具-收尾开销，换不到任何东西。故它不进 ``FULL_TOOL_SET``，就是个 REST 端点。
-
-    **不再按长期记忆过滤**（M4）：原来这里会拿用户亲手勾的「绝不推荐」黑名单挡一遍同款。那条腿
-    随长期记忆改成「只经模型上下文生效」一并删了——记忆现在只有一种生效方式，就是模型把它写进
-    工具入参，而这条通路根本没有模型。留着它就等于留一条谁也看不见的第二生效通路，正是这次
-    重构要消灭的东西。代价：同款列表里可能出现用户说过不喜欢的东西，他可以照样不点。
-
-    返回形状直接对齐前端 ``ProductItem``：只有货价（``price_usd``，建库时预折算），**没有到手价**
-    ——那要跑 ``shipping_calc``，不是这条通路该做的事，前端照实标「货价」即可。
-    """
-    top_k = max(1, min(top_k, 24))
-    cands = await asyncio.to_thread(get_recall_client().similar, item_id, top_k)
-    return {
-        "item_id": item_id,
-        "items": [
-            {
-                "item_id": c.item_id,
-                "platform": c.platform,
-                "title": c.title,
-                "price_usd": c.price_usd,
-                "image_url": c.image_url,
-                "url": c.url,
-                "score": round(c.score, 4),
-            }
-            for c in cands
-        ],
-    }
 
 
 @app.get("/api/quota")
@@ -1506,8 +1065,8 @@ async def get_history(
     属主校验（M16）：这是最要紧的一个口——对话正文全在这里，不校验就等于谁拿到 thread_id
     谁就能读别人聊过什么。
     """
-    await _guard_thread(thread_id, auth_uid)
-    session_dir = _safe_session_dir(OUTPUT_ROOT, thread_id)
+    await guard_thread(thread_id, auth_uid)
+    session_dir = safe_session_dir(OUTPUT_ROOT, thread_id)
     return {"thread_id": thread_id, "turns": await read_turns(thread_id, session_dir)}
 
 
@@ -1548,231 +1107,3 @@ async def metrics_endpoint() -> Response:
     metrics.refresh_circuit_breakers()
     body, content_type = metrics.render()
     return Response(content=body, media_type=content_type)
-
-
-# --- 订单（批 1 / 7.2 交易域）------------------------------------------------
-
-
-def _require_login(auth_uid: str | None) -> str:
-    """订单接口一律要求登录——订单是**归属**数据，没有「匿名的订单」这回事。
-
-    与偏好接口的 ``_assert_own`` 口径不同：那边关掉鉴权后退回「任意读」，因为偏好在关掉鉴权的
-    本地开发里还得能看；订单不行——鉴权一关就人人可读所有订单，那不是开发便利，是洞。
-    """
-    if not auth_uid:
-        raise HTTPException(401, "请先登录后查看订单")
-    return auth_uid
-
-
-@app.get("/api/orders")
-async def list_orders(
-    limit: int = 20, auth_uid: str | None = Depends(get_current_user_id)
-) -> dict[str, Any]:
-    """当前用户的订单列表（侧栏「我的订单」）。只列自己的——user_id 取自 token，不从查询参数收。"""
-    uid = _require_login(auth_uid)
-    orders = await query_orders(order_repository(), user_id=uid, limit=limit)
-    return {"orders": [o.snapshot() for o in orders], "count": len(orders)}
-
-
-@app.get("/api/orders/{order_id}")
-async def get_order(
-    order_id: str, auth_uid: str | None = Depends(get_current_user_id)
-) -> dict[str, Any]:
-    """单张订单详情。别人的单与不存在的单**回同一个 404**（理由见 usecases._load_owned）。"""
-    uid = _require_login(auth_uid)
-    try:
-        found = await query_orders(order_repository(), user_id=uid, order_id=order_id)
-    except OrderNotFoundError as e:
-        raise HTTPException(404, str(e)) from e
-    return found[0].snapshot()
-
-
-class CancelOrderBody(BaseModel):
-    reason: str
-    thread_id: str
-
-
-@app.post("/api/orders/{order_id}/cancel")
-async def cancel_order_endpoint(
-    order_id: str,
-    body: CancelOrderBody,
-    auth_uid: str | None = Depends(get_current_user_id),
-) -> dict[str, Any]:
-    """从前端为一张订单**生成取消确认卡**（不经 Agent，也不直接取消）。
-
-    取消和下单一样要先出卡、用户再点「确认取消」。这条路**没有**「先 query_order」
-    的顺序闸——那道闸拦的是模型编订单号，而前端的取消按钮长在订单卡片上，订单号来自刚渲染的
-    那张卡。归属与状态机仍照常校验。
-    """
-    uid = _require_login(auth_uid)
-    await _guard_thread(body.thread_id, auth_uid)
-    try:
-        conf = await prepare_cancel_confirmation(
-            confirmation_repository(),
-            order_repository(),
-            user_id=uid,
-            thread_id=body.thread_id,
-            order_id=order_id,
-            reason=body.reason,
-        )
-    except OrderNotFoundError as e:
-        raise HTTPException(404, str(e)) from e
-    except OrderStateError as e:
-        raise HTTPException(409, str(e)) from e
-    except ConfirmationError as e:
-        raise _confirmation_http_error(e) from e
-    env = conf.envelope()
-    await monitor.report_confirmation("required", env, thread_id=body.thread_id)
-    return env
-
-
-# --- 交易确认卡----------------------------
-
-_CONFIRMATION_STATUS = {
-    "unauthorized": 401,
-    "not_found": 404,
-    "conflict": 409,
-    "expired": 410,
-    "invalid": 400,
-}
-
-
-def _confirmation_http_error(e: ConfirmationError) -> HTTPException:
-    return HTTPException(_CONFIRMATION_STATUS.get(e.code, 400), str(e))
-
-
-class OrderItemBody(BaseModel):
-    item_id: str
-    quantity: int = 1
-
-
-class PrepareOrderBody(BaseModel):
-    items: list[OrderItemBody]
-    shipping_address: dict[str, Any]
-
-
-class ResolveConfirmationBody(BaseModel):
-    snapshot_hash: str
-    approved: bool
-
-
-def _hydrate_for_thread(thread_id: str, uid: str) -> Any:
-    """给 HTTP 入口用的候选 hydrate：进该 thread 的作用域再按 id 取。
-
-    表单点「生成确认单」时任务早已结束、登记表只活一轮（候选不落盘），这里靠 :func:`hydrate`
-    自带的「登记表未命中 → 按 id 回源 Qdrant」取回商品与价格。"""
-    session_dir = _safe_session_dir(OUTPUT_ROOT, thread_id)
-
-    def _hydrate(ids: list[str]) -> list[Any]:
-        with thread_scope(thread_id, session_dir, uid):
-            return hydrate(ids)
-
-    return _hydrate
-
-
-@app.post("/api/threads/{thread_id}/confirmations/orders")
-async def prepare_order_endpoint(
-    thread_id: str,
-    body: PrepareOrderBody,
-    auth_uid: str | None = Depends(get_current_user_id),
-) -> dict[str, Any]:
-    """下单意向表单 → 服务端生成确认卡（不经模型、不下单）。商品与价格按 item_id 从本会话候选取。"""
-    uid = _require_login(auth_uid)
-    await _guard_thread(thread_id, auth_uid)
-    lines = [LineRequest(item_id=i.item_id, quantity=i.quantity) for i in body.items]
-    try:
-        conf = await prepare_order_confirmation(
-            confirmation_repository(),
-            user_id=uid,
-            thread_id=thread_id,
-            lines=lines,
-            shipping_address=body.shipping_address,
-            hydrate=_hydrate_for_thread(thread_id, uid),
-        )
-    except ConfirmationError as e:
-        raise _confirmation_http_error(e) from e
-    except (NoCandidateError, ValueError) as e:
-        raise HTTPException(400, str(e)) from e
-    env = conf.envelope()
-    await monitor.report_confirmation("required", env, thread_id=thread_id)
-    return env
-
-
-class CompareBody(BaseModel):
-    item_ids: list[str]
-
-
-@app.post("/api/threads/{thread_id}/compare")
-async def compare_endpoint(
-    thread_id: str,
-    body: CompareBody,
-    auth_uid: str | None = Depends(get_current_user_id),
-) -> dict[str, Any]:
-    """对比栏「让 Agent 帮我比一比」：几件商品的逐件优劣 + 推荐哪件，**不走 AgentLoop**。
-
-    **为什么是 REST 而不是发一句话给 Agent**：用户已经亲手勾了这几件并点了按钮，意图百分之百
-    确定——再让主环规划一遍，换来的是几十秒往返和「模型可能回一段纯文字、对比表还是填不满」的
-    不确定性。这里一次 fast 模型调用就出结构化结果，对比表按 item_id 逐列填。与 ``/api/similar``
-    同一个取舍（那条是 0 次 LLM，这条是 1 次）。
-
-    ``present_comparison`` 工具仍在工具面上：用户在对话里说「这几个哪个好」时由模型调，两条入口
-    共用 :func:`compare_items`。
-
-    **代价（明确记着）**：这条路的结论不进会话历史，Agent 后续不知道用户看过对比。当前是可接受
-    的——对比是「看一眼就决定」的动作，不是需要被后续推理引用的事实；真要接回去，应该由前端把
-    结论作为用户消息回发，而不是在这里偷偷写 messages。
-    """
-    await _guard_thread(thread_id, auth_uid)
-    session_dir = _safe_session_dir(OUTPUT_ROOT, thread_id)
-    with thread_scope(thread_id, session_dir, auth_uid):
-        out = await compare_items(body.item_ids)
-    return out.model_dump()
-
-
-@app.get("/api/threads/{thread_id}/confirmations")
-async def list_confirmations_endpoint(
-    thread_id: str,
-    limit: int = 20,
-    auth_uid: str | None = Depends(get_current_user_id),
-) -> dict[str, Any]:
-    """本会话的确认记录（真源）。前端打开 / 刷新会话时拉一次，与事件流合并。"""
-    uid = _require_login(auth_uid)
-    await _guard_thread(thread_id, auth_uid)
-    try:
-        confs = await list_confirmations(
-            confirmation_repository(), user_id=uid, thread_id=thread_id, limit=limit
-        )
-    except ConfirmationError as e:
-        raise _confirmation_http_error(e) from e
-    return {"confirmations": [c.envelope() for c in confs]}
-
-
-@app.post("/api/threads/{thread_id}/confirmations/{confirmation_id}/resolve")
-async def resolve_confirmation_endpoint(
-    thread_id: str,
-    confirmation_id: str,
-    body: ResolveConfirmationBody,
-    auth_uid: str | None = Depends(get_current_user_id),
-) -> dict[str, Any]:
-    """用户在确认卡上点「确认 / 拒绝」。**唯一**能真正下单 / 取消的入口，模型没有对应工具。"""
-    uid = _require_login(auth_uid)
-    await _guard_thread(thread_id, auth_uid)
-    try:
-        conf = await resolve_confirmation(
-            confirmation_repository(),
-            order_repository(),
-            user_id=uid,
-            thread_id=thread_id,
-            confirmation_id=confirmation_id,
-            snapshot_hash=body.snapshot_hash,
-            approved=body.approved,
-        )
-    except ConfirmationError as e:
-        raise _confirmation_http_error(e) from e
-    except OrderNotFoundError as e:
-        raise HTTPException(404, str(e)) from e
-    except OrderStateError as e:
-        raise HTTPException(409, str(e)) from e
-    env = conf.envelope()
-    await monitor.report_confirmation("resolved", env, thread_id=thread_id)
-    return env

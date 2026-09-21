@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 
 from app.api.context import get_session_pt
 from app.memory.affinity import affinity_terms
-from app.memory.store import PreferenceStore
+from app.memory.store import UserDataStore
 from app.utils.terms import normalize_terms, term_hits
 
 
@@ -55,7 +55,7 @@ def _merge(*groups: list[str]) -> list[str]:
     return out
 
 
-async def assemble(user_id: str, store: PreferenceStore | None = None) -> MemoryBundle:
+async def assemble(user_id: str, store: UserDataStore | None = None) -> MemoryBundle:
     """装配本轮约束：会话级 P_t（本轮亲口说的）+ 行为亲和（收藏聚合）。"""
     pt = get_session_pt()
 

@@ -122,13 +122,9 @@ def _as_text(value: Any) -> str:
 def candidate_count() -> int:
     """当前会话候选登记表里的候选总数。读不到（无会话作用域等）返回 0。"""
     try:
-        from app.api.context import get_session_dir
-        from app.tools._candidates import _REGISTRY
+        from app.tools._candidates import registry_snapshot
 
-        sd = get_session_dir()
-        if sd is None:
-            return 0
-        return len(_REGISTRY.get(str(sd), {}))
+        return len(registry_snapshot())
     except Exception:
         logger.debug("candidate_count 读取失败", exc_info=True)
         return 0

@@ -16,18 +16,19 @@ shipping_calc → item_picker → shopping_summary）。其中 ``url`` / ``image
     ``item_id`` 登记到会话作用域；shopping_summary 收尾时按 ``item_id`` 回填卡片的 url/image。url
     不再需要穿过模型——丢没丢、改没改都不影响卡片（item_id 被模型改写时仍降级为空，与原行为一致）。
 
-会话作用域照 :mod:`app.harness.retrieval_budget`：按 ``session_dir`` 为键的模块级 dict
-（ContextVar 的 ``set`` 不回传 fork 父，故用显式 session_dir 聚合，主 / 子共享同一会话条目）。
-``run_agent`` 收尾调 :func:`reset_candidates` 清理，防模块级 dict 无界增长。
-无 session 作用域（单测）时各函数静默降级。
+会话作用域照 :mod:`app.harness.retrieval_budget`：状态住 :mod:`app.api.run_state` 的 run 状态表，
+按 ``session_dir`` 聚合（ContextVar 的 ``set`` 不回传父 context，同轮 batch 的几个工具各跑在自己
+的子 task 里，只有显式按 session_dir 聚合才数得对）。``run_agent`` 收尾调 :func:`reset_candidates`
+清理，防状态表无界增长。无 session 作用域（单测）时各函数静默降级。
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 
-from app.api.context import get_session_dir
+from app.api.run_state import clear_run_slot, peek_run_slot, run_slot
 from app.tools.schemas import ItemCandidate
 
 logger = logging.getLogger("shoppingx.candidates")
@@ -49,13 +50,21 @@ _MODEL_NOISE_FIELDS = frozenset({"score", "reviews_count", "pref_matched"})
 # 必须留（见 compact_candidates 的兜底分支）。
 _REDUNDANT_WHEN_USD = frozenset({"price", "currency"})
 
-# session_dir(str) -> {item_id: ItemCandidate（全量，含真实 url/image_url）}
-_REGISTRY: dict[str, dict[str, ItemCandidate]] = {}
+@dataclass
+class _CandidateState:
+    """本轮的候选登记状态（住 :mod:`app.api.run_state` 的 run 状态表，按 session_dir 聚合）。"""
 
-
-def _key() -> str | None:
-    sd = get_session_dir()
-    return str(sd) if sd is not None else None
+    # {item_id: ItemCandidate（全量，含真实 url/image_url）}
+    registry: dict[str, ItemCandidate] = field(default_factory=dict)
+    # 本轮 item_picker 定稿的那批 picks 的 id（按推荐度排序）。``None`` = 本轮还没定稿过，
+    # 与「定稿了但一件没挑上」（空列表）是两回事，见 :func:`picker_finalized`。
+    #
+    # **为什么要单独记一份**：收尾时 shopping_summary 需要「这一批精选是哪几件」，而登记表是个
+    # 累积容器（装着本轮所有召回、还含上一轮读回的旧候选），从中区分不出谁入选了。以前这件事靠
+    # 模型把 picker 返回的 id 逐个抄进 shopping_summary 的入参——纯搬运、没有决策价值，却让模型
+    # 每次多解码一长串 id；更糟的是它抄的时候会顺手「再精选一遍」（10 件只抄 4 件），而它此刻
+    # 既没有分数也没有理由，纯凭印象——筛选是 item_picker 的职责，那里有权重、有排序、有封顶。
+    last_picks: list[str] | None = None
 
 
 def compact_candidates(
@@ -108,21 +117,18 @@ def register(cands: Iterable[ItemCandidate]) -> None:
     仅 item_search（候选源头）调用：它产出的候选必带真实 url/image_url。下游工具阶段传回的候选
     可能已被模型紧凑序列化丢了 url，故**只在新值带 url/image 或尚无记录时写入**，避免空值覆盖真值。
     """
-    k = _key()
-    if k is None:
+    st = run_slot(_CandidateState)
+    if st is None:
         return
-    bucket = _REGISTRY.setdefault(k, {})
     for c in cands:
-        if c.item_id not in bucket or c.url or c.image_url:
-            bucket[c.item_id] = c
+        if c.item_id not in st.registry or c.url or c.image_url:
+            st.registry[c.item_id] = c
 
 
 def enrich(item_id: str) -> ItemCandidate | None:
     """按 item_id 取回登记的全量候选（含 url/image_url）；无 session 作用域或无记录返回 None。"""
-    k = _key()
-    if k is None:
-        return None
-    return _REGISTRY.get(k, {}).get(item_id)
+    st = peek_run_slot(_CandidateState)
+    return st.registry.get(item_id) if st is not None else None
 
 
 def update_fields(item_id: str, **fields: object) -> None:
@@ -134,10 +140,7 @@ def update_fields(item_id: str, **fields: object) -> None:
     只覆盖非 ``None`` 值（``None`` 表示该阶段没算，别抹掉已有真值）；无会话作用域或该 id
     未登记时静默跳过。
     """
-    k = _key()
-    if k is None:
-        return
-    c = _REGISTRY.get(k, {}).get(item_id)
+    c = enrich(item_id)
     if c is None:
         return
     for f, v in fields.items():
@@ -165,27 +168,17 @@ def register_updates(cands: Iterable[ItemCandidate]) -> None:
         )
 
 
-# 本轮 item_picker 定稿的那批 picks 的 id（按推荐度排序）。与 _REGISTRY 同一套会话作用域。
-#
-# **为什么要单独记一份**：收尾时 shopping_summary 需要「这一批精选是哪几件」，而登记表是个累积
-# 容器（装着本轮所有召回、还含上一轮读回的旧候选），从中区分不出谁入选了。以前这件事靠模型把
-# picker 返回的 id 逐个抄进 shopping_summary 的入参——纯搬运、没有决策价值，却让模型每次多解码
-# 一长串 id；更糟的是它抄的时候会顺手「再精选一遍」（10 件只抄 4 件），而它此刻既没有分数也没有
-# 理由，纯凭印象——筛选是 item_picker 的职责，那里有权重、有排序、有封顶。
-_LAST_PICKS: dict[str, list[str]] = {}
-
-
 def set_last_picks(cands: Iterable[ItemCandidate]) -> None:
     """记下本轮 item_picker 定稿的 picks（收尾据此免抄 id）。"""
-    k = _key()
-    if k is not None:
-        _LAST_PICKS[k] = [c.item_id for c in cands]
+    st = run_slot(_CandidateState)
+    if st is not None:
+        st.last_picks = [c.item_id for c in cands]
 
 
 def get_last_picks() -> list[str]:
     """本轮 item_picker 定稿的 picks id（按推荐度排序）；本轮没精挑过则为空。"""
-    k = _key()
-    return list(_LAST_PICKS.get(k, [])) if k is not None else []
+    st = peek_run_slot(_CandidateState)
+    return list(st.last_picks) if st is not None and st.last_picks is not None else []
 
 
 def picker_finalized() -> bool:
@@ -193,10 +186,11 @@ def picker_finalized() -> bool:
 
     get_last_picks 对两种情形都返回 []，分不出来；而这两种情形对收尾语义完全不同：
     前者「没找到」是诚实结论，后者「没找到」是拿着空通道编答案（badcase 63093a85）。
-    判据是 _LAST_PICKS 的键存在性——item_picker 定稿时无条件 set_last_picks（含空列表）。
+    判据是 ``last_picks`` 写过没有（``None`` = 没写过）——item_picker 定稿时无条件
+    set_last_picks（含空列表）。
     """
-    k = _key()
-    return k is not None and k in _LAST_PICKS
+    st = peek_run_slot(_CandidateState)
+    return st is not None and st.last_picks is not None
 
 
 def hydrate(item_ids: Iterable[str]) -> list[ItemCandidate]:
@@ -212,7 +206,8 @@ def hydrate(item_ids: Iterable[str]) -> list[ItemCandidate]:
     """
     ids = list(dict.fromkeys(i for i in item_ids if i))
     missing = [i for i in ids if enrich(i) is None]
-    if missing and _key() is not None:
+    # run_slot（而非 peek）：判的是「有没有会话作用域」——本轮一件都没登记过时也该回源。
+    if missing and run_slot(_CandidateState) is not None:
         register(_fetch_from_store(missing))
     return [c for i in ids if (c := enrich(i)) is not None]
 
@@ -230,14 +225,11 @@ def _fetch_from_store(item_ids: list[str]) -> list[ItemCandidate]:
 
 
 def reset_candidates() -> None:
-    """清当前会话的登记条目（run_agent 收尾调，防模块级 dict 无界增长）。
+    """清当前会话的登记条目（run_agent 收尾调，防 run 状态表无界增长）。
 
     登记表只活一轮：跨轮引用（「买第 2 个」）由 :func:`hydrate` 按 id 回源 Qdrant，不落盘。
     """
-    k = _key()
-    if k is not None:
-        _REGISTRY.pop(k, None)
-        _LAST_PICKS.pop(k, None)
+    clear_run_slot(_CandidateState)
 
 
 def registry_snapshot() -> list[ItemCandidate]:
@@ -249,7 +241,5 @@ def registry_snapshot() -> list[ItemCandidate]:
       - item_picker 的**候选全集**：判完 search 的那轮，planner 已把旧候选清掉（见 planner），故此
         刻登记表自身就是「本轮该精挑的全部候选」——picker 直接吃它，不必让模型抄 id。
     """
-    k = _key()
-    if k is None:
-        return []
-    return list(_REGISTRY.get(k, {}).values())
+    st = peek_run_slot(_CandidateState)
+    return list(st.registry.values()) if st is not None else []

@@ -1,6 +1,6 @@
 """预算：把「再找找更好的」这个动机用额度兜死，prompt 只当辅助。
 
-    pre_think       20  budget_router  按全树成本定档：换模型 / 注入 hint / FALLBACK 不调 LLM
+    pre_think       20  budget_router  按本次 run 成本定档：换模型 / 注入 hint / FALLBACK 不调 LLM
     pre_tool_call   30  spend_gate     token 档位：minimal 档收走成本放大器
     pre_tool_call   45  search_gate    web_search 用途门 + research 配额门 → 检索计数自增 /
                                        越线软收敛 / 硬挡
@@ -11,9 +11,10 @@
 **效率闸 vs 安全闸**（逃生门见 ``middleware._try_escape``）：依据推定的（websearch）声明
 ``escape_key``，连拒 2 次放行；依据事实的（token / 检索预算）永远硬拒。
 **预算的定义住在哪（消费在本文件，定义分两个包，改额度先找对地方）**：
-- 检索：全树计数、web_search 任务配额、research 搜索配额（三本账互不透支）在
+- 检索：本次 run 的检索计数、web_search 任务配额、research 搜索配额（三本账互不透支）在
   ``app/harness/retrieval_budget.py``；上限 / 工具集合在 ``app/harness/budgets.py``。
-- token / 成本：全树成本与四档 ``Tier`` 在 ``app/harness/token_budget.py`` / ``model_router.py``。
+- token / 成本：本次 run 的成本与四档 ``Tier`` 在 ``app/harness/token_budget.py`` /
+  ``model_router.py``。
 - 一次失控最多烧多少（超时 / max_iters）：``app/agent/limits.py`` 一页看全。
 """
 
@@ -33,7 +34,7 @@ from app.harness.msgs import system_message
 from app.harness.retrieval_budget import (
     RESEARCH_SEARCH_QUOTA,
     charge_research,
-    charge_tree_retrieval,
+    charge_retrieval_count,
     note_web_search,
     research_remaining,
     web_search_allowed,
@@ -115,8 +116,8 @@ async def check_token_budget(context: dict[str, Any]) -> dict[str, Any] | None:
 async def charge_retrieval(context: dict[str, Any]) -> dict[str, Any] | None:
     """对「商品检索」工具计数，越预算则软收敛 / 硬挡。
 
-    优先用会话级全树计数（``charge_tree_retrieval``，按 session_dir 聚合）；无 session 作用域
-    （单测）回退 per-instance。
+    计数只有一条路：按 session_dir 聚合的本次 run 累计（``charge_retrieval_count``）。无 session
+    作用域（单测直调）不计也不拦——失效方向中性，与本模块其他闸一致。
 
     - ``count <= cap``：放行。
     - ``count == cap + 1``（刚越线）：**执行**，但在结果尾部追加强制收敛指令（软收敛）——
@@ -136,12 +137,10 @@ async def charge_retrieval(context: dict[str, Any]) -> dict[str, Any] | None:
         # 同一顺序契约：check_websearch 读自增前值判任务口径配额（已完成 < 配额即放行）。
         note_web_search()
 
-    tree = charge_tree_retrieval()  # None=无 session 作用域
-    if tree is None:
-        guard.retrieval_count += 1
-        count, cap = guard.retrieval_count, guard.retrieval_cap
-    else:
-        count, cap = tree, guard.tree_retrieval_cap
+    count = charge_retrieval_count()  # None=无 session 作用域
+    if count is None:
+        return None
+    cap = guard.retrieval_cap
 
     if count <= cap:
         return None
@@ -183,7 +182,7 @@ async def route_by_budget(context: dict[str, Any]) -> dict[str, Any] | None:
     档位只降不升（成本单调增），所以每档只上报一次 metric——用 ``GuardState.last_tier`` 去重，
     否则一个 20 轮的任务会把 minimal 档记 15 次，降级率统计直接失真。
 
-    全程走 ``model_router.xxx`` 而不是 ``from ... import xxx``：档位依赖全树成本，每次模型调用后都在
+    全程走 ``model_router.xxx`` 而不是 ``from ... import xxx``：档位依赖累计成本，每次模型调用后都在
     变，必须现算；模块级引用也让单测能 monkeypatch 掉整条链（import 绑定的名字打不中）。
     """
     guard = context.get("_guard")

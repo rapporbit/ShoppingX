@@ -1,9 +1,9 @@
 """长期记忆事实的存取口：六个方法，后端是 `app.db` 的 SQLite（阶段 1 后是 MySQL）。
 
-与 `PreferenceStore` 并存一段时间：`preferences` 表不 drop，旧读写路径在 M4 的删除清单里一起摘，
-这中间两张表都在库里，但**只有这一个 store 被新代码调用**（见计划 §4.1 C4，留旧表作回滚依据）。
+**长期记忆只有这一条路**：旧的 `preferences` 表与它的 store 已经删干净（迁移
+`0016_drop_preferences`），`app.memory.store.UserDataStore` 现在只管行为历史与收藏，两者不重叠。
 
-容错口径与 `PreferenceStore` 一致：**记忆是增强不是依赖**。读失败返回空 = 「这轮没有长期记忆」，
+容错口径与 `UserDataStore` 一致：**记忆是增强不是依赖**。读失败返回空 = 「这轮没有长期记忆」，
 写失败只记日志 = 「这条没记住，下次再说」，都不许把一次购物任务拖失败。
 """
 

@@ -19,7 +19,7 @@ import yaml
 # prompts_*.yml，按 env 整份切换」——改一处要同步 N 份，且切换是全局的、没有分桶也没有对照。
 # 现在是「一份正文 + prompt/versions/<semver>.yml 叠加层 + 按 user_id 分桶」：
 # 版本文件只存差异，A/B 按人分流，桶号与版本进 trace 与配额账本，用 Rubric 分桶对照来判优劣。
-# 更早的 full / slim 全量副本仍在 prompt/archive/，仅供翻阅、不参与运行。
+# 更早的 full / slim 全量副本已从仓库删除，要翻阅走 git 历史。
 _PROMPT_DIR = Path(__file__).resolve().parents[2] / "prompt"
 _PROMPTS_PATH = _PROMPT_DIR / "prompts.yml"
 _VERSIONS_DIR = _PROMPT_DIR / "versions"
@@ -124,17 +124,6 @@ def _load_prompts(version: str | None = None) -> dict[str, Any]:
     return resolved
 
 
-# curator 与 preference_parse 共用的「长期偏好字段规则」占位符——两者落同一张表，规则必须逐字
-# 一致，曾各抄一份已开始措辞漂移。YAML 锚点没法插进 block scalar 中间，故用显式占位符 + replace
-# （不用 str.format：prompt 里有 {"size": "42"} 这类字面大括号，format 会炸）。
-_PREF_RULES_PLACEHOLDER = "<<PREF_FIELD_RULES>>"
-
-
-def _inject_pref_rules(text: str, version: str | None) -> str:
-    rules = str(_resolved(version).get("pref_field_rules", "")).rstrip()
-    return text.replace(_PREF_RULES_PLACEHOLDER, rules)
-
-
 def _resolved(version: str | None) -> dict[str, Any]:
     """``version=None`` → 取**当前分桶**的版本（A/B）。
 
@@ -182,9 +171,4 @@ def get_shopping_summary_prompt(version: str | None = None) -> str:
 
 def get_memory_curator_prompt(version: str | None = None) -> str:
     """记忆管家（curator）的提示词——独立于购物工作流的偏好判定器。"""
-    return _inject_pref_rules(_resolved(version)["memory_curator_prompt"], version)
-
-
-def get_preference_parse_prompt(version: str | None = None) -> str:
-    """把用户手填的一句话拆成结构化偏好条目（偏好页面的「添加」入口用）。"""
-    return _inject_pref_rules(_resolved(version)["preference_parse_prompt"], version)
+    return _resolved(version)["memory_curator_prompt"]

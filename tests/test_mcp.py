@@ -22,7 +22,7 @@ from agentscope.mcp import HttpMCPConfig, MCPClient
 from agentscope.message import ToolCallBlock
 from agentscope.state import AgentState
 
-from app.agent.mcp_registry import MCP_ROLES, mcp_clients, mcp_tool_names
+from app.agent.mcp_registry import mcp_clients, mcp_tool_names
 from app.agent.tool_registry import _READ_ONLY_TOOLS, build_toolkit
 from app.mcp.fx_server import FX_TOOL_NAMES
 from app.mcp.server import EXPOSED_TOOL_NAMES
@@ -54,26 +54,23 @@ def test_exposed_names_are_a_subset_of_repo_read_only_set() -> None:
 
 def test_clients_are_empty_without_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MCP_SEARCH_URL", "")
-    assert mcp_clients("main") == []
-    assert mcp_tool_names("main") == []
+    assert mcp_clients() == []
+    assert mcp_tool_names() == []
 
 
-def test_only_main_gets_mcp(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A4 删 SearchAgent 后 MCP 改发给 main；已删的 search 角色拿不到。"""
+def test_main_gets_mcp_when_url_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    """配了 URL，主 Agent 就拿到一个 MCP 客户端。"""
     monkeypatch.setenv("MCP_SEARCH_URL", "http://127.0.0.1:1/mcp")
-    assert MCP_ROLES == frozenset({"main"})
-    assert len(mcp_clients("main")) == 1
-    assert mcp_clients("search") == []
-    assert mcp_tool_names("search") == []
+    assert len(mcp_clients()) == 1
 
 
 def test_enable_tools_whitelist_is_declarative(monkeypatch: pytest.MonkeyPatch) -> None:
     """白名单是**客户端侧**的：对端多开的工具进不来，与它自称什么无关。"""
     monkeypatch.setenv("MCP_SEARCH_URL", "http://127.0.0.1:1/mcp")
     monkeypatch.setenv("MCP_SEARCH_TOOLS", "convert_currency")
-    (client,) = mcp_clients("main")
+    (client,) = mcp_clients()
     assert client.enable_tools == ["convert_currency"]
-    assert mcp_tool_names("main") == ["mcp__globex-fx__convert_currency"]
+    assert mcp_tool_names() == ["mcp__globex-fx__convert_currency"]
 
 
 def test_mcp_tool_names_are_whitelisted(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -82,7 +79,7 @@ def test_mcp_tool_names_are_whitelisted(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("MCP_SEARCH_URL", "http://127.0.0.1:1/mcp")
     allowed_tools.cache_clear()
     try:
-        for name in mcp_tool_names("main"):
+        for name in mcp_tool_names():
             assert validate_tool_call(name)
     finally:
         allowed_tools.cache_clear()
@@ -91,7 +88,7 @@ def test_mcp_tool_names_are_whitelisted(monkeypatch: pytest.MonkeyPatch) -> None
 def test_client_is_stateless(monkeypatch: pytest.MonkeyPatch) -> None:
     """有状态 client 必须在 Toolkit 构造前 connect，而本仓的 Toolkit 是每个 loop 现建的。"""
     monkeypatch.setenv("MCP_SEARCH_URL", "http://127.0.0.1:1/mcp")
-    (client,) = mcp_clients("main")
+    (client,) = mcp_clients()
     assert client.is_stateful is False
 
 
@@ -142,7 +139,7 @@ async def test_main_toolkit_lists_mcp_tools(
     fx_server: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("MCP_SEARCH_URL", fx_server)
-    toolkit = await build_toolkit("main")
+    toolkit = await build_toolkit()
     names = {s["function"]["name"] for s in await toolkit.get_tool_schemas()}
     for tool in FX_TOOL_NAMES:
         assert f"mcp__globex-fx__{tool}" in names
@@ -157,7 +154,7 @@ async def test_every_mcp_tool_is_read_only(
     所以这条断言真的会因为 server 少写一个 annotation 而红，不是走过场。
     """
     monkeypatch.setenv("MCP_SEARCH_URL", fx_server)
-    toolkit = await build_toolkit("main")
+    toolkit = await build_toolkit()
     available = await toolkit._get_available_tools(["basic"])
     mcp = {name: rt for name, rt in available.items() if rt.tool.is_mcp}
     assert mcp
@@ -168,7 +165,7 @@ async def test_mcp_tool_is_callable_through_toolkit(
     fx_server: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("MCP_SEARCH_URL", fx_server)
-    toolkit = await build_toolkit("main")
+    toolkit = await build_toolkit()
     call = ToolCallBlock(
         type="tool_call",
         id="t1",
@@ -186,7 +183,7 @@ async def test_unknown_currency_comes_back_as_data_not_protocol_error(
 ) -> None:
     """工具内部的业务错误要回成模型读得懂的结构，不是一条「工具挂了」。"""
     monkeypatch.setenv("MCP_SEARCH_URL", fx_server)
-    toolkit = await build_toolkit("main")
+    toolkit = await build_toolkit()
     call = ToolCallBlock(
         type="tool_call",
         id="t2",

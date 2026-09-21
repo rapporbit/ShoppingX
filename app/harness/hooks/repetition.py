@@ -29,7 +29,7 @@ from app.harness.sentinels import (
 from app.harness.state import guard_of
 from app.utils import shared_breaker
 from app.utils.circuit_breaker import CircuitBreaker
-from app.utils.env import env_bool, env_int
+from app.utils.env import env_bool
 
 logger = logging.getLogger("shoppingx.harness.repetition")
 
@@ -104,8 +104,8 @@ async def append_nudges(context: dict[str, Any]) -> dict[str, Any] | None:
 
 
 TOOL_BREAKER_ENABLED = env_bool("HARNESS_TOOL_BREAKER", True)
-_FAILURE_THRESHOLD = env_int("HARNESS_TOOL_BREAKER_THRESHOLD", 3)
-_RECOVERY_TIMEOUT = float(env_int("HARNESS_TOOL_BREAKER_RECOVERY_SEC", 60))
+_FAILURE_THRESHOLD = 3
+_RECOVERY_TIMEOUT = 60.0
 
 # 每个工具一个断路器，进程级共享（跨会话累积失败——某平台 API 挂了就是挂了，不该每个会话重新试
 # 三次）。``all_breakers()`` 会枚举它们，metrics 里能看到状态。

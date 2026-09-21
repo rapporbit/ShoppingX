@@ -121,47 +121,8 @@ class Thread(Base):
 # 本就低于账户——「偏好丢一条无所谓，账号丢一条是事故」（见模块 docstring）。只建 index 保查询。
 
 
-class Preference(Base):
-    """一条长期偏好（跨会话的一贯取向）。
-
-    ``dedup_key`` 是**派生**的去重身份（由 polarity/category/domain/slug 拼出，见
-    :class:`app.memory.store.PreferenceEntry`），不由 LLM 手拼——但它要在库里做唯一约束，所以
-    冗余存一列。``(user_id, dedup_key)`` 唯一：同一身份的偏好只有一条，重复提及走覆盖合并。
-
-    **``blocking`` 是这次重构的核心字段**：只有它为 True 的条目才会在 item_picker 里**硬淘汰**
-    商品。而它**只能由用户在偏好页面显式勾选**（source="user"）——LLM 学到的偏好一律只减分。
-    让一个每轮都在猜的模型去决定「这件商品用户永远不该看到」，风险和收益完全不匹配：猜错了，
-    用户搜不到东西还归因不了。杀伤力必须由用户授予。
-    """
-
-    __tablename__ = "preferences"
-    __table_args__ = (UniqueConstraint("user_id", "dedup_key", name="uq_pref_user_key"),)
-
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    user_id: Mapped[str] = mapped_column(String(64), index=True)
-    dedup_key: Mapped[str] = mapped_column(String(200))
-
-    polarity: Mapped[str] = mapped_column(String(16), default="like")  # like / dislike
-    category: Mapped[str] = mapped_column(String(32), default="other")  # PrefCategory
-    domain: Mapped[str] = mapped_column(String(32), default="other")  # PrefDomain
-    slug: Mapped[str] = mapped_column(String(64), default="")
-    content: Mapped[str] = mapped_column(String(500))
-    # 可硬过滤 / 减分的原子词。JSON 列：SQLite 原生支持，且这里只做整存整取，不按元素查询。
-    keywords: Mapped[list[str]] = mapped_column(JSON, default=list)
-
-    source: Mapped[str] = mapped_column(String(16), default="agent")  # agent / user
-    blocking: Mapped[bool] = mapped_column(Boolean, default=False)
-
-    source_session: Mapped[str] = mapped_column(String(64), default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
-    # 上次被确认（重复提及）的时间。**不再参与任何打分**（半衰期衰减已删）——只供偏好页面显示
-    # 「这条 3 个月没用过了」，把「淡出」从一个没人能解释的隐式指数函数，变成用户看得见、能自己
-    # 决定删不删的显式提示。系统不该偷偷把用户的偏好打七折。
-    last_confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
-
-
 class MemoryFactRow(Base):
-    """一条长期记忆事实（key → value + 三分类），取代 :class:`Preference` 的建模。
+    """一条长期记忆事实（key → value + 三分类），取代旧 ``preferences`` 表的建模。
 
     与旧 ``preferences`` 表的根本不同：**身份就是 ``fact_key`` 本身**，不再由 polarity/domain/slug
     拼出 ``dedup_key``。同 key 覆盖写，一个主题永远只有一条——「我不要塑料」后来变成「塑料也行」时，
@@ -238,7 +199,7 @@ class UsageLedger(Base):
 
     **与已有两层记账的分工。** ``app/agent/usage.py`` 是事后测量（一轮的 token 聚合，进日志 /
     Langfuse）；``app/harness/token_budget.py`` 是**单次任务**（一棵 fork 树）的成本闸，进程内的
-    模块级 dict，任务一结束就 ``reset_tree`` 清掉。两者都答不了「这个人这个月一共烧了多少、还剩
+    模块级 dict，任务一结束就 ``reset_run`` 清掉。两者都答不了「这个人这个月一共烧了多少、还剩
     多少能用」——那要跨会话、跨进程重启地累计，只能落库。
 
     **为什么按 (user_id, period_key) 一行而不是流水表。** 配额判定是最热的读路径（每次发任务都查
@@ -257,7 +218,7 @@ class UsageLedger(Base):
     __table_args__ = (UniqueConstraint("user_id", "period_key", name="uq_usage_user_period"),)
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    # 不加外键，理由同 Preference：鉴权关闭时 user_id 是不在 users 表里的假身份。
+    # 不加外键，理由同上面几张用户级表：鉴权关闭时 user_id 是不在 users 表里的假身份。
     user_id: Mapped[str] = mapped_column(String(64), index=True)
     period_key: Mapped[str] = mapped_column(String(16))  # "2026-07-14"（UTC 日）
 
@@ -346,7 +307,7 @@ class Message(Base):
     折叠区、token 消耗）；续聊回喂只取 role/content，对它们透明、不增 token。JSON 列整存整取，
     不按元素查询。
 
-    ``thread_id`` **不加外键**（与 :class:`Thread` 相反，理由同 :class:`Preference`）：鉴权关闭的
+    ``thread_id`` **不加外键**（与 :class:`Thread` 相反，理由同 :class:`MemoryFactRow`）：鉴权关闭的
     demo 模式下压根不建 ``threads`` 行，外键会让每一轮对话落库直接炸。只建 index。
     """
 
@@ -500,12 +461,12 @@ class ConfirmationRow(Base):
 class StrategyRow(Base):
     """一条**成功策略**（18-4）：从高分轨迹蒸馏出来的「遇到这类局面就这么办」。
 
-    与 :class:`Preference` 正交，两张表谁也别兼任谁：偏好是**某个人**的取向（user_id 是它的
+    与 :class:`MemoryFactRow` 正交，两张表谁也别兼任谁：记忆是**某个人**的取向（user_id 是它的
     第一列），策略是**全局**的打法（没有 user_id 这一列——「预算陷阱要先算到手价再排序」对谁
-    都成立）。把策略塞进偏好表，等于给每个用户各存一份同样的话，还得回答「A 的策略淘汰了，
+    都成立）。把策略塞进记忆表，等于给每个用户各存一份同样的话，还得回答「A 的策略淘汰了，
     B 那份算不算数」这种无意义的问题。
 
-    ``dedup_key`` 与 ``PreferenceEntry`` 同一取向：由 ``category:slug`` **派生**，不由 LLM 手拼。
+    ``dedup_key`` 是**派生**的去重身份：由 ``category:slug`` 拼出，不由 LLM 手拼。
 
     **生命周期三列**（``health`` / ``hits`` / ``consecutive_failures``）是这张表存在的理由。
     蒸馏出来的策略是**假设**不是结论：门禁重放只证明它在 3 条同类 query 上不退化，证不了它在

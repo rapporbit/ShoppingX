@@ -53,10 +53,6 @@ def get_enabled_platforms() -> tuple[str, ...]:
     return _enabled_var.get() or default_platforms()
 
 
-def is_multi_platform() -> bool:
-    """本轮是否真的要跨平台（启用 ≥2 个平台）——单平台时不该 fork、不该跨平台比价。"""
-    return len(get_enabled_platforms()) > 1
-
 
 @contextmanager
 def platform_scope(platforms: Sequence[str] | None) -> Iterator[tuple[str, ...]]:

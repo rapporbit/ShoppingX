@@ -30,7 +30,6 @@ from app.memory.facts import memory_enabled, render_memory_block, select_tier_on
 from app.memory.strategies import get_strategy_store, render_strategy_block, strategies_for_query
 from app.trade.confirmations import trade_state
 from app.trade.repository_sql import confirmation_repository, order_repository
-from app.utils.env import env_int
 from app.utils.tokens import count_tokens
 
 logger = logging.getLogger("shoppingx.harness.context_shaping")
@@ -38,10 +37,10 @@ logger = logging.getLogger("shoppingx.harness.context_shaping")
 
 #: 上下文里工具返回的 token 总量超过它就开始清最旧的几条（0 = 关掉这道清理）。
 #: 24k 是按「普通轮输入 22.5k」（round3 基线）定的：正常一轮碰不到，多轮续聊堆起来才会。
-PRUNE_TOOL_RESULTS_TOKENS = env_int("PRUNE_TOOL_RESULTS_TOKENS", 24000)
+PRUNE_TOOL_RESULTS_TOKENS = 24000
 
 #: 最近几条工具返回一律不动——模型当前这一步的推理就靠它们，清了等于让它凭空作答。
-PRUNE_KEEP_RECENT = env_int("PRUNE_KEEP_RECENT", 6)
+PRUNE_KEEP_RECENT = 6
 
 _PRUNED_PLACEHOLDER = "[早先的工具返回已清理以腾出上下文。还需要这段内容就重新调用对应工具。]"
 
@@ -211,8 +210,6 @@ async def _trade_state_block() -> str | None:
 @harness_hook("on_system_prompt", name="system_prompt_append", priority=50)
 async def append_system_prompt_blocks(context: dict[str, Any]) -> dict[str, Any] | None:
     """主 loop 装配期往 system prompt 末尾追加：先策略块、后交易状态块（顺序即渲染顺序）。"""
-    if context.get("role") != "main":
-        return None
     blocks = [b for b in (await _strategy_block(context), await _trade_state_block()) if b]
     if not blocks:
         return None

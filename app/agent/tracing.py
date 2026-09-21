@@ -1,13 +1,13 @@
 """Langfuse 在线观测接入（v4 / OpenTelemetry）——主链路调试用。
 
-**范围**：只 trace 主对话链路（``run_agent`` 主 loop + 派出去的 worker），不碰 ``eval/`` 与
+**范围**：只 trace 主对话链路（``run_agent`` 主 loop），不碰 ``eval/`` 与
 judge LLM——评测链路进了 trace 只会把线上数据搅浑。
 
 **零胶水的由来**：Langfuse v4 本身就是 OTel SDK 的包装，client 初始化时会把自己的
 TracerProvider 设成全局；而 AgentScope 原生的 ``TracingMiddleware`` 打的是标准 ``gen_ai.*``
 语义属性，正好落进 Langfuse 的 span 过滤器（``is_genai_span``）放行的那一类。所以主链路的观测
 = 装配时挂一个框架自带的中间件，**不需要自建 exporter，也不需要手工传 trace_id**：OTel 上下文
-本身就是 ContextVar，worker 的 span 天然挂在父 span 下。
+本身就是 ContextVar，同轮并发的工具子任务的 span 天然挂在父 span 下。
 
 **一轮 = 一条 trace**：:func:`turn_span` 在 ``run_agent`` 入口开一个根 span，本轮所有模型 /
 工具 span 都挂在它下面；多轮再靠 ``session_id``（= thread_id）在 UI 的 Sessions 视图聚成一次会话。
@@ -39,10 +39,9 @@ if TYPE_CHECKING:  # 只为类型标注；运行时不 import，避免 agent →
 logger = logging.getLogger("shoppingx.tracing")
 
 
-# 本轮（一次 run_agent）的 trace_id：主 loop 在 root 处生成并写入，fork 子 loop 读出来复用，
-# 从而把主 + 所有子的多次独立 ainvoke 归并到同一条 trace。ContextVar 天然按 async 上下文隔离
-# （多用户并发各有各的），且新建的 asyncio.Task（如 parallel_dispatch 的 gather）建时即拷贝当前
-# 上下文 → 子 task 能读到父设的值。每轮 run_agent 都重新生成，不跨轮复用、无需手动 reset。
+# 本轮（一次 run_agent）的 trace_id：主 loop 在 root 处生成并写入。ContextVar 天然按 async
+# 上下文隔离（多用户并发各有各的），且新建的 asyncio.Task（如同轮 batch 工具的 gather）建时即
+# 拷贝当前上下文 → 子 task 能读到父设的值。每轮 run_agent 都重新生成，不跨轮复用、无需手动 reset。
 _current_trace_id: ContextVar[str | None] = ContextVar("langfuse_trace_id", default=None)
 
 # score comment 的截断：单条 rationale 与整段 comment 各设上限，防 judge 长篇大论灌爆 UI 那一栏。
@@ -81,7 +80,7 @@ def _get_client() -> Any | None:
     """构造并缓存 Langfuse client 单例；任何不就绪条件 → ``None``（安静降级）。
 
     缓存的是**重的那个**——client 内含 OTEL exporter + 后台 flush 线程，全进程建一次即可，
-    主 loop 与所有 fork 共用。轻量的 ``CallbackHandler`` 则**每次 invoke 现建**（见
+    全进程共用。轻量的 ``CallbackHandler`` 则**每次 invoke 现建**（见
     :func:`apply_tracing`）：handler 持有 per-run 状态（``_runs`` 等），共享一个反而会在并发
     invoke 间串状态，故按 langfuse 官方口径「一次请求一个 handler」。
     """
@@ -191,26 +190,6 @@ def flush_traces() -> None:
     except Exception:
         logger.warning("Langfuse flush 失败，可能有 score 未上报", exc_info=True)
 
-
-def record_trace_scores(scores: dict[str, float]) -> None:
-    """把数值指标作为 score 挂到**本轮 trace**（携带量 / 缓存命中率等，见 usage.py）。
-
-    安静降级：无 client（未启用 / 缺 key）或本轮没有 trace_id（root 未挂 tracing）一律跳过；
-    任何异常吞掉，绝不反噬主链路。score 用 ``create_score``（langfuse v4）按 ``trace_id`` 关联。
-    """
-    client = _get_client()
-    if client is None:
-        return
-    trace_id = _current_trace_id.get()
-    if not trace_id:
-        return
-    try:
-        for name, value in scores.items():
-            client.create_score(
-                name=name, value=float(value), trace_id=trace_id, data_type="NUMERIC"
-            )
-    except Exception:
-        logger.warning("Langfuse 记录 score 失败，跳过（不影响主链路）", exc_info=True)
 
 
 def tracing_middlewares() -> list[Any]:

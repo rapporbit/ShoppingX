@@ -25,12 +25,12 @@ from app.harness.middleware import harness_hook
 from app.harness.signals import blacklist_hits
 from app.harness.state import guard_of
 from app.security.content_filter import strip_fence_open
-from app.utils.env import env_bool, env_int
+from app.utils.env import env_bool
 from app.utils.terms import normalize_terms, term_hits
 
 logger = logging.getLogger("shoppingx.harness.drift")
 
-CHECK_INTERVAL = env_int("HARNESS_DRIFT_INTERVAL", 3)
+CHECK_INTERVAL = 3
 DRIFT_ENABLED = env_bool("HARNESS_DRIFT_ENABLED", True)
 
 # 目标遗忘：最近 N 轮行为里**一个** query 关键词都没提到，才算遗忘。
@@ -64,7 +64,7 @@ Agent 最近 {n} 轮行为摘要：{recent_actions}
 class DriftState:
     """单会话的漂移检测状态（与 HarnessAgentAdapter 同生命周期）。
 
-    ``token_history`` 由 :class:`HarnessAgentAdapter` 在每次模型调用后按 tree_snapshot 的
+    ``token_history`` 由 :class:`HarnessAgentAdapter` 在每次模型调用后按 run_snapshot 的
     增量追加；``blacklist_violations`` 由 ``track_result_signals`` 在工具返回后累加。
     """
 

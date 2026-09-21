@@ -1030,7 +1030,7 @@ class TestDriftWiring:
 
         totals = iter([100, 250, 500])
         monkeypatch.setattr(
-            session_mod, "tree_snapshot", lambda: {"input_tokens": next(totals), "output_tokens": 0}
+            session_mod, "run_snapshot", lambda: {"input_tokens": next(totals), "output_tokens": 0}
         )
         mw = _mw()
         for _ in range(3):

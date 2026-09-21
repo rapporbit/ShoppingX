@@ -42,12 +42,6 @@ def ensure_session_dir(thread_id: str) -> Path:
     return session_dir
 
 
-def ensure_upload_dir(thread_id: str) -> Path:
-    """获取或创建本次任务的上传目录 ``uploaded/<thread_id>/``。"""
-    upload_dir = UPLOAD_ROOT / thread_id
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    return upload_dir
-
 
 def safe_join(base: Path, *parts: str) -> Path:
     """在 ``base`` 下安全拼接路径，越权（解析结果跳出 base）则抛 ``ValueError``。"""

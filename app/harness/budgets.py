@@ -14,15 +14,12 @@ from app.agent.constants import is_terminal_call  # noqa: F401  # 转出给 hook
 from app.utils.env import env_int
 
 # 「商品检索」类工具：拿信息但不推进收尾，是「再找找更好的」这个动机最爱漏出来的两个口子。
-# 预算打在**检索总量**（动机）上，两个口子计进同一个全树计数（见 retrieval_budget.py，按
-# session_dir 聚合）。不计 category_insight：它是品类常识（RAG）、不是「找更好商品」的渠道。
+# 预算打在**检索总量**（动机）上，两个口子计进同一次 run 的同一个计数（见 retrieval_budget.py，
+# 按 session_dir 聚合）。不计 category_insight：它是品类常识（RAG）、不是「找更好商品」的渠道。
 RETRIEVAL_TOOLS = frozenset({"item_search", "web_search"})
 
 # 一次 run_agent 的商品检索总量上限。
-TREE_RETRIEVAL_BUDGET = env_int("RETRIEVAL_BUDGET", 8)
-
-# 无 session 作用域（单测）时的 per-instance 回退上限。
-DEFAULT_RETRIEVAL_CAP = 6
+RETRIEVAL_BUDGET_CAP = env_int("RETRIEVAL_BUDGET", 8)
 
 # 「成本放大器」工具：会派生更多模型调用 / 外呼、让 token 成本乘法累积的几个口子。token 预算越
 # 硬线时执行层硬挡这些工具，逼 Agent 用现有候选走收尾。便宜的收尾 / 精挑工具与终结工具保留，

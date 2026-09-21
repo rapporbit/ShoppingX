@@ -4,8 +4,8 @@ Hook 是**模块级函数**、全局注册，天然无处安放「这个 Agent �
 放这里，由 :class:`HarnessAgentAdapter` 每实例新建一个，经 ``context["_guard"]`` 传给 Hook。
 
 **绝不跨 Agent 实例复用**——否则会话之间计数串台（LoopDetector 窗口、检索计数、终结标记都是
-per-loop 语义）。跨 fork 树共享的量（fork 轮数 / 全树检索总量 / token 成本）另有 ContextVar +
-session_dir 聚合兜底，不在这里。
+per-loop 语义）。按一次 run 聚合的量（检索总量 / token 成本）另有 ContextVar + session_dir
+聚合兜底，不在这里。
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.harness.budgets import DEFAULT_RETRIEVAL_CAP, TREE_RETRIEVAL_BUDGET
+from app.harness.budgets import RETRIEVAL_BUDGET_CAP
 from app.harness.loop_detector import LoopDetector
 from app.harness.truncation import MAX_TOOL_RESULT_TOKENS
 
@@ -24,15 +24,12 @@ class GuardState:
 
     # ── 可调参数（构造时注入，便于测试与不同 loop 用不同口径）──
     max_tool_tokens: int = MAX_TOOL_RESULT_TOKENS
-    retrieval_cap: int = DEFAULT_RETRIEVAL_CAP
-    tree_retrieval_cap: int = TREE_RETRIEVAL_BUDGET
+    retrieval_cap: int = RETRIEVAL_BUDGET_CAP
     loop_window: int = 6
     loop_threshold: int = 4
 
     # ── 运行时状态 ──
     detector: LoopDetector = field(init=False)
-    #: per-instance 检索计数（无 session 作用域时的回退口径）
-    retrieval_count: int = 0
     #: per-instance item_search 计数
     item_search_calls: int = 0
     #: 主 loop 本轮是否已调过终结工具（终结硬停闸用）

@@ -28,16 +28,15 @@ from pydantic import BaseModel, BeforeValidator, Field
 from app.api import monitor
 from app.tools._args import StrListArg, coerce_stringified_list
 from app.tools._shell import tool
-from app.utils.env import env_int
 
 logger = logging.getLogger("shoppingx.tools.present_guide")
 
 #: 一次最多讲几节标准。超出截断——再多用户就不读了，真要细讲让他挑一条继续问。
-GUIDE_MAX_SECTIONS = env_int("GUIDE_MAX_SECTIONS", 6)
+GUIDE_MAX_SECTIONS = 6
 #: 一节最多几个要点。
-GUIDE_MAX_POINTS = env_int("GUIDE_MAX_POINTS", 5)
+GUIDE_MAX_POINTS = 5
 #: 来源最多列几条。
-GUIDE_MAX_SOURCES = env_int("GUIDE_MAX_SOURCES", 8)
+GUIDE_MAX_SOURCES = 8
 
 
 class GuideSection(BaseModel):

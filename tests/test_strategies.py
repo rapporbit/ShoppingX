@@ -190,20 +190,18 @@ async def test_hook_appends_to_system_prompt_without_touching_prefix() -> None:
 
     base = get_system_prompt()
     await get_strategy_store().upsert(_s("cheap_first", keywords=["预算"]))
-    got = await _run_system_prompt_hooks(base, role="main", query="预算 300 买个包")
+    got = await _run_system_prompt_hooks(base, query="预算 300 买个包")
     assert got.startswith(base)
     assert "<learned_strategies>" in got and "动作-cheap_first" in got
 
 
 @pytest.mark.anyio
-async def test_hook_is_noop_for_workers_and_for_unmatched_query() -> None:
+async def test_hook_is_noop_for_unmatched_query() -> None:
     from app.agent.agents import _run_system_prompt_hooks
 
     await get_strategy_store().upsert(_s("cheap_first", keywords=["预算"]))
-    # worker 跑的是收窄后的子任务，主 loop 的打法塞进去只会稀释它那段专职 prompt
-    assert await _run_system_prompt_hooks("BASE", role="search", query="预算 300") == "BASE"
     # 匹配不上就一个字都不加（不塞空区块）
-    assert await _run_system_prompt_hooks("BASE", role="main", query="今天天气怎么样") == "BASE"
+    assert await _run_system_prompt_hooks("BASE", query="今天天气怎么样") == "BASE"
 
 
 @pytest.mark.anyio
@@ -213,9 +211,9 @@ async def test_injected_list_is_rewritten_every_turn() -> None:
     from app.harness.hooks.context_shaping import injected_strategy_keys
 
     await get_strategy_store().upsert(_s("cheap_first", keywords=["预算"]))
-    await _run_system_prompt_hooks("BASE", role="main", query="预算 300")
+    await _run_system_prompt_hooks("BASE", query="预算 300")
     assert injected_strategy_keys() == ("预算陷阱:cheap_first",)
-    await _run_system_prompt_hooks("BASE", role="main", query="今天天气怎么样")
+    await _run_system_prompt_hooks("BASE", query="今天天气怎么样")
     assert injected_strategy_keys() == ()
 
 
@@ -229,7 +227,7 @@ async def test_session_end_settles_by_terminal_tool_and_final_text() -> None:
     await store.upsert(s)
 
     async def _turn(called: set[str], final: str) -> Strategy:
-        await _run_system_prompt_hooks("BASE", role="main", query="预算 300")
+        await _run_system_prompt_hooks("BASE", query="预算 300")
         await settle_strategies({"called_tools": called, "final_answer": final})
         return next(x for x in await store.read_all() if x.dedup_key == s.dedup_key)
 

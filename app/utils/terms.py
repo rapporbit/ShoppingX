@@ -40,7 +40,6 @@ Cubes"）**永远命中不了**——用户说的「不要塑料」在机制层�
 from __future__ import annotations
 
 import logging
-import os
 import re
 from typing import Literal
 
@@ -431,9 +430,9 @@ _SPEC_TITLE_RE = re.compile(
     re.IGNORECASE,
 )
 
-#: 容差（相对比例，经 env 调）：15.6 寸位的包装 16 寸机器是常态（差 2.5%，兼容），
+#: 容差（相对比例）：15.6 寸位的包装 16 寸机器是常态（差 2.5%，兼容），
 #: 14 对 16（差 12.5%）才是真冲突。
-SPEC_TOLERANCE = float(os.getenv("SPEC_MATCH_TOLERANCE", "0.05"))
+SPEC_TOLERANCE = 0.05
 
 # 多维尺寸链（"18 x 12 x 6 inch"）的识别：单位只挂在链尾数字上，孤立看就是一条「6 寸」假规格。
 # 链里的数字是**包体三维**，不是「装几寸笔记本」的档位声明——整链忽略（不算 found，不参与裁决）。

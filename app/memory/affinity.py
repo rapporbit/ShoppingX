@@ -27,18 +27,17 @@ from __future__ import annotations
 
 from collections import Counter
 
-from app.memory.store import PreferenceStore, get_store
-from app.utils.env import env_int
+from app.memory.store import UserDataStore, get_user_data_store
 from app.utils.terms import title_attr_tokens
 
 # 一个属性被多少件收藏命中，才算「一贯取向」而非偶然。设 1 即退回「收藏一件就当偏好」（不建议）。
-AFFINITY_MIN_EVIDENCE = env_int("AFFINITY_MIN_EVIDENCE", 2)
+AFFINITY_MIN_EVIDENCE = 2
 # 最多取几个亲和词（按证据数降序）。封顶是为了不让一个收藏了几百件的重度用户把打分项冲成一片噪声：
 # 亲和词越多，商品之间的区分度反而越低（人人都命中三四个）。设 0 即关闭整条通路。
-AFFINITY_MAX_TERMS = env_int("AFFINITY_MAX_TERMS", 5)
+AFFINITY_MAX_TERMS = 5
 
 
-async def affinity_terms(user_id: str, store: PreferenceStore | None = None) -> list[str]:
+async def affinity_terms(user_id: str, store: UserDataStore | None = None) -> list[str]:
     """聚合该用户的行为亲和词：收藏标题里出现 ≥ :data:`AFFINITY_MIN_EVIDENCE` 次的属性 token。
 
     返回按证据数降序的英文小写词表（可直接拿去匹英文商品标题），最多 :data:`AFFINITY_MAX_TERMS` 个。
@@ -47,7 +46,8 @@ async def affinity_terms(user_id: str, store: PreferenceStore | None = None) -> 
     if not user_id or AFFINITY_MAX_TERMS <= 0:
         return []
 
-    favorites = await (store or get_store()).read_favorites(user_id)  # 读失败已在 store 内降级为空
+    # 读失败已在 store 内降级为空
+    favorites = await (store or get_user_data_store()).read_favorites(user_id)
 
     counter: Counter[str] = Counter()
     for fav in favorites:

@@ -56,14 +56,14 @@ class TestTierBoundaries:
     def test_budget_disabled_is_main(self, tmp_path: Path, monkeypatch: Any) -> None:
         monkeypatch.setenv("TOKEN_BUDGET_USD", "0")
         with thread_scope("t", tmp_path):
-            tb.reset_tree()
+            tb.reset_run()
             _spend(10.0, "m1")  # 花爆也不降级——没配预算 = 预算充裕
             assert mr.current_tier() is Tier.MAIN
-            tb.reset_tree()
+            tb.reset_run()
 
     def test_tiers_step_down_as_budget_burns(self, tmp_path: Path, budget_env: None) -> None:
         with thread_scope("t", tmp_path):
-            tb.reset_tree()
+            tb.reset_run()
             assert mr.current_tier() is Tier.MAIN  # 剩 100%
 
             _spend(0.40, "m1")  # 剩 60% > 50%
@@ -77,7 +77,7 @@ class TestTierBoundaries:
 
             _spend(0.12, "m4")  # 剩 3% ≤ 5%
             assert mr.current_tier() is Tier.FALLBACK
-            tb.reset_tree()
+            tb.reset_run()
 
     def test_tier_is_ordered(self) -> None:
         """IntEnum 可比大小——``tier >= Tier.MINIMAL`` 是预算闸的判据。"""
@@ -85,10 +85,10 @@ class TestTierBoundaries:
 
     def test_remaining_ratio_floors_at_zero(self, tmp_path: Path, budget_env: None) -> None:
         with thread_scope("t", tmp_path):
-            tb.reset_tree()
+            tb.reset_run()
             _spend(3.0, "m1")  # 花掉 300% 预算
             assert tb.remaining_ratio() == 0.0  # 不为负
-            tb.reset_tree()
+            tb.reset_run()
 
 
 # ``TestTierModel`` 已随 ``tier_model`` / ``_lite_llm`` 一并删除：那两个函数唯一的下游是

@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 
 from app.api.context import get_thread_id
-from app.memory.store import HistoryEntry, PreferenceStore, get_store
+from app.memory.store import HistoryEntry, UserDataStore, get_user_data_store
 
 logger = logging.getLogger(__name__)
 
@@ -53,14 +53,14 @@ def format_history(entries: list[HistoryEntry]) -> str:
     return "\n".join(lines)
 
 
-async def build_history_block(user_id: str, store: PreferenceStore | None = None) -> str:
+async def build_history_block(user_id: str, store: UserDataStore | None = None) -> str:
     """读出用户行为历史并格式化为可注入文本（``get_system_prompt`` 的 recent_history 实参）。
 
     无 user_id（匿名）直接返回占位，不碰 Store。历史条目少（每种 kind 几条），全量注入即可。
     """
     if not user_id:
         return format_history([])
-    st = store or get_store()
+    st = store or get_user_data_store()
     return format_history(await st.read_history(user_id))
 
 
@@ -68,7 +68,7 @@ async def record_search_history(
     user_id: str,
     content: str,
     source_session: str | None = None,
-    store: PreferenceStore | None = None,
+    store: UserDataStore | None = None,
 ) -> None:
     """记一条 ``search`` 行为历史（每 kind 保留最近 ``HISTORY_MAX_PER_KIND`` 条 + 30 天 TTL）。
 
@@ -79,7 +79,7 @@ async def record_search_history(
     if not user_id or not content.strip():
         return
     session = (source_session or get_thread_id()) or ""
-    st = store or get_store()
+    st = store or get_user_data_store()
     await st.write_history(
         user_id, HistoryEntry(kind="search", content=content, source_session=session)
     )

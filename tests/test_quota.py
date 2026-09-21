@@ -127,13 +127,13 @@ async def test_remaining_usd_caps_task_budget(monkeypatch: Any, tmp_path: Any) -
     with thread_scope("t-cap", tmp_path):
         token_budget.set_task_cap(left)
         assert abs(token_budget.budget_cap_usd() - 0.03) < 1e-6  # 被剩余额度压低了
-        token_budget.reset_tree()
+        token_budget.reset_run()
 
     # 剩余额度比单任务预算还宽时，cap 不该被抬高——它是上限，不是目标值。
     with thread_scope("t-cap2", tmp_path):
         token_budget.set_task_cap(10.0)
         assert abs(token_budget.budget_cap_usd() - 0.50) < 1e-6
-        token_budget.reset_tree()
+        token_budget.reset_run()
 
 
 async def test_prompt_version_recorded_and_not_erased(client: AsyncClient) -> None:

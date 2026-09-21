@@ -33,26 +33,26 @@ import itertools
 import logging
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 
 from pydantic import BaseModel, Field
 
-from app.api.context import get_session_dir
+from app.api.run_state import clear_run_slot, peek_run_slot, run_slot
 from app.tools.schemas import ItemCandidate
-from app.utils.env import env_int
 from app.utils.terms import term_hits
 
 logger = logging.getLogger("shoppingx.bundle")
 
 # 槽位数硬上限：「一套」的粒度是子品类不是 SKU，拆到 6 个以上就是过度拆解（且组合枚举
 # 规模按槽数指数涨）。planner 的 validator 与 register_slot 都按它封顶。
-MAX_SLOTS = env_int("BUNDLE_MAX_SLOTS", 6)
+MAX_SLOTS = 6
 # 每槽进组合枚举的候选上限：组合规模 = (每槽候选+1)^槽数，5×6 槽 ≈ 4.7 万组合，纯 Python
 # 毫秒级。再大收益也小——第 6 名靠分数进组合的概率已经很低。
-TOP_PER_SLOT = env_int("BUNDLE_TOP_PER_SLOT", 5)
+TOP_PER_SLOT = 5
 # 并列模式下每个子需求展示几件。「一套齐」每槽只能要一件（配套），并列需求则是**各给一份
 # 推荐**——3 件够用户在每类里做选择，再多会把三类的卡片堆成一屏刷不完。
-PARALLEL_PER_SLOT = env_int("PARALLEL_PER_SLOT", 3)
+PARALLEL_PER_SLOT = 3
 
 # 槽位的两种形态。**是同一套槽位机制的两种消费方式**，共用登记 / 打标 / 分组 rerank / 报告：
 #   bundle   —— 「一套齐」：配套、共享**总预算**、essential 必选 optional 可砍，跨槽做组合
@@ -89,30 +89,29 @@ class BundleSlot(BaseModel):
     )
 
 
-# ── 会话级槽位登记（同 _candidates 的「按 session_dir 聚合的模块级 dict」套路）──────────
-# 全部只活一轮：run_agent 收尾 reset_session_bundle() 清掉。
-# session_dir -> 槽位定义（planner 写、picker / item_search 读）
-_BUNDLE: dict[str, list[BundleSlot]] = {}
-# session_dir -> 本轮真正检索过的槽名（item_search 盖章时记）。用来区分「搜了但没货」
-# （essential 缺货，要如实报）与「压根没搜」（用户在 ask_user 里删掉的槽，静默不列）。
-_SEARCHED: dict[str, set[str]] = {}
-# session_dir -> 最近一次组合优选的报告（picker 写、shopping_summary 注入文案时读）。
-_REPORT: dict[str, dict[str, Any]] = {}
-# session_dir -> 用户在组成确认里明确不要的槽名（reconcile_slots_from_reply 记）。register_slot
-# 据此拒绝复活：模型检索时再传这个词不代表用户改了主意。跨轮不保留——下一轮用户怎么说，
-# planner 就按原话重拆。
-_DECLINED: dict[str, list[str]] = {}
-# session_dir -> 槽位形态（SLOT_MODE_*），与槽表同生命周期。
-_MODE: dict[str, str] = {}
+# ── 会话级槽位登记（住 app.api.run_state 的 run 状态表，按 session_dir 聚合）──────────
+@dataclass
+class _BundleState:
+    """本轮的槽位状态。**全部只活一轮**：run_agent 收尾 reset_session_bundle() 清掉。"""
+
+    # 槽位定义（planner 写、picker / item_search 读）。
+    slots: list[BundleSlot] = field(default_factory=list)
+    # 本轮真正检索过的槽名（item_search 盖章时记）。用来区分「搜了但没货」（essential 缺货，
+    # 要如实报）与「压根没搜」（用户在 ask_user 里删掉的槽，静默不列）。
+    searched: set[str] = field(default_factory=set)
+    # 最近一次组合优选的报告（picker 写、shopping_summary 注入文案时读）。
+    report: dict[str, Any] | None = None
+    # 用户在组成确认里明确不要的槽名（reconcile_slots_from_reply 记）。register_slot 据此拒绝
+    # 复活：模型检索时再传这个词不代表用户改了主意。跨轮不保留——下一轮用户怎么说，planner
+    # 就按原话重拆。
+    declined: list[str] = field(default_factory=list)
+    # 槽位形态（SLOT_MODE_*），与槽表同生命周期。
+    mode: str = SLOT_MODE_BUNDLE
+
 
 # 老会话历史里 item_search 返回过「slot: s2」这类槽 id（槽名即身份之前的格式），模型可能照抄
 # 回来——这种引用不当成一个叫「s2」的新品类去建槽。
 _LEGACY_ID_RE = re.compile(r"s\d+")
-
-
-def _key() -> str | None:
-    sd = get_session_dir()
-    return str(sd) if sd is not None else None
 
 
 def set_session_bundle(slots: Iterable[BundleSlot], mode: str | None = None) -> None:
@@ -123,8 +122,8 @@ def set_session_bundle(slots: Iterable[BundleSlot], mode: str | None = None) -> 
     都走这个默认值——它们改的是槽表，不该顺手把形态重置回 bundle，那会让并列轮在用户确认
     组成后突然变成「一套齐」。
     """
-    k = _key()
-    if k is None:
+    st = run_slot(_BundleState)
+    if st is None:
         return
     seen: set[str] = set()
     cleaned: list[BundleSlot] = []
@@ -135,21 +134,21 @@ def set_session_bundle(slots: Iterable[BundleSlot], mode: str | None = None) -> 
             cleaned.append(s)
     if not cleaned:
         return
-    _BUNDLE[k] = cleaned[:MAX_SLOTS]
+    st.slots = cleaned[:MAX_SLOTS]
     if mode is not None:
-        _MODE[k] = mode if mode in (SLOT_MODE_BUNDLE, SLOT_MODE_PARALLEL) else SLOT_MODE_BUNDLE
+        st.mode = mode if mode in (SLOT_MODE_BUNDLE, SLOT_MODE_PARALLEL) else SLOT_MODE_BUNDLE
 
 
 def get_session_bundle() -> list[BundleSlot]:
     """读本轮登记的槽位。无会话作用域（单测直调）或本轮没登记 → 空列表 = 不是槽位轮。"""
-    k = _key()
-    return list(_BUNDLE.get(k, [])) if k is not None else []
+    st = peek_run_slot(_BundleState)
+    return list(st.slots) if st is not None else []
 
 
 def get_session_mode() -> str:
     """本轮的槽位形态。没登记过返回 bundle——那种轮次槽 <2、下游根本不看形态。"""
-    k = _key()
-    return _MODE.get(k, SLOT_MODE_BUNDLE) if k is not None else SLOT_MODE_BUNDLE
+    st = peek_run_slot(_BundleState)
+    return st.mode if st is not None else SLOT_MODE_BUNDLE
 
 
 def _match_name(candidate: str, target: str) -> bool:
@@ -190,12 +189,12 @@ def register_slot(ref: str) -> str:
     hit = resolve_slot(ref)
     if hit is not None:
         return hit.name
-    k = _key()
-    if k is None or not ref or _LEGACY_ID_RE.fullmatch(ref):
+    st = run_slot(_BundleState)
+    if st is None or not ref or _LEGACY_ID_RE.fullmatch(ref):
         return ""
-    if any(_match_name(d, ref) for d in _DECLINED.get(k, [])):
+    if any(_match_name(d, ref) for d in st.declined):
         return ""
-    slots = get_session_bundle()
+    slots = list(st.slots)
     if len(slots) >= MAX_SLOTS:
         return ""
     if slots:
@@ -218,10 +217,10 @@ def reconcile_slots_from_reply(reply: str, offered: Iterable[str] | None = None)
     「水杯换大点的」这类单槽追问不会误伤。``offered``（ask_user 的 options 标签）非空时
     只删标签里出现过的槽——没上问卷的槽不算被问及，不错杀。返回删掉的槽名（日志用）。
     """
-    k = _key()
+    st = run_slot(_BundleState)
     reply = (reply or "").strip()
-    slots = get_session_bundle()
-    if k is None or not reply or not slots:
+    slots = list(st.slots) if st is not None else []
+    if st is None or not reply or not slots:
         return []
     mentioned = {s.name for s in slots if s.name in reply}
     if len(mentioned) < 2:
@@ -234,7 +233,7 @@ def reconcile_slots_from_reply(reply: str, offered: Iterable[str] | None = None)
     ]
     if not removed:
         return []
-    _DECLINED.setdefault(k, []).extend(removed)
+    st.declined.extend(removed)
     set_session_bundle([s for s in slots if s.name not in removed])
     logger.info("组成确认核销：删槽 %s，保留 %s", removed, sorted(mentioned))
     return removed
@@ -246,44 +245,37 @@ def note_slot_searched(ref: str) -> None:
     漂移名先归到规范名；解析不出的原样记（报告层对不上号，等价于「没搜过」，失效方向与
     漏记一致）。
     """
-    k = _key()
+    st = run_slot(_BundleState)
     ref = (ref or "").strip()
-    if k is None or not ref:
+    if st is None or not ref:
         return
     s = resolve_slot(ref)
-    _SEARCHED.setdefault(k, set()).add(s.name if s is not None else ref)
+    st.searched.add(s.name if s is not None else ref)
 
 
 def searched_slots() -> set[str]:
     """本轮检索过的槽名集合。"""
-    k = _key()
-    return set(_SEARCHED.get(k, set())) if k is not None else set()
+    st = peek_run_slot(_BundleState)
+    return set(st.searched) if st is not None else set()
 
 
 def set_bundle_report(report: dict[str, Any]) -> None:
     """登记最近一次组合优选的分配报告（picker 写、shopping_summary 注入文案时读）。"""
-    k = _key()
-    if k is not None:
-        _REPORT[k] = report
+    st = run_slot(_BundleState)
+    if st is not None:
+        st.report = report
 
 
 def get_bundle_report() -> dict[str, Any] | None:
     """读最近一次组合报告；本轮没跑过组合优选返回 None。"""
-    k = _key()
-    return _REPORT.get(k) if k is not None else None
+    st = peek_run_slot(_BundleState)
+    return st.report if st is not None else None
 
 
 def reset_session_bundle() -> None:
-    """清本会话的槽位状态：``run_agent`` 收尾调（槽只活一轮，也防模块级 dict 无界增长）；
+    """清本会话的槽位状态：``run_agent`` 收尾调（槽只活一轮，也防 run 状态表无界增长）；
     planner 判换域时调（旧套装与新需求无关）。"""
-    k = _key()
-    if k is None:
-        return
-    _BUNDLE.pop(k, None)
-    _SEARCHED.pop(k, None)
-    _REPORT.pop(k, None)
-    _DECLINED.pop(k, None)
-    _MODE.pop(k, None)
+    clear_run_slot(_BundleState)
 
 
 # ── 组合优选（Multiple-Choice Knapsack，穷举）──────────────────────────────────

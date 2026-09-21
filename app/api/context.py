@@ -17,9 +17,11 @@ import time
 import uuid
 from collections.abc import Sequence
 from contextvars import ContextVar
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from app.api.run_state import peek_run_slot, run_slot
 from app.utils.env import env_bool
 
 if TYPE_CHECKING:
@@ -89,15 +91,35 @@ def take_first_event_latency() -> float | None:
     return None if started is None else time.time() - started
 
 
-# 当前会话的短期偏好状态 P_t（本会话逐轮累积的约束）——run_agent 入口从 session.json 读回后
-# 写入、**planner 在识别出本轮约束后当轮改写**，供 item_picker 等工具机制性读取并强制执行
-# （把「不要塑料」「预算 ≤X」从 prompt 建议升为硬保证，不靠模型每轮转述）。
-#
-# 同 _DEST_COUNTRY 用「按 session_dir 聚合的模块级 dict」而非裸 ContextVar，理由见下面那段
-# 注释——planner 与 item_picker 各自在独立 context 里跑，前者 set 的 ContextVar 后者读不到。
-# P_t 原本是裸 ContextVar 且侥幸没暴露这个坑：它此前只由 run_agent 入口（主 context）写一次，
-# 从没有工具写过它。planner 一开始写 P_t，同一个坑就踩第三次了。
-_SESSION_PT: dict[str, "SessionPrefState"] = {}
+@dataclass
+class _RunScope:
+    """本模块在**一次 run** 里持有的全部状态（住 :mod:`app.api.run_state` 的总表）。
+
+    这四格都按 session_dir 聚合而非裸 ContextVar：planner 与 item_picker / shipping_calc 是几个
+    不同的工具、各自在独立 context 里跑，前者 ``set`` 的 ContextVar 后者读不到（子 task 建立时
+    拷贝一份 context，回写不冒泡）。P_t 原本是裸 ContextVar 且侥幸没暴露这个坑——它此前只由
+    run_agent 入口（主 context）写一次；planner 一开始写 P_t，同一个坑就要踩第三次。
+    """
+
+    # 本会话的短期偏好状态 P_t（逐轮累积的约束）——run_agent 入口从 session.json 读回后写入、
+    # **planner 在识别出本轮约束后当轮改写**，供 item_picker 等工具机制性读取并强制执行
+    # （把「不要塑料」「预算 ≤X」从 prompt 建议升为硬保证，不靠模型每轮转述）。
+    pt: "SessionPrefState | None" = None
+
+    # planner 本轮判定的任务清单（recommend / price_compare / landed_cost / ...）——「用户要不要
+    # 比价」同样是意图判断，只有 planner 有依据。收线通告读它来定向（无比价诉求时提示模型跳过
+    # price_compare / shipping_calc，见 harness.hooks.progress）。
+    tasks: list[str] = field(default_factory=list)
+
+    # planner 本轮判定的收货国：(ISO 码, 是否为系统假设值)。收货国决定关税免征额（US $0 vs
+    # CN $7 vs AU $660，差两个数量级）。assumed=True 表示用户从没说过、是 env 默认兜的，此时
+    # 回复必须标注假设，且**不该**把它当用户事实沉进会话 slots / 长期记忆。
+    dest_country: tuple[str, bool] | None = None
+
+    # 本轮**原始用户 query**（未经任何 LLM 转述）——工具侧唯一的「用户到底说了什么」确定性
+    # 信号源。planner 的 domains / category 都是 LLM 结构化输出，「合法但错」时下游拿它当锚会
+    # 静默反转（品类门反着杀）；反证只能靠独立信号，而独立信号只有原文词面。
+    original_query: str = ""
 
 # 本轮「已沉淀事实」累加器——curator 写成功即把 (content, key) 记这里，
 # 供 run_agent 收尾时汇总进 learned_preferences 返回、并经 AGUI 推给前端「记住了 … ✕」那一行。
@@ -108,37 +130,6 @@ _SESSION_PT: dict[str, "SessionPrefState"] = {}
 _learned_prefs_var: ContextVar[list[dict[str, str]] | None] = ContextVar(
     "shoppingx_learned_prefs", default=None
 )
-
-# planner 本轮判定的任务清单（recommend / price_compare / landed_cost / ...）——「用户要不要比价」
-# 同样是意图判断，只有 planner 有依据。收线通告读它来定向（无比价诉求时提示模型跳过
-# price_compare / shipping_calc，见 harness.hooks.progress）。按 session_dir 聚合（理由见
-# _DEST_COUNTRY）。
-_SESSION_TASKS: dict[str, list[str]] = {}
-
-# planner 本轮判定的收货国（ISO 码）——决定关税免征额（US $0 vs CN $7 vs AU $660，差两个数量级）。
-# 同 _RETRIEVAL_MODE 用「按 session_dir 聚合的模块级 dict」而非裸 ContextVar：planner 与
-# shipping_calc 是两个工具、各自在独立 context 里跑，前者 set 的 ContextVar 后者读不到。
-# 存 (ISO 码, 是否为系统假设值)：assumed=True 表示用户从没说过收货国、是 env 默认兜的，
-# 此时回复必须标注假设，且**不该**把它当用户事实沉进会话 slots / 长期记忆。
-_DEST_COUNTRY: dict[str, tuple[str, bool]] = {}
-
-# 本轮**原始用户 query**（未经任何 LLM 转述）——工具侧唯一的「用户到底说了什么」确定性信号源。
-# planner 的 domains / category 都是 LLM 结构化输出，「合法但错」时下游拿它当锚会静默反转
-# （品类门反着杀）；反证只能靠独立信号，而独立信号只有原文词面。按 session_dir 聚合（理由见
-# _DEST_COUNTRY）。
-_ORIGINAL_QUERY: dict[str, str] = {}
-
-
-def set_thread_context(thread_id: str, session_dir: Path, user_id: str | None = None) -> None:
-    """在请求入口写入本次任务的身份信息。
-
-    一般通过 ``thread_scope`` 调用以保证离开作用域时自动还原；直接调用时不返回
-    token，无法 reset，仅适用于进程级一次性绑定（如离线脚本）。
-    """
-    _thread_id_var.set(thread_id)
-    _session_dir_var.set(session_dir)
-    _user_id_var.set(user_id)
-
 
 def get_thread_id() -> str | None:
     """读取当前任务的 thread_id；无上下文（如离线脚本）时返回 None。"""
@@ -222,29 +213,23 @@ def set_session_pt(pt: "SessionPrefState | None") -> None:
     """写入本会话的短期状态 P_t。两个写入点：``run_agent`` 入口（从 session.json 读回后）与
     ``planner``（识别出本轮约束后当轮改写）。按 session_dir 聚合，故**跨工具可见**；fork 子 Agent
     继承父 session_dir，因此天然读到同一份。无 session_dir（单测直调工具）时静默丢弃。"""
-    sd = get_session_dir()
-    if sd is None:
-        return
-    if pt is None:
-        _SESSION_PT.pop(str(sd), None)
-    else:
-        _SESSION_PT[str(sd)] = pt
+    st = run_slot(_RunScope)
+    if st is not None:
+        st.pt = pt
 
 
 def get_session_pt() -> "SessionPrefState | None":
     """读取本会话的 P_t；未设置（无会话上下文 / 首轮空态）时返回 None。"""
-    sd = get_session_dir()
-    if sd is None:
-        return None
-    return _SESSION_PT.get(str(sd))
+    st = peek_run_slot(_RunScope)
+    return st.pt if st is not None else None
 
 
 def reset_session_pt() -> None:
-    """清掉本会话的 P_t（run_agent 收尾，与 reset_session_tasks 对称——模块级 dict 不像
+    """清掉本会话的 P_t（run_agent 收尾，与 reset_session_tasks 对称——run 状态表不像
     ContextVar 会随 task 结束自动回收，不清就会按 session_dir 一直攒着）。"""
-    sd = get_session_dir()
-    if sd is not None:
-        _SESSION_PT.pop(str(sd), None)
+    st = peek_run_slot(_RunScope)
+    if st is not None:
+        st.pt = None
 
 
 def get_session_dir() -> Path | None:
@@ -258,31 +243,29 @@ def set_original_query(query: str) -> None:
     给 planner 的域反证与 item_picker 的品类门锚核验当独立信号：LLM 结构化输出互相印证
     没有意义（domains 与 category 同出一张嘴），能反证它们的只有用户原文的词面。
     """
-    sd = get_session_dir()
-    if sd is not None:
-        _ORIGINAL_QUERY[str(sd)] = query
+    st = run_slot(_RunScope)
+    if st is not None:
+        st.original_query = query
 
 
 def get_original_query() -> str:
     """读本轮原始用户 query；无会话作用域（单测）返回空串 = 无反证证据，一切照旧。"""
-    sd = get_session_dir()
-    if sd is None:
-        return ""
-    return _ORIGINAL_QUERY.get(str(sd), "")
+    st = peek_run_slot(_RunScope)
+    return st.original_query if st is not None else ""
 
 
 def reset_original_query() -> None:
-    """收尾清理（模块级 dict 按 session_dir 为键，不清会无界增长）。"""
-    sd = get_session_dir()
-    if sd is not None:
-        _ORIGINAL_QUERY.pop(str(sd), None)
+    """收尾清理（run 状态按 session_dir 为键，不清会无界增长）。"""
+    st = peek_run_slot(_RunScope)
+    if st is not None:
+        st.original_query = ""
 
 
 def set_session_tasks(tasks: Sequence[str]) -> None:
     """记下 planner 本轮判定的任务清单。由 planner 工具写，收线通告读。"""
-    sd = get_session_dir()
-    if sd is not None:
-        _SESSION_TASKS[str(sd)] = list(tasks)
+    st = run_slot(_RunScope)
+    if st is not None:
+        st.tasks = list(tasks)
 
 
 def get_session_tasks() -> list[str]:
@@ -291,20 +274,18 @@ def get_session_tasks() -> list[str]:
     空列表是安全侧：读方（转移通告）只在**确定无比价诉求**时才提示跳过 price_compare，
     判不出来就不提示——多调一次工具只是慢，错误提示跳过会漏掉用户真要的比价。
     """
-    sd = get_session_dir()
-    if sd is None:
-        return []
-    return list(_SESSION_TASKS.get(str(sd), []))
+    st = peek_run_slot(_RunScope)
+    return list(st.tasks) if st is not None else []
 
 
 def reset_session_tasks() -> None:
     """清掉本会话的任务判定（``run_agent`` 开局 + 收尾调）。
 
-    开局清防上一轮残留、收尾清防模块级 dict 无界增长。
+    开局清防上一轮残留、收尾清防 run 状态表无界增长。
     """
-    sd = get_session_dir()
-    if sd is not None:
-        _SESSION_TASKS.pop(str(sd), None)
+    st = peek_run_slot(_RunScope)
+    if st is not None:
+        st.tasks = []
 
 
 def set_dest_country(country: str, assumed: bool = False) -> None:
@@ -314,9 +295,9 @@ def set_dest_country(country: str, assumed: bool = False) -> None:
     每轮自由填——同 currency 的老教训（「预算 500」曾被轮流猜成 ₹/¥/$）。判完写这里，让
     shipping_calc 读得到，而不是指望模型每次都记得把参数传对。
     """
-    sd = get_session_dir()
-    if sd is not None:
-        _DEST_COUNTRY[str(sd)] = (country.strip().upper(), assumed)
+    st = run_slot(_RunScope)
+    if st is not None:
+        st.dest_country = (country.strip().upper(), assumed)
 
 
 def get_dest_country() -> str:
@@ -326,11 +307,9 @@ def get_dest_country() -> str:
     认定的那个国家。默认值与 ``app.recall.geo.DEFAULT_DEST_COUNTRY`` 同源——这里单独读一次 env
     而不 import geo，是为了不把整个 recall 包（qdrant / towers 等重模块）拖进 api 底层。
     """
-    sd = get_session_dir()
-    if sd is not None:
-        hit = _DEST_COUNTRY.get(str(sd))
-        if hit:
-            return hit[0]
+    st = peek_run_slot(_RunScope)
+    if st is not None and st.dest_country:
+        return st.dest_country[0]
     return (os.getenv("DEFAULT_DEST_COUNTRY", "CN") or "CN").strip().upper()
 
 
@@ -340,11 +319,9 @@ def is_dest_country_assumed() -> bool:
     curate_turn 用它决定要不要把收货国沉进会话 slots：假设值不是用户事实，沉下去会让
     「系统默认」在下一轮伪装成「用户说过」，越滚越真。
     """
-    sd = get_session_dir()
-    if sd is not None:
-        hit = _DEST_COUNTRY.get(str(sd))
-        if hit:
-            return hit[1]
+    st = peek_run_slot(_RunScope)
+    if st is not None and st.dest_country:
+        return st.dest_country[1]
     return True
 
 
@@ -352,11 +329,11 @@ def reset_dest_country() -> None:
     """清掉本会话的收货国（``run_agent`` 开局 + 收尾调）。
 
     开局清：同 thread 续聊换了收货国时，别让上一轮的国家赖着不走。
-    收尾清：模块级 dict 按 session_dir 为键，不清会无界增长。
+    收尾清：run 状态按 session_dir 为键，不清会无界增长。
     """
-    sd = get_session_dir()
-    if sd is not None:
-        _DEST_COUNTRY.pop(str(sd), None)
+    st = peek_run_slot(_RunScope)
+    if st is not None:
+        st.dest_country = None
 
 
 def begin_learned_prefs() -> None:

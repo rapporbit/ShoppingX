@@ -1,6 +1,6 @@
 """M1 示例共用的玩具工具与最小版 system prompt。
 
-被 min_loop.py / stream.py / dispatch.py 共用，避免重复。工具按主线
+被 min_loop.py / stream.py 共用，避免重复。工具按主线
 规范写：async + Pydantic 输出 + 给模型看的 docstring + 走 ``app.tools._shell`` 的 ``@tool``
 外壳；实现是假数据，重点演示循环，真实版见 app/tools/。
 

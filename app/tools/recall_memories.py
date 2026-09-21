@@ -20,7 +20,7 @@ from app.api.context import get_user_id
 from app.memory.fact_store import get_fact_store
 from app.memory.facts import MEMORY_DISABLED_TEXT, MemoryFact, memory_enabled
 from app.memory.injector import format_history
-from app.memory.store import get_store
+from app.memory.store import get_user_data_store
 from app.tools._shell import tool
 
 #: 一次最多回多少条，防止老用户的全量记忆灌爆上下文。
@@ -65,7 +65,7 @@ async def recall_memories(topic: str = "") -> RecallMemoriesOutput:
 
     low = (topic or "").strip().lower()
     facts = await get_fact_store().search_facts(user_id, low)
-    history = list(await get_store().read_history(user_id))
+    history = list(await get_user_data_store().read_history(user_id))
 
     note = ""
     if not facts:

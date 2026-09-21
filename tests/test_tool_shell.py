@@ -199,10 +199,10 @@ def test_read_only_flags_are_exactly_the_read_side() -> None:
 
 
 @pytest.mark.asyncio
-async def test_build_toolkit_roles_produce_schemas() -> None:
+async def test_build_toolkit_produces_schemas() -> None:
     from app.agent.tool_registry import build_toolkit
 
-    main = await build_toolkit("main")
+    main = await build_toolkit()
     schemas = await main.get_tool_schemas()
     # 主 Agent 拿全集：19 业务工具（S3 起含 present_guide）
     # + 框架内置的 skill 阅读器 Skill（批 4-3：注册了 skill 就自动挂上，只读、权限恒 ALLOW）
@@ -210,11 +210,6 @@ async def test_build_toolkit_roles_produce_schemas() -> None:
     names = {s["function"]["name"] for s in schemas}
     assert "Skill" in names and "task_dispatch" not in names
     assert all(s["function"]["description"] for s in schemas)
-
-    with pytest.raises(ValueError):
-        await build_toolkit("nope")
-    with pytest.raises(ValueError):
-        await build_toolkit("search")  # SearchAgent 已在 A4 删除
 
 
 async def test_content_and_artifact_tool_yields_structured_json() -> None:

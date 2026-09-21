@@ -1,0 +1,21 @@
+# k6 压测台的叠加层：只给 mysql / redis 开宿主机端口。
+#
+# 为什么要单独一份而不是改 multi.yml：multi.yml 是给 scripts/multi_scenarios.py 的四个正确性
+# 场景用的，那套脚本靠 `docker exec` 进容器发请求，**不需要**任何对外端口，开了反而多一份与
+# 验收无关的差异。压测不一样——k6 和两个 stub 进程都跑在宿主机上，得连得进去。
+#
+# 跑法（只起这两个依赖，api/worker 用本地进程起，见 scripts/loadtest_stub_server.py 注释）::
+#
+#     docker compose -f docker/docker-compose.multi.yml \
+#                    -f docker/docker-compose.loadtest.yml up -d mysql redis
+#
+# 端口都往高位挪：3306 / 6379 常被本机其它服务（含 docker/docker-compose.yml 里的
+# shoppingx-redis）占着，撞上了不报错，只会连到错误的那一个。
+services:
+  mysql:
+    ports:
+      - "13306:3306"
+
+  redis:
+    ports:
+      - "16379:6379"

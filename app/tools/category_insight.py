@@ -55,8 +55,8 @@ RERANK_RELEVANCE_MIN = 0.005
 # 薄数据自报线：卡片数或卡片平均置信度（ETL 按样本量 + 措辞确定性自评）低于线时，返回里
 # 明说「库内数据薄、参考价值有限」——RAG 库是脏 CSV 聚合的，样本薄的品类「均价 / 爆款」
 # 不该被主 loop 当基准线拿去背书。工具自己诚实，比在 prompt 里教「什么时候别信它」可靠。
-THIN_DATA_CARD_MIN = env_int("INSIGHT_THIN_CARD_MIN", 3)
-THIN_DATA_CONF_MIN = env_float("INSIGHT_THIN_CONF_MIN", 0.5)
+THIN_DATA_CARD_MIN = 3
+THIN_DATA_CONF_MIN = 0.5
 
 # 品类洞察缓存（E 块）：品类知识弱时效、重复 / 近义查询多，缓存命中即省一整条 Hybrid + 精排。
 # 只缓 category_insight，**绝不缓 item_search 的价格 / 库存**（强时效）。阈值 0.92：品类近义才命中、

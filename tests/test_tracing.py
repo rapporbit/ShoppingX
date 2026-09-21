@@ -121,19 +121,6 @@ def test_turn_span_swallows_span_teardown_failure(monkeypatch: pytest.MonkeyPatc
         assert span == "span"  # 不抛即通过
 
 
-def test_scores_skipped_without_trace(monkeypatch: pytest.MonkeyPatch) -> None:
-    """本轮没有 trace（未启用观测）时，回注分数直接跳过——不该凭空造一条 trace 出来。"""
-    calls: list[Any] = []
-
-    class _Client:
-        def create_score(self, **kw: Any) -> None:
-            calls.append(kw)
-
-    monkeypatch.setattr(T, "_get_client", lambda: _Client())
-    T._current_trace_id.set(None)
-    T.record_trace_scores({"cache_hit_rate": 0.9})
-    assert calls == []
-
 
 def test_flush_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     """短命进程退出前的 flush 失败只记日志——评测结论已经算完了，不该因为上报失败而中断。"""

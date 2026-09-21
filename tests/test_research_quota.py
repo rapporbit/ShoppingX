@@ -12,10 +12,10 @@ from pathlib import Path
 import pytest
 
 import app.harness.hooks.budget as tg
-from app.api.context import _SESSION_TASKS, set_session_tasks
+from app.api.context import set_session_tasks
+from app.api.run_state import reset_run_state
 from app.harness.middleware import HarnessMiddleware
 from app.harness.retrieval_budget import (
-    _STATE,
     RESEARCH_SEARCH_QUOTA,
     charge_research,
     note_item_search,
@@ -32,12 +32,10 @@ SESSION_DIR = Path("/tmp/shoppingx-test-research-quota-session")
 
 @pytest.fixture(autouse=True)
 def _clean_tree() -> None:
-    """每条测试独立一个会话：fixture 不在 thread_scope 内，只能直接清 ``_STATE`` 的键。"""
-    _STATE.pop(str(SESSION_DIR), None)
-    _SESSION_TASKS.pop(str(SESSION_DIR), None)
+    """每条测试独立一个会话：fixture 不在 thread_scope 内，只能显式传 session_dir 清。"""
+    reset_run_state(SESSION_DIR)
     yield
-    _STATE.pop(str(SESSION_DIR), None)
-    _SESSION_TASKS.pop(str(SESSION_DIR), None)
+    reset_run_state(SESSION_DIR)
 
 
 def _gate() -> HarnessMiddleware:

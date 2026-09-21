@@ -159,11 +159,11 @@ def fake_redis() -> Iterator[FakeRedis]:
 
 @pytest.fixture(autouse=True)
 def _clean_memory_tables() -> Iterator[None]:
-    """每个测试跑完清空四张记忆表（偏好 / 行为历史 / 收藏 / 对话正文）。
+    """每个测试跑完清空几张共享表（行为历史 / 收藏 / 对话正文 / 额度 / 策略 / 会话）。
 
     **Mmem 之后必须有这道清理**：改造前每个测试拿 ``LocalFileStore(root=tmp_path)``，pytest 的
-    tmp_path 天然一测一目录、互不可见；现在三类数据都进了**同一个共享库**，一个测试写的 "u1"
-    偏好会被下一个测试读到——串出来的红是假红，且**先跑谁就变谁的锅**，极难查。
+    tmp_path 天然一测一目录、互不可见；现在这些数据都进了**同一个共享库**，一个测试写的 "u1"
+    收藏会被下一个测试读到——串出来的红是假红，且**先跑谁就变谁的锅**，极难查。
 
     ``messages`` 同理、且更容易串：测试里的 thread_id 常是 "t-1" 这类硬编码字面量，不清就会让
     下一个用例的「新会话」凭空带上一段前世的对话。
@@ -185,7 +185,6 @@ def _clean_memory_tables() -> Iterator[None]:
     async def _wipe() -> None:
         async with session_factory()() as db:
             for table in (
-                "preferences",
                 "history_records",
                 "favorites",
                 "messages",
