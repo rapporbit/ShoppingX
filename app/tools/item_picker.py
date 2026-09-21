@@ -36,6 +36,7 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Callable
 from typing import Annotated, NamedTuple
 
 from pydantic import BaseModel
@@ -47,13 +48,14 @@ from app.api.context import (
     get_session_pt,
     get_user_id,
 )
-from app.memory.assemble import assemble
+from app.memory.assemble import MemoryBundle, assemble
 from app.memory.domains import infer_domains_from_text
 from app.recall.reranker import get_reranker
 from app.recall.towers import get_tower_client
 from app.tools._args import StrListArg
 from app.tools._bundle import (
     SLOT_MODE_PARALLEL,
+    BundleOutcome,
     combine_bundle,
     combine_parallel,
     drop_pick_from_report,
@@ -449,33 +451,54 @@ async def _category_relevance(
     return scores, True, False
 
 
-@tool
-async def item_picker(
-    budget_usd: float | None = None,
-    exclude_keywords: StrListArg | None = None,
-    prefer_keywords: StrListArg | None = None,
-    must_have: StrListArg | None = None,
-    deprioritize_keywords: StrListArg | None = None,
-    top_k: int = PICK_DISPLAY_CAP,
-    candidates: Annotated[list[ItemCandidate] | None, InjectedToolArg] = None,
-) -> ItemPickerOutput:
-    """在已入池候选里按预算 + 硬约束 + 软偏好精挑（最多 3 件）；检索合流后系统会自动跑，通常不必调。
-    候选不用传。参数：budget_usd；exclude_keywords 硬淘汰词；must_have 正向硬约束（强加分不淘汰）；
-    prefer_keywords 软加分；deprioritize_keywords 软减分；均只放结构化字段覆盖不到的自由文本。
-    """
-    # 候选来源：会话登记表的**全部**候选——它自身就是「本轮该精挑的全集」（换品类那轮，planner
-    # 判 search 时已把上一轮读回的旧候选清掉；追问轮不清，全集即上一轮那批）。
-    #
-    # **模型不再传 item_ids**（这个参数已删）。它以前的活是把 10 个 id 逐个抄进入参——纯搬运，不含
-    # 任何决策（该精挑哪批是 planner 的 retrieval 早已定死的事），却要模型实打实解码一长串 id（实测
-    # 追问轮首次思考因此花掉 ~20s）。更糟的是：一个可选的 id 列表，就是给模型开了「我再自己筛一遍」
-    # 的口子，而它筛的时候既没有分数也没有权重——筛选是本工具的职责（同一课在 shopping_summary 上
-    # 已经学过一遍）。
-    #
-    # candidates 是 InjectedToolArg（模型侧不可见）：仅供直接调用 / 单测注入现成候选，绕开登记表。
-    if candidates is None:
-        candidates = registry_snapshot()
+def _resolve_candidates(candidates: list[ItemCandidate] | None) -> list[ItemCandidate]:
+    """① 之一：本轮该精挑的候选全集——调用方没注入就读会话登记表。
 
+    候选来源：会话登记表的**全部**候选——它自身就是「本轮该精挑的全集」（换品类那轮，planner
+    判 search 时已把上一轮读回的旧候选清掉；追问轮不清，全集即上一轮那批）。
+
+    **模型不再传 item_ids**（这个参数已删）。它以前的活是把 10 个 id 逐个抄进入参——纯搬运，不含
+    任何决策（该精挑哪批是 planner 的 retrieval 早已定死的事），却要模型实打实解码一长串 id（实测
+    追问轮首次思考因此花掉 ~20s）。更糟的是：一个可选的 id 列表，就是给模型开了「我再自己筛一遍」
+    的口子，而它筛的时候既没有分数也没有权重——筛选是本工具的职责（同一课在 shopping_summary 上
+    已经学过一遍）。
+
+    candidates 是 InjectedToolArg（模型侧不可见）：仅供直接调用 / 单测注入现成候选，绕开登记表。
+    """
+    if candidates is None:
+        return registry_snapshot()
+    return candidates
+
+
+class _PickInputs(NamedTuple):
+    """归一后的四格子词表 + 本轮生效预算 + 会话记忆装配结果（后续各阶段只读这一份）。
+
+    每个词桶都经 :func:`_split_specs` 切成「普通词 + 数值规格」两半：普通词走字面 / 语义两路，
+    数值规格走确定性 spec 专道。
+    """
+
+    exclude: list[str]  # 负向硬（Filter）：命中即淘汰
+    exclude_specs: list[tuple[float, str, str]]
+    attenuate: list[str]  # 负向软（Attenuator）：命中减分不淘汰
+    attenuate_specs: list[tuple[float, str, str]]
+    must: list[str]  # 正向硬（Matcher 高权重）：含 mem.must，打分用
+    must_specs: list[tuple[float, str, str]]
+    hard_must: list[str]  # 只含模型显式传的 must_have，**唯一**可进 rerank query 的那份
+    prefer: list[str]  # 正向软（Matcher）：命中加分
+    prefer_specs: list[tuple[float, str, str]]
+    affinity: list[str]  # 行为亲和（收藏聚合）：弱正向，已与本轮显式词去重
+    mem: MemoryBundle
+    budget_usd: float | None
+
+
+async def _prepare_inputs(
+    budget_usd: float | None,
+    exclude_keywords: list[str] | None,
+    prefer_keywords: list[str] | None,
+    must_have: list[str] | None,
+    deprioritize_keywords: list[str] | None,
+) -> _PickInputs:
+    """① 入参归一：模型本轮传的词 + 会话记忆 → 归一成英文、拆出数值规格、定下本轮预算。"""
     # 会话级约束的**唯一**入口：本轮 P_t（用户亲口说的「不要 X」）+ 收藏亲和，在 assemble 里
     # 装配一次（见其模块 docstring）。这里只负责把它和模型本轮传的词并起来。
     # **长期记忆不在这条路上**（M4）：它每轮注入给模型，由模型写进本函数的 exclude_keywords /
@@ -528,19 +551,46 @@ async def item_picker(
     # 本轮没显式传预算、但会话累积过预算 → 用 P_t 兜底（续聊改颜色不该丢掉上一轮的预算上限）。
     if budget_usd is None:
         budget_usd = mem.budget_usd
-    await monitor.report_tool_start("item_picker", count=len(candidates), budget=budget_usd)
+    return _PickInputs(
+        exclude=exclude,
+        exclude_specs=exclude_specs,
+        attenuate=attenuate,
+        attenuate_specs=attenuate_specs,
+        must=must,
+        must_specs=must_specs,
+        hard_must=hard_must,
+        prefer=prefer,
+        prefer_specs=prefer_specs,
+        affinity=affinity,
+        mem=mem,
+        budget_usd=budget_usd,
+    )
 
+
+class _Filtered(NamedTuple):
+    """② 的结果：幸存池 + 两类淘汰归因 + 诚实性标注 + 池内便宜度归一函数。"""
+
+    survivors: list[ItemCandidate]
+    excluded: list[str]
+    over_budget: list[str]
+    no_effect_excludes: list[str]
+    # 便宜度按**这一刻的幸存集合**归一：③ 的精排额度外出局发生在其后，刻意不重算。
+    cheapness: Callable[[ItemCandidate], float]
+
+
+def _hard_filter(candidates: list[ItemCandidate], inputs: _PickInputs) -> _Filtered:
+    """② 硬过滤（Filter）：命中排除词 / 超预算的出局，其余进幸存池。"""
     excluded: list[str] = []
     over_budget: list[str] = []
     survivors: list[ItemCandidate] = []
     for c in candidates:
         text = _searchable(c)
-        hit = next((kw for kw in exclude if _hits(kw, text)), None)
+        hit = next((kw for kw in inputs.exclude if _hits(kw, text)), None)
         if hit is None:
             # 排除桶里的数值规格（「不要14寸」）：标题标称尺寸容差内命中即淘汰——「14 inch」
             # 写法千变（14-inch/14in/14"），字面路挡不全，spec 专道按数值判。
             hit = next(
-                (d for v, u, d in exclude_specs if spec_verdict(v, u, text) == "match"), None
+                (d for v, u, d in inputs.exclude_specs if spec_verdict(v, u, text) == "match"), None
             )
         if hit is not None:
             excluded.append(c.item_id)
@@ -551,10 +601,13 @@ async def item_picker(
             logger.debug("item_picker 淘汰 %s：命中排除词 %s", c.title[:40], hit)
             continue
         price = _effective_price(c)
-        if budget_usd is not None and price is not None and price > budget_usd:
+        if inputs.budget_usd is not None and price is not None and price > inputs.budget_usd:
             over_budget.append(c.item_id)
             logger.debug(
-                "item_picker 淘汰 %s：超预算（%.2f > %.2f）", c.title[:40], price, budget_usd
+                "item_picker 淘汰 %s：超预算（%.2f > %.2f）",
+                c.title[:40],
+                price,
+                inputs.budget_usd,
             )
             continue
         survivors.append(c)
@@ -564,7 +617,7 @@ async def item_picker(
     # 拦截：0 命中常是正常的（池子里本来就没有塑料款），异常与否用户自己看得懂；命中过高的
     # 反方向（杀空池子）已有补搜闸兜（f057659）。
     no_effect_excludes = [
-        kw for kw in exclude if not any(_hits(kw, _searchable(c)) for c in candidates)
+        kw for kw in inputs.exclude if not any(_hits(kw, _searchable(c)) for c in candidates)
     ]
     if no_effect_excludes:
         logger.info("硬排除词整池 0 命中（未产生过滤效果）：%s", no_effect_excludes)
@@ -580,13 +633,31 @@ async def item_picker(
             return 0.5
         return (hi - price) / span
 
-    # 品类一致性相关性门：cross-encoder 对「干净品类 query」打分。召回是向量近邻，标题蹭词的
-    # 跨品类垃圾（water bottle **stickers**）向量分和真品拉不开（实测 0.60 vs 0.67），字面匹配
-    # 更拦不住（标题真含关键词）——只有 cross-encoder 拉得开（实测 0.97 vs 0.006）。
-    # 传 ``hard_must`` 而不是 ``must``：后者含 ``mem.must``（= P_t 的软偏好），拼进 query 会让
-    # 判据随 planner 每轮的自由发挥而变，执法结果跟着翻转——理由与实测数据见 hard_must 的定义处。
-    # hard_must 已是 _split_specs 剥掉数值规格、normalize_terms 归一成英文的普通词，正是要拼进
-    # rerank query 的那部分（prefer 不能拼，见 _category_relevance 的硬约束①）。
+    return _Filtered(survivors, excluded, over_budget, no_effect_excludes, _cheapness)
+
+
+class _Relevance(NamedTuple):
+    """③ 的结果：相关性分与门的执法状态。"""
+
+    survivors: list[ItemCandidate]  # 精排额度外出局之后的幸存池（门开启时会比入参短）
+    scores: dict[str, float]  # item_id → cross-encoder 相关分
+    on: bool  # 本轮门是否可执法
+    anchor_conflict: bool  # 锚分歧（category 与用户原文词面对不上）→ 本轮 fail-open
+    oncat_count: int | None
+    offcat_count: int | None
+
+
+async def _relevance_gate(survivors: list[ItemCandidate], hard_must: list[str]) -> _Relevance:
+    """③ 品类一致性相关性门：cross-encoder 对「干净品类 query」打分。
+
+    召回是向量近邻，标题蹭词的跨品类垃圾（water bottle **stickers**）向量分和真品拉不开
+    （实测 0.60 vs 0.67），字面匹配更拦不住（标题真含关键词）——只有 cross-encoder 拉得开
+    （实测 0.97 vs 0.006）。
+    传 ``hard_must`` 而不是 ``must``：后者含 ``mem.must``（= P_t 的软偏好），拼进 query 会让
+    判据随 planner 每轮的自由发挥而变，执法结果跟着翻转——理由与实测数据见 hard_must 的定义处。
+    hard_must 已是 _split_specs 剥掉数值规格、normalize_terms 归一成英文的普通词，正是要拼进
+    rerank query 的那部分（prefer 不能拼，见 _category_relevance 的硬约束①）。
+    """
     rerank_scores, rerank_on, anchor_conflict = await _category_relevance(survivors, hard_must)
     if rerank_on and len(rerank_scores) < len(survivors):
         # 精排额度（PICK_RERANK_K）之外的候选没有相关分，「判不了不定罪」会让它们绕过品类门；
@@ -605,20 +676,36 @@ async def item_picker(
             if (rr := rerank_scores.get(c.item_id)) is not None and rr < _RERANK_FLOOR
         )
         oncat_count = len(survivors) - offcat_count
+    return _Relevance(
+        survivors, rerank_scores, rerank_on, anchor_conflict, oncat_count, offcat_count
+    )
 
-    # 语义 Matcher + Attenuator（对齐论文式6/8）：对正/负软意图算候选的 embedding 相似度——正向 sim
-    # 加分（Matcher，抓「精致高级感」这类字面漏网的正向近邻）、负向 sim 取负减分（Attenuator，抓「塑
-    # 料感」这类负向近邻）。负向作独立减分项、不进正向 query 向量，躲开否定语义反向召回。标题**只
-    # 编码一次**、正负意图各编一次。仅当对应软意图非空 + 权重>0 + 有幸存候选时才编码；编码任一环失败
-    # 降级为纯关键词（不反噬主链路）。cosine clamp 到 ≥0（只「像→加/减」，不因不像反向奖惩）。
-    sem_match: dict[str, float] = {}  # 正软语义加分
-    sem_hard: dict[str, float] = {}  # 正硬语义强加分（must_have）
-    sem_penalty: dict[str, float] = {}  # 负软语义减分
+
+class _Semantic(NamedTuple):
+    """④ 的结果：三路 embedding 语义分（降级为纯关键词时三项皆空）。"""
+
+    match: dict[str, float]  # 正软语义加分
+    hard: dict[str, float]  # 正硬语义强加分（must_have）
+    penalty: dict[str, float]  # 负软语义减分
+
+
+async def _semantic_scores(survivors: list[ItemCandidate], inputs: _PickInputs) -> _Semantic:
+    """④ 语义 Matcher + Attenuator（对齐论文式6/8）。
+
+    对正/负软意图算候选的 embedding 相似度——正向 sim 加分（Matcher，抓「精致高级感」这类字面漏网
+    的正向近邻）、负向 sim 取负减分（Attenuator，抓「塑料感」这类负向近邻）。负向作独立减分项、不进
+    正向 query 向量，躲开否定语义反向召回。标题**只编码一次**、正负意图各编一次。仅当对应软意图非空
+    + 权重>0 + 有幸存候选时才编码；编码任一环失败降级为纯关键词（不反噬主链路）。cosine clamp 到
+    ≥0（只「像→加/减」，不因不像反向奖惩）。
+    """
+    sem_match: dict[str, float] = {}
+    sem_hard: dict[str, float] = {}
+    sem_penalty: dict[str, float] = {}
     # intent 只拼**普通词**（prefer/must/attenuate 已被 _split_specs 剥掉数值规格）：embedding
     # 对数字失明——"16 inch" 进了 hard_intent，14 寸候选照样拿接近满分的语义硬加分（badcase）。
-    pos_intent = " ".join(prefer) if _W_MATCH_SEM > 0 else ""
-    hard_intent = " ".join(must) if _W_MATCH_HARD_SEM > 0 else ""
-    neg_intent = " ".join(attenuate) if _W_ATTEN_SEM > 0 else ""
+    pos_intent = " ".join(inputs.prefer) if _W_MATCH_SEM > 0 else ""
+    hard_intent = " ".join(inputs.must) if _W_MATCH_HARD_SEM > 0 else ""
+    neg_intent = " ".join(inputs.attenuate) if _W_ATTEN_SEM > 0 else ""
 
     def _sims(item_mat: object, intent_vec: object) -> dict[str, float]:
         return {
@@ -640,36 +727,56 @@ async def item_picker(
         except Exception:
             logger.warning("item_picker 语义打分编码失败，降级纯关键词", exc_info=True)
             sem_match, sem_hard, sem_penalty = {}, {}, {}
+    return _Semantic(sem_match, sem_hard, sem_penalty)
+
+
+class _Scored(NamedTuple):
+    """⑤ 的结果：整池打分（Aggregator）的三种形态，各有各的消费方。"""
 
     # scored 用 4 元组：亲和命中（matched_aff）单独一路带出去，理由措辞与「你要的 X」区分开。
-    scored: list[tuple[float, list[str], list[str], ItemCandidate]] = []
+    # 已按综合分降序。
+    rows: list[tuple[float, list[str], list[str], ItemCandidate]]
     # 槽无关的 base 分（**不含便宜度**）：套装组合优选要按「槽内」重新归一便宜度——床垫
     # （$200 档）在全局归一里永远垫底、台灯（$20 档）永远满分，跨槽求和会被价格档位而非
     # 商品优劣主导（见 _bundle.combine_bundle）。
+    base_scores: dict[str, float]
+    matched_map: dict[str, list[str]]
+
+
+def _score_candidates(
+    rel: _Relevance,
+    inputs: _PickInputs,
+    sem: _Semantic,
+    cheapness: Callable[[ItemCandidate], float],
+) -> _Scored:
+    """⑤ 逐候选加权求和（Aggregator），按综合分降序。"""
+    scored: list[tuple[float, list[str], list[str], ItemCandidate]] = []
     base_scores: dict[str, float] = {}
     matched_map: dict[str, list[str]] = {}
-    for c in survivors:
+    for c in rel.survivors:
         text = _searchable(c)
-        matched = [kw for kw in prefer if _hits(kw, text)]
-        matched_must = [kw for kw in must if _hits(kw, text)]  # 正向硬命中（高权重）
-        penalized = [kw for kw in attenuate if _hits(kw, text)]
-        matched_aff = [kw for kw in affinity if _hits(kw, text)]  # 行为亲和命中（弱加分）
+        matched = [kw for kw in inputs.prefer if _hits(kw, text)]
+        matched_must = [kw for kw in inputs.must if _hits(kw, text)]  # 正向硬命中（高权重）
+        penalized = [kw for kw in inputs.attenuate if _hits(kw, text)]
+        matched_aff = [kw for kw in inputs.affinity if _hits(kw, text)]  # 行为亲和命中（弱加分）
         # 数值规格三态计分：match 并入对应档的命中（照常加分、进理由），conflict 减分沉底
         # （must 档按 _W_SPEC_CONFLICT，prefer 档与软避讳同权重），unknown 不奖不罚。
         spec_conflicts = 0
-        for v, u, d in must_specs:
+        for v, u, d in inputs.must_specs:
             verdict = spec_verdict(v, u, text)
             if verdict == "match":
                 matched_must.append(d)
             elif verdict == "conflict":
                 spec_conflicts += 1
-        for v, u, d in prefer_specs:
+        for v, u, d in inputs.prefer_specs:
             verdict = spec_verdict(v, u, text)
             if verdict == "match":
                 matched.append(d)
             elif verdict == "conflict":
                 penalized.append(d)
-        penalized += [d for v, u, d in attenuate_specs if spec_verdict(v, u, text) == "match"]
+        penalized += [
+            d for v, u, d in inputs.attenuate_specs if spec_verdict(v, u, text) == "match"
+        ]
         # 评分缺失记中性 0.5（同 _cheapness 的处理），避免把「没人评过」误判成「评分极低」。
         rating_norm = (c.rating / 5.0) if c.rating is not None else 0.5
         base = (
@@ -677,15 +784,15 @@ async def item_picker(
             + _W_MATCH_HARD * len(matched_must)  # 正硬：关键词命中强加分（不淘汰不匹配的）
             + _W_AFFINITY * len(matched_aff)  # 行为亲和：从收藏推断的弱正向
             + _W_RATING * rating_norm
-            + _W_MATCH_SEM * sem_match.get(c.item_id, 0.0)
-            + _W_MATCH_HARD_SEM * sem_hard.get(c.item_id, 0.0)  # 正硬：语义强加分
+            + _W_MATCH_SEM * sem.match.get(c.item_id, 0.0)
+            + _W_MATCH_HARD_SEM * sem.hard.get(c.item_id, 0.0)  # 正硬：语义强加分
             - _W_ATTEN * len(penalized)
-            - _W_ATTEN_SEM * sem_penalty.get(c.item_id, 0.0)
+            - _W_ATTEN_SEM * sem.penalty.get(c.item_id, 0.0)
             - _W_SPEC_CONFLICT * spec_conflicts  # 硬规格冲突：标题标称尺寸明确不合要求
         )
         # 相关性门（普通轮口径）：低于阈值判蹭词垃圾，**降权沉底不剔除**（容打分噪声——误杀
         # 一件真品的代价高于让垃圾多沉几名）。套装轮的「逐出槽位」在 combine_bundle 里另判。
-        rr = rerank_scores.get(c.item_id) if rerank_on else None
+        rr = rel.scores.get(c.item_id) if rel.on else None
         if rr is not None and rr < _RERANK_FLOOR:
             base -= _W_RERANK_MISS
         base_scores[c.item_id] = base
@@ -693,101 +800,248 @@ async def item_picker(
         matched_map[c.item_id] = matched_must + matched
         # 亲和命中单独一路带出去（第 3 位）：它在理由里的措辞必须和「你要的 X」区分开——用户没
         # 说过这个词，冒充成他说的就是编造事实。
-        scored.append((base + _W_CHEAP * _cheapness(c), matched_must + matched, matched_aff, c))
+        scored.append((base + _W_CHEAP * cheapness(c), matched_must + matched, matched_aff, c))
 
     scored.sort(key=lambda t: t[0], reverse=True)
+    return _Scored(scored, base_scores, matched_map)
 
-    # 槽位轮（会话里登记了 ≥2 槽，见 app.tools._bundle）按**形态**走两条分配路，代替「全池
-    # 排序取前 N」：bundle = 总预算内跨槽组合优选（每槽一件，essential 必选、optional 可砍）；
-    # parallel = 每类各取 top N、一类都不砍。不构成槽位轮（槽 <2 / 打标全失败只剩一组有货）
-    # 两者都返回 None，照常走普通精挑——失效方向安全：最差退化成现状行为。
-    #
-    # 分派放在 picker 里而不是 _bundle 内部：这一行是「本轮拿什么规则选货」的业务决策，
-    # 藏进机制层会让「为什么这轮没砍类」变得不可读。
+
+def _combine_slots(
+    rel: _Relevance, scored: _Scored, budget_usd: float | None
+) -> BundleOutcome | None:
+    """⑥ 之一：槽位轮的分配路；不构成槽位轮返回 None，由调用方退回普通精挑。
+
+    槽位轮（会话里登记了 ≥2 槽，见 app.tools._bundle）按**形态**走两条分配路，代替「全池
+    排序取前 N」：bundle = 总预算内跨槽组合优选（每槽一件，essential 必选、optional 可砍）；
+    parallel = 每类各取 top N、一类都不砍。不构成槽位轮（槽 <2 / 打标全失败只剩一组有货）
+    两者都返回 None，照常走普通精挑——失效方向安全：最差退化成现状行为。
+
+    分派放在 picker 里而不是 _bundle 内部：这一行是「本轮拿什么规则选货」的业务决策，
+    藏进机制层会让「为什么这轮没砍类」变得不可读。
+    """
     combine = combine_parallel if get_session_mode() == SLOT_MODE_PARALLEL else combine_bundle
-    outcome = combine(
-        survivors,
-        base_scores,
-        matched_map,
+    return combine(
+        rel.survivors,
+        scored.base_scores,
+        scored.matched_map,
         budget_usd,
         w_cheap=_W_CHEAP,
         w_slot_pref=_W_PREF,
-        slot_relevance=rerank_scores if rerank_on else None,
+        slot_relevance=rel.scores if rel.on else None,
         relevance_floor=_SLOT_RERANK_FLOOR,
         w_relevance=_W_SLOT_RERANK,
     )
-    picks: list[ItemCandidate] = []
-    if outcome is not None:
-        # 跨槽没有「本批最低价」这类可比统计（床垫和台灯比价没有意义），理由只写属性 /
-        # 命中偏好 / 评分价格；「哪槽花钱哪槽省」的相对叙事由组合报告承担（bundle + summary 注入）。
-        empty_stats = _BatchStats(None, None, None)
-        for p in outcome.chosen:
-            # 并列形态一类给好几件，同一款的颜色/包装变体会各占一张卡（bundle 每槽只有一件，
-            # 撞不上这个问题）。同槽内判重、**不补位**：这一类少一张卡，好过给用户两张一样的。
-            if any(q.slot == p.slot.name and _near_duplicate(p.cand, q) for q in picks):
-                drop_pick_from_report(p.cand.item_id)
-                continue
-            item = p.cand.model_copy()
-            # 归槽结果回写到 slot 字段（槽名）——盖章缺失、靠 keywords 兜底归槽的候选
-            # （主循环补搜没传 slot 的那批）全靠这行把槽位带到收尾卡片，否则前端落「其他」组
-            # （badcase 75aa84）。
-            item.slot = p.slot.name
-            # 套装理由不单列行为亲和（弱信号、组合叙事已够满，且避免把推断词冒充成用户明说的
-            # 偏好）——传空 affinity 列表；亲和仍通过 base_scores 影响了组合选择。
-            reason = _build_reason(item, p.matched, [], empty_stats)
-            item.pick_reason = f"【{p.slot.name}】{reason}"
-            item.pref_matched = bool(p.matched)
-            picks.append(item)
-    else:
-        # 合适的（survivors）全部展示，但封顶 PICK_DISPLAY_CAP——模型传的 top_k 只当上界，再硬封
-        # 一道。近重复合并：同价 + 标题几乎全同的变体（颜色/翻新/包装）只留分最高的一件，名额顺延
-        # 给下一名——两件一模一样的商品各占一张卡，对用户零信息增量，对上下文是双倍 token。
-        limit = min(max(1, top_k), PICK_DISPLAY_CAP)
-        # 展示相对门（见 PICK_REL_SHOW_RATIO）：基准 = 池内最高 cross-encoder 相关分。仅普通轮 +
-        # 真跑了相关性门时算；否则 None（退化回按分填满，不因缺信号误杀）。
-        rel_floor: float | None = None
-        if rerank_on and rerank_scores and PICK_REL_SHOW_RATIO > 0:
-            rel_floor = max(rerank_scores.values()) * PICK_REL_SHOW_RATIO
-        final: list[tuple[float, list[str], list[str], ItemCandidate]] = []
-        dup_dropped: list[str] = []
-        gate_dropped: list[str] = []
-        for row in scored:
-            if len(final) >= limit:
-                break
-            cand = row[3]
-            if any(_near_duplicate(cand, kept[3]) for kept in final):
-                dup_dropped.append(cand.item_id)
-                continue
-            # 相对门：品类相关分显著低于头部 → 宁缺毋滥不凑数。**final 为空时放行**——保底留最高
-            # 综合分 1 件，不让展示门主动产空清单（空是空召回诚实路径的职责，不是这里）。
-            if rel_floor is not None and final:
-                rr = rerank_scores.get(cand.item_id)
-                if rr is not None and rr < rel_floor:
-                    gate_dropped.append(cand.item_id)
-                    continue
-            final.append(row)
-        if dup_dropped:
-            logger.info("item_picker 近重复合并：丢弃 %d 件（%s）", len(dup_dropped), dup_dropped)
-        if gate_dropped:
-            logger.info(
-                "item_picker 展示相对门：%d 件品类相关分低于头部 %.0f%%，不凑数展示（%s）",
-                len(gate_dropped),
-                PICK_REL_SHOW_RATIO * 100,
-                gate_dropped,
-            )
-        chosen = [c for _score, _matched, _aff, c in final]
-        # 批内统计要在**定稿的这一批**上算（不是全部 survivors）：用户看到的是这几张卡，「本批
-        # 最低价」说的就该是这几张里的最低——拿一个他看不见的更大集合算，标签会和眼前价格对不上。
-        stats = _batch_stats(chosen)
-        for (_score, matched, matched_aff, _c), src in zip(final, chosen, strict=True):
-            item = src.model_copy()
-            item.pick_reason = _build_reason(item, matched, matched_aff, stats)
-            # pref_matched **只认显式偏好**，不含行为亲和：它喂给 shopping_summary 的 prompt 当
-            # 「命中了用户偏好」的判据，而亲和是我们从收藏里推断的、用户从没说过。让推断冒充明说，
-            # 收尾文案就会写出「按你的要求选了帆布款」——用户根本没提过帆布。
-            item.pref_matched = bool(matched)  # 结构化判据，供 summary 的 prompt 用（见 schemas）
-            picks.append(item)
 
+
+def _picks_from_slots(outcome: BundleOutcome) -> list[ItemCandidate]:
+    """⑥ 之二：槽位轮定稿——每件盖上槽名、写理由。"""
+    picks: list[ItemCandidate] = []
+    # 跨槽没有「本批最低价」这类可比统计（床垫和台灯比价没有意义），理由只写属性 /
+    # 命中偏好 / 评分价格；「哪槽花钱哪槽省」的相对叙事由组合报告承担（bundle + summary 注入）。
+    empty_stats = _BatchStats(None, None, None)
+    for p in outcome.chosen:
+        # 并列形态一类给好几件，同一款的颜色/包装变体会各占一张卡（bundle 每槽只有一件，
+        # 撞不上这个问题）。同槽内判重、**不补位**：这一类少一张卡，好过给用户两张一样的。
+        if any(q.slot == p.slot.name and _near_duplicate(p.cand, q) for q in picks):
+            drop_pick_from_report(p.cand.item_id)
+            continue
+        item = p.cand.model_copy()
+        # 归槽结果回写到 slot 字段（槽名）——盖章缺失、靠 keywords 兜底归槽的候选
+        # （主循环补搜没传 slot 的那批）全靠这行把槽位带到收尾卡片，否则前端落「其他」组
+        # （badcase 75aa84）。
+        item.slot = p.slot.name
+        # 套装理由不单列行为亲和（弱信号、组合叙事已够满，且避免把推断词冒充成用户明说的
+        # 偏好）——传空 affinity 列表；亲和仍通过 base_scores 影响了组合选择。
+        reason = _build_reason(item, p.matched, [], empty_stats)
+        item.pick_reason = f"【{p.slot.name}】{reason}"
+        item.pref_matched = bool(p.matched)
+        picks.append(item)
+    return picks
+
+
+def _picks_from_pool(scored: _Scored, top_k: int, rel: _Relevance) -> list[ItemCandidate]:
+    """⑥ 之三：普通轮定稿——去重、过展示相对门、封顶，再写逐件理由。"""
+    # 合适的（survivors）全部展示，但封顶 PICK_DISPLAY_CAP——模型传的 top_k 只当上界，再硬封
+    # 一道。近重复合并：同价 + 标题几乎全同的变体（颜色/翻新/包装）只留分最高的一件，名额顺延
+    # 给下一名——两件一模一样的商品各占一张卡，对用户零信息增量，对上下文是双倍 token。
+    limit = min(max(1, top_k), PICK_DISPLAY_CAP)
+    # 展示相对门（见 PICK_REL_SHOW_RATIO）：基准 = 池内最高 cross-encoder 相关分。仅普通轮 +
+    # 真跑了相关性门时算；否则 None（退化回按分填满，不因缺信号误杀）。
+    rel_floor: float | None = None
+    if rel.on and rel.scores and PICK_REL_SHOW_RATIO > 0:
+        rel_floor = max(rel.scores.values()) * PICK_REL_SHOW_RATIO
+    final: list[tuple[float, list[str], list[str], ItemCandidate]] = []
+    dup_dropped: list[str] = []
+    gate_dropped: list[str] = []
+    for row in scored.rows:
+        if len(final) >= limit:
+            break
+        cand = row[3]
+        if any(_near_duplicate(cand, kept[3]) for kept in final):
+            dup_dropped.append(cand.item_id)
+            continue
+        # 相对门：品类相关分显著低于头部 → 宁缺毋滥不凑数。**final 为空时放行**——保底留最高
+        # 综合分 1 件，不让展示门主动产空清单（空是空召回诚实路径的职责，不是这里）。
+        if rel_floor is not None and final:
+            rr = rel.scores.get(cand.item_id)
+            if rr is not None and rr < rel_floor:
+                gate_dropped.append(cand.item_id)
+                continue
+        final.append(row)
+    if dup_dropped:
+        logger.info("item_picker 近重复合并：丢弃 %d 件（%s）", len(dup_dropped), dup_dropped)
+    if gate_dropped:
+        logger.info(
+            "item_picker 展示相对门：%d 件品类相关分低于头部 %.0f%%，不凑数展示（%s）",
+            len(gate_dropped),
+            PICK_REL_SHOW_RATIO * 100,
+            gate_dropped,
+        )
+    chosen = [c for _score, _matched, _aff, c in final]
+    # 批内统计要在**定稿的这一批**上算（不是全部 survivors）：用户看到的是这几张卡，「本批
+    # 最低价」说的就该是这几张里的最低——拿一个他看不见的更大集合算，标签会和眼前价格对不上。
+    stats = _batch_stats(chosen)
+    picks: list[ItemCandidate] = []
+    for (_score, matched, matched_aff, _c), src in zip(final, chosen, strict=True):
+        item = src.model_copy()
+        item.pick_reason = _build_reason(item, matched, matched_aff, stats)
+        # pref_matched **只认显式偏好**，不含行为亲和：它喂给 shopping_summary 的 prompt 当
+        # 「命中了用户偏好」的判据，而亲和是我们从收藏里推断的、用户从没说过。让推断冒充明说，
+        # 收尾文案就会写出「按你的要求选了帆布款」——用户根本没提过帆布。
+        item.pref_matched = bool(matched)  # 结构化判据，供 summary 的 prompt 用（见 schemas）
+        picks.append(item)
+    return picks
+
+
+def _count_must_have_hits(
+    must_have: list[str] | None, survivors: list[ItemCandidate]
+) -> int | None:
+    """⑦ 之一：本轮 must_have 的池内命中件数——退回补搜闸（refine_backfill）的质量信号。
+
+    两条口径都是刻意的：
+    ① 只统计**模型本轮传的** must_have、不并记忆的 must：记忆里的旧硬条件（如「纯棉」）往往整池
+       全命中，一并计数会把「本轮新条件（刺绣）0 命中」的信号整个稀释掉。
+    ② 只走关键词路、不用语义分（sem_hard）豁免：同品类候选对任何购物意图的 cosine 地板都不低，
+       绝对阈值难标定；而两个方向的代价不对称——误报 0（有货但标题没写词）只多付一次补搜合流，
+       结果不会变差；漏报（池里真没货却照常推进收尾）是「挑不出→不许再搜→承认失败」的死路。
+    """
+    model_must, model_must_specs = _split_specs(normalize_terms(_merge_terms(must_have)))
+    if not (model_must or model_must_specs):
+        return None
+    return sum(
+        1
+        for c in survivors
+        if any(_hits(kw, _searchable(c)) for kw in model_must)
+        or any(spec_verdict(v, u, _searchable(c)) == "match" for v, u, _d in model_must_specs)
+    )
+
+
+def _result_summary(out: ItemPickerOutput) -> str:
+    """⑦ 之二：思考结果摘要——精选了哪几件、各自入选理由。
+
+    供前端展开看这一步「挑出了什么、为什么」。
+    """
+    if out.bundle is not None:
+        # 套装轮直接给分配表：哪槽花了多少、砍了谁、缺了谁——比逐件理由更是用户要的答案。
+        return render_allocation(out.bundle)
+    if out.picks:
+        pick_lines = [
+            f"· {c.title}" + (f" —— {c.pick_reason}" if c.pick_reason else "")
+            for c in out.picks[:5]
+        ]
+        return f"精选 {len(out.picks)} 件：\n" + "\n".join(pick_lines)
+    return "无符合条件的候选（可能被排除词 / 预算筛掉）"
+
+
+async def _report_picks(
+    out: ItemPickerOutput, inputs: _PickInputs, filtered: _Filtered, sem: _Semantic
+) -> None:
+    """⑦ 之三：商品卡预览 + tool_end 事件。"""
+    picker_result = _result_summary(out)
+    # 先出货、后出文案：清单是**哪几件**在这一刻就已经定了，但用户还得等主 loop 收尾那轮解码 +
+    # shopping_summary 内部生成才看得见（好几秒）。把卡片现在就推出去，文案随后由 summary_delta
+    # 逐字补上。收尾的 task_result 会用定稿那批原样覆盖，两者同构、顺序一致，不会跳动。
+    # 商品卡的字段全是**确定性的**（价格/图/链接/理由都在 picks 里），提前推不存在「先给一版、
+    # 收尾又换一版」的风险——真正还没定的只有那段文案。
+    if out.picks:
+        await monitor.report_items_preview([_preview_item(c) for c in out.picks])
+    await monitor.report_tool_end(
+        "item_picker",
+        picked=len(out.picks),
+        excluded=len(out.excluded),
+        # 会话级 P_t 本轮贡献的排除 / 减分词数（长期记忆那腿已随 M4 删，不再有系统侧加的词）
+        session_excluded=len(inputs.mem.exclude),
+        session_attenuated=len(inputs.mem.penalty),
+        semantic=bool(sem.match or sem.hard or sem.penalty),  # 走了语义打分（论文式6/8）
+        # 整池 0 命中的硬排除词（诚实性标注：这些词本轮没挡下任何商品，别让用户以为生效了）
+        **(
+            {"no_effect_excludes": filtered.no_effect_excludes}
+            if filtered.no_effect_excludes
+            else {}
+        ),
+        result=picker_result,
+    )
+
+
+def _report_diag(out: ItemPickerOutput, anchor_conflict: bool) -> None:
+    """⑦ 之四：给 harness 的诊断走结构化侧信道（middleware 消费）。
+
+    模型可见文本里带不带、怎么截断都不再影响这些信号——见 app/tools/_diagnostics.py 的
+    受众分离说明。
+    """
+    report_diagnostics(
+        "item_picker",
+        {
+            "picks": len(out.picks),
+            "must_have_hits": out.must_have_hits,
+            "oncat_count": out.oncat_count,
+            "offcat_count": out.offcat_count,
+            # 硬淘汰归因计数（补搜闸的杀池信号）：「池子为什么空」决定补搜指路指哪条——
+            # 超预算杀的 → 带 price_usd_max 重搜；排除词杀的 → 换开检索词。
+            "excluded_count": len(out.excluded),
+            "over_budget_count": len(out.over_budget),
+            # 品类门锚分歧（planner category 与用户原文词面对不上 → 门本轮 fail-open）。
+            # 暂无 harness 消费方，先进侧信道供评测/日志盯复发率——加字段=dict 加一个 key。
+            "anchor_conflict": anchor_conflict,
+        },
+    )
+
+
+@tool
+async def item_picker(
+    budget_usd: float | None = None,
+    exclude_keywords: StrListArg | None = None,
+    prefer_keywords: StrListArg | None = None,
+    must_have: StrListArg | None = None,
+    deprioritize_keywords: StrListArg | None = None,
+    top_k: int = PICK_DISPLAY_CAP,
+    candidates: Annotated[list[ItemCandidate] | None, InjectedToolArg] = None,
+) -> ItemPickerOutput:
+    """在已入池候选里按预算 + 硬约束 + 软偏好精挑（最多 3 件）；检索合流后系统会自动跑，通常不必调。
+    候选不用传。参数：budget_usd；exclude_keywords 硬淘汰词；must_have 正向硬约束（强加分不淘汰）；
+    prefer_keywords 软加分；deprioritize_keywords 软减分；均只放结构化字段覆盖不到的自由文本。
+    """
+    candidates = _resolve_candidates(candidates)
+    # ① 入参归一：模型本轮传的词 + 会话记忆 → 英文词表 + 数值规格 + 本轮生效预算
+    inputs = await _prepare_inputs(
+        budget_usd, exclude_keywords, prefer_keywords, must_have, deprioritize_keywords
+    )
+    await monitor.report_tool_start("item_picker", count=len(candidates), budget=inputs.budget_usd)
+
+    # ② 硬过滤（Filter）：排除词 / 超预算出局，顺带定下池内便宜度归一
+    filtered = _hard_filter(candidates, inputs)
+    # ③ 品类一致性相关性门：cross-encoder 打分、精排额度外出局、池内品类计数
+    rel = await _relevance_gate(filtered.survivors, inputs.hard_must)
+    # ④ 语义 Matcher / Attenuator：正软 / 正硬 / 负软三路 embedding 分
+    sem = await _semantic_scores(rel.survivors, inputs)
+    # ⑤ 逐候选加权求和（Aggregator），按综合分降序
+    scored = _score_candidates(rel, inputs, sem, filtered.cheapness)
+
+    # ⑥ 选品：槽位轮走跨槽组合优选，普通轮走去重 + 展示相对门 + 封顶
+    outcome = _combine_slots(rel, scored, inputs.budget_usd)
+    picks = (
+        _picks_from_slots(outcome) if outcome is not None else _picks_from_pool(scored, top_k, rel)
+    )
     # 把入选理由回写登记表：shopping_summary 收尾改按 id hydrate 时，能直接取到 pick_reason
     # （卡片理由与 LLM 兜底都复用它），不必让模型把理由再重吐一遍。
     register_updates(picks)
@@ -795,79 +1049,18 @@ async def item_picker(
     # （抄的过程中它还会顺手再砍掉几件——筛选是这里的职责，不是收尾时凭印象再来一遍）。
     set_last_picks(picks)
 
-    # 本轮 must_have 的池内命中件数——退回补搜闸（refine_backfill）的质量信号。两条口径都是刻意的：
-    # ① 只统计**模型本轮传的** must_have、不并记忆的 must：记忆里的旧硬条件（如「纯棉」）往往整池
-    #    全命中，一并计数会把「本轮新条件（刺绣）0 命中」的信号整个稀释掉。
-    # ② 只走关键词路、不用语义分（sem_hard）豁免：同品类候选对任何购物意图的 cosine 地板都不低，
-    #    绝对阈值难标定；而两个方向的代价不对称——误报 0（有货但标题没写词）只多付一次补搜合流，
-    #    结果不会变差；漏报（池里真没货却照常推进收尾）是「挑不出→不许再搜→承认失败」的死路。
-    model_must, model_must_specs = _split_specs(normalize_terms(_merge_terms(must_have)))
-    must_have_hits: int | None = None
-    if model_must or model_must_specs:
-        must_have_hits = sum(
-            1
-            for c in survivors
-            if any(_hits(kw, _searchable(c)) for kw in model_must)
-            or any(spec_verdict(v, u, _searchable(c)) == "match" for v, u, _d in model_must_specs)
-        )
-
+    # ⑦ 组装输出 + 上报（先推商品卡与 tool_end，再走 harness 诊断侧信道）
     out = ItemPickerOutput(
         picks=picks,
-        excluded=excluded,
-        over_budget=over_budget,
-        must_have_hits=must_have_hits,
-        oncat_count=oncat_count,
-        offcat_count=offcat_count,
+        excluded=filtered.excluded,
+        over_budget=filtered.over_budget,
+        must_have_hits=_count_must_have_hits(must_have, rel.survivors),
+        oncat_count=rel.oncat_count,
+        offcat_count=rel.offcat_count,
         bundle=outcome.report if outcome is not None else None,
     )
-    # 思考结果摘要：精选了哪几件、各自入选理由（供前端展开看这一步「挑出了什么、为什么」）。
-    if outcome is not None:
-        # 套装轮直接给分配表：哪槽花了多少、砍了谁、缺了谁——比逐件理由更是用户要的答案。
-        picker_result = render_allocation(outcome.report)
-    elif picks:
-        pick_lines = [
-            f"· {c.title}" + (f" —— {c.pick_reason}" if c.pick_reason else "") for c in picks[:5]
-        ]
-        picker_result = f"精选 {len(picks)} 件：\n" + "\n".join(pick_lines)
-    else:
-        picker_result = "无符合条件的候选（可能被排除词 / 预算筛掉）"
-    # 先出货、后出文案：清单是**哪几件**在这一刻就已经定了，但用户还得等主 loop 收尾那轮解码 +
-    # shopping_summary 内部生成才看得见（好几秒）。把卡片现在就推出去，文案随后由 summary_delta
-    # 逐字补上。收尾的 task_result 会用定稿那批原样覆盖，两者同构、顺序一致，不会跳动。
-    # 商品卡的字段全是**确定性的**（价格/图/链接/理由都在 picks 里），提前推不存在「先给一版、
-    # 收尾又换一版」的风险——真正还没定的只有那段文案。
-    if picks:
-        await monitor.report_items_preview([_preview_item(c) for c in picks])
-    await monitor.report_tool_end(
-        "item_picker",
-        picked=len(picks),
-        excluded=len(excluded),
-        # 会话级 P_t 本轮贡献的排除 / 减分词数（长期记忆那腿已随 M4 删，不再有系统侧加的词）
-        session_excluded=len(mem.exclude),
-        session_attenuated=len(mem.penalty),
-        semantic=bool(sem_match or sem_hard or sem_penalty),  # 走了语义打分（论文式6/8）
-        # 整池 0 命中的硬排除词（诚实性标注：这些词本轮没挡下任何商品，别让用户以为生效了）
-        **({"no_effect_excludes": no_effect_excludes} if no_effect_excludes else {}),
-        result=picker_result,
-    )
-    # 给 harness 的诊断走结构化侧信道（middleware 消费）；模型可见文本里带不带、怎么截断
-    # 都不再影响这些信号——见 app/tools/_diagnostics.py 的受众分离说明。
-    report_diagnostics(
-        "item_picker",
-        {
-            "picks": len(picks),
-            "must_have_hits": must_have_hits,
-            "oncat_count": oncat_count,
-            "offcat_count": offcat_count,
-            # 硬淘汰归因计数（补搜闸的杀池信号）：「池子为什么空」决定补搜指路指哪条——
-            # 超预算杀的 → 带 price_usd_max 重搜；排除词杀的 → 换开检索词。
-            "excluded_count": len(excluded),
-            "over_budget_count": len(over_budget),
-            # 品类门锚分歧（planner category 与用户原文词面对不上 → 门本轮 fail-open）。
-            # 暂无 harness 消费方，先进侧信道供评测/日志盯复发率——加字段=dict 加一个 key。
-            "anchor_conflict": anchor_conflict,
-        },
-    )
+    await _report_picks(out, inputs, filtered, sem)
+    _report_diag(out, rel.anchor_conflict)
     return out
 
 
