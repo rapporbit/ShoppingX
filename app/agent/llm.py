@@ -26,7 +26,7 @@ from pydantic import SecretStr
 
 from app.agent.capabilities import gate_fallback_refs
 from app.agent.gateway import GatewayThrottle, ThrottledChatModel
-from app.agent.providers import fallback_chain, router_enabled
+from app.agent.providers import fallback_chain, parse_model_ref, resolve_endpoint, router_enabled
 from app.agent.router_model import build_routed_model
 
 # 模块导入即加载 .env，使后续 os.environ 读取生效（已设置的环境变量优先，不覆盖）。
@@ -149,6 +149,57 @@ def _credential(vision: bool = False) -> OpenAICredential:
     )
 
 
+def _direct_outlet(ref: str, *, vision: bool) -> tuple[OpenAICredential, str]:
+    """直连出口：把 ``provider/model`` 拆成（凭据, 发给服务商的模型名）。
+
+    解析复用 :func:`~app.agent.providers.parse_model_ref`（判据是「第一段配过
+    ``PROVIDER_<NAME>_BASE_URL``」，所以 ``Qwen/Qwen3-8B`` 那种自带斜杠的模型名不会被吃掉一截）。
+
+    **凭据口径按「谁更具体听谁的」**：
+    - 没前缀 → 与改之前逐字一致（``VISION_*`` → ``OPENAI_*``）。
+    - 有前缀、``VISION_BASE_URL`` + ``VISION_API_KEY`` **都**配了 → 仍听 ``VISION_*``：它是显式
+      指定的出口，前缀这时只负责剥模型名。两个都配才算数——只配了一半时拿另一半去凑另一家的
+      出口，是 key 与 base_url 对不上的经典 404。
+    - 有前缀、``VISION_*`` 没配全 → 缺的那半按前缀指向的那家取（``PROVIDER_<NAME>_*``）。
+      这才是 ``LLM_VISION=dashscope/xxx`` 该有的语义：写了哪家就打哪家。
+    """
+    provider, model = parse_model_ref(ref)
+    if provider == "default":
+        return _credential(vision=vision), model
+    vis_url = (os.environ.get("VISION_BASE_URL") or "").strip() if vision else ""
+    vis_key = (os.environ.get("VISION_API_KEY") or "").strip() if vision else ""
+    if vis_url and vis_key:
+        return _credential(vision=True), model
+    endpoint = resolve_endpoint(ref)
+    credential = OpenAICredential(
+        api_key=SecretStr(vis_key or endpoint.api_key),
+        base_url=vis_url or endpoint.base_url,
+    )
+    return credential, endpoint.model
+
+
+class _PrefixedDirectModel(ThrottledChatModel):
+    """直连 + 模型名带 ``provider/`` 前缀时用的那版：**只在发请求那一刻把前缀剥掉**。
+
+    ``self.model`` 仍是带前缀的 ref，因为它是断路器（:mod:`app.agent.llm_breaker`）和令牌桶
+    （:mod:`app.agent.token_bucket`）的键，而 ``limits_for`` 要按 provider 那一维去读
+    ``PROVIDER_<NAME>_RPM``。在构造时就把前缀剥了更省事，但那样一关 Router（直连是它的回滚开关）
+    就会把按家配的限额和跨路一致的断路器键一起静默换掉——回滚开关不该顺手改别的语义。
+    """
+
+    def __init__(self, *args: Any, wire_model: str, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._wire_model = wire_model
+
+    async def _call_api(self, *args: Any, **kwargs: Any) -> Any:
+        """``ChatModelBase.__call__`` 把 ``self.model`` 作为第一个位置参数传进来。"""
+        if args:
+            args = (self._wire_model, *args[1:])
+        else:  # pragma: no cover - 框架当前只按位置传
+            kwargs["model_name"] = self._wire_model
+        return await super()._call_api(*args, **kwargs)
+
+
 def _formatter() -> OpenAIChatFormatter:
     """格式化层：开了 ``COMPRESS_CACHE_CONTROL`` 就换成会打断点标记的那版。
 
@@ -179,8 +230,11 @@ def build_model(
     跨供应商 fallback 才成立），``LLM_PROVIDER_ROUTER=0`` 回退直连。没配任何 ``PROVIDER_*``
     时两条路等价——Router 只有一个指向 ``OPENAI_*`` 的 deployment。
 
-    视觉档例外，恒走直连：它的出口是另一套 ``VISION_*`` env，不在 provider 寻址的模型里，
-    而且图片理解是链路外的一次性调用，跨家 fallback 对它没有收益。
+    视觉档例外，恒走直连：它的出口可以是另一套 ``VISION_*`` env，而且图片理解是链路外的
+    一次性调用，跨家 fallback 对它没有收益。**但直连一样认 ``provider/`` 前缀**——它只是不走
+    Router，不是不参与 provider 寻址。曾经不认：``LLM_VISION=dashscope/qwen3.5-flash`` 时整串
+    模型名被发给服务商，每次看图都 404 降级（2026-09-22 修）。剥前缀的位置见
+    :func:`_direct_outlet` 与 :class:`_PrefixedDirectModel`。
     """
     common: dict[str, Any] = {
         "parameters": OpenAIChatModel.Parameters(temperature=temperature),
@@ -195,7 +249,10 @@ def build_model(
         "role": role,
     }
     if vision or not router_enabled():
-        return ThrottledChatModel(credential=_credential(vision=vision), model=model, **common)
+        credential, wire = _direct_outlet(model, vision=vision)
+        if wire == model:  # 不带前缀：与改之前逐字同一条路、同一个类
+            return ThrottledChatModel(credential=credential, model=model, **common)
+        return _PrefixedDirectModel(credential=credential, model=model, wire_model=wire, **common)
     return build_routed_model(model, _fallback_refs(role), **common)
 
 
