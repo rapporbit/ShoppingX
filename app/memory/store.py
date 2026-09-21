@@ -106,15 +106,12 @@ class FavoriteItem(BaseModel):
         )
 
 
-class PreferenceStore:
+class UserDataStore:
     """用户级持久数据的读写口（**行为历史 / 收藏**），后端是 :mod:`app.db` 的 SQLite。
 
     **偏好那一腿已经不在这里了**：长期记忆改由 :class:`app.memory.fact_store.MemoryFactStore`
-    按 ``key / value / category`` 存 ``memory_facts``（M1~M4）。旧的 ``preferences`` 表与
-    ``app.db.models.Preference`` 行保留着不 drop，作为一版回滚依据，但**没有任何代码再读写它**。
-
-    类名沿用 ``PreferenceStore`` 只是为了不动收藏 / 历史那十几处调用点；它现在名实不副，
-    等收藏与历史也重构时一并改名。
+    按 ``key / value / category`` 存 ``memory_facts``（M1~M4）；旧的 ``preferences`` 表已由迁移
+    ``0016_drop_preferences`` 删除。本类因此改名——原来叫 ``PreferenceStore``，名实不副。
 
     **不再有后端抽象基类**：原来 ABC + LocalFileStore + RedisStore 的三层结构，是为了「离线可跑」
     与「可选真后端」——而 SQLite 两样都占（零外部依赖、库文件躺在持久卷上），一个实现就够了。
@@ -271,6 +268,10 @@ class PreferenceStore:
 
 
 @lru_cache(maxsize=1)
-def get_store() -> PreferenceStore:
-    """进程内共享的 Store（主 / 子 Agent 共用）。无状态，单例只为省对象。"""
-    return PreferenceStore()
+def get_user_data_store() -> UserDataStore:
+    """进程内共享的 Store。无状态，单例只为省对象。
+
+    名字带 ``user_data`` 是为了和 :func:`app.memory.fact_store.get_fact_store` 摆在一起时
+    一眼分得清：这个管行为历史 / 收藏，那个管长期记忆事实。
+    """
+    return UserDataStore()

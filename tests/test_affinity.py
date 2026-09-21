@@ -11,11 +11,11 @@ from uuid import uuid4
 
 import pytest
 
+from app.api.context import set_session_pt
 from app.memory.affinity import affinity_terms
 from app.memory.assemble import assemble
-from app.api.context import set_session_pt
 from app.memory.session_state import SessionPrefState
-from app.memory.store import FavoriteItem, PreferenceStore, get_store
+from app.memory.store import FavoriteItem, UserDataStore, get_user_data_store
 from app.tools.item_picker import item_picker
 from app.tools.schemas import ItemCandidate
 from app.utils.thread_ctx import thread_scope
@@ -24,15 +24,15 @@ pytestmark = pytest.mark.anyio
 
 
 @pytest.fixture
-def store() -> PreferenceStore:
-    return get_store()
+def store() -> UserDataStore:
+    return get_user_data_store()
 
 
 def _uid() -> str:
     return f"u-{uuid4().hex[:8]}"
 
 
-async def _fav_titles(store: PreferenceStore, uid: str, *titles: str) -> None:
+async def _fav_titles(store: UserDataStore, uid: str, *titles: str) -> None:
     for i, title in enumerate(titles):
         await store.write_favorite(uid, FavoriteItem(item_id=f"f-{i}", title=title))
 
@@ -44,27 +44,27 @@ def _cand(item_id: str, title: str, rating: float = 4.0, price: float = 50.0) ->
 
 
 # ---------- ① 证据阈：一件不算，两件才算 ----------
-async def test_single_favorite_is_not_a_preference(store: PreferenceStore) -> None:
+async def test_single_favorite_is_not_a_preference(store: UserDataStore) -> None:
     """收藏一件推不出偏好——可能只是随手存个链接，或者想再比比价。"""
     uid = _uid()
     await _fav_titles(store, uid, "Canvas Travel Backpack")
     assert await affinity_terms(uid) == []
 
 
-async def test_two_favorites_make_a_signal(store: PreferenceStore) -> None:
+async def test_two_favorites_make_a_signal(store: UserDataStore) -> None:
     uid = _uid()
     await _fav_titles(store, uid, "Canvas Travel Backpack", "Canvas Tote Bag with Nylon Lining")
     assert await affinity_terms(uid) == ["canvas"]  # nylon 只出现一次，不到阈值
 
 
-async def test_repeated_token_in_one_title_counts_once(store: PreferenceStore) -> None:
+async def test_repeated_token_in_one_title_counts_once(store: UserDataStore) -> None:
     """一件收藏只投一票：标题里把 cotton 堆砌两遍，是电商 SEO，不是两个证据。"""
     uid = _uid()
     await _fav_titles(store, uid, "Cotton Shirt, 100% Cotton, Premium Cotton")
     assert await affinity_terms(uid) == []
 
 
-async def test_long_token_absorbs_short_one(store: PreferenceStore) -> None:
+async def test_long_token_absorbs_short_one(store: UserDataStore) -> None:
     """ "genuine leather" 命中时 "leather" 不再单独计数，否则皮革类的证据数系统性翻倍。"""
     uid = _uid()
     await _fav_titles(store, uid, "Genuine Leather Wallet", "Genuine Leather Belt")
@@ -75,7 +75,7 @@ async def test_anonymous_user_has_no_affinity() -> None:
     assert await affinity_terms("") == []
 
 
-async def test_negated_material_is_not_evidence(store: PreferenceStore) -> None:
+async def test_negated_material_is_not_evidence(store: UserDataStore) -> None:
     """**「不含 X」的商品不是 X 的证据**——否则学出来的偏好正好是反的。
 
     收藏 vegan / leather-free 包的人，恰恰是**不想要**皮革的。裸子串匹配（``"leather" in title``）
@@ -87,7 +87,7 @@ async def test_negated_material_is_not_evidence(store: PreferenceStore) -> None:
 
 
 # ---------- ③ 显式表达压过行为 ----------
-async def test_explicit_dislike_beats_favorites(store: PreferenceStore, tmp_path: Path) -> None:
+async def test_explicit_dislike_beats_favorites(store: UserDataStore, tmp_path: Path) -> None:
     """嘴上说不要皮革、手上收藏过两件皮革 —— 以说的为准，不能一边减分一边加分。
 
     **排斥词刻意用中文 ['皮革']**：这是从中文对话里抽词的真实形态。初版测试图省事写了英文
@@ -110,7 +110,7 @@ async def test_explicit_dislike_beats_favorites(store: PreferenceStore, tmp_path
 
 
 # ---------- ②④ 只加分不淘汰 + 归因不静默 ----------
-async def test_affinity_lifts_but_never_drops(store: PreferenceStore, tmp_path: Path) -> None:
+async def test_affinity_lifts_but_never_drops(store: UserDataStore, tmp_path: Path) -> None:
     """亲和只影响排序：命中的上浮，没命中的**照样在清单里**（行为是弱证据，无权淘汰）。"""
     uid = _uid()
     await _fav_titles(store, uid, "Canvas Backpack", "Canvas Duffel Bag")

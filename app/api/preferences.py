@@ -31,7 +31,7 @@ from app.memory.session_state import (
     pt_from_state,
     pt_into_state,
 )
-from app.memory.store import FavoriteItem, get_store
+from app.memory.store import FavoriteItem, get_user_data_store
 from app.recall import get_recall_client
 from app.utils.path_utils import (
     OUTPUT_ROOT,
@@ -253,7 +253,7 @@ async def get_favorites(
     _assert_own(user_id, auth_uid)
     return {
         "user_id": user_id,
-        "favorites": [i.model_dump() for i in await get_store().read_favorites(user_id)],
+        "favorites": [i.model_dump() for i in await get_user_data_store().read_favorites(user_id)],
     }
 
 
@@ -269,7 +269,7 @@ async def add_favorite(
     随会话清理，换个会话按 id 早捞不回商品了。前端点 ♡ 时手上正好有整张卡的数据，直接送来。
     """
     _assert_own(user_id, auth_uid)
-    await get_store().write_favorite(user_id, body)
+    await get_user_data_store().write_favorite(user_id, body)
     return {"user_id": user_id, "item_id": body.item_id, "status": "ok"}
 
 
@@ -279,7 +279,7 @@ async def remove_favorite(
 ) -> dict[str, Any]:
     """取消收藏。``item_id`` 不存在则静默成功（幂等）。"""
     _assert_own(user_id, auth_uid)
-    await get_store().delete_favorite(user_id, item_id)
+    await get_user_data_store().delete_favorite(user_id, item_id)
     return {"user_id": user_id, "item_id": item_id, "status": "ok"}
 
 

@@ -102,7 +102,7 @@ class Strategy(BaseModel):
 
     @property
     def dedup_key(self) -> str:
-        """去重身份：由 ``category`` + ``slug`` **派生**，与 ``PreferenceEntry`` 同口径。"""
+        """去重身份：由 ``category`` + ``slug`` **派生**，与长期记忆的 ``fact_key`` 同口径。"""
         return f"{self.category}:{self.slug or make_slug(self.trigger)}"
 
     def render(self) -> str:
@@ -130,9 +130,9 @@ class Strategy(BaseModel):
 
 
 class StrategyStore:
-    """策略库的读写口。后端与偏好共用 :mod:`app.db` 的 SQLite，但**表和实例都不共用**。
+    """策略库的读写口。后端与长期记忆共用 :mod:`app.db` 的 SQLite，但**表和实例都不共用**。
 
-    容错口径与 :class:`app.memory.store.PreferenceStore` 逐条一致：**读不出来就返回空**。
+    容错口径与 :class:`app.memory.store.UserDataStore` 逐条一致：**读不出来就返回空**。
     策略是增强不是依赖——库挂了这一轮就当没有策略跑，绝不让它演变成「这次任务失败」。
     """
 

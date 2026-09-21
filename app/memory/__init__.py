@@ -6,8 +6,9 @@
   :mod:`app.db` 的 SQLite（``memory_facts`` 表）。
 - :mod:`app.memory.curator`：会话结束后独立跑的记忆管家——回合后抽取，与 ``save_memory``
   工具、偏好页 API 并列为三条写路径，三条都过 ``validate_fact`` 同一道门。
-- :mod:`app.memory.store`：``HistoryEntry`` / ``FavoriteItem`` + ``PreferenceStore``
-  （现在只管**行为历史与收藏**，长期记忆那腿已迁到 fact_store）。
+- :mod:`app.memory.store`：``HistoryEntry`` / ``FavoriteItem`` + ``UserDataStore``
+  （用户级**行为数据**：行为历史与收藏。长期记忆不在这儿，旧的 ``preferences`` 表已随迁移
+  ``0016_drop_preferences`` 删除）。
 - :mod:`app.memory.injector`：行为历史的渲染与写入。
 - :mod:`app.memory.session_state`：会话级短期状态 P_t（本轮约束，随 session.json 的
   ``middle_context`` 落盘，不进长期库）。
@@ -23,8 +24,8 @@ from app.memory.facts import MemoryCategory, MemoryFact, validate_fact
 from app.memory.store import (
     FavoriteItem,
     HistoryEntry,
-    PreferenceStore,
-    get_store,
+    UserDataStore,
+    get_user_data_store,
 )
 from app.memory.strategies import (
     Strategy,
@@ -41,12 +42,12 @@ __all__ = [
     "MemoryFact",
     "MemoryFactStore",
     "PrefDomain",
-    "PreferenceStore",
     "Strategy",
     "StrategyStore",
+    "UserDataStore",
     "get_fact_store",
-    "get_store",
     "get_strategy_store",
+    "get_user_data_store",
     "match_strategies",
     "render_strategy_block",
     "validate_fact",

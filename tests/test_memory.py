@@ -33,8 +33,8 @@ from app.memory.injector import (
 from app.memory.store import (
     FavoriteItem,
     HistoryEntry,
-    PreferenceStore,
-    get_store,
+    UserDataStore,
+    get_user_data_store,
 )
 
 pytestmark = pytest.mark.anyio
@@ -46,8 +46,8 @@ def _uid() -> str:
 
 
 @pytest.fixture
-def store() -> PreferenceStore:
-    return get_store()
+def store() -> UserDataStore:
+    return get_user_data_store()
 
 
 async def test_memory_not_in_system_prompt() -> None:
@@ -63,7 +63,7 @@ async def test_memory_not_in_system_prompt() -> None:
 
 
 # ---------- 行为历史（与偏好正交：不去重、不合并、每 kind 留最近 N 条）----------
-async def test_history_keeps_recent_n_per_kind(store: PreferenceStore) -> None:
+async def test_history_keeps_recent_n_per_kind(store: UserDataStore) -> None:
     uid = _uid()
     for i in range(5):
         await store.write_history(uid, HistoryEntry(kind="search", content=f"搜了第 {i} 次"))
@@ -72,7 +72,7 @@ async def test_history_keeps_recent_n_per_kind(store: PreferenceStore) -> None:
     assert entries[0].content == "搜了第 4 次"  # 新→旧
 
 
-async def test_history_isolated_from_long_term_memory(store: PreferenceStore) -> None:
+async def test_history_isolated_from_long_term_memory(store: UserDataStore) -> None:
     """历史和长期记忆分表存：写历史不该污染记忆库，反之亦然。"""
     uid = _uid()
     await store.write_history(uid, HistoryEntry(kind="search", content="搜了跑鞋"))
@@ -81,7 +81,7 @@ async def test_history_isolated_from_long_term_memory(store: PreferenceStore) ->
     assert len(await store.read_history(uid)) == 1
 
 
-async def test_record_search_history_and_block(store: PreferenceStore) -> None:
+async def test_record_search_history_and_block(store: UserDataStore) -> None:
     uid = _uid()
     await record_search_history(uid, "搜了「旅行收纳袋」")
     block = await build_history_block(uid)
@@ -89,7 +89,7 @@ async def test_record_search_history_and_block(store: PreferenceStore) -> None:
     assert "最近搜索" in block
 
 
-async def test_record_search_history_anonymous_noop(store: PreferenceStore) -> None:
+async def test_record_search_history_anonymous_noop(store: UserDataStore) -> None:
     await record_search_history("", "搜了点东西")  # 不抛、不落库
 
 
@@ -111,7 +111,7 @@ def _fav(item_id: str = "i-1", **kw: object) -> FavoriteItem:
     return FavoriteItem(**base)  # type: ignore[arg-type]
 
 
-async def test_favorites_crud_and_idempotent(store: PreferenceStore) -> None:
+async def test_favorites_crud_and_idempotent(store: UserDataStore) -> None:
     uid = _uid()
     await store.write_favorite(uid, _fav())
     await store.write_favorite(uid, _fav(title="帆布收纳袋（改价）", price_usd=19.9))
@@ -123,7 +123,7 @@ async def test_favorites_crud_and_idempotent(store: PreferenceStore) -> None:
     assert await store.read_favorites(uid) == []
 
 
-async def test_favorites_never_leak_into_prefs_or_history(store: PreferenceStore) -> None:
+async def test_favorites_never_leak_into_prefs_or_history(store: UserDataStore) -> None:
     """收藏**不会变成一条偏好**：收藏一件商品推不出任何偏好（可能只是想再比比价）。
 
     这条测试守的是一个**设计边界**而不是实现细节——哪天有人「顺手」把收藏喂进 prompt，它会在这里炸。
@@ -141,7 +141,7 @@ async def test_favorites_never_leak_into_prefs_or_history(store: PreferenceStore
     assert (await assemble(uid)).exclude == []
 
 
-async def test_favorites_user_isolation(store: PreferenceStore) -> None:
+async def test_favorites_user_isolation(store: UserDataStore) -> None:
     a, b = _uid(), _uid()
     await store.write_favorite(a, _fav())
     assert len(await store.read_favorites(a)) == 1
