@@ -14,20 +14,33 @@ OrbStack 里无 qdrant 容器 / 卷，``data/qdrant`` 为空），用 SSH 隧道
 """
 
 import asyncio
+import atexit
 import json
 import os
 import shutil
 import tempfile
 import time
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-_DB = Path(tempfile.gettempdir()) / "globex-snapshot.db"
-_DB.unlink(missing_ok=True)
+# 库文件名带 pid：名字固定时两个快照进程会互删对方正在用的库（tests/conftest.py 同款修法，
+# 那边实测过 "no such table" 一片红）。退出时连 sqlite 的 -wal / -shm / -journal 一起删掉。
+_DB = Path(tempfile.gettempdir()) / f"globex-snapshot-{os.getpid()}.db"
+
+
+def _drop_db() -> None:
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        with suppress(OSError):
+            _DB.with_name(_DB.name + suffix).unlink(missing_ok=True)
+
+
+_drop_db()  # pid 被系统回收复用时，仍从空表开始
+atexit.register(_drop_db)
 os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_DB}"
 os.environ["TURN_CACHE_ENABLED"] = "false"
 os.environ["LANGFUSE_ENABLED"] = "false"
