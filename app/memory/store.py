@@ -33,15 +33,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Favorite, HistoryRecord
 from app.db.session import session_factory
-from app.utils.env import env_int
 
 logger = logging.getLogger("shoppingx.memory")
 
-HISTORY_TTL_DAYS = env_int("HISTORY_TTL_DAYS", 30)
+HISTORY_TTL_DAYS = 30
 # 每种 kind 保留最近几条历史（超出的按 created_at 淘汰最旧）。设为 1 即退回 last-write-wins。
-HISTORY_MAX_PER_KIND = env_int("HISTORY_MAX_PER_KIND", 3)
+HISTORY_MAX_PER_KIND = 3
 # 收藏上限：超过则丢最旧的。收藏是用户手工攒的清单，不会自动膨胀，上限只是防脚本刷爆。
-FAVORITES_MAX = env_int("FAVORITES_MAX", 200)
+FAVORITES_MAX = 200
 
 
 def _now() -> datetime:

@@ -41,17 +41,16 @@ from app.api.context import get_session_dir
 from app.tools._args import StrListArg
 from app.tools._shell import tool
 from app.tools.web_search import WebResult, search_web
-from app.utils.env import env_int
 
 logger = logging.getLogger(__name__)
 
 #: 单次 research 最多研究几个对象。超出的 target 直接截断（不报错——主 agent 想比 5 个手机时，
 #: 回 3 个 + 一句说明，比整条失败有用）。会话级配额 ``RESEARCH_SEARCH_QUOTA`` 在
 #: ``app/harness/retrieval_budget.py``，闸在 ``hooks/budget.py`` 的 research_gate。
-RESEARCH_MAX_TARGETS = env_int("RESEARCH_MAX_TARGETS", 3)
+RESEARCH_MAX_TARGETS = 3
 
 #: 每个 target 发一条模板查询、取几条结果。aspects 合进同一条查询，不额外发搜索。
-RESEARCH_RESULTS_PER_TARGET = env_int("RESEARCH_RESULTS_PER_TARGET", 5)
+RESEARCH_RESULTS_PER_TARGET = 5
 
 
 class ResearchClaim(BaseModel):

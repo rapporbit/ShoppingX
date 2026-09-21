@@ -44,10 +44,12 @@ _URL = os.environ.get("EVENT_REDIS_URL", "redis://localhost:6379/2")
 _SESSION_CREATED = "session_created"
 
 # Redis 操作的断路器：连续失败即熔断，避免 Redis 没启时每个事件都干等连接超时。
+_CB_FAILURE_THRESHOLD = 3
+_CB_RECOVERY_TIMEOUT = 30
 _breaker = CircuitBreaker(
     "event_log",
-    failure_threshold=env_int("EVENT_REPLAY_CB_THRESHOLD", 3),
-    recovery_timeout=env_int("EVENT_REPLAY_CB_RECOVERY", 30),
+    failure_threshold=_CB_FAILURE_THRESHOLD,
+    recovery_timeout=_CB_RECOVERY_TIMEOUT,
 )
 
 _client: Any = None

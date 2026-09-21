@@ -29,10 +29,14 @@ import httpx
 
 from app.api.context import clamp_timeout
 from app.utils.circuit_breaker import CircuitBreaker, CircuitOpenError
-from app.utils.env import env_float, env_int
 from app.utils.retry import call_with_retry
 
 logger = logging.getLogger("shoppingx.reranker")
+
+# 断路器 / 重试参数：连续失败到阈值即熔断，OPEN 期直接走本地兜底；恢复窗口后再放一次探测。
+_CB_FAILURE_THRESHOLD = 5
+_CB_RECOVERY_TIMEOUT = 30.0
+_RETRY_ATTEMPTS = 3
 
 # 本地回退分词：抓连续字母数字片段（中英混排够用，中文按单字切由下面的 bigram 兜）。
 _WORD_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
@@ -81,10 +85,10 @@ class RerankerClient:
         # 不再每次干等 10s 超时；瞬时抖动（超时 / 5xx）先由 call_with_retry 消化。
         self._breaker = CircuitBreaker(
             "reranker",
-            failure_threshold=env_int("RERANKER_CB_THRESHOLD", 5),
-            recovery_timeout=env_float("RERANKER_CB_RECOVERY", 30.0),
+            failure_threshold=_CB_FAILURE_THRESHOLD,
+            recovery_timeout=_CB_RECOVERY_TIMEOUT,
         )
-        self._retry_attempts = env_int("RERANKER_RETRY_ATTEMPTS", 3)
+        self._retry_attempts = _RETRY_ATTEMPTS
 
     @property
     def remote(self) -> bool:

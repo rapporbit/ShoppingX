@@ -40,20 +40,19 @@ from pydantic import BaseModel, Field
 
 from app.api.run_state import clear_run_slot, peek_run_slot, run_slot
 from app.tools.schemas import ItemCandidate
-from app.utils.env import env_int
 from app.utils.terms import term_hits
 
 logger = logging.getLogger("shoppingx.bundle")
 
 # 槽位数硬上限：「一套」的粒度是子品类不是 SKU，拆到 6 个以上就是过度拆解（且组合枚举
 # 规模按槽数指数涨）。planner 的 validator 与 register_slot 都按它封顶。
-MAX_SLOTS = env_int("BUNDLE_MAX_SLOTS", 6)
+MAX_SLOTS = 6
 # 每槽进组合枚举的候选上限：组合规模 = (每槽候选+1)^槽数，5×6 槽 ≈ 4.7 万组合，纯 Python
 # 毫秒级。再大收益也小——第 6 名靠分数进组合的概率已经很低。
-TOP_PER_SLOT = env_int("BUNDLE_TOP_PER_SLOT", 5)
+TOP_PER_SLOT = 5
 # 并列模式下每个子需求展示几件。「一套齐」每槽只能要一件（配套），并列需求则是**各给一份
 # 推荐**——3 件够用户在每类里做选择，再多会把三类的卡片堆成一屏刷不完。
-PARALLEL_PER_SLOT = env_int("PARALLEL_PER_SLOT", 3)
+PARALLEL_PER_SLOT = 3
 
 # 槽位的两种形态。**是同一套槽位机制的两种消费方式**，共用登记 / 打标 / 分组 rerank / 报告：
 #   bundle   —— 「一套齐」：配套、共享**总预算**、essential 必选 optional 可砍，跨槽做组合
