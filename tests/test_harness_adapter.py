@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 from agentscope.agent import Agent
 from agentscope.credential import OpenAICredential
-from agentscope.message import Msg, TextBlock, ToolCallBlock, ToolResultBlock
+from agentscope.message import HintBlock, Msg, TextBlock, ToolCallBlock, ToolResultBlock
 from agentscope.model import ChatResponse, ChatUsage, OpenAIChatModel
 from agentscope.tool import FunctionTool, Toolkit
 from agentscope.tool._response import ToolChunk, ToolResultState
@@ -734,3 +734,191 @@ def test_guide_markdown_survives_the_models_tail() -> None:
     """
     md = "### 电动牙刷怎么挑\n\n#### 1. 清洁力\n- 声波每分钟 3 万次以上"
     assert _merged([_guide_turn("", md)], "以上就是选购要点，有偏好告诉我。") == md
+
+
+# ── 一条 assistant 消息里装着整轮所有迭代的块（2026-09-22 验收实测的真实块顺序）──
+
+
+def _hint(text: str) -> object:
+    return HintBlock(source="harness", hint=[TextBlock(type="text", text=text)])
+
+
+def _call(cid: str, name: str, args: dict) -> object:
+    return ToolCallBlock(type="tool_call", id=cid, name=name, input=json.dumps(args))
+
+
+def _result(cid: str, name: str, output: str) -> object:
+    return ToolResultBlock(type="tool_result", id=cid, name=name, output=output)
+
+
+def _fb_result(cid: str, reply: str) -> object:
+    output = json.dumps({"reply": reply, "items": []}, ensure_ascii=False)
+    return _result(cid, "chat_fallback", output)
+
+
+def _whole_turn(blocks: list[object]) -> str:
+    """整轮那条 assistant 消息既当上下文、又当收尾事件——线上就是同一条。"""
+    turn = Msg(name="assistant", role="assistant", content=blocks)
+    msg = HarnessAgentAdapter._merge_terminal_body(_agent_with([turn]), turn)
+    return "".join(b.text for b in msg.content if b.type == "text")
+
+
+def test_earlier_iteration_prose_is_not_merged() -> None:
+    """现象 1：更早那次迭代的过程旁白不算终结工具那一步的正文。
+
+    2026-09-22 真 LLM 验收实测块顺序（「记住：我对坚果过敏…」）——final_text 开头混进了
+    ``I'll read the memory skill and save these two facts.``。整轮所有迭代的块都在这一条
+    assistant 消息里，按整条取文本就把第一步的旁白当成了正文。
+    """
+    text = _whole_turn(
+        [
+            _hint("[预算] 省着点"),
+            TextBlock(type="text", text="I'll read the memory skill and save these two facts."),
+            _call("s1", "Skill", {"name": "memory"}),
+            _call("m1", "save_memory", {"text": "坚果过敏"}),
+            _call("m2", "save_memory", {"text": "寄德国"}),
+            _result("s1", "Skill", "memory skill 正文"),
+            _result("m1", "save_memory", "ok"),
+            _result("m2", "save_memory", "ok"),
+            _call("f1", "chat_fallback", {"message": "记下了"}),
+            _fb_result("f1", "记住了，两条都记下了 ✅ 坚果过敏、以后寄德国。"),
+            TextBlock(type="text", text="好的，两条偏好我都保存好了，之后推荐会避开坚果。"),
+        ],
+    )
+    assert text == "记住了，两条都记下了 ✅ 坚果过敏、以后寄德国。"
+    assert "I'll read the memory skill" not in text
+
+
+def test_models_rewrite_after_the_tool_is_dropped() -> None:
+    """现象 2：终结工具之后模型补的那段是**改写**，不是子串——拼上去就是同一段答案读两遍。"""
+    reply = "好，已经改过来了 ✅ 以后都寄日本，德国那条已经删掉。"
+    text = _whole_turn(
+        [
+            _hint("[漂移纠正] 别再搜了"),
+            _hint("[预算] 省着点"),
+            _call("s1", "Skill", {"name": "memory"}),
+            _result("s1", "Skill", "memory skill 正文"),
+            _call("m1", "forget_memory", {"text": "寄德国"}),
+            _result("m1", "forget_memory", "ok"),
+            _call("f1", "chat_fallback", {"message": "改好了"}),
+            _fb_result("f1", reply),
+            TextBlock(type="text", text="已经帮你改好了 ✅ 以后都寄日本，德国那条我删了。"),
+        ],
+    )
+    assert text == reply
+    assert text.count("✅") == 1
+
+
+def test_same_step_prose_survives_earlier_iteration_prose() -> None:
+    """两件事要同时成立：更早迭代的旁白丢掉，**同一步**写的长正文照旧并回来。"""
+    body = "### 德国收件要注意\n\n1. 关税按 CIF 计\n2. 超过 150 欧要报关"
+    text = _whole_turn(
+        [
+            _hint("[预算] 省着点"),
+            TextBlock(type="text", text="Let me look up the shipping rules first."),
+            _call("s1", "Skill", {"name": "memory"}),
+            _result("s1", "Skill", "memory skill 正文"),
+            TextBlock(type="text", text=body),
+            _call("f1", "chat_fallback", {"message": "以上就是要点，还有问题随时说。"}),
+            _fb_result("f1", "以上就是要点，还有问题随时说。"),
+        ],
+    )
+    assert body in text
+    assert text.endswith("以上就是要点，还有问题随时说。")
+    assert "Let me look up the shipping rules" not in text
+
+
+# ── 本轮 vs 历史轮：查找范围必须限定在本轮（现象 3）──
+
+
+def _order_turn(reply: str) -> list[Msg]:
+    """上一轮：查订单 + chat_fallback 收尾，答案落在 chat_fallback 的 reply 里。"""
+    return [
+        _user("查一下我的订单"),
+        Msg(
+            name="assistant",
+            role="assistant",
+            content=[
+                _call("q1", "query_order", {"limit": 5}),
+                _result("q1", "query_order", json.dumps({"orders": [{"id": "SX-1"}]})),
+                _call("f1", "chat_fallback", {"message": "报一下订单"}),
+                _fb_result("f1", reply),
+            ],
+        ),
+    ]
+
+
+def _merged_this_turn(prev: list[Msg], blocks: list[object]) -> str:
+    """``prev`` 是历史轮，本轮从它之后开始（turn_start = len(prev)，即本轮 user 消息那一格）。"""
+    turn = Msg(name="assistant", role="assistant", content=blocks)
+    ctx = [*prev, _user("把刚才那个订单取消掉"), turn]
+    msg = HarnessAgentAdapter._merge_terminal_body(_agent_with(ctx), turn, len(prev))
+    return "".join(b.text for b in msg.content if b.type == "text")
+
+
+def test_previous_turns_fallback_does_not_hijack_this_turn() -> None:
+    """现象 3：本轮以 cancel_order 收尾、没调任何文本型终结工具 —— 不许捡上一轮的 reply。
+
+    真踩过（thread qa0922-d2b）：轮 A「查一下我的订单」的「你目前有 1 张订单…」原样成了轮 B
+    「把刚才那个订单取消掉」的 final_text，取消确认卡的说明一个字都没有。
+    """
+    prev_reply = "你目前有 1 张订单：SX-1，状态待发货。"
+    tail = "已经帮你提交取消申请，确认卡在下面，点一下就生效。"
+    text = _merged_this_turn(
+        _order_turn(prev_reply),
+        [
+            _call("q2", "query_order", {"limit": 5}),
+            _result("q2", "query_order", json.dumps({"orders": [{"id": "SX-1"}]})),
+            _call("c1", "cancel_order", {"order_id": "SX-1"}),
+            _result("c1", "cancel_order", json.dumps({"status": "pending_confirm"})),
+            TextBlock(type="text", text=tail),
+        ],
+    )
+    assert text == tail
+    assert prev_reply not in text
+
+
+def test_previous_turns_fallback_does_not_outlive_a_shorter_summary() -> None:
+    """同一个病的另一条路：轮 2 的清单文案比轮 1 的闲聊短，「tail 比 answer 长才不动」顶不住。"""
+    prev_reply = "关税按 CIF 计，德国 150 欧以上要报关，具体税率看品类。" * 3
+    picked = json.dumps({"summary": "为你精选 2 件", "items": []})
+    text = _merged_this_turn(
+        _order_turn(prev_reply),
+        [
+            _call("s1", "shopping_summary", {}),
+            _result("s1", "shopping_summary", picked),
+            TextBlock(type="text", text="为你精选 2 件"),
+        ],
+    )
+    assert text == "为你精选 2 件"
+
+
+def test_this_turns_own_fallback_still_wins() -> None:
+    """对照：本轮自己调了 chat_fallback，照旧并回本轮那份（限定本轮不等于关掉并回）。"""
+    text = _merged_this_turn(
+        _order_turn("你目前有 1 张订单：SX-1，状态待发货。"),
+        [
+            _call("f2", "chat_fallback", {"message": "取消好了"}),
+            _fb_result("f2", "取消申请已提交 ✅ 等商家确认。"),
+            TextBlock(type="text", text="好的"),
+        ],
+    )
+    assert text == "取消申请已提交 ✅ 等商家确认。"
+
+
+@pytest.mark.asyncio
+async def test_turn_start_is_wired_from_on_reply(isolated_harness: HarnessMiddleware) -> None:
+    """接线验证：``turn_start`` 由 ``on_reply`` 自己记，历史轮的 chat_fallback 不该进本轮答案。
+
+    上面那批单测是手工传 turn_start 的，验不到「进 on_reply 时记的那一下准不准」——而现象 3
+    正是栽在这一步上。
+    """
+    session = HarnessSession()
+    agent = await _build(session, [_text("已经帮你提交取消申请。")])
+    agent.state.context.extend(_order_turn("你目前有 1 张订单：SX-1，状态待发货。"))
+
+    reply = await agent.reply(_user("把刚才那个订单取消掉"))
+
+    text = "".join(b.text for b in reply.content if b.type == "text")
+    assert text == "已经帮你提交取消申请。"
+    assert "SX-1" not in text
