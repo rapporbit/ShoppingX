@@ -1,6 +1,6 @@
-"""检索预算的 web_search 门控测试：全树共享的召回信号 + 任务口径配额。
+"""检索预算：会话共享的召回信号 + 任务口径配额 + 检索总量越线。
 
-隔离检索作用域（原定点调查用）已于 2026-09-16 删除，门控只剩全树共享语义。
+隔离检索作用域（原定点调查用）已于 2026-09-16 删除，门控只剩会话共享语义。
 """
 
 from __future__ import annotations
@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 
 from app.api.context import _SESSION_TASKS, set_session_tasks
+from app.harness.hooks.budget import charge_retrieval
+from app.harness.middleware import HookRejectSignal
 from app.harness.retrieval_budget import (
     _STATE,
     WEB_SEARCH_TASK_QUOTA,
@@ -17,6 +19,7 @@ from app.harness.retrieval_budget import (
     note_web_search,
     web_search_allowed,
 )
+from app.harness.state import GuardState
 from app.utils.thread_ctx import thread_scope
 
 SESSION_DIR = Path("/tmp/shoppingx-test-retrieval-budget-session")
@@ -26,7 +29,7 @@ SESSION_DIR = Path("/tmp/shoppingx-test-retrieval-budget-session")
 def _clean_tree() -> None:
     """每条测试独立一棵树：避免 session_dir 键跨测试串台。
 
-    直接清 ``_STATE`` 的字典键，不用 ``reset_tree()``——那个函数靠 ContextVar 读当前
+    直接清 ``_STATE`` 的字典键，不用 ``reset_run()``——那个函数靠 ContextVar 读当前
     session_dir，fixture 运行时不在任何 thread_scope 内（``get_session_dir()`` 返回 None），
     调了也清不到 SESSION_DIR 这个键。
     """
@@ -79,6 +82,33 @@ def test_task_quota_exhausts_then_blocks() -> None:
             assert web_search_allowed() is True
             note_web_search()
         assert web_search_allowed() is False
+
+
+async def test_retrieval_cap_soft_then_hard() -> None:
+    """检索总量只剩会话这一条计数路：cap 内放行 → cap+1 软收敛 → 再越硬挡。
+
+    回退口径（GuardState.retrieval_count / DEFAULT_RETRIEVAL_CAP）已删，这条用例把原来只有
+    回退路覆盖到的越线判据移到 thread_scope 里跑。
+    """
+    guard = GuardState(retrieval_cap=2)
+    with thread_scope("main", SESSION_DIR):
+        for _ in range(2):
+            ctx: dict = {"tool_name": "item_search", "_guard": guard}
+            assert await charge_retrieval(ctx) is None
+            assert "converge_count" not in ctx
+
+        ctx = {"tool_name": "item_search", "_guard": guard}
+        assert await charge_retrieval(ctx) is ctx  # 软越线：照常执行 + 追加收敛指令
+        assert ctx["converge_count"] == 3
+
+        with pytest.raises(HookRejectSignal):
+            await charge_retrieval({"tool_name": "item_search", "_guard": guard})
+
+
+async def test_retrieval_not_counted_without_session_scope() -> None:
+    """无 session 作用域（单测直调）：不计数也不拦——失效方向中性，与本模块其他闸一致。"""
+    guard = GuardState(retrieval_cap=0)
+    assert await charge_retrieval({"tool_name": "item_search", "_guard": guard}) is None
 
 
 def test_task_quota_not_granted_to_recommend() -> None:

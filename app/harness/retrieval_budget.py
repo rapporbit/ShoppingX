@@ -10,9 +10,9 @@
 按同一 key 自增才数得准。（历史：这套聚合最初是为跨 fork 树共享写的，2026-09-16 删子 Agent 后
 口径收窄为「一次 run_agent」，机制不变。）
 
-模块级 dict 需要收尾清理（防无界增长）：``run_agent`` 结束时调 :func:`reset_tree`。
+模块级 dict 需要收尾清理（防无界增长）：``run_agent`` 结束时调 :func:`reset_run`。
 
-三本账各管各的，互不透支：全树检索总量（``count``，堵找更好商品的动机）、web_search 任务配额
+三本账各管各的，互不透支：一次 run 的检索总量（``count``，堵找更好商品的动机）、web_search 任务配额
 （``WEB_SEARCH_TASK_QUOTA``）、research 搜索配额（``RESEARCH_SEARCH_QUOTA``，见下方长注释）。
 """
 
@@ -39,10 +39,10 @@ _TASKS_WANT_WEB = frozenset({"evaluate", "category_intel"})
 # 互相饿死。两者吃的也不是同一种成本：web_search 每条整页正文原样进主环 messages，research 的正文
 # 只进归纳模型、主环只见 schema。
 #
-# **为什么不塞进全树检索总额（RETRIEVAL_TOOLS / TREE_RETRIEVAL_BUDGET）**：那份额度堵的是「再找找
-# 更好的商品」这个动机，research 不产候选、不是这条路上的渠道，混进去只会挤掉 item_search 的额度，
-# 且「停止检索立即收尾」的软收敛哨兵对它并不成立。挤气球风险（item_search 撞线后改调 research 兜
-# 圈子）由本配额自己封顶兜住：最多 2 次调用，且拿不到可下单候选。
+# **为什么不塞进本次 run 的检索总额（RETRIEVAL_TOOLS / RETRIEVAL_BUDGET_CAP）**：那份额度堵的是
+# 「再找找更好的商品」这个动机，research 不产候选、不是这条路上的渠道，混进去只会挤掉 item_search
+# 的额度，且「停止检索立即收尾」的软收敛哨兵对它并不成立。挤气球风险（item_search 撞线后改调
+# research 兜圈子）由本配额自己封顶兜住：最多 2 次调用，且拿不到可下单候选。
 #
 # **为什么是 6 而不是博客口径的 3**：博客那个 3 说的是自由 web_search —— 正文全进主环上下文。
 # research 是有界函数，主环单次增量约为裸搜的 1/10，同样的上下文预算能放更多次。
@@ -50,21 +50,21 @@ RESEARCH_SEARCH_QUOTA = env_int("RESEARCH_SEARCH_QUOTA", 6)
 
 
 @dataclass
-class _TreeRetrieval:
-    count: int = 0  # item_search + web_search 全树累计（预算计数）
+class _RunRetrieval:
+    count: int = 0  # item_search + web_search 本次 run 累计（预算计数）
     item_search_runs: int = 0  # item_search 调用次数（含召回为空的）
-    web_search_runs: int = 0  # web_search 已执行次数（任务口径配额用，全树共享）
+    web_search_runs: int = 0  # web_search 已执行次数（任务口径配额用，会话共享）
     research_searches: int = 0  # research 已发出的搜索条数（独立配额，与 web_search 不互通）
     nonempty_item_search: int = 0  # 召回到 ≥1 候选的 item_search 次数（web_search 兜底门用）
-    # ── item_search 探测召回（filtered_out）的全树汇总，供「该建议放宽预算还是该补搜」判定 ──
+    # ── item_search 探测召回（filtered_out）的会话汇总，供「该建议放宽预算还是该补搜」判定 ──
     probe_runs: int = 0  # 跑过探测的 item_search 次数（＝带硬过滤且命中不足的那些）
     probe_price_blocked: int = 0  # 探测差集里「只差预算」的条数
     probe_other_blocked: int = 0  # 探测差集里因排除词 / 品牌 / 评分被挡的条数
     probe_hits: int = 0  # 上述那些 item_search 各自的实际命中数之和
 
 
-# session_dir(str) → 该任务一棵 fork 树的检索状态。主 / 各子 Agent 共享同一条目。
-_STATE: dict[str, _TreeRetrieval] = {}
+# session_dir(str) → 该任务一次 run 的检索状态。同轮 batch 的各工具共享同一条目。
+_STATE: dict[str, _RunRetrieval] = {}
 
 
 def _key() -> str | None:
@@ -72,20 +72,20 @@ def _key() -> str | None:
     return str(sd) if sd is not None else None
 
 
-def _state(create: bool = True) -> _TreeRetrieval | None:
+def _state(create: bool = True) -> _RunRetrieval | None:
     """取当前 session 的检索状态；无 session 作用域（单测）返回 None。"""
     k = _key()
     if k is None:
         return None
     st = _STATE.get(k)
     if st is None and create:
-        st = _TreeRetrieval()
+        st = _RunRetrieval()
         _STATE[k] = st
     return st
 
 
-def charge_tree_retrieval() -> int | None:
-    """item_search / web_search 计一次，返回当前全树累计；无 session 作用域返回 None。"""
+def charge_retrieval_count() -> int | None:
+    """item_search / web_search 计一次，返回本次 run 的累计；无 session 作用域返回 None。"""
     st = _state()
     if st is None:
         return None
@@ -205,7 +205,7 @@ def web_search_allowed() -> bool:
     return st.nonempty_item_search == 0  # 搜过但全空 → 兜底放行；有候选 → 拦
 
 
-def reset_tree() -> None:
+def reset_run() -> None:
     """清掉本 session 的检索预算条目（任务收尾时调，防模块级 dict 无界增长）。"""
     k = _key()
     if k is not None:

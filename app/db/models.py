@@ -238,7 +238,7 @@ class UsageLedger(Base):
 
     **与已有两层记账的分工。** ``app/agent/usage.py`` 是事后测量（一轮的 token 聚合，进日志 /
     Langfuse）；``app/harness/token_budget.py`` 是**单次任务**（一棵 fork 树）的成本闸，进程内的
-    模块级 dict，任务一结束就 ``reset_tree`` 清掉。两者都答不了「这个人这个月一共烧了多少、还剩
+    模块级 dict，任务一结束就 ``reset_run`` 清掉。两者都答不了「这个人这个月一共烧了多少、还剩
     多少能用」——那要跨会话、跨进程重启地累计，只能落库。
 
     **为什么按 (user_id, period_key) 一行而不是流水表。** 配额判定是最热的读路径（每次发任务都查

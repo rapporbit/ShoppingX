@@ -59,10 +59,10 @@ from app.api.context import (
 )
 from app.db.quota import remaining_usd
 from app.harness.msgs import iter_tool_results
-from app.harness.retrieval_budget import reset_tree as reset_retrieval_tree
+from app.harness.retrieval_budget import reset_run as reset_retrieval_run
 from app.harness.setup import setup_harness
-from app.harness.token_budget import budget_status, set_task_cap, tree_snapshot
-from app.harness.token_budget import reset_tree as reset_token_tree
+from app.harness.token_budget import budget_status, run_snapshot, set_task_cap
+from app.harness.token_budget import reset_run as reset_token_run
 from app.memory.curator import curate_turn
 from app.memory.fact_store import get_fact_store
 from app.memory.facts import select_tier_one_facts
@@ -480,7 +480,7 @@ async def _run_turn(
         finally:
             # 成本归集 + 全部按 session_dir / thread_id 聚合的模块级状态清理。放 finally：
             # 取消 / 超时也照样记账 + 清理，绝不漏账或泄漏模块级 dict。
-            snap = tree_snapshot()
+            snap = run_snapshot()
             if snap is not None:
                 status = budget_status()
                 metrics.record_cost(float(snap["cost_usd"]), status)
@@ -493,8 +493,8 @@ async def _run_turn(
                     snap["model_calls"],
                     status,
                 )
-            reset_token_tree()
-            reset_retrieval_tree()
+            reset_token_run()
+            reset_retrieval_run()
             reset_candidates()  # 候选登记表只活一轮；跨轮引用按 item_id 回源 Qdrant
             reset_diagnostics(thread_id)
             reset_session_bundle()

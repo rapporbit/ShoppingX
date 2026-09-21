@@ -18,7 +18,7 @@ from agentscope.message import Msg, TextBlock
 from app.harness.hooks.drift import DriftState
 from app.harness.signals import _SEARCH_TOOLS, _as_opt_int, _count_candidates, _count_picks
 from app.harness.state import GuardState
-from app.harness.token_budget import tree_snapshot
+from app.harness.token_budget import run_snapshot
 from app.tools._diagnostics import consume_diagnostics
 
 logger = logging.getLogger("shoppingx.harness.session")
@@ -99,7 +99,7 @@ class HarnessSession:
 
     def track_token_delta(self) -> None:
         """本次模型调用的 token 增量喂给漂移检测（信号 4：成本失控）。"""
-        snap = tree_snapshot()
+        snap = run_snapshot()
         if not snap:
             return
         total = int(snap.get("input_tokens", 0)) + int(snap.get("output_tokens", 0))

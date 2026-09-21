@@ -64,7 +64,7 @@ Agent 最近 {n} 轮行为摘要：{recent_actions}
 class DriftState:
     """单会话的漂移检测状态（与 HarnessAgentAdapter 同生命周期）。
 
-    ``token_history`` 由 :class:`HarnessAgentAdapter` 在每次模型调用后按 tree_snapshot 的
+    ``token_history`` 由 :class:`HarnessAgentAdapter` 在每次模型调用后按 run_snapshot 的
     增量追加；``blacklist_violations`` 由 ``track_result_signals`` 在工具返回后累加。
     """
 

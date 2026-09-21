@@ -71,7 +71,7 @@ def test_as_dict_roundtrip() -> None:
 #  迁移期两套 helper 并存的遗留，2026-09-13 删。）
 
 
-def test_tree_snapshot_wins_over_message_count() -> None:
+def test_run_snapshot_wins_over_message_count() -> None:
     """给了记账树就以它为准——一次 reply 只落一条 assistant 消息，光数消息会把次数数成 1。
 
     这条是迁移踩出来的：``model_calls`` 恒为 1、``carried`` 只算最后一次调用，指标全废却零报错。

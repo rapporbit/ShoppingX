@@ -93,7 +93,7 @@ def retrieval_snapshot(monkeypatch: pytest.MonkeyPatch) -> dict:
     """在 ``run_agent`` 收尾清账前截一份检索状态。
 
     分账要看的 ``research_searches`` / ``web_search_runs`` 都在模块级 ``_STATE`` 里，而收尾会
-    ``reset_tree()`` 把本会话那条 pop 掉（防无界增长）——跑完再去读只会读到 None，那条断言就
+    ``reset_run()`` 把本会话那条 pop 掉（防无界增长）——跑完再去读只会读到 None，那条断言就
     永远「拿不到状态」。所以钩在清理动作上，清之前拷贝一份。
     """
     import copy
