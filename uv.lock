@@ -3383,6 +3383,7 @@ db = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "aiomysql" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -3431,6 +3432,7 @@ provides-extras = ["db"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "aiomysql", specifier = ">=0.3.2" },
     { name = "mypy", specifier = ">=1.11" },
     { name = "pytest", specifier = ">=8.2" },
     { name = "pytest-asyncio", specifier = ">=0.23" },

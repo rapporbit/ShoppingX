@@ -28,6 +28,9 @@ type TopBarProps = {
   status: TaskStatus;
   // 展示用的是**用户名**，不是 user_id：后者是一串随机 hex，取首字母只会得到两个乱码字符。
   username: string;
+  // 试用身份：顶栏多一条「试用中 · 注册可保留记录」入口，头像菜单名字显示「试用访客」而非 guest_xxx。
+  isGuest: boolean;
+  onUpgrade: () => void;
   platformCount: number;
   quota: Quota | null;
   onOpenSettings: () => void;
@@ -70,19 +73,21 @@ function QuotaMeter({ quota }: { quota: Quota }) {
 // 头像下拉：用户名 / 后台管理（仅管理员）/ 退出。Radix DropdownMenu 管点外关闭、Esc、方向键与焦点回落。
 function AvatarMenu({
   username,
+  isGuest,
   onOpenAdmin,
   onLogout,
-}: Pick<TopBarProps, "username" | "onOpenAdmin" | "onLogout">) {
+}: Pick<TopBarProps, "username" | "isGuest" | "onOpenAdmin" | "onLogout">) {
+  const shown = isGuest ? "试用访客" : username;
   return (
     <DropdownMenu.Root modal={false}>
       <DropdownMenu.Trigger asChild>
-        <button className="avatar" aria-label={`账户菜单：${username}`}>
-          {initials(username)}
+        <button className="avatar" aria-label={`账户菜单：${shown}`}>
+          {isGuest ? "试" : initials(username)}
         </button>
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content className="menu" align="end" sideOffset={8} collisionPadding={8}>
-          <DropdownMenu.Label className="menu-label">{username}</DropdownMenu.Label>
+          <DropdownMenu.Label className="menu-label">{shown}</DropdownMenu.Label>
           <DropdownMenu.Separator className="menu-sep" />
           {onOpenAdmin && (
             <DropdownMenu.Item className="menu-item" onSelect={onOpenAdmin}>
@@ -92,7 +97,7 @@ function AvatarMenu({
           )}
           <DropdownMenu.Item className="menu-item danger" onSelect={onLogout}>
             <LogOut size={15} strokeWidth={1.75} />
-            退出登录
+            {isGuest ? "结束试用" : "退出登录"}
           </DropdownMenu.Item>
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
@@ -105,6 +110,8 @@ export function TopBar({
   titleHidden = false,
   status,
   username,
+  isGuest,
+  onUpgrade,
   platformCount,
   quota,
   onOpenSettings,
@@ -131,6 +138,13 @@ export function TopBar({
       </div>
 
       <div className="topbar-actions">
+        {isGuest && (
+          <Tooltip content="试用额度是正式账号的 1/5；注册后试用期间的会话、偏好与收藏全部保留">
+            <button className="upgrade-chip" onClick={onUpgrade}>
+              试用中 · 注册保留记录
+            </button>
+          </Tooltip>
+        )}
         {quota?.enabled && <QuotaMeter quota={quota} />}
         {/* 平台入口常驻顶栏并显示已启用个数：跨平台并行检索是本项目最贵的一步，用户该随时看得见
             自己开着几个平台，而不是点进设置才知道。 */}
@@ -140,7 +154,12 @@ export function TopBar({
             <span>{platformCount > 1 ? `${platformCount} 个平台` : "单平台"}</span>
           </button>
         </Tooltip>
-        <AvatarMenu username={username} onOpenAdmin={onOpenAdmin} onLogout={onLogout} />
+        <AvatarMenu
+          username={username}
+          isGuest={isGuest}
+          onOpenAdmin={onOpenAdmin}
+          onLogout={onLogout}
+        />
       </div>
     </header>
   );

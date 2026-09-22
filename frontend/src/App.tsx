@@ -38,7 +38,7 @@ import { Landing } from "./components/Landing";
 import { Legal, type LegalPage } from "./components/Legal";
 import { Login } from "./components/Login";
 import { useShoppingXTask, type Turn } from "./hooks/useShoppingXTask";
-import { clearSession, loadSession, type Session } from "./auth";
+import { clearSession, loadSession, startGuest, type Session } from "./auth";
 import { loadPlatforms, savePlatforms } from "./settings";
 
 // 法务页的路由。只认三个固定路径，不引 react-router——nginx 已经把所有路径 fallback 到
@@ -69,6 +69,23 @@ export default function App() {
   const [session, setSession] = useState<Session | null>(loadSession);
   const [legal, setLegal] = useState<LegalPage | null>(readLegalRoute);
   const [wantLogin, setWantLogin] = useState(false);
+  // 免登录试用：点一下就领访客身份；后端拒了（名额满 / 限流）把原话留在落地页上。
+  const [trialBusy, setTrialBusy] = useState(false);
+  const [trialError, setTrialError] = useState("");
+  // 试用中点「注册保留记录」：在工作区之上翻到只有注册面的 Login，成功后原地换成正式身份。
+  const [wantUpgrade, setWantUpgrade] = useState(false);
+
+  const startTrial = async () => {
+    setTrialBusy(true);
+    setTrialError("");
+    try {
+      setSession(await startGuest());
+    } catch (err) {
+      setTrialError(err instanceof Error ? err.message : "试用申请失败，请稍后再试");
+    } finally {
+      setTrialBusy(false);
+    }
+  };
 
   // 浏览器前进/后退：法务页是真实 URL，用户按回退键就得回得去。
   useEffect(() => {
@@ -89,13 +106,32 @@ export default function App() {
     return wantLogin ? (
       <Login onDone={setSession} onBack={() => setWantLogin(false)} />
     ) : (
-      <Landing onStart={() => setWantLogin(true)} />
+      <Landing
+        onStart={() => setWantLogin(true)}
+        onTrial={startTrial}
+        trialBusy={trialBusy}
+        trialError={trialError}
+      />
+    );
+  }
+
+  if (wantUpgrade && session.isGuest) {
+    return (
+      <Login
+        upgrade
+        onDone={(s) => {
+          setSession(s);
+          setWantUpgrade(false);
+        }}
+        onBack={() => setWantUpgrade(false)}
+      />
     );
   }
 
   return (
     <Workspace
       session={session}
+      onUpgrade={() => setWantUpgrade(true)}
       onLogout={() => {
         clearSession();
         setSession(null);
@@ -177,7 +213,15 @@ const WELCOME_ITEM = {
   show: { opacity: 1, y: 0, transition: { type: "spring", stiffness: 380, damping: 32 } },
 } as const;
 
-function Workspace({ session, onLogout }: { session: Session; onLogout: () => void }) {
+function Workspace({
+  session,
+  onLogout,
+  onUpgrade,
+}: {
+  session: Session;
+  onLogout: () => void;
+  onUpgrade: () => void;
+}) {
   const userId = session.userId; // 唯一身份来源：后端 token 里的 sub
   const {
     threadId,
@@ -402,6 +446,8 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
           titleHidden={hasConversation && firstQueryVisible}
           status={status}
           username={session.username}
+          isGuest={session.isGuest}
+          onUpgrade={onUpgrade}
           platformCount={platforms.length}
           quota={quota}
           onOpenSettings={() => setSettingsOpen(true)}

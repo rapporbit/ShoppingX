@@ -121,6 +121,20 @@ def get_current_user_id(
     return decode_token(creds.credentials)
 
 
+def get_current_user_id_optional(
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+) -> str | None:
+    """与 :func:`get_current_user_id` 同源，只差一点：**没带凭证不是错**（返回 None）。
+
+    给「匿名也能进、带身份则另有含义」的口子用——目前只有注册（带访客 token 来 = 升级）。
+    带了凭证但验不过照样 401：一枚坏 token 不能被静默当成「没登录」，否则前端拿着过期访客
+    token 注册会莫名建出一个新号、试用期数据丢在旧号上。
+    """
+    if not auth_enabled() or creds is None or not creds.credentials:
+        return None
+    return decode_token(creds.credentials)
+
+
 def resolve_identity(authenticated: str | None, requested: str | None) -> str | None:
     """合流「token 身份」与「前端传入身份」，返回本次任务**应当生效**的 user_id。
 

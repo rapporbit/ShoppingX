@@ -94,6 +94,9 @@ class SlidingWindow:
 # 额度取值：正常人注册一次、登录失败几次重来就够了，这些上限手工操作根本碰不到；脚本一上来就撞墙。
 _register_by_ip = SlidingWindow(env_int("REGISTER_PER_IP_PER_HOUR", 5), 3600)
 _login_by_ip = SlidingWindow(env_int("LOGIN_PER_IP_PER_15MIN", 20), 900)
+# 免登录试用发证口与注册口**分账**：它不要密码、一次点击就领一份日额度，是比注册更便宜的刷号
+# 入口，窗口给得比注册更紧；全站日闸也单列（MAX_NEW_GUESTS_PER_DAY），访客把名额刷满时注册照常。
+_guest_by_ip = SlidingWindow(env_int("GUEST_PER_IP_PER_HOUR", 3), 3600)
 
 
 def _enforce(window: SlidingWindow, key: str, what: str) -> None:
@@ -116,6 +119,30 @@ def guard_login_ip(request: Request) -> None:
     _enforce(_login_by_ip, client_ip(request), "登录尝试")
 
 
+def guard_guest_ip(request: Request) -> None:
+    _enforce(_guest_by_ip, client_ip(request), "试用申请")
+
+
+def max_new_guests_per_day() -> int:
+    """全站每日新增访客上限；``<=0`` 表示不设闸。"""
+    return env_int("MAX_NEW_GUESTS_PER_DAY", 100)
+
+
+async def guard_daily_guests(db: AsyncSession) -> None:
+    """访客版的每日全站闸：清 localStorage 再点一次「试用」= 库里又多一行，IP 换了也换不掉这行。"""
+    limit = max_new_guests_per_day()
+    if not rate_limit_enabled() or limit <= 0:
+        return
+    today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    count = await db.scalar(
+        select(func.count())
+        .select_from(User)
+        .where(User.created_at >= today, User.is_guest.is_(True))
+    )
+    if (count or 0) >= limit:
+        raise HTTPException(429, "今日试用名额已满，请注册或明天再来")
+
+
 def max_new_users_per_day() -> int:
     """全站每日新增用户上限；``<=0`` 表示不设闸。"""
     return env_int("MAX_NEW_USERS_PER_DAY", 50)
@@ -127,7 +154,12 @@ async def guard_daily_signups(db: AsyncSession) -> None:
     if not rate_limit_enabled() or limit <= 0:
         return
     today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
-    count = await db.scalar(select(func.count()).select_from(User).where(User.created_at >= today))
+    # 只数正式账号：访客有自己的日闸（下面 guard_daily_guests），两本账互不透支。
+    count = await db.scalar(
+        select(func.count())
+        .select_from(User)
+        .where(User.created_at >= today, User.is_guest.is_(False))
+    )
     if (count or 0) >= limit:
         raise HTTPException(429, "今日注册名额已满，请明天再来")
 
@@ -136,3 +168,4 @@ def reset_all() -> None:
     """清空所有内存窗口（测试用：否则用例之间互相把对方的额度用光）。"""
     _register_by_ip.reset()
     _login_by_ip.reset()
+    _guest_by_ip.reset()

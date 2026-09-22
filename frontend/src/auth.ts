@@ -16,16 +16,18 @@ const USER_KEY = "shoppingx.user";
 // 发消息也被 403（那不是你的会话），新用户会卡在一个「一句话都发不出去」的界面里，且毫无头绪。
 export const THREAD_KEY = "shoppingx.threadId";
 
-export type Session = { userId: string; username: string; token: string };
+// isGuest：免登录试用身份（后端 POST /api/auth/guest 签发）。它和正式账号唯一的前端差别是顶栏
+// 多一条「试用中 · 注册可保留记录」，以及注册时带上当前 token（后端据此原地升级、user_id 不变）。
+export type Session = { userId: string; username: string; token: string; isGuest: boolean };
 
 export function loadSession(): Session | null {
   try {
     const token = localStorage.getItem(TOKEN_KEY);
     const raw = localStorage.getItem(USER_KEY);
     if (!token || !raw) return null;
-    const { userId, username } = JSON.parse(raw);
+    const { userId, username, isGuest } = JSON.parse(raw);
     if (!userId) return null;
-    return { userId, username, token };
+    return { userId, username, token, isGuest: Boolean(isGuest) };
   } catch {
     // 隐私模式禁读 / 值被改坏 → 当作未登录，跳登录页重来即可。
     return null;
@@ -35,7 +37,10 @@ export function loadSession(): Session | null {
 function saveSession(s: Session): void {
   try {
     localStorage.setItem(TOKEN_KEY, s.token);
-    localStorage.setItem(USER_KEY, JSON.stringify({ userId: s.userId, username: s.username }));
+    localStorage.setItem(
+      USER_KEY,
+      JSON.stringify({ userId: s.userId, username: s.username, isGuest: s.isGuest }),
+    );
   } catch {
     // 存不下也让本次会话继续（内存里还有），只是刷新后要重新登录。
   }
@@ -62,10 +67,15 @@ export function wsToken(): string | null {
   return loadSession()?.token ?? null;
 }
 
-async function submit(path: string, username: string, password: string): Promise<Session> {
+async function submit(
+  path: string,
+  username: string,
+  password: string,
+  extraHeaders: Record<string, string> = {},
+): Promise<Session> {
   const resp = await fetch(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...extraHeaders },
     body: JSON.stringify({ username, password }),
   });
   const body = await resp.json().catch(() => ({}));
@@ -74,13 +84,36 @@ async function submit(path: string, username: string, password: string): Promise
     userId: body.user_id,
     username: body.username,
     token: body.access_token,
+    isGuest: Boolean(body.is_guest),
   };
   saveSession(session);
   return session;
 }
 
+// 免登录试用：一次点击换一枚访客 token。失败（429 名额 / 限流、404 未开鉴权）原话抛给落地页显示。
+export async function startGuest(): Promise<Session> {
+  const resp = await fetch("/api/auth/guest", { method: "POST" });
+  const body = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(body.detail ?? "试用申请失败");
+  const session: Session = {
+    userId: body.user_id,
+    username: body.username,
+    token: body.access_token,
+    isGuest: true,
+  };
+  saveSession(session);
+  return session;
+}
+
+// 试用中注册 = 升级：带上访客 token，后端把访客那行原地改成正式账号（user_id 不变，会话 / 偏好 /
+// 收藏全留）。不是访客时不带 token——正式账号再注册一个新号是另一个人，后端也会 409 拦住带 token 的。
 export const register = (username: string, password: string): Promise<Session> =>
-  submit("/api/auth/register", username, password);
+  submit(
+    "/api/auth/register",
+    username,
+    password,
+    loadSession()?.isGuest ? authHeader() : {},
+  );
 
 export const login = (username: string, password: string): Promise<Session> =>
   submit("/api/auth/login", username, password);

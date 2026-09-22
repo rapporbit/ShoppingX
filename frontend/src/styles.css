@@ -417,6 +417,25 @@ button:disabled {
 .ghost-btn:hover {
   background: var(--surface-soft);
 }
+/* 试用身份提示 + 升级入口。做成一颗可点的小胶囊而不是一行灰字：它是访客最该点的那个按钮。 */
+.upgrade-chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--accent);
+  background: transparent;
+  color: var(--accent);
+  padding: 5px 11px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.upgrade-chip:hover {
+  background: var(--accent);
+  color: #fff;
+}
 .avatar {
   width: 34px;
   height: 34px;
@@ -1946,6 +1965,15 @@ button:disabled {
   .topbar-actions .ghost-btn span {
     display: none;
   }
+  /* 窄屏：胶囊只留「注册保留记录」四个字以外的动作词，别把标题挤没。 */
+  .upgrade-chip {
+    font-size: 0;
+    padding: 5px 9px;
+  }
+  .upgrade-chip::after {
+    content: "去注册";
+    font-size: 12px;
+  }
   .title-text {
     max-width: 38vw;
   }
@@ -2926,6 +2954,27 @@ button:disabled {
   margin: 12px 0 0;
   font-size: 13px;
   color: var(--muted);
+}
+.landing-cta-link {
+  border: none;
+  background: none;
+  padding: 0 2px;
+  font: inherit;
+  color: var(--text-2);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.landing-cta-link:hover {
+  color: var(--text);
+}
+.landing-cta-error {
+  color: var(--danger, #b42318);
+}
+.landing-cta:disabled {
+  opacity: 0.7;
+  cursor: progress;
+  transform: none;
 }
 
 .landing-features {

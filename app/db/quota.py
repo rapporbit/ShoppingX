@@ -35,7 +35,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import auth_enabled
-from app.db.models import UsageLedger
+from app.db.models import UsageLedger, User
 from app.db.session import session_factory
 from app.utils.env import env_float
 
@@ -49,6 +49,24 @@ CREDITS_PER_USD = 1000
 def daily_quota_usd() -> float:
     """每人每日成本上限（美元）。``<=0`` 表示不设闸。"""
     return env_float("DAILY_QUOTA_USD", 2.0)
+
+
+def guest_daily_quota_usd() -> float:
+    """免登录试用账号的每日上限（美元）。默认给正式额度的 1/5：按 2026-09-20 实测一轮约 3 credits，
+    0.1 美元 = 100 credits ≈ 30 轮，够把产品试明白，不够拿来白嫖。``<=0`` 时访客与正式账号同档。"""
+    return env_float("GUEST_DAILY_QUOTA_USD", 0.1)
+
+
+async def daily_quota_usd_for(db: AsyncSession, user_id: str) -> float:
+    """这个人的日上限：访客走 ``GUEST_DAILY_QUOTA_USD``，其余（含查无此人的 demo 假身份）走正式档。
+
+    多一次按主键查 users 的开销：只在任务进门与 ``/api/quota`` 各查一次，不在热路径上。
+    """
+    guest_limit = guest_daily_quota_usd()
+    if guest_limit <= 0:
+        return daily_quota_usd()
+    user = await db.get(User, user_id)
+    return guest_limit if user is not None and user.is_guest else daily_quota_usd()
 
 
 def quota_enabled() -> bool:
@@ -127,7 +145,7 @@ async def get_quota(db: AsyncSession, user_id: str | None) -> QuotaStatus:
         )
     ).scalar_one_or_none()
 
-    limit_usd = daily_quota_usd()
+    limit_usd = await daily_quota_usd_for(db, user_id)
     used_usd = row.cost_usd if row else 0.0
     limit_credits = to_credits(limit_usd)
     used_credits = to_credits(used_usd)
