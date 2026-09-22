@@ -16,8 +16,8 @@ card_type 消费，检索的本质是「定位品类」而非「对 2044 张卡�
 取卡 → 分组提炼」≥3 跳，且召回的原始卡片大、不该污染主 loop 上下文。``depth="deep"`` 尤其
 适合 fork；``depth="quick"`` 主 loop 直接调也行——fork 与否由主 loop 判。
 
-数据后端：配了 ``OPENSEARCH_HOST`` 走真 OpenSearch（``source="opensearch"``），否则走进程内
-本地 hybrid 回退（``source="local_kb_fallback"``）——诚实标注当前数据通路。
+数据后端：进程内 hybrid（``source="local_kb"``，1935 张卡全量精确 KNN + 词面重叠），
+无外部搜索引擎——2026-09-22 删 OpenSearch，见 app/recall/kb_client.py 头注释。
 """
 
 from __future__ import annotations
@@ -128,7 +128,7 @@ class CategoryInsightOutput(BaseModel):
     price_tiers: list[PriceTier]
     card_count: int  # 精排后命中的卡片数
     confidence: float  # 命中卡片的平均置信度
-    source: str  # opensearch / local_kb_fallback
+    source: str  # 数据通路标识（当前恒为 local_kb）
     # 数据可信度自报：库内数据薄（卡片少 / 卡片自评置信低）时非空，明说参考价值有限、评价类
     # 结论建议 web_search 口碑佐证。空串 = 数据量正常。
     data_note: str = ""
@@ -381,7 +381,6 @@ async def category_insight(
     attributes = _extract_attributes(grouped["attribute"]) if depth == "deep" else []
 
     confidence = round(sum(c.confidence for c in cards) / len(cards), 3) if cards else 0.0
-    source = "opensearch" if get_kb_client().remote else "local_kb_fallback"
     out = CategoryInsightOutput(
         category=category,
         matched_category=matched,
@@ -393,7 +392,7 @@ async def category_insight(
         price_tiers=price_tiers,
         card_count=len(cards),
         confidence=confidence,
-        source=source,
+        source="local_kb",
         data_note=_thin_data_note(len(cards), confidence),
     )
     # 写回缓存：精确层总写（编码不可用时相同 query 仍走快路径）；语义层在编码可用时一并写。

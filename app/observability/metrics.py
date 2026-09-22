@@ -79,7 +79,7 @@ LLM_BUCKET_EVENTS = Counter("shoppingx_llm_bucket_events_total", "LLM 令牌桶�
 #   success             正常跑完
 #   failed              跑挂了（含超时）—— 这才是 SLO 要压的
 #   cancelled           用户自己掐的 / worker 排空掐的，不是服务质量问题
-#   dependency_rejected 依赖不可用（Qdrant / OpenSearch 熔断或宕），Agent 如实告知用户，
+#   dependency_rejected 依赖不可用（Qdrant 熔断或宕），Agent 如实告知用户，
 #                       是**设计内的降级**不是故障；混进分母会让一次 Qdrant 维护把 SLO 打穿
 RUN_OUTCOME = Counter("shoppingx_run_outcome_total", "一次 run 的收尾结果", ["outcome"])
 # 首事件延迟 = 任务入队 → 前端收到第一条 assistant_call。用入队时刻而非「POST 返回时刻」作起点：

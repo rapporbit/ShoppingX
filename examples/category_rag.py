@@ -5,14 +5,12 @@
     → RerankerClient（cross-encoder 精排，剔跑题卡）
     → 按 card_type 分组提炼 → 结构化 CategoryInsightOutput（给主 loop 结论，不给原文）
 
-数据后端按 env 自动选：配了 OPENSEARCH_HOST 走真 OpenSearch（引擎层 Hybrid），否则走进程内
-本地 hybrid 回退——两种都用同一份卡片、算同一个加权融合公式，离线可跑。
+数据后端只有一条：进程内 hybrid（1935 张卡全量精确 KNN + 词面重叠），读同一份卡片 JSONL，离线可跑。
 
 前置：先建知识库（产出 data/rag/category_cards.jsonl，已 gitignore）：
     uv run python scripts/build_category_kb.py
 运行：
     uv run python examples/category_rag.py
-    OPENSEARCH_HOST=localhost uv run python examples/category_rag.py   # 走真 OpenSearch
 """
 
 import asyncio
@@ -21,7 +19,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.recall.kb_client import get_kb_client  # noqa: E402
 from app.tools.category_insight import category_insight  # noqa: E402
 
 # 覆盖名词类 / 跨语言 / 语义化（关 BM25）三种 query 形态。
@@ -33,8 +30,7 @@ CASES = [
 
 
 async def main() -> None:
-    backend = "OpenSearch（引擎层 Hybrid）" if get_kb_client().remote else "进程内本地 hybrid 回退"
-    print(f"知识库后端：{backend}\n")
+    print("知识库后端：进程内 hybrid（app/recall/kb_client.py）\n")
 
     for category, depth in CASES:
         out = await category_insight.ainvoke({"category": category, "depth": depth})

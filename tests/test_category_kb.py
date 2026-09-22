@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from app.recall import kb_client
 from app.recall.category_kb import CategoryCard, normalize_category
 from app.recall.kb_client import KBClient, should_disable_bm25
 from app.recall.reranker import RerankerClient
-from app.recall.towers import TowerClient
 
 
 def test_normalize_category() -> None:
@@ -63,8 +61,7 @@ def _cards() -> list[CategoryCard]:
 
 async def test_local_kb_search_ranks_relevant_first() -> None:
     """本地 hybrid 后端：query 应把最相关品类卡排在首位（KNN+token 融合）。"""
-    kb = KBClient(cards=_cards(), host=None)
-    assert kb.remote is False
+    kb = KBClient(cards=_cards())
     hits = await kb.search("luggage suitcase", coarse_k=3)
     assert hits, "应有召回"
     top_card, top_score = hits[0]
@@ -75,7 +72,7 @@ async def test_local_kb_search_ranks_relevant_first() -> None:
 
 
 async def test_local_kb_empty_when_no_cards() -> None:
-    kb = KBClient(cards=[], host=None)
+    kb = KBClient(cards=[])
     assert await kb.search("anything", coarse_k=5) == []
 
 
@@ -125,7 +122,7 @@ async def test_reranker_remote_failure_degrades_with_log(
 
 async def test_resolve_category_votes_by_category() -> None:
     """两段式第一段：hybrid 命中按品类投票——相关品类胜出，置信度是得分占比且降序。"""
-    kb = KBClient(cards=_cards(), host=None)
+    kb = KBClient(cards=_cards())
     cands = await kb.resolve_category("luggage suitcase", top_n=2)
     assert cands and cands[0][0] == "luggage"
     confs = [c for _, c in cands]
@@ -142,7 +139,7 @@ async def test_fetch_cards_exact_category_sorted_by_confidence() -> None:
         summary="评分分布：4.5★+ 60% / 4.0–4.5★ 30% / 3.0–4.0★ 8% / <3.0★ 2%",
         confidence=0.95,
     )
-    kb = KBClient(cards=[*_cards(), extra], host=None)
+    kb = KBClient(cards=[*_cards(), extra])
     cards = await kb.fetch_cards("luggage")
     assert {c.category for c in cards} == {"luggage"}
     assert len(cards) == 2
@@ -283,7 +280,7 @@ def test_insight_result_renders_data_note_first() -> None:
         price_tiers=[],
         card_count=1,
         confidence=0.4,
-        source="opensearch",
+        source="local_kb",
         data_note="库内该品类数据薄",
     )
     assert _insight_result(out).splitlines()[0].startswith("⚠ 库内该品类数据薄")
@@ -335,38 +332,3 @@ def test_admit_gate() -> None:
     # attribute 缺百分号被拦。
     attr = {**good, "card_id": "x_attr", "card_type": "attribute", "summary": "评分都很高"}
     assert admit(attr)[0] is False
-
-
-class _BoomOpenSearch:
-    """每次 search 都炸的假 OpenSearch 客户端，用来数请求次数。"""
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def search(self, **_kw: object) -> dict:
-        self.calls += 1
-        raise RuntimeError("连不上")
-
-
-async def test_opensearch_breaker_skips_request_after_threshold(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """OpenSearch 连续失败到阈值后不再发请求，但降级语义不变——照旧返回空（阶段 4-4）。
-
-    品类知识是锦上添花，后端挂着时每轮开局的预取各等满 10s，等于把主 loop 的时间预算白送
-    给必然拿不到结果的调用。断路器省掉的是那 10 秒，不是「返回空」这个行为本身。
-    """
-    monkeypatch.setenv("OPENSEARCH_CB_THRESHOLD", "3")
-    kb_client._os_breaker.cache_clear()
-    try:
-        boom = _BoomOpenSearch()
-        kb = KBClient(cards=[], host="os.local", tower=TowerClient(model=None, local_dim=32))
-        kb._os_client = boom
-        for _ in range(4):
-            assert await kb.search("luggage", coarse_k=3) == [], "降级语义变了"
-        assert boom.calls == 3, "熔断后仍然发了请求"
-        # 取卡走的是另一条路径，共用同一个断路器 → 同样不再发请求。
-        assert await kb.fetch_cards("luggage") == []
-        assert boom.calls == 3
-    finally:
-        kb_client._os_breaker.cache_clear()

@@ -27,9 +27,6 @@ data:
   # ---- 事件回放（断线重连补缺口）与向量 / 全文检索 ----
   EVENT_REDIS_URL: "redis://redis:6379/2"
   QDRANT_URL: "http://qdrant:6333"
-  OPENSEARCH_HOST: "opensearch"
-  OPENSEARCH_PORT: "9200"
-  OPENSEARCH_USE_SSL: "false"
   # ---- 库。**单副本 SQLite 是过渡态，不是推荐** ----
   # 批2-5 给 SQLite 开了 WAL + busy_timeout，同一台机器上多进程写同一个文件是稳的；但放到 K8s
   # 上，这个文件在网络卷（NFS/EFS）上，而 SQLite 的锁依赖 POSIX advisory lock —— NFS 上它时灵
@@ -63,7 +60,6 @@ stringData:
   EMBED_API_KEY: "replace-me"
   RERANKER_API_KEY: "replace-me"
   TAVILY_API_KEY: "replace-me"
-  OPENSEARCH_PASS: "replace-me"
   # 至少 32 字节随机串。换掉它 = 所有已签发的登录态立刻失效（这是特性不是 bug）。
   JWT_SECRET: "replace-me-with-32-bytes-of-randomness"
 ---

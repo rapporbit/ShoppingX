@@ -39,7 +39,7 @@ _SENSITIVE_PATTERNS: tuple[tuple[str, str], ...] = (
     (
         "internal_endpoint",
         r"(?i)\bhttps?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0|"
-        r"opensearch|qdrant|redis|vllm|reranker)(?::\d+)?\S*",
+        r"qdrant|redis|vllm|reranker)(?::\d+)?\S*",
     ),
     # 服务器绝对路径：会话目录 / 项目路径泄露磁盘结构。产物下载走 /api/files/，用不着绝对路径。
     # 前置 lookbehind 挡住 URL 里的同名路径段（``https://x.com/home/foo`` 不该被当成本机路径）。

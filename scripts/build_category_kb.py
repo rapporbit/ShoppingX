@@ -1,14 +1,13 @@
 """构建 RAG 品类知识库（可复现，产物 gitignore）。
 
-离线流程：聚合抽卡 → 入库门禁 → 编码向量 → 写 JSONL →（配了 OpenSearch 则）建索引 +
-注册 Hybrid 管道 + bulk 灌库。``category_insight`` 运行时只读这份产物。
+离线流程：聚合抽卡 → 入库门禁 → 编码向量 → 写 JSONL。``category_insight`` 运行时只读这份产物
+（进程内 Hybrid，无需灌任何搜索引擎，见 app/recall/kb_client.py）。
 
 用法：
     uv run python scripts/build_category_kb.py            # 全量
     uv run python scripts/build_category_kb.py --limit 40 # 只取前 N 个品类（快速试跑）
 
-不配 ``OPENSEARCH_HOST`` 时只产 JSONL，由本地回退后端读取（离线可跑）；配了则同时灌进
-OpenSearch，走引擎层 Hybrid。两种情况都用同一个 TowerClient 编码，保证向量空间一致。
+卡片向量与运行时 query 用同一个 TowerClient 编码，保证向量空间一致。
 """
 
 from __future__ import annotations
@@ -148,29 +147,15 @@ async def main(limit: int | None, require_remote: bool = False) -> None:
         )
     print(f"向量维度：{dim}")
 
-    # 写 JSONL（本地回退后端的数据源）。
+    # 写 JSONL（运行时知识库的唯一数据源）。
     out_path = Path(os.environ.get("CATEGORY_CARDS_PATH", DEFAULT_CARDS_PATH))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as f:
         for card in admitted:
-            # content_vector 是 exclude 字段，手动并回 JSONL 供本地后端读取。
+            # content_vector 是 exclude 字段，手动并回 JSONL 供运行时读取。
             payload = {**card.model_dump(), "content_vector": card.content_vector}
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
     print(f"卡片写入 {out_path}（{len(admitted)} 张）")
-
-    # 配了 OpenSearch 才灌库。
-    if os.environ.get("OPENSEARCH_HOST"):
-        from scripts.etl.os_setup import bulk_cards, make_client, recreate_index, register_pipeline
-
-        dim = len(admitted[0].content_vector)
-        print(f"灌入 OpenSearch（dim={dim}）…")
-        client = make_client()
-        recreate_index(client, dim)
-        register_pipeline(client)
-        n = bulk_cards(client, admitted)
-        print(f"  已索引 {n} 张到 {client.transport.hosts}")
-    else:
-        print("未配置 OPENSEARCH_HOST：跳过灌库，仅产出 JSONL（本地回退后端可用）。")
 
     await tower.aclose()
 
