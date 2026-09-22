@@ -6,7 +6,7 @@
 不要塑料的」），系统并行检索不同电商平台、比价、估算到手价（关税 + 运费），输出带选购理由的
 清单，并把偏好沉淀为跨会话记忆。
 
-**技术栈**：AgentScope 2.0 · FastAPI · Redis · Qdrant · OpenSearch · Langfuse · AG-UI · WebSocket · React
+**技术栈**：AgentScope 2.0 · FastAPI · Redis · Qdrant · Langfuse · AG-UI · WebSocket · React
 
 ## 特性
 
@@ -23,7 +23,7 @@
 - **MCP 两侧** — 消费侧把一个只读汇率 MCP 的工具挂进 SearchAgent；生产侧对外开放只读三工具
   （`item_search` / `price_compare` / `shipping_calc`）。
 - **向量召回 + 精排** — 商品侧 Qdrant dense（BGE-M3，1024 维）+ payload filter；品类知识库
-  OpenSearch Hybrid（KNN + BM25）+ cross-encoder 精排。
+  进程内 Hybrid（全量精确 KNN + 词面重叠）+ cross-encoder 精排。
 - **分层记忆** — 跨会话长期偏好 + 会话短期状态；会话结束后由记忆管家离线写入与矛盾消解。
 - **缓存友好压缩** — 长对话在保住 Prompt Cache 前缀的前提下压缩较旧历史，控制 token 成本。
 - **过程治理** — 工具调用前后挂载单步断言、漂移检测、熔断与阶段权限，失败尽早拦下。
@@ -44,7 +44,7 @@
                                               │
               控制面（中间件）：断言 / 漂移 / 阶段 / 预算 / 熔断
                                               │
-                        ├──▶ Qdrant（商品向量）  OpenSearch（品类知识库）
+                        ├──▶ Qdrant（商品向量）  进程内品类知识库（JSONL）
                         ├──▶ 记忆 Store（长期偏好 / 策略库）
                         └──▶ 事件背板 ──▶ WebSocket ──▶ React（AG-UI 事件流）
 ```
@@ -87,7 +87,7 @@
 uv sync
 cp .env.example .env          # 填入 LLM / embedding / reranker endpoint
 
-docker compose -f docker/docker-compose.yml up -d   # Qdrant / OpenSearch / Redis
+docker compose -f docker/docker-compose.yml up -d   # Qdrant / Redis
 
 # 可选：全量数据（清洗 + 语料 + 建索引；建索引约数小时）
 uv run python scripts/clean_platforms.py
@@ -100,7 +100,7 @@ cd frontend && npm install && npm run dev
 
 - 未配置 `EMBED_MODEL` 时编码器退化为本地确定性实现，可离线跑通（检索质量下降）。
 - `--require-remote`：检测到静默退化为本地哈希编码则中止，避免假向量入库。
-- embedding / reranker / OpenSearch / Langfuse 均有本地 fallback，远程故障只降级不中断主链路。
+- embedding / reranker / Langfuse 均有本地 fallback，远程故障只降级不中断主链路。
 
 ```bash
 uv run ruff check . && uv run mypy app && uv run pytest   # 1355 tests
@@ -114,7 +114,7 @@ uv run ruff check . && uv run mypy app && uv run pytest   # 1355 tests
 | --- | --- |
 | LLM | `OPENAI_BASE_URL` / `OPENAI_API_KEY` / `LLM_MAIN` / `LLM_JUDGE` / `LLM_FAST` |
 | 召回 | `ANN_BACKEND` / `EMBED_DIM` / `RELEVANCE_FLOOR` |
-| 知识库 | `OPENSEARCH_*` / `CATEGORY_CARDS_PATH` |
+| 知识库 | `CATEGORY_CARDS_PATH` |
 | 记忆与账户 | `DATABASE_URL`（缺省 SQLite `var/globex.db`） |
 | 预算 / 压缩 | `RETRIEVAL_BUDGET` / `TOKEN_BUDGET_USD` / `COMPRESS_*` |
 
@@ -172,7 +172,7 @@ uv run ruff check . && uv run mypy app && uv run pytest   # 1355 tests
 
 ### 2. 品类 RAG：Hybrid 粗排 + Cross-Encoder 精排
 
-`category_insight`：OpenSearch Hybrid（默认 **KNN 0.7 + BM25 0.3**）粗排 Top-30，再
+`category_insight`：进程内 Hybrid（默认 **KNN 0.7 + 词面 0.3**，1935 张卡全量精确计算）粗排，再
 BGE-Reranker 精排到 Top-8。粗排已够自信或候选不足时短路跳过 rerank。
 
 | 指标 | 仅 Hybrid 粗排 | 粗排 + Rerank | 说明 |
@@ -280,7 +280,7 @@ app/
 prompt/versions/  提示词版本（基线的叠加层，非副本）
 skills/           Skill 目录（正文按需读取）
 migrations/       Alembic 迁移
-deploy/k8s/       API / worker / Redis / Qdrant / OpenSearch 编排
+deploy/k8s/       API / worker / Redis / Qdrant 编排
 frontend/         React + Vite
 scripts/          ETL、索引、评测（scripts/eval/）
 tests/            1355 tests

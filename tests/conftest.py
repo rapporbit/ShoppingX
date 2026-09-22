@@ -25,10 +25,9 @@ os.environ.setdefault("OPENAI_BASE_URL", "http://localhost:9/v1")
 # 仍用 setdefault：想跑真实联调可在 shell 显式 export EMBED_MODEL=... 覆盖。
 os.environ.setdefault("EMBED_MODEL", "")
 
-# 同理把检索后端钉成「本地回退」：开发者 .env 配了真 OpenSearch / 远程 reranker 时，单测仍走
-# 进程内 hybrid + 确定性本地打分（无网络、可断言、不依赖 docker）。空串 → KBClient/RerankerClient
-# 的 remote 判定为 False。想跑真实联调同样可在 shell 显式 export 覆盖。
-os.environ.setdefault("OPENSEARCH_HOST", "")
+# 同理把精排钉成本地：开发者 .env 配了远程 reranker 时，单测仍走
+# 确定性本地打分（无网络、可断言、不依赖 docker）。空串 → RerankerClient 的 remote 判定为 False。
+# 想跑真实联调同样可在 shell 显式 export 覆盖。
 os.environ.setdefault("RERANKER_ENDPOINT", "")
 
 # 观测同理钉死为关：开发者 .env 里 LANGFUSE_ENABLED=true 时，单测（fork 容错、dispatch 那几条走

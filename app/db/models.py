@@ -10,7 +10,7 @@
 拿它当唯一真源，一次异常退出就可能丢掉刚注册的账号——偏好丢一条无所谓，账号丢一条是事故。
 
 **为什么 SQLite 而不是 Postgres。** 部署是**单机单 worker**（Dockerfile 里就写死单 worker，因为
-任务表是进程内状态），那台 VPS 已经扛着 OpenSearch + Qdrant + Redis，再加一个 Postgres 容器纯属
+任务表是进程内状态），那台 VPS 已经扛着 Qdrant + Redis，再加一个 Postgres 容器纯属
 拿内存换用不上的并发写能力。SQLite 零容器、零运维、库文件躺在持久卷上。代价说清楚：多进程并发写
 会锁表——真要多副本时，把 DSN 换成 Postgres 即可，ORM 层一行不用改（这正是用 SQLAlchemy 而非手写
 SQL 的理由）。

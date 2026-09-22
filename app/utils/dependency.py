@@ -21,7 +21,7 @@ class DependencyDown(RuntimeError):
     """某个外部依赖当前不可用（连不上 / 超时 / 熔断中），重试无意义。
 
     Args:
-        dependency: 依赖名，用于文案与可观测（``qdrant`` / ``embedding`` / ``opensearch``）。
+        dependency: 依赖名，用于文案与可观测（``qdrant`` / ``embedding``）。
         detail: 补充说明，会拼进消息给模型看，所以写「做什么失败了」而不是堆栈术语。
     """
 

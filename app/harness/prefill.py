@@ -113,7 +113,7 @@ async def prefill(session: HarnessSession, agent: Agent) -> None:
     ctx["tool_args"] = args
     ctx["tool_result"] = text
     # round3 刀 4：planner 的 post_tool_call（域内长期偏好读取 + 注入，走 DB）与品类知识库预取
-    # （OpenSearch 两段式检索）互不依赖，并发跑；KB 预取的结果作为第二对 tool 块预置进上下文，
+    # （进程内两段式检索）互不依赖，并发跑；KB 预取的结果作为第二对 tool 块预置进上下文，
     # 模型第 1 轮就拿着 plan + 品类行情直接检索（改前 9/9 遍第 1 轮都在调 category_insight）。
     kb_task = asyncio.create_task(_prefetch_kb(s, out)) if _kb_prefetch_due(out) else None
     # 订单 grounding（D4）：问订单的轮次直接把最近几张摆上去，与 KB 预取并发。

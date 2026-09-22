@@ -1,26 +1,23 @@
-"""品类知识库检索客户端（OpenSearch Hybrid + 进程内本地回退）。
+"""品类知识库检索客户端（进程内 Hybrid：KNN + 词面重叠）。
 
-原方案定型：**应用层走 OpenSearch**——它把「语义召回(KNN) + 全文匹配(BM25) +
-标量过滤 + 线性加权融合」装进同一套 DSL，且融合权重在引擎层运行时可调，这是 Faiss
-等纯向量库做不到的（标量+向量结合有三种模式）。
+**为什么不用搜索引擎（2026-09-22 主动更正原方案）：** 原方案让应用层走 OpenSearch，
+理由是它把「语义召回(KNN) + 全文匹配(BM25) + 标量过滤 + 线性加权融合」装进同一套 DSL。
+但本仓的知识库只有 1935 张品类卡，整个语料的向量矩阵不到 10MB，全量精确点积比 HNSW 近似
+还准；两段式结构下指标只取决于「品类定位对不对」，而定位由 KNN 0.7 主导。40 条口语金标集
+实测两种后端 recall / mrr / ndcg 三个数完全一致（0.800 / 0.800 / 0.769），于是把 OpenSearch
+连同 512MB 堆的容器、断路器、灌库脚本一起删掉，只留这一条进程内路。
 
 **两段式检索（本客户端的主用法）：** 知识库按品类组织（每品类固定几类卡），检索的本质是
 「定位品类」而非「检索卡片」。:meth:`resolve_category` 用 hybrid 命中按品类投票定位，
-:meth:`fetch_cards` 再按品类 term 精确取全——跨品类污染、同类卡挤出 top-K 这两类全局
+:meth:`fetch_cards` 再按品类精确取全——跨品类污染、同类卡挤出 top-K 这两类全局
 top-K 的老毛病从结构上消掉。裸 :meth:`search` 保留给投票内部与评测用。
 
-**双后端（沿用 M3 解耦套路）：**
+**Hybrid 公式：** KNN 余弦与词面重叠各自 min_max 归一后按 :data:`HYBRID_WEIGHTS` 加权平均。
+词面那一路是「query 与卡片文本的 token 交集数」，没有词干化 / IDF / 字段加权；字段加权由
+:meth:`CategoryCard.search_text` 的「品类名重复一次 + 并入别名」代替。
 
-- 配了 ``OPENSEARCH_HOST`` → 走真 OpenSearch：``hybrid`` query + ``search_pipeline``
-  在引擎层做 min_max 归一 + 加权融合（KNN 0.7 / BM25 0.3）。
-- 没配 → 退化到**进程内本地 hybrid**：用 TowerClient 编码做语义召回 + token 重叠做
-  全文召回，各自 min_max 归一后同权重融合——**和引擎层算的是同一个公式**，只是规模小、
-  在本进程算。保证离线 / CI 不依赖 docker 也能跑通整条 RAG 链路。
-
-**语料是英文（主动更正原方案）：** 原方案假设中文卡片用 ``ik_max_word`` 分词；本项目
-``data/rag`` 是英文 Amazon 商品，故 BM25 那一路用 OpenSearch 内置 ``english`` 分词器。
-中文 query（如「旅行三件套」）跨语言匹配**靠 KNN 多语言向量兜底**——这正是 Hybrid 双路
-互相代偿的设计意图（一路命不中，另一路补上）。
+**语料是英文：** ``data/rag`` 是英文 Amazon 商品卡。中文 query（如「旅行三件套」）词面路
+基本不命中，跨语言匹配靠 KNN 多语言向量兜底——这正是 Hybrid 双路互相代偿的设计意图。
 """
 
 from __future__ import annotations
@@ -29,27 +26,18 @@ import logging
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 
-from app.api.context import clamp_timeout
 from app.recall.category_kb import CategoryCard
 from app.recall.towers import TowerClient, get_tower_client
-from app.utils.circuit_breaker import CircuitBreaker
-from app.utils.env import env_float, env_int
 
 logger = logging.getLogger("shoppingx.kb")
 
-# OpenSearch 侧的固定命名（建库脚本与检索共用，避免两处写歪）。
-INDEX_NAME = "globex_category_kb"
-HYBRID_PIPELINE = "globex_hybrid_pipeline"
-VECTOR_FIELD = "content_vector"
-
-# 默认卡片落盘位置（ETL 产出，已 gitignore；本地后端从这里读）。
+# 默认卡片落盘位置（ETL 产出，已 gitignore）。
 DEFAULT_CARDS_PATH = "./data/rag/category_cards.jsonl"
 
-# 融合权重 [KNN, BM25]，对应原方案的引擎层 weights，本地后端复用同一组。
+# 融合权重 [KNN, 词面]，沿用原方案的引擎层 weights。
 HYBRID_WEIGHTS = (0.7, 0.3)
 
 # 两段式检索（品类定位 → 结构化取卡）的参数：
@@ -57,44 +45,25 @@ HYBRID_WEIGHTS = (0.7, 0.3)
 RESOLVE_COARSE_K = 15
 # 第二段按品类取卡的上限（一个品类当前 ≈8 张卡，32 给足余量）。
 FETCH_SIZE = 32
-# 一次 OpenSearch 请求最多等多久（秒）。opensearch-py 不传就是 10s，这里显式化好让 deadline 收得动
-# （阶段 4-2）——后端挂着时这 10 秒是干等，而品类知识只是锦上添花，主 loop 不该为它耗掉整个预算。
-OS_REQUEST_TIMEOUT_SEC = float(os.environ.get("OPENSEARCH_TIMEOUT_SEC", "10"))
 
-
-@lru_cache(maxsize=1)
-def _os_breaker() -> CircuitBreaker:
-    """OpenSearch 的进程级断路器（阶段 4-4）。
-
-    这里**不改降级语义**——挂了照旧静默返回空、由上层给低置信度结果；断路器只省掉「每次都干等
-    10 秒」。品类知识是锦上添花，后端挂着时让每轮开局的 ``category_insight`` 预取各等 10s，等于
-    把主 loop 的时间预算白送给一个必然拿不到结果的调用。
-    """
-    return CircuitBreaker(
-        "opensearch",
-        failure_threshold=env_int("OPENSEARCH_CB_THRESHOLD", 3),
-        recovery_timeout=env_float("OPENSEARCH_CB_RECOVERY", 30.0),
-    )
-
-
-# query 含这些「语义化 token」时关掉 BM25 子路：纯气质/口语 query 下 BM25 几乎全是
+# query 含这些「语义化 token」时关掉词面子路：纯气质/口语 query 下词面几乎全是
 # 字面命中的杂卡，反把 KNN 准命中的卡挤出 Top-K。
 SEMANTIC_TOKENS = ("气质", "感觉", "风格", "氛围", "适合", "送", "vibe", "aesthetic", "minimal")
 
 
 def should_disable_bm25(query: str) -> bool:
-    """判定型分支：query 偏纯语义时关掉 BM25 子路，只走 KNN（大小写不敏感的子串匹配）。"""
+    """判定型分支：query 偏纯语义时关掉词面子路，只走 KNN（大小写不敏感的子串匹配）。"""
     low = query.lower()
     return any(t in low for t in SEMANTIC_TOKENS)
 
 
 def _min_max_norm(scores: list[float]) -> list[float]:
-    """把一路原始分线性映射到 [0,1]（KNN 余弦与 BM25 量纲不同，融合前先各自归一）。"""
+    """把一路原始分线性映射到 [0,1]（KNN 余弦与词面计数量纲不同，融合前先各自归一）。"""
     if not scores:
         return []
     lo, hi = min(scores), max(scores)
     if hi - lo < 1e-9:
-        # 全相等（含单条候选 / 某路全 0，如中文 query 对英文卡的 BM25 全不命中）：这一路
+        # 全相等（含单条候选 / 某路全 0，如中文 query 对英文卡的词面全不命中）：这一路
         # 没有区分信号，归零让它**不贡献**融合分，把排序交给另一路——避免给所有候选注入
         # 一个常数把绝对分抬高、把短路用的首尾差距抹平。
         return [0.0 for _ in scores]
@@ -102,14 +71,14 @@ def _min_max_norm(scores: list[float]) -> list[float]:
 
 
 def _overlap_score(query: str, text: str) -> float:
-    """本地 BM25 替身：query 与卡片文本的 token 交集数（min_max 前的原始分）。"""
+    """词面子路：query 与卡片文本的 token 交集数（min_max 前的原始分）。"""
     q = set(query.lower().split())
     t = set(text.lower().split())
     return float(len(q & t))
 
 
 class KBClient:
-    """品类知识库检索：对外只暴露一个 :meth:`search`，内部按配置选后端。
+    """品类知识库检索：对外暴露 :meth:`search` / :meth:`resolve_category` / :meth:`fetch_cards`。
 
     构造参数全可选，缺省从 env 读；``cards`` / ``cards_path`` 用于测试时直接注入卡片
     （不依赖外部文件）。
@@ -119,22 +88,13 @@ class KBClient:
         self,
         cards: list[CategoryCard] | None = None,
         cards_path: str | Path | None = None,
-        host: str | None = None,
         tower: TowerClient | None = None,
     ) -> None:
-        self._host = host if host is not None else os.environ.get("OPENSEARCH_HOST")
         self._tower = tower or get_tower_client()
         self._cards_path = Path(
             cards_path or os.environ.get("CATEGORY_CARDS_PATH", DEFAULT_CARDS_PATH)
         )
-        # 本地后端的卡片缓存（远程后端不用）。
         self._cards: list[CategoryCard] | None = cards
-        self._os_client: Any | None = None
-
-    @property
-    def remote(self) -> bool:
-        """是否走真 OpenSearch（否则为进程内本地回退）。"""
-        return bool(self._host)
 
     async def search(
         self, query: str, coarse_k: int, disable_bm25: bool | None = None
@@ -145,9 +105,27 @@ class KBClient:
         """
         if disable_bm25 is None:
             disable_bm25 = should_disable_bm25(query)
-        if self.remote:
-            return await self._search_remote(query, coarse_k, disable_bm25)
-        return await self._search_local(query, coarse_k, disable_bm25)
+        cards = await self._load_cards()
+        if not cards:
+            return []
+        qvec = await self._tower.encode_query(query)
+        mat = np.asarray([c.content_vector for c in cards], dtype=np.float32)
+        # 向量已 L2 归一化 → 内积即余弦（语义子路原始分）。全量精确计算，不做近似。
+        knn_raw = (mat @ np.asarray(qvec, dtype=np.float32)).tolist()
+        knn = _min_max_norm(knn_raw)
+        if disable_bm25:
+            fused = [(card, k) for card, k in zip(cards, knn, strict=True)]
+        else:
+            lex_raw = [_overlap_score(query, c.search_text()) for c in cards]
+            lex = _min_max_norm(lex_raw)
+            w_knn, w_lex = HYBRID_WEIGHTS
+            denom = w_knn + w_lex
+            fused = [
+                (card, (w_knn * k + w_lex * b) / denom)
+                for card, k, b in zip(cards, knn, lex, strict=True)
+            ]
+        fused.sort(key=lambda x: x[1], reverse=True)
+        return fused[:coarse_k]
 
     # ---------------------- 两段式：品类定位 + 结构化取卡 ----------------------
     async def resolve_category(self, query: str, top_n: int = 2) -> list[tuple[str, float]]:
@@ -175,13 +153,9 @@ class KBClient:
 
         同 card_type 多卡按 confidence 降序，下游「只取首卡」的消费口径直接受益。
         """
-        if self.remote:
-            cards = await self._fetch_remote(category)
-        else:
-            cards = [c for c in await self._load_cards() if c.category == category]
+        cards = [c for c in await self._load_cards() if c.category == category]
         return sorted(cards, key=lambda c: c.confidence, reverse=True)[:FETCH_SIZE]
 
-    # ---------------------- 本地回退后端 ----------------------
     async def _load_cards(self) -> list[CategoryCard]:
         # 首次：从文件读卡（注入的 cards 已在 __init__ 落到 self._cards，跳过读盘）。
         if self._cards is None:
@@ -192,7 +166,7 @@ class KBClient:
                     if line:
                         cards.append(CategoryCard.model_validate_json(line))
             else:
-                logger.warning("品类卡片文件不存在：%s（本地后端将返回空召回）", self._cards_path)
+                logger.warning("品类卡片文件不存在：%s（知识库将返回空召回）", self._cards_path)
             self._cards = cards
         # 补齐缺失向量：建库时一般已写入 content_vector；测试直接注入的卡可能没有，
         # 用同一个 TowerClient 即时编码摘要文本补上（一次性，补完后续 search 直接用）。
@@ -203,147 +177,12 @@ class KBClient:
                 card.content_vector = [float(x) for x in vec]
         return self._cards
 
-    async def _search_local(
-        self, query: str, coarse_k: int, disable_bm25: bool
-    ) -> list[tuple[CategoryCard, float]]:
-        cards = await self._load_cards()
-        if not cards:
-            return []
-        qvec = await self._tower.encode_query(query)
-        mat = np.asarray([c.content_vector for c in cards], dtype=np.float32)
-        # 向量已 L2 归一化 → 内积即余弦（语义子路原始分）。
-        knn_raw = (mat @ np.asarray(qvec, dtype=np.float32)).tolist()
-        knn = _min_max_norm(knn_raw)
-
-        if disable_bm25:
-            fused = [(card, k) for card, k in zip(cards, knn, strict=True)]
-        else:
-            bm25_raw = [_overlap_score(query, c.search_text()) for c in cards]
-            bm25 = _min_max_norm(bm25_raw)
-            w_knn, w_bm25 = HYBRID_WEIGHTS
-            denom = w_knn + w_bm25
-            fused = [
-                (card, (w_knn * k + w_bm25 * b) / denom)
-                for card, k, b in zip(cards, knn, bm25, strict=True)
-            ]
-        fused.sort(key=lambda x: x[1], reverse=True)
-        return fused[:coarse_k]
-
-    # ---------------------- OpenSearch 后端 ----------------------
-    def _client(self) -> Any:
-        if self._os_client is None:
-            from opensearchpy import OpenSearch  # 懒导入：本地后端不强依赖 opensearch-py
-
-            self._os_client = OpenSearch(
-                hosts=[
-                    {"host": self._host, "port": int(os.environ.get("OPENSEARCH_PORT", "9200"))}
-                ],
-                http_auth=(
-                    os.environ.get("OPENSEARCH_USER", "admin"),
-                    os.environ.get("OPENSEARCH_PASS", "admin"),
-                ),
-                use_ssl=os.environ.get("OPENSEARCH_USE_SSL", "false").lower() == "true",
-                verify_certs=False,
-                ssl_show_warn=False,
-            )
-        return self._os_client
-
-    def _hybrid_body(
-        self, query: str, qvec: list[float], coarse_k: int, disable_bm25: bool
-    ) -> dict:
-        """组装 OpenSearch ``hybrid`` query：子路顺序必须与 pipeline weights 顺序一致。"""
-        knn_q: dict[str, Any] = {"knn": {VECTOR_FIELD: {"vector": qvec, "k": coarse_k * 3}}}
-        queries: list[dict[str, Any]] = [knn_q]
-        if not disable_bm25:
-            # aliases 权重介于 category 与 summary 之间：别名是品类锚点（强于 summary 的
-            # 通用长串），但经 LLM 生成、可信度略逊标准品类名。
-            queries.append(
-                {
-                    "multi_match": {
-                        "query": query,
-                        "fields": ["category^2", "aliases^1.5", "summary"],
-                    }
-                }
-            )
-        return {"size": coarse_k, "query": {"hybrid": {"queries": queries}}}
-
-    async def _search_remote(
-        self, query: str, coarse_k: int, disable_bm25: bool
-    ) -> list[tuple[CategoryCard, float]]:
-        breaker = _os_breaker()
-        # 熔断判定放在 encode 之前：OpenSearch 已经挂了就没必要再花一次 embedding 往返去编码
-        # 一个注定发不出去的查询。
-        if not breaker.allow():
-            logger.warning("OpenSearch 已熔断（%.0fs），本次跳过检索", breaker.open_seconds)
-            return []
-        try:
-            qvec = [float(x) for x in await self._tower.encode_query(query)]
-        except Exception:
-            # embedding 挂了不是 OpenSearch 的锅，但放行过就必须记一笔：什么都不记会让半开探测
-            # 永远卡在 HALF_OPEN，断路器从此恒放行、静默失效。
-            breaker.record_neutral()
-            raise
-        # 关 BM25 后只剩单子路：**不能**再走 hybrid + pipeline——归一化管道的融合权重
-        # 是两个（KNN/BM25），子路数与权重数不匹配直接 400（口语金标的语义 token query
-        # 实测踩中）。退成裸 KNN 查询，分数即原始余弦，排序语义不变。
-        if disable_bm25:
-            body: dict[str, Any] = {
-                "size": coarse_k,
-                "query": {"knn": {VECTOR_FIELD: {"vector": qvec, "k": coarse_k * 3}}},
-            }
-            params: dict[str, str] = {}
-        else:
-            body = self._hybrid_body(query, qvec, coarse_k, disable_bm25)
-            params = {"search_pipeline": HYBRID_PIPELINE}
-        try:
-            resp = self._client().search(
-                index=INDEX_NAME,
-                body=body,
-                params=params,
-                request_timeout=clamp_timeout(OS_REQUEST_TIMEOUT_SEC),
-            )
-        except Exception as exc:  # noqa: BLE001 —— OpenSearch 不可用不该让工具崩
-            # 原方案：检索后端挂了不抛异常，返回空让上层给低置信度结果。
-            breaker.record_failure()
-            logger.warning("OpenSearch 检索失败，降级为空召回：%s", exc)
-            return []
-        breaker.record_success()
-        out: list[tuple[CategoryCard, float]] = []
-        for hit in resp.get("hits", {}).get("hits", []):
-            src = dict(hit.get("_source", {}))
-            src.pop(VECTOR_FIELD, None)  # 向量不进结构化输出
-            out.append((CategoryCard(**src), float(hit.get("_score", 0.0))))
-        return out
-
-    async def _fetch_remote(self, category: str) -> list[CategoryCard]:
-        """term 精确取一个品类的全部卡片（不走 hybrid pipeline，纯结构化查询）。"""
-        body = {"size": FETCH_SIZE, "query": {"term": {"category.raw": category}}}
-        breaker = _os_breaker()
-        if not breaker.allow():
-            logger.warning("OpenSearch 已熔断（%.0fs），本次跳过取卡", breaker.open_seconds)
-            return []
-        try:
-            resp = self._client().search(
-                index=INDEX_NAME, body=body, request_timeout=clamp_timeout(OS_REQUEST_TIMEOUT_SEC)
-            )
-        except Exception as exc:  # noqa: BLE001 —— 同 _search_remote：后端挂了降级为空
-            breaker.record_failure()
-            logger.warning("OpenSearch 取卡失败，降级为空：%s", exc)
-            return []
-        breaker.record_success()
-        cards: list[CategoryCard] = []
-        for hit in resp.get("hits", {}).get("hits", []):
-            src = dict(hit.get("_source", {}))
-            src.pop(VECTOR_FIELD, None)
-            cards.append(CategoryCard(**src))
-        return cards
-
     async def aclose(self) -> None:
-        """释放编码器连接（OpenSearch 客户端是同步的，无需 await 关闭）。"""
+        """释放编码器连接。"""
         await self._tower.aclose()
 
 
 @lru_cache(maxsize=1)
 def get_kb_client() -> KBClient:
-    """进程内共享的知识库客户端（按 env 选 OpenSearch / 本地后端，主+子 Agent 复用）。"""
+    """进程内共享的知识库客户端。"""
     return KBClient()

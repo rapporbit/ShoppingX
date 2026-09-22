@@ -1,7 +1,7 @@
 """把一次 Rubric 全跑存档成**带环境指纹**的基线，供后续 A/B 对照。
 
 **为什么非要存指纹**：A/B 两组只有在同一环境下才可比。M22 的端到端 A/B 之所以无结论，
-噪声是一半原因，另一半是「两次跑之间到底还有什么变了」说不清。模型名、索引名、OpenSearch
+噪声是一半原因，另一半是「两次跑之间到底还有什么变了」说不清。模型名、索引名、检索后端
 在不在、代码 commit——任何一个不同，分差就不能全算到被测改动头上。
 
 **支持合并多份报告**：`run_rubric.py --only` 补跑失败条目时只会写它跑的那几条。补跑完要和
@@ -51,7 +51,6 @@ def _fingerprint(stamp: str) -> dict:
         "QDRANT_COLLECTION": os.getenv("QDRANT_COLLECTION", ""),
         "EMBED_MODEL": os.getenv("EMBED_MODEL", ""),
         "RERANK_MODEL": os.getenv("RERANK_MODEL", ""),
-        "OPENSEARCH": os.getenv("OPENSEARCH_HOST", "") or "（未起，品类 KB 走本地回退）",
     }
 
 

@@ -1,7 +1,7 @@
 # globex 的 K8s 编排（批2-6）
 
 把批 2 做出来的双进程形态（API 收请求 / worker 跑 AgentLoop，中间 Redis Stream 削峰）用 K8s
-表达出来。五件套：`redis` / `qdrant` / `opensearch` / `globex-api` / `globex-worker`。
+表达出来。四件套：`redis` / `qdrant` / `globex-api` / `globex-worker`。
 
 ## 应用顺序
 

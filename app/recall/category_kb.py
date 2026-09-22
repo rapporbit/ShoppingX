@@ -44,7 +44,7 @@ class CategoryCard(BaseModel):
     def search_text(self) -> str:
         """参与编码 / BM25 / 本地 token 召回的文本。
 
-        品类名**重复一次提权**（与 OpenSearch BM25 路径里 ``category^2`` 的字段加权同理）：
+        品类名**重复一次提权**（代替搜索引擎 BM25 里 ``category^2`` 那种字段加权）：
         attribute / price_range 卡的 summary 是「评分分布…」「budget…」这类长通用串，不提权
         的话品类信号会被稀释，导致同品类卡召不全。重复品类名让三类卡都稳稳带上品类锚点。
         别名并入文本：非标准写法（中文/口语）的 query 靠它拿到词面与语义两路信号。

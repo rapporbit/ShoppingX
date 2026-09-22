@@ -1183,12 +1183,12 @@ async def test_category_insight_rag_pipeline(monkeypatch: Any) -> None:
             confidence=0.71,
         ),
     ]
-    # host=None → 走本地后端、source 为 local_kb_fallback（与外部 .env 无关，确定性）。
-    kb = KBClient(cards=cards, host=None)
+    # 注入卡片 → 进程内确定性检索（与外部 .env 无关）。
+    kb = KBClient(cards=cards)
     monkeypatch.setattr(mod, "get_kb_client", lambda: kb)
 
     out = await mod.category_insight.ainvoke({"category": "luggage", "depth": "deep"})
-    assert out.source == "local_kb_fallback"
+    assert out.source == "local_kb"
     assert out.card_count == 4
     # 爆款卡提炼出组件与结构化爆款。
     assert "Big Roller" in out.components
@@ -1224,7 +1224,7 @@ async def test_category_insight_quick_skips_attributes(monkeypatch: Any) -> None
             confidence=0.8,
         ),
     ]
-    kb = KBClient(cards=cards, host=None)
+    kb = KBClient(cards=cards)
     monkeypatch.setattr(mod, "get_kb_client", lambda: kb)
 
     out = await mod.category_insight.ainvoke({"category": "mug", "depth": "quick"})

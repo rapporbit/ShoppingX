@@ -5,7 +5,7 @@
 # threads（会话归谁）、preferences（长期偏好）、history_records、favorites、usage_ledger（credit
 # 账本）、messages（对话正文）。丢了没有任何别处能重建出来。
 #
-# 其余的都**故意不备**，因为都能重来：Qdrant / OpenSearch 索引可由 data/ + scripts/build_*.py 重建
+# 其余的都**故意不备**，因为都能重来：Qdrant 索引 / 品类卡 JSONL 可由 data/ + scripts/build_*.py 重建
 # （代价是一笔 embedding 费用和若干小时，不是「数据没了」）；Redis 里只有事件回放和语义缓存，丢了
 # 用户最多少看一段回放。把备份面收窄到这一个文件，是为了让恢复这件事在真出事那天足够简单。
 #

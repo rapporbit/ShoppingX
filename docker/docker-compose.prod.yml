@@ -1,7 +1,7 @@
 # globex 生产编排（gcjp / shopx.oiuu.de）。与 docker-compose.yml（开发）的三点关键差异：
 #
 #   1. **不发布任何端口到宿主**。开发版的 "6333:6333" 会绑 0.0.0.0，而 Docker 直接写 iptables、
-#      绕过 ufw —— 等于把无鉴权的 Qdrant / OpenSearch / Redis 挂公网。这里服务间只走内部网络，
+#      绕过 ufw —— 等于把无鉴权的 Qdrant / Redis 挂公网。这里服务间只走内部网络，
 #      互相用服务名寻址；唯一入口是 Caddy。
 #   2. backend / frontend 额外接入 vaultwarden_web（Caddy 所在的既有网络），供 Caddy 反代。
 #   3. 全部 restart: unless-stopped，VPS 重启后自动拉起。
@@ -11,7 +11,7 @@
 name: globex
 
 # 日志轮转。**不配这个，磁盘迟早被日志打满，然后全站一起挂**——Docker 的 json-file driver 默认
-# 无上限，一个话痨容器（OpenSearch 尤其）几周就能写掉几个 G，而 VPS 的盘就那么大。这是自建部署
+# 无上限，一个话痨容器几周就能写掉几个 G，而 VPS 的盘就那么大。这是自建部署
 # 最经典、也最不该发生的死法：不是被攻击，是自己把自己撑死的。
 #
 # 每个容器最多 3 × 10MB = 30MB，五个容器封顶 150MB。用 YAML 锚点复用，免得漏配某个服务——漏掉的
@@ -34,28 +34,6 @@ services:
       - qdrant-data:/qdrant/storage
       - qdrant-snapshots:/qdrant/snapshots
     networks: [internal]
-
-  opensearch:
-    image: opensearchproject/opensearch:2.13.0
-    container_name: globex-opensearch
-    restart: unless-stopped
-    logging: *default-logging # 它是这里最话痨的一个：慢查询 / GC / 索引日志一刻不停
-    environment:
-      - discovery.type=single-node
-      - DISABLE_SECURITY_PLUGIN=true # 无鉴权可接受：不出内部网络，宿主与公网都够不着
-      - bootstrap.memory_lock=true
-      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
-    ulimits:
-      memlock: { soft: -1, hard: -1 }
-      nofile: { soft: 65536, hard: 65536 }
-    volumes:
-      - os-data:/usr/share/opensearch/data
-    networks: [internal]
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 12
 
   redis:
     image: redis:7.2-alpine
@@ -120,7 +98,6 @@ services:
       # 的源），另外分词器缓存等也落这儿。账户真相已在 mysql 服务的 mysql-data 卷上。
       - appdb:/app/var
     depends_on:
-      opensearch: { condition: service_healthy }
       redis: { condition: service_healthy }
       mysql: { condition: service_healthy }
     networks: [internal, vaultwarden_web] # 后者供 Caddy 反代
@@ -156,7 +133,6 @@ services:
       - uploaded:/app/uploaded
       - appdb:/app/var
     depends_on:
-      opensearch: { condition: service_healthy }
       redis: { condition: service_healthy }
       mysql: { condition: service_healthy }
     networks: [internal] # 不接 Caddy 网络：它不收 HTTP 请求，只从 Redis Stream 领任务
@@ -184,7 +160,6 @@ volumes:
   mysql-data: # 账户 / 会话归属 / holds：丢了没法从别处重建
   qdrant-data:
   qdrant-snapshots:
-  os-data:
   redis-data:
   output:
   uploaded:

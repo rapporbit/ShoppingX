@@ -1,6 +1,6 @@
 """商品召回门禁：在 ESCI golden（M21 那份 qrels）上打 Recall@20 / MRR / NDCG@20，不达标退非零。
 
-**与 `run_category_recall.py` 的分工**：那条量的是品类知识库（OpenSearch，几百条自指金标）；
+**与 `run_category_recall.py` 的分工**：那条量的是品类知识库（进程内 hybrid，几十条金标）；
 这条量的是**商品向量召回**（Qdrant dense，1.1 万条人工标注 query）。改 embedding / 索引 /
 payload filter / coarse_k 前后各跑一遍，两份 JSON 一比就是结论。
 

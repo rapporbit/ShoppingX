@@ -38,7 +38,7 @@ preflight() {
 
 # ── Docker 基础设施 ───────────────────────────────────────
 start_docker() {
-    info "启动 Docker 容器（Qdrant / OpenSearch / Redis）..."
+    info "启动 Docker 容器（Qdrant / Redis）..."
     docker compose -f docker/docker-compose.yml up -d
 
     info "等待服务就绪..."
@@ -53,20 +53,6 @@ start_docker() {
         sleep 1
     done
     ok "Qdrant        :6333"
-
-    # OpenSearch
-    retries=0
-    while ! curl -sf http://localhost:9200/_cluster/health >/dev/null 2>&1; do
-        ((retries++))
-        if (( retries >= max_retries )); then
-            warn "OpenSearch 未就绪，category_insight 将退化到本地回退"
-            break
-        fi
-        sleep 1
-    done
-    if (( retries < max_retries )); then
-        ok "OpenSearch     :9200"
-    fi
 
     # Redis
     retries=0
@@ -109,11 +95,11 @@ check_data() {
         echo -e "    首次使用请运行：${CYAN}uv run python scripts/build_item_index.py${NC}"
     fi
 
-    # 检查 OpenSearch 品类知识库
-    if curl -sf http://localhost:9200/_cat/indices 2>/dev/null | grep -q 'category'; then
-        ok "品类知识库索引存在"
+    # 检查品类知识库（进程内读 JSONL，无需容器）
+    if [[ -s "${CATEGORY_CARDS_PATH:-data/rag/category_cards.jsonl}" ]]; then
+        ok "品类知识库 JSONL 存在"
     else
-        warn "OpenSearch 中未检测到品类知识库索引"
+        warn "未检测到品类知识库 JSONL"
         echo -e "    首次使用请运行：${CYAN}uv run python scripts/build_category_kb.py${NC}"
     fi
 }
