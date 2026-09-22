@@ -8,9 +8,11 @@
 用 ``setdefault``：本地若已有真实 ``.env`` / 环境变量，保持原值不覆盖。
 """
 
+import atexit
 import os
 import tempfile
 from collections.abc import AsyncIterator, Iterator
+from contextlib import suppress
 from pathlib import Path
 
 os.environ.setdefault("LLM_MAIN", "gpt-4o-mini")
@@ -58,8 +60,22 @@ os.environ.setdefault("DEV_ADMIN_PASSWORD", "")
 # 会话），若落到开发者的 var/globex.db 上，跑一遍 pytest 就往真实账户表里塞一堆测试用户。每次
 # pytest 启动先删掉旧的临时库，保证从空表开始（用例间的隔离则靠各自用不同用户名）。
 # engine 在 app.db.session 被 import 时就按这个 URL 建好，所以必须在任何 app 导入之前设。
-_TEST_DB = Path(tempfile.gettempdir()) / "globex-test-accounts.db"
-_TEST_DB.unlink(missing_ok=True)
+#
+# 文件名**带 pid**：名字固定时，两个 pytest 进程（两个 worktree 各跑一个、或 xdist 的多个 worker）
+# 会互删对方正在用的库文件、再往同一个文件里写——实测一边 42 failed / 45 errors 全是 "no such
+# table"，串行重跑同一份代码却全绿。pid 隔离后各进程一份库，互不可见。
+# 退出时删掉自己那份（含 sqlite 的 -wal / -shm / -journal 伴生文件），否则临时目录越攒越多。
+_TEST_DB = Path(tempfile.gettempdir()) / f"globex-test-accounts-{os.getpid()}.db"
+
+
+def _drop_test_db() -> None:
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        with suppress(OSError):
+            _TEST_DB.with_name(_TEST_DB.name + suffix).unlink(missing_ok=True)
+
+
+_drop_test_db()  # pid 被系统回收复用时，仍从空表开始
+atexit.register(_drop_test_db)
 os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_TEST_DB}"
 
 # 建表放这儿、而不是放某个测试文件的 fixture 里：库是全局的，碰它的不止 test_accounts
@@ -68,7 +84,6 @@ os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_TEST_DB}"
 # 这里用 asyncio.run 同步建掉：conftest 顶层没有事件循环，也不该为它引 session 级 async fixture
 # （anyio 的 backend fixture 是 function 级，套不上）。
 import asyncio  # noqa: E402
-from contextlib import suppress  # noqa: E402
 
 import pytest  # noqa: E402
 
