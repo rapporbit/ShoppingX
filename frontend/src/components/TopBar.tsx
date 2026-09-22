@@ -4,9 +4,9 @@ import { formatResetAt, type Quota } from "../api";
 import type { TaskStatus } from "../hooks/useShoppingXTask";
 import { Tooltip } from "./ui/Tooltip";
 
-// 顶栏只放「本轮 / 本次会话」相关的东西：左侧当前会话标题 + 运行状态点；右侧 credit 条、检索平台数、
-// 头像。收藏 / 订单 / Skill / 长期偏好是「我的东西」，属于导航，已下沉到侧栏；退出和后台收进头像菜单——
-// 它们一天点不了一次，不值得常驻一个按钮位。
+// 顶栏三段（对照 daydream.ing）：左侧一颗悬浮胶囊导航（☰ 历史 / 对话 / 收藏 / 订单），正中衬线字标 +
+// 运行状态点，右侧 credit 条、检索平台数、头像。侧栏不再常驻——它收成抽屉，由胶囊最左的 ☰ 唤出；
+// Skill / 长期偏好一天点不了几次，留在抽屉里。退出和后台收进头像菜单。
 //
 // **credit 余额条是有功能的**（M18）：它显示的是后端 usage_ledger 里真实累计的当日成本，归零时
 // POST /api/task 会真的 402 拒任务。后端没开配额（demo / 本地）时 quota.enabled=false，整块不渲染。
@@ -21,10 +21,14 @@ const STATUS_TEXT: Record<TaskStatus, string> = {
   error: "出错",
 };
 
+// 胶囊导航里的三个去处。"chat" = 回到对话（关掉所有整页面板）。
+export type TopNavTarget = "chat" | "favorites" | "orders";
+
 type TopBarProps = {
-  title: string;
-  // 标题 = 第一轮 query；那条气泡还在视野里时藏起来，免得同屏重复（由 App 按滚动位置判定）。
-  titleHidden?: boolean;
+  // 当前停在哪：没开面板就是对话；开的是 Skill / 偏好这类不在胶囊里的面板时传 null（三项都不高亮）。
+  active: TopNavTarget | null;
+  onNavigate: (target: TopNavTarget) => void;
+  favoriteCount: number;
   status: TaskStatus;
   // 展示用的是**用户名**，不是 user_id：后者是一串随机 hex，取首字母只会得到两个乱码字符。
   username: string;
@@ -37,7 +41,7 @@ type TopBarProps = {
   // 后台管理入口。非管理员传 null —— 菜单项整个不渲染，而不是禁用态：真正的门在后端。
   onOpenAdmin: (() => void) | null;
   onLogout: () => void;
-  // 窄屏专用：会话栏在手机上收成了抽屉，得有个入口把它唤回来。宽屏侧栏常驻，此按钮 CSS 隐藏。
+  // 会话栏在所有宽度下都是抽屉，这是唤出它的入口。
   onOpenNav: () => void;
 };
 
@@ -105,9 +109,16 @@ function AvatarMenu({
   );
 }
 
+const NAV_ITEMS: { key: TopNavTarget; label: string }[] = [
+  { key: "chat", label: "对话" },
+  { key: "favorites", label: "收藏" },
+  { key: "orders", label: "订单" },
+];
+
 export function TopBar({
-  title,
-  titleHidden = false,
+  active,
+  onNavigate,
+  favoriteCount,
   status,
   username,
   isGuest,
@@ -121,21 +132,34 @@ export function TopBar({
 }: TopBarProps) {
   return (
     <header className="topbar">
-      <div className="topbar-title">
-        <button className="nav-toggle" onClick={onOpenNav} aria-label="打开会话栏">
-          <Menu size={20} strokeWidth={1.75} />
-        </button>
-        <span
-          className={`title-text ${titleHidden ? "is-hidden" : ""}`}
-          title={title}
-          aria-hidden={titleHidden}
-        >
-          {title}
-        </span>
+      <nav className="topnav" aria-label="主导航">
+        <Tooltip content="历史对话 / Skill / 长期偏好">
+          <button className="topnav-menu" onClick={onOpenNav} aria-label="打开会话栏">
+            <Menu size={17} strokeWidth={1.75} />
+          </button>
+        </Tooltip>
+        {NAV_ITEMS.map((item) => (
+          <button
+            key={item.key}
+            className={`topnav-item ${active === item.key ? "active" : ""}`}
+            aria-current={active === item.key ? "page" : undefined}
+            onClick={() => onNavigate(item.key)}
+          >
+            {item.label}
+            {item.key === "favorites" && favoriteCount > 0 && (
+              <span className="topnav-count">{favoriteCount}</span>
+            )}
+          </button>
+        ))}
+      </nav>
+
+      {/* 字标绝对居中：左右两段宽度不等，靠 flex 居中会偏。点它 = 回到对话。 */}
+      <button className="wordmark" onClick={() => onNavigate("chat")}>
+        ShoppingX
         <Tooltip content={STATUS_TEXT[status]}>
           <span className={`status-dot status-${status}`} tabIndex={-1} />
         </Tooltip>
-      </div>
+      </button>
 
       <div className="topbar-actions">
         {isGuest && (

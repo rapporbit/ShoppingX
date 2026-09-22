@@ -33,7 +33,6 @@ import { AdminDrawer } from "./components/AdminDrawer";
 import { Sidebar, type SidebarPanel } from "./components/Sidebar";
 import { InputBar } from "./components/InputBar";
 import { TopBar } from "./components/TopBar";
-import { Sparkles } from "lucide-react";
 import { Landing } from "./components/Landing";
 import { Legal, type LegalPage } from "./components/Legal";
 import { Login } from "./components/Login";
@@ -369,25 +368,7 @@ function Workspace({
   }, [status]);
 
   const hasConversation = turns.length > 0;
-  // 会话标题取第一轮 query（整段对话的「主题」），多轮续聊也不跳来跳去。
-  const title = turns[0]?.query || "ShoppingX 跨境购物 Agent";
-  // 标题就是第一轮 query：那条用户气泡还在视野里时，顶栏再写一遍就是同屏重复；滚走了才在顶栏出现。
   const conversationRef = useRef<HTMLElement>(null);
-  const firstQueryRef = useRef<HTMLDivElement>(null);
-  const [firstQueryVisible, setFirstQueryVisible] = useState(true);
-  const firstTurnId = turns[0]?.id;
-  useEffect(() => {
-    const el = firstQueryRef.current;
-    if (!el) {
-      setFirstQueryVisible(true);
-      return;
-    }
-    const io = new IntersectionObserver(([entry]) => setFirstQueryVisible(entry.isIntersecting), {
-      root: conversationRef.current,
-    });
-    io.observe(el);
-    return () => io.disconnect();
-  }, [firstTurnId]);
 
   const activePanel: SidebarPanel | null = favsOpen
     ? "favorites"
@@ -440,10 +421,16 @@ function Workspace({
         onClick={() => setNavOpen(false)}
       />
 
-      <div className={`workspace ${activePanel ? "paged" : ""}`}>
+      <div className={`workspace ${activePanel ? "paged" : ""} ${hasConversation ? "" : "is-home"}`}>
         <TopBar
-          title={title}
-          titleHidden={hasConversation && firstQueryVisible}
+          active={activePanel === null ? "chat" : activePanel === "favorites" || activePanel === "orders" ? activePanel : null}
+          onNavigate={(target) => {
+            setFavsOpen(target === "favorites");
+            setOrdersOpen(target === "orders");
+            setSkillsOpen(false);
+            setPrefsOpen(false);
+          }}
+          favoriteCount={favorites.length}
           status={status}
           username={session.username}
           isGuest={session.isGuest}
@@ -503,30 +490,11 @@ function Workspace({
                 animate="show"
                 variants={{ show: { transition: { staggerChildren: 0.07, delayChildren: 0.05 } } }}
               >
-                {/* 首屏元素按序浮现：标记 → 标题 → 说明 → 四个示例，各晚 70ms。 */}
-                <motion.div className="welcome-mark" variants={WELCOME_ITEM}>
-                  <Sparkles size={26} strokeWidth={1.5} />
-                </motion.div>
+                {/* 首屏元素按序浮现：标题 → 说明，各晚 70ms；示例胶囊在输入框下面（见 InputBar 之后）。 */}
                 <motion.h1 variants={WELCOME_ITEM}>今天想淘点什么？</motion.h1>
                 <motion.p variants={WELCOME_ITEM}>
                   用一句话说清预算、品类和偏好，ShoppingX 会跨平台并行检索、比价、算到手价，给你一份带选购理由的清单。
                 </motion.p>
-                <div className="welcome-samples">
-                  {/* 额度耗尽时一并禁掉示例：输入框已经锁了，还留着能点的入口，点下去只会打一次
-                      注定 402 的请求，再把这一轮标红——用户白挨一个错误。 */}
-                  {SAMPLES.map((s) => (
-                    <motion.button
-                      key={s}
-                      className="sample-chip"
-                      disabled={quotaExhausted}
-                      onClick={() => startTask(s, userId)}
-                      variants={WELCOME_ITEM}
-                      whileTap={{ scale: 0.985 }}
-                    >
-                      {s}
-                    </motion.button>
-                  ))}
-                </div>
               </motion.section>
             ) : (
               <section className="thread">
@@ -538,7 +506,7 @@ function Workspace({
                   return (
                     <div key={turn.id} className="turn">
                       <div className="msg-row user">
-                        <div className="user-msg" ref={idx === 0 ? firstQueryRef : undefined}>
+                        <div className="user-msg">
                           {/* 参考图在气泡上方：它是这句话的宾语（「找这个同款」里的「这个」），
                               读的顺序应当是先看到图、再看到那句话。 */}
                           {turn.images.length > 0 && (
@@ -618,6 +586,31 @@ function Workspace({
                             />
                           )}
 
+                          {/* 追问 chips：只挂最后一轮、且已出结果时。三个都是「下一步最常做的事」，
+                              不发请求（预填 / 打开对比 / 切页），所以不占 credit。位置在回复与商品网格之间：
+                              读完回复顺手就能细化，不必先滚过整排卡片。 */}
+                          {isLast && turn.status === "done" && turn.items.length > 0 && (
+                            <div className="followups">
+                              <button className="followup" onClick={() => prefill("预算想再少一点，")}>
+                                调整预算
+                              </button>
+                              {turn.items.length > 1 && (
+                                <button
+                                  className="followup"
+                                  onClick={() => {
+                                    setCompareList(turn.items.slice(0, Math.min(3, COMPARE_MAX)));
+                                    setCompareOpen(true);
+                                  }}
+                                >
+                                  一起比较
+                                </button>
+                              )}
+                              <button className="followup" onClick={() => setFavsOpen(true)}>
+                                看看收藏
+                              </button>
+                            </div>
+                          )}
+
                           {/* 商品卡「先出货、后出文案」：item_picker 一定稿就经 items_preview 推上来
                               （卡片的每个字段那一刻都已确定），用户不必再等收尾那轮解码 + 文案生成。
                               收尾的 task_result 用定稿那批原样覆盖；文案由上面的 streamingText 逐字补。 */}
@@ -651,30 +644,6 @@ function Workspace({
                               <p>这次没有找到符合条件的商品。放宽预算、换个说法或去掉一条限制，再试一次。</p>
                               <button className="btn-ghost" onClick={() => prefill(turn.query)}>
                                 调整一下需求
-                              </button>
-                            </div>
-                          )}
-
-                          {/* 追问 chips：只挂最后一轮、且已出结果时。三个都是「下一步最常做的事」，
-                              不发请求（预填 / 打开对比 / 切页），所以不占 credit。 */}
-                          {isLast && turn.status === "done" && turn.items.length > 0 && (
-                            <div className="followups">
-                              <button className="followup" onClick={() => prefill("预算想再少一点，")}>
-                                调整预算
-                              </button>
-                              {turn.items.length > 1 && (
-                                <button
-                                  className="followup"
-                                  onClick={() => {
-                                    setCompareList(turn.items.slice(0, Math.min(3, COMPARE_MAX)));
-                                    setCompareOpen(true);
-                                  }}
-                                >
-                                  一起比较
-                                </button>
-                              )}
-                              <button className="followup" onClick={() => setFavsOpen(true)}>
-                                看看收藏
                               </button>
                             </div>
                           )}
@@ -776,6 +745,30 @@ function Workspace({
           onCancel={cancelTask}
           onClarify={sendClarification}
         />
+
+        {/* 首屏的示例胶囊：放在输入框**下面**（标题 → 输入框 → 示例，视线一路向下）。
+            额度耗尽时一并禁掉：输入框已经锁了，还留着能点的入口，点下去只会打一次注定 402 的请求。 */}
+        {!hasConversation && !activePanel && (
+          <motion.div
+            className="welcome-samples"
+            initial="hidden"
+            animate="show"
+            variants={{ show: { transition: { staggerChildren: 0.06, delayChildren: 0.25 } } }}
+          >
+            {SAMPLES.map((s) => (
+              <motion.button
+                key={s}
+                className="sample-chip"
+                disabled={quotaExhausted}
+                onClick={() => startTask(s, userId)}
+                variants={WELCOME_ITEM}
+                whileTap={{ scale: 0.985 }}
+              >
+                {s}
+              </motion.button>
+            ))}
+          </motion.div>
+        )}
       </div>
 
       <SimilarDrawer source={similarOf} onClose={() => setSimilarOf(null)} />

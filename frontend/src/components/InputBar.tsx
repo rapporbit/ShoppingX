@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SkillCatalogItem } from "../types";
 import { AnimatePresence, motion } from "motion/react";
 import { ArrowUp, ImagePlus, Square } from "lucide-react";
@@ -60,6 +60,19 @@ export function InputBar({
   const [imgError, setImgError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  // 对话态的输入条是悬浮的，对话流靠底部留白给它让位。输入条会变高（多行文字 / 参考图 / skill chip /
+  // 额度横幅），留白写死就会把最后一行内容盖在底下滚不出来——量实际高度写到 .workspace 的 --composer-h 上。
+  // 用 callback ref：下面两条 return 各有一个 .composer，切换时自动换观察对象。
+  const composerRO = useRef<ResizeObserver | null>(null);
+  const composerRef = useCallback((el: HTMLDivElement | null) => {
+    composerRO.current?.disconnect();
+    composerRO.current = null;
+    const host = el?.parentElement;
+    if (!el || !host) return;
+    const ro = new ResizeObserver(() => host.style.setProperty("--composer-h", `${el.offsetHeight}px`));
+    ro.observe(el);
+    composerRO.current = ro;
+  }, []);
   // **额度用尽不挡澄清回复**（waiting 时放行）：那一轮任务早在入口就放过行了、成本上限也已压好，
   // 它现在正停在这里等用户答一句话。此时把输入框锁死，任务只能一路等到超时——用户既回不了话，
   // 也白等一场。要挡的只是「再起一个新任务」。
@@ -137,14 +150,14 @@ export function InputBar({
   // 澄清带可点选卡片时，作答入口在展示区那张卡片上——这里只留一行指引，收起输入框，防止双入口作答。
   if (waiting && clarificationHasChoices) {
     return (
-      <div className="composer">
+      <div className="composer" ref={composerRef}>
         <p className="composer-hint">请在上方消息里点选作答 ↑</p>
       </div>
     );
   }
 
   return (
-    <div className="composer">
+    <div className="composer" ref={composerRef}>
       {blocked && (
         <div className="quota-banner">
           <span className="quota-banner-icon">!</span>
