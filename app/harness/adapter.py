@@ -23,6 +23,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncGenerator, Callable
+from difflib import SequenceMatcher
 from typing import TYPE_CHECKING, Any
 
 from agentscope.message import (
@@ -111,6 +112,69 @@ def _last_assistant(agent: Agent) -> Msg | None:
     return None
 
 
+def _step_body(ctx: list[Msg], source: str) -> str:
+    """终结工具那一步的正文：该 ``tool_call`` **之前**、上一个 ``tool_result``（或消息开头）之后。
+
+    为什么不是 ``text_of(整条消息)``：框架一轮 reply 只落**一条** assistant 消息，整轮所有迭代的
+    块按顺序全装在它的 ``content`` 里。2026-09-22 真 LLM 验收实测到的顺序是
+    ``text(旁白), tool_call Skill, tool_call save_memory ×2, tool_result ×3,
+    tool_call chat_fallback, tool_result, text(复述)``——按整条取，第一步那句
+    ``I'll read the memory skill and save these two facts.`` 就跟着并进了最终答案。
+
+    分界线取「上一个 tool_result」而不是「上一个 tool_call」：同一批并发发出的 tool_call 之间
+    不该断开，它们本来就是同一步；而 tool_result 一出现，就说明再往前是上一次迭代了。
+    """
+    for m in reversed(ctx):
+        content = getattr(m, "content", None)
+        if not isinstance(content, list):
+            continue
+        idx = -1
+        for i, block in enumerate(content):
+            if _attr(block, "type") == "tool_call" and _attr(block, "name") == source:
+                idx = i
+        if idx < 0:
+            continue
+        parts: list[str] = []
+        for block in reversed(content[:idx]):
+            kind = _attr(block, "type")
+            if kind == "tool_result":
+                break
+            if kind == "text":
+                parts.append(block_text(block))
+        return "".join(reversed(parts)).strip()
+    return ""
+
+
+def _text_after(msg: Msg, source: str) -> str:
+    """模型在终结工具产出**之后**补的那段文本（同一条消息里 source 的块之后的 text）。
+
+    收尾事件那条 Msg 线上就是上面那条「整轮一条」的 assistant 消息，所以这里同样不能按整条取
+    ——否则更早迭代的旁白会从「tail 比 answer 长就不动它」那条路原样漏出去。消息里根本没有
+    source 的块时（单元测试里只带一段纯文本的形态）退回全文。
+    """
+    content = getattr(msg, "content", None)
+    if not isinstance(content, list):
+        return text_of(msg).strip()
+    idx = -1
+    for i, block in enumerate(content):
+        if _attr(block, "name") == source and _attr(block, "type") in ("tool_call", "tool_result"):
+            idx = i
+    if idx < 0:
+        return text_of(msg).strip()
+    return "".join(
+        block_text(b) for b in content[idx + 1 :] if _attr(b, "type") == "text"
+    ).strip()
+
+
+def _is_rewrite(a: str, b: str) -> bool:
+    """两段话是不是同一段的改写：字面高度重合但互不包含（子串那种由调用方先判掉）。
+
+    实测「好，已经改过来了 ✅ …」与「已经帮你改好了 ✅ …」就是这种关系——只判子串的话两段都
+    留着，用户等于把同一个答案读两遍。
+    """
+    return SequenceMatcher(None, a, b).ratio() >= 0.5
+
+
 def _closing_question(ctx: list[Msg]) -> str:
     """取本轮 ``ask_user(closes_turn=True)`` 的问题原文；没有这种调用则返回空串（D2）。
 
@@ -141,6 +205,10 @@ class HarnessAgentAdapter(MiddlewareBase):
 
     def __init__(self, session: HarnessSession) -> None:
         self._s = session
+        #: 本轮消息在 ``state.context`` 里的起点下标，进 ``on_reply`` 时记一次。
+        #: 与 orchestrator 的 ``turn_start`` 同一个口径（那边是收尾产物只从本轮找，这边是
+        #: 终结工具产出只从本轮找），差别只在这里拿不到 orchestrator 的局部变量，只能自己记。
+        self._turn_start = 0
 
     # ── pre_think（含终结直出与预算 fallback 两条早退）──
 
@@ -271,6 +339,11 @@ class HarnessAgentAdapter(MiddlewareBase):
         next_handler: Callable[..., AsyncGenerator],
     ) -> AsyncGenerator:
         s = self._s
+        # 记在 prefill **之前**：此刻 context 里全是历史轮，本轮一个字都还没写进去——与
+        # orchestrator 在 ``agent.reply`` 之前取 ``len(state.context)`` 是同一时刻。
+        # （prefill 预置的 planner / KB / 订单那条 assistant 消息落在本轮 user 消息之前，
+        #   算进本轮也无妨：它里面没有任何文本型终结工具。）
+        self._turn_start = len(agent.state.context)
         await self._prefill(agent)
         async for event in next_handler(**input_kwargs):
             if type(event).__name__ == "ReplyEndEvent" and s.retry_nudge:
@@ -279,12 +352,12 @@ class HarnessAgentAdapter(MiddlewareBase):
                     continue  # 吞掉结束事件 = 强制再来一轮（框架原生语义）
                 s.retry_nudge = None
             if isinstance(event, Msg):
-                event = self._merge_terminal_body(agent, event)
+                event = self._merge_terminal_body(agent, event, self._turn_start)
                 event = await self._finalize(event)
             yield event
 
     @staticmethod
-    def _merge_terminal_body(agent: Agent, msg: Msg) -> Msg:
+    def _merge_terminal_body(agent: Agent, msg: Msg, turn_start: int = 0) -> Msg:
         """文本型终结工具收尾时，把模型写在**同一条消息**里的正文并回最终答案。
 
         **为什么需要**：模型很爱把整篇回答写成 assistant 文本、``message`` 入参里只留一句
@@ -296,8 +369,8 @@ class HarnessAgentAdapter(MiddlewareBase):
         **答案的两个可能位置，都要收**（2026-09-16 实测两种都出现过）：
         - 写在 ``message`` 入参里 → 取 chat_fallback 的**工具返回**（`reply` 字段）；框架之后还会
           让模型说一句「以上就是…」，那句才是 ``final_text``，长答案就这么被顶掉了。
-        - 写成 assistant 正文、``message`` 只留一句 → 取那条消息的 text block（正文与 ``tool_call``
-          在同一条 Msg 里，不用按长度猜哪段算正文）。
+        - 写成 assistant 正文、``message`` 只留一句 → 取**与终结 ``tool_call`` 同一步**的 text block
+          （见 ``_step_body``：整轮所有迭代共用一条 Msg，按整条取会连更早迭代的旁白一起并进来）。
 
         于是口径统一成：**终结工具的产出就是最终答案**，与 ``shopping_summary`` 那条路用
         ``summary.summary`` 覆盖 final_text 同源；模型在工具之后补的那句复述丢掉。并完的文本
@@ -305,8 +378,15 @@ class HarnessAgentAdapter(MiddlewareBase):
 
         只认文本型终结工具（chat_fallback / present_guide）：shopping_summary 那条路的伴随文本是
         「好的，我来生成清单」这类过程碎话，并进去只会脏了清单文案。
+
+        **三处查找都只看本轮**（``turn_start`` 之后）：``state.context`` 跨轮累积，不限定范围时
+        「本轮没调文本型终结工具」会退化成「捡上一轮的产出」。2026-09-22 实测 thread qa0922-d2b：
+        轮 B 以 ``cancel_order`` 收尾，final_text 是轮 A 那句「你目前有 1 张订单…」原文，取消确认
+        卡的说明一个字都没有。同一个病还有第二条路——轮 2 的清单文案比轮 1 的闲聊短时，末尾那个
+        「tail 比 answer 长才不动」的判断会让轮 2 被轮 1 顶掉。本轮没有文本型终结工具产出就原样
+        返回 msg，不动。
         """
-        ctx = list(agent.state.context)
+        ctx = list(agent.state.context)[turn_start:]
         source = ""
         reply = ""
         # 两个「产出即最终答案」的文本型终结工具，各取自己那个正文字段：
@@ -331,24 +411,23 @@ class HarnessAgentAdapter(MiddlewareBase):
             reply, source = _closing_question(ctx), "ask_user"
         if not reply:
             return msg
-        body = ""
-        for m in reversed(ctx):
-            content = getattr(m, "content", None)
-            if not isinstance(content, list):
-                continue
-            called = {_attr(b, "name") for b in content if _attr(b, "type") == "tool_call"}
-            if source in called:
-                body = text_of(m).strip()
-                break
+        body = _step_body(ctx, source)
         parts = [p for p in (body, reply) if p]
         # 互含只留长的那份：模型把同一段话既写进正文又写进 message 时，拼接等于让用户读两遍。
         if len(parts) == 2 and (parts[0] in parts[1] or parts[1] in parts[0]):
             parts = [max(parts, key=len)]
         answer = "\n\n".join(parts)
-        tail = text_of(msg).strip()
-        # 模型最后那句比工具产出还全时不动它——这里的目的是别丢答案，不是非要换成工具那份。
-        if answer == tail or (tail and tail not in answer and len(tail) > len(answer)):
-            return msg
+        tail = _text_after(msg, source)
+        # 终结工具之后那段文本**默认当复述丢掉**（docstring 承诺过，此前没做到）。只有三条同时
+        # 成立才认它是答案本体、换过去：工具产出很短（它长出一倍以上）、不是产出的子串、也不是
+        # 产出的改写。方向仍是「宁可多带不丢答案」，只是不再让它顺手带上更早迭代的旁白。
+        if (
+            tail
+            and tail not in answer
+            and len(tail) >= 2 * len(answer)
+            and not _is_rewrite(tail, answer)
+        ):
+            answer = tail
         return msg.model_copy(update={"content": [TextBlock(type="text", text=answer)]})
 
     async def _prefill(self, agent: Agent) -> None:
