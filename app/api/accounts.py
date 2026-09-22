@@ -16,17 +16,32 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.auth import auth_enabled, create_access_token, get_current_user_id
-from app.api.ratelimit import guard_daily_signups, guard_login_ip, guard_register_ip
+from app.api.auth import (
+    auth_enabled,
+    create_access_token,
+    get_current_user_id,
+    get_current_user_id_optional,
+)
+from app.api.ratelimit import (
+    guard_daily_guests,
+    guard_daily_signups,
+    guard_guest_ip,
+    guard_login_ip,
+    guard_register_ip,
+)
 from app.db.accounts import (
     MAX_PASSWORD_BYTES,
     MIN_PASSWORD_LEN,
     authenticate,
+    create_guest_user,
     create_user,
     delete_thread,
+    get_user,
     list_threads,
+    upgrade_guest,
 )
 from app.db.session import get_db
+from app.utils.env import env_int
 
 router = APIRouter(prefix="/api", tags=["accounts"])
 
@@ -50,28 +65,61 @@ def _require_auth_on() -> None:
         raise HTTPException(404, "账户功能未开启（需 AUTH_ENABLED=true）")
 
 
-def _issue(user_id: str, username: str) -> dict[str, Any]:
+def _issue(
+    user_id: str, username: str, *, is_guest: bool = False, ttl: int | None = None
+) -> dict[str, Any]:
     return {
-        "access_token": create_access_token(user_id),
+        "access_token": create_access_token(user_id, ttl),
         "token_type": "bearer",
         "user_id": user_id,
         "username": username,
+        "is_guest": is_guest,
     }
+
+
+@router.post("/auth/guest")
+async def start_guest(request: Request, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    """免登录试用：签发一个访客身份（真实 users 行 + JWT），不要用户名密码。
+
+    与注册同构（两道闸在建号之前跑），差异只有三处：额度取访客档（``GUEST_DAILY_QUOTA_USD``）、
+    token 有效期单列（``GUEST_JWT_EXP_SECONDS``，默认 7 天——访客没有密码，token 过期即失联，
+    给长一点让「隔天回来接着看」成立）、限流窗口更紧（见 ratelimit）。
+    """
+    _require_auth_on()
+    guard_guest_ip(request)
+    await guard_daily_guests(db)
+    user = await create_guest_user(db)
+    ttl = env_int("GUEST_JWT_EXP_SECONDS", 7 * 86400)
+    return _issue(user.id, user.username, is_guest=True, ttl=ttl)
 
 
 @router.post("/auth/register")
 async def register(
-    req: Credentials, request: Request, db: AsyncSession = Depends(get_db)
+    req: Credentials,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    uid: str | None = Depends(get_current_user_id_optional),
 ) -> dict[str, Any]:
     """注册并直接发 token（注册完不用再登录一次——少一次往返，用户少一步）。
 
     两道限流闸在**建号之前**跑：注册一旦成功，这个号今天就有了一份 credit 额度，事后再拦没有意义。
+
+    **带着访客 token 来注册 = 升级**：不建新行，把访客那行原地改成正式账号（id 不变，试用期的
+    会话 / 偏好 / 收藏全留）。升级不过日闸——这个人今天已经领过一份额度，并没有多出一个「人」。
     """
     _require_auth_on()
     guard_register_ip(request)
-    await guard_daily_signups(db)
     if len(req.password.encode()) > MAX_PASSWORD_BYTES:
         raise HTTPException(400, f"密码过长（上限 {MAX_PASSWORD_BYTES} 字节）")
+    if uid is not None:
+        try:
+            user = await upgrade_guest(db, uid, req.username.strip(), req.password)
+        except PermissionError as exc:
+            raise HTTPException(409, "当前账号不是试用账号，请先退出再注册") from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return _issue(user.id, user.username)
+    await guard_daily_signups(db)
     try:
         user = await create_user(db, req.username.strip(), req.password)
     except ValueError as exc:  # 用户名已被占用（数据库唯一索引拦下的）
@@ -93,10 +141,19 @@ async def login(
 
 
 @router.get("/auth/me")
-async def whoami(uid: str | None = Depends(get_current_user_id)) -> dict[str, Any]:
-    """前端刷新后拿本地 token 问一句「我还是我吗」——token 过期 / 被改则 401，前端据此跳登录页。"""
+async def whoami(
+    uid: str | None = Depends(get_current_user_id), db: AsyncSession = Depends(get_db)
+) -> dict[str, Any]:
+    """前端刷新后拿本地 token 问一句「我还是我吗」——token 过期 / 被改则 401，前端据此跳登录页。
+
+    顺带回 ``is_guest``：前端顶栏「试用中 · 注册可保留记录」的提示只认服务端这一位，不信本地缓存。
+    token 合法但行已被清理（访客过期清理脚本）视同过期 → 401，前端回落地页重来。
+    """
     _require_auth_on()
-    return {"user_id": uid}
+    user = await get_user(db, uid) if uid else None
+    if user is None:
+        raise HTTPException(401, "账号不存在或已清理")
+    return {"user_id": user.id, "username": user.username, "is_guest": user.is_guest}
 
 
 @router.delete("/sessions/{thread_id}")

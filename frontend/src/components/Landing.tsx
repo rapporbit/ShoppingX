@@ -39,7 +39,19 @@ const STEPS = [
   { n: "3", t: "拿到带理由的清单", d: "每件为什么选它，写给你看" },
 ];
 
-export function Landing({ onStart }: { onStart: () => void }) {
+// onTrial：免登录试用（主 CTA）。onStart：登录 / 注册。trialError：后端拒了试用（名额满 / 限流）时
+// 的原话——落地页得把它说出来并把「登录 / 注册」当作退路，而不是按钮转一圈没反应。
+export function Landing({
+  onStart,
+  onTrial,
+  trialBusy = false,
+  trialError = "",
+}: {
+  onStart: () => void;
+  onTrial: () => void;
+  trialBusy?: boolean;
+  trialError?: string;
+}) {
   return (
     <div className="landing">
       <header className="landing-nav">
@@ -68,14 +80,25 @@ export function Landing({ onStart }: { onStart: () => void }) {
         </motion.p>
         <motion.button
           className="landing-cta"
-          onClick={onStart}
+          onClick={onTrial}
+          disabled={trialBusy}
           variants={RISE}
           whileTap={{ scale: 0.97 }}
         >
-          免费开始
+          {trialBusy ? "正在准备…" : "免登录试用"}
         </motion.button>
         <motion.p className="landing-cta-note" variants={RISE}>
-          注册即用，无需绑卡
+          {trialError ? (
+            <span className="landing-cta-error">{trialError}</span>
+          ) : (
+            <>
+              不用注册、不用绑卡。随时
+              <button type="button" className="landing-cta-link" onClick={onStart}>
+                注册
+              </button>
+              可保留试用期间的会话与偏好。
+            </>
+          )}
         </motion.p>
       </motion.section>
 

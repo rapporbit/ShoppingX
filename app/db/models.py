@@ -31,6 +31,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -66,6 +67,12 @@ class User(Base):
     # 用户清空过几次长期记忆。回合后抽取是异步的：抽取开始时读一次，落库前再比一次，中途用户点了
     # 「清空」这批就整批丢弃——否则清空按钮会被一个早于它开始、晚于它结束的抽取悄悄撤销。
     memory_purge_gen: Mapped[int] = mapped_column(Integer, default=0)
+
+    # 免登录试用账号（feat/guest-trial）。访客不是「没有身份」而是「有一个后端签发的临时身份」：
+    # 这样会话归属、credit 配额、WS 校验、记忆全部照旧按 user_id 走，一行不用改。这一位只决定两件事：
+    # 日额度取 GUEST_DAILY_QUOTA_USD 而非 DAILY_QUOTA_USD；注册升级时原地翻成 False、id 不变，
+    # 试用期间的会话 / 偏好 / 收藏全部保留（对齐 Firebase Anonymous Auth 的 link 语义）。
+    is_guest: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
 
 
 class Thread(Base):

@@ -51,6 +51,51 @@ async def create_user(db: AsyncSession, username: str, password: str) -> User:
     return user
 
 
+GUEST_USERNAME_PREFIX = "guest_"
+
+
+async def create_guest_user(db: AsyncSession) -> User:
+    """免登录试用：建一行 ``is_guest=True`` 的真实用户。
+
+    用户名 ``guest_<hex>`` 只是占住唯一索引、方便后台一眼认出；密码字段填一个随机 bcrypt 摘要——
+    没人知道明文，所以这个号**不可能被密码登录**，唯一入口是签发时返回的那枚 token。
+    """
+    user = User(
+        id=uuid.uuid4().hex,
+        username=GUEST_USERNAME_PREFIX + uuid.uuid4().hex[:16],
+        password_hash=hash_password(uuid.uuid4().hex),
+        is_guest=True,
+    )
+    db.add(user)
+    await db.commit()
+    return user
+
+
+async def get_user(db: AsyncSession, user_id: str) -> User | None:
+    return await db.get(User, user_id)
+
+
+async def upgrade_guest(db: AsyncSession, user_id: str, username: str, password: str) -> User:
+    """访客升级成正式账号：**原行改名 + 设密码 + 翻 is_guest**，id 不变。
+
+    id 不变是全部意义所在：threads / memory_facts / favorites / usage_ledger 都按 user_id 挂，
+    改一行 users 就把试用期的一切带进正式账号，不用搬任何数据。非访客调用（已是正式账号）
+    抛 ``PermissionError``；用户名撞了由唯一索引挡、抛 ``ValueError``（与 create_user 同口径）。
+    """
+    user = await db.get(User, user_id)
+    if user is None or not user.is_guest:
+        raise PermissionError("只有试用账号可以升级")
+    user.username = username
+    user.password_hash = hash_password(password)
+    user.is_guest = False
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise ValueError("用户名已被占用") from exc
+    return user
+
+
 async def ensure_dev_admin(db: AsyncSession, username: str, password: str) -> bool:
     """本地调试的默认管理员：不存在就建，已存在不动（**不重置密码**），返回是否新建。
 

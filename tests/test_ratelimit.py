@@ -33,6 +33,9 @@ async def _auth_and_limits_on(monkeypatch: Any) -> AsyncIterator[None]:
     monkeypatch.setenv("AUTH_ENABLED", "true")
     monkeypatch.setenv("JWT_SECRET", "test-secret-not-real")
     monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    # 全站日闸默认关掉：整套测试一天里注册的用户数早就超过线上默认的 50，不关的话本文件的用例会
+    # 随「前面跑了多少个注册用户的文件」忽红忽绿。专测日闸的那条用例自己再把它设回来。
+    monkeypatch.setenv("MAX_NEW_USERS_PER_DAY", "0")
     rl.reset_all()
     yield
     rl.reset_all()
@@ -94,7 +97,9 @@ async def test_daily_signup_cap_survives_ip_rotation(client: AsyncClient, monkey
         await rl.guard_daily_signups(db)  # 确认此刻还没到顶（否则下面的基数没意义）
         today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
         base = await db.scalar(
-            select(func.count()).select_from(User).where(User.created_at >= today)
+            select(func.count())
+            .select_from(User)
+            .where(User.created_at >= today, User.is_guest.is_(False))
         )
     monkeypatch.setenv("MAX_NEW_USERS_PER_DAY", str((base or 0) + 2))
 

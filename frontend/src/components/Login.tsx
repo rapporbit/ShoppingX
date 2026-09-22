@@ -6,14 +6,18 @@ import { login, register, type Session } from "../auth";
 const MIN_PASSWORD = 8; // 与后端 MIN_PASSWORD_LEN 对齐：前端先拦一道，省一次注定失败的往返
 
 // onBack：从落地页翻进来的，就得能翻回去——不给退路的登录框是死胡同。
+// upgrade：试用中来注册（升级）。只开注册面、不给「去登录」开关——访客要登别的账号得先退出，否则
+// 登录成功的那一刻访客会话就被丢在旧号上、用户不会知道。
 export function Login({
   onDone,
   onBack,
+  upgrade = false,
 }: {
   onDone: (s: Session) => void;
   onBack?: () => void;
+  upgrade?: boolean;
 }) {
-  const [isRegister, setIsRegister] = useState(false);
+  const [isRegister, setIsRegister] = useState(upgrade);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -42,7 +46,11 @@ export function Login({
       <form className="login-card" onSubmit={submit}>
         <h1 className="login-title">ShoppingX</h1>
         <p className="login-sub">
-          {isRegister ? "创建账号，你的偏好与会话会跟着账号走" : "登录以继续你的购物会话"}
+          {upgrade
+            ? "注册后，试用期间的会话、偏好与收藏全部保留，额度升到正式档"
+            : isRegister
+              ? "创建账号，你的偏好与会话会跟着账号走"
+              : "登录以继续你的购物会话"}
         </p>
 
         <input
@@ -66,23 +74,25 @@ export function Login({
         {error && <div className="login-error">{error}</div>}
 
         <button className="login-submit" type="submit" disabled={busy}>
-          {busy ? "请稍候…" : isRegister ? "注册并进入" : "登录"}
+          {busy ? "请稍候…" : upgrade ? "注册并保留记录" : isRegister ? "注册并进入" : "登录"}
         </button>
 
-        <button
-          type="button"
-          className="login-switch"
-          onClick={() => {
-            setIsRegister(!isRegister);
-            setError("");
-          }}
-        >
-          {isRegister ? "已有账号？去登录" : "还没有账号？去注册"}
-        </button>
+        {!upgrade && (
+          <button
+            type="button"
+            className="login-switch"
+            onClick={() => {
+              setIsRegister(!isRegister);
+              setError("");
+            }}
+          >
+            {isRegister ? "已有账号？去登录" : "还没有账号？去注册"}
+          </button>
+        )}
 
         {onBack && (
           <button type="button" className="login-back" onClick={onBack}>
-            ← 返回首页
+            {upgrade ? "← 先不注册，回去继续试用" : "← 返回首页"}
           </button>
         )}
 
