@@ -33,6 +33,7 @@ class FakeRedis:
         self.groups: dict[tuple[str, str], dict[str, Any]] = {}
         self.kv: dict[str, str] = {}
         self.counter = 0
+        self.xclaim_calls = 0
 
     # ── 生产 ────────────────────────────────────────────────────────────────
     async def xadd(
@@ -98,7 +99,37 @@ class FakeRedis:
         entry = state["pending"].get(min)
         if entry is None:
             return []
-        return [{"message_id": min, "times_delivered": entry["times_delivered"]}]
+        return [
+            {
+                "message_id": min,
+                "consumer": entry["consumer"],
+                "times_delivered": entry["times_delivered"],
+            }
+        ]
+
+    async def xclaim(
+        self,
+        stream: str,
+        group: str,
+        consumer: str,
+        min_idle_time: int,
+        message_ids: list[str],
+        justid: bool = False,
+    ) -> list[str]:
+        """只实现心跳用到的 JUSTID 形态：换属主 + idle 清零，**不**累加投递计数（同真 Redis）。"""
+        assert justid, "FakeRedis 只模拟 XCLAIM JUSTID"
+        state = self.groups.get((stream, group), {"pending": {}})
+        now = time.monotonic()
+        out = []
+        for sid in message_ids:
+            entry = state["pending"].get(sid)
+            if entry is None or (now - entry["delivered_at"]) * 1000 < min_idle_time:
+                continue
+            entry["consumer"] = consumer
+            entry["delivered_at"] = now
+            self.xclaim_calls += 1
+            out.append(sid)
+        return out
 
     async def xautoclaim(
         self,
@@ -294,6 +325,83 @@ async def test_reclaim_covers_large_stream(rq: RedisStreamQueue, fake: FakeRedis
     handled = await _drain(rq, 1, block_ms=0, claim_idle_ms=0)
     assert [t.task_id for t in handled] == ["long"]
     assert fake.pending_ids(STREAM_LARGE) == []
+
+
+# ── 心跳续租与重投去重 ──────────────────────────────────────────────────────
+async def test_heartbeat_keeps_long_task_from_being_stolen(
+    rq: RedisStreamQueue, fake: FakeRedis
+) -> None:
+    """跑得比 claim 阈值还久的任务，靠心跳续租不被别的 worker 抢走，且投递计数不涨。"""
+    await rq.ensure_group()
+    await rq.enqueue(_task(tid="long"))
+    done = asyncio.Event()
+
+    async def _slow(_task: IntentTask) -> None:
+        await asyncio.sleep(0.5)
+        done.set()
+
+    consumer = asyncio.create_task(
+        _consume_until(rq, done.is_set, _slow, block_ms=0, claim_idle_ms=10_000, heartbeat_sec=0.05)
+    )
+    await asyncio.sleep(0.3)  # 已远超 0.2s 的阈值，没心跳的话这时它早就是孤儿了
+    stolen = await rq._reclaim("thief", 200, 10)
+    await consumer
+    assert stolen == []
+    assert fake.xclaim_calls >= 3
+    assert fake.pending_ids(STREAM_NORMAL) == []
+
+
+async def test_without_heartbeat_idle_message_is_reclaimed(
+    rq: RedisStreamQueue, fake: FakeRedis
+) -> None:
+    """对照组：同样的时序关掉心跳，消息会被接管——证明上一条用例绿不是因为阈值没到。"""
+    await rq.ensure_group()
+    await rq.enqueue(_task(tid="long"))
+    await fake.xreadgroup(GROUP, "dead-worker", {STREAM_NORMAL: ">"}, count=1, block=0)
+    await asyncio.sleep(0.3)
+    stolen = await rq._reclaim("thief", 200, 10)
+    assert [mid for _s, mid, _f in stolen] == fake.pending_ids(STREAM_NORMAL)
+
+
+async def test_heartbeat_stops_once_lease_is_lost(rq: RedisStreamQueue, fake: FakeRedis) -> None:
+    """属主已换人时心跳停跳、不把消息抢回来——否则两边都以为自己是正主。"""
+    await rq.ensure_group()
+    await rq.enqueue(_task(tid="a"))
+    await fake.xreadgroup(GROUP, "other", {STREAM_NORMAL: ">"}, count=1, block=0)
+    [mid] = fake.pending_ids(STREAM_NORMAL)
+    await asyncio.wait_for(rq._heartbeat(STREAM_NORMAL, mid, "me", 0.01), 1.0)
+    assert fake.groups[(STREAM_NORMAL, GROUP)]["pending"][mid]["consumer"] == "other"
+    assert fake.xclaim_calls == 0
+
+
+@pytest.mark.parametrize("state", ["done", "cancelled", "interrupted"])
+async def test_redelivery_of_finished_task_is_skipped(
+    rq: RedisStreamQueue, fake: FakeRedis, state: str
+) -> None:
+    """worker 写完终态、XACK 前被 kill：接管方按 task_id 查到终态，直接 ack，不重跑。"""
+    await rq.ensure_group()
+    await rq.enqueue(_task(tid="a"))
+    await rq.set_status(TaskStatus(task_id="a", state=state, thread_id="a"))  # type: ignore[arg-type]
+    calls: list[str] = []
+
+    async def _handler(task: IntentTask) -> None:
+        calls.append(task.task_id)
+
+    def _acked() -> bool:
+        cursor = fake.groups[(STREAM_NORMAL, GROUP)]["cursor"]
+        return cursor == 1 and fake.pending_ids(STREAM_NORMAL) == []
+
+    await _consume_until(rq, _acked, _handler, block_ms=0)
+    assert calls == []
+
+
+async def test_failed_status_is_still_retried(rq: RedisStreamQueue, fake: FakeRedis) -> None:
+    """``failed`` 不在跳过名单里：失败留 PEL 本来就是为了重跑。"""
+    await rq.ensure_group()
+    await rq.enqueue(_task(tid="a"))
+    await rq.set_status(TaskStatus(task_id="a", state="failed", thread_id="a"))
+    handled = await _drain(rq, 1, block_ms=0)
+    assert [t.task_id for t in handled] == ["a"]
 
 
 async def test_unparsable_payload_goes_straight_to_dead(

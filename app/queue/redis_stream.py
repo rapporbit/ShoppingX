@@ -28,7 +28,7 @@ from dataclasses import replace
 from typing import Any
 
 from app.queue.ports import IntentTask, TaskHandler, TaskStatus, cancel_in_flight
-from app.utils.env import env_int
+from app.utils.env import env_float, env_int
 
 logger = logging.getLogger("shoppingx.queue")
 
@@ -45,9 +45,16 @@ _STATUS_TTL = env_int("QUEUE_STATUS_TTL", 3600)
 # 死信流保留条数。死信是给人看的（排查为什么这条跑不动），不是给程序重放的，留最近若干条就够；
 # 不设上限则一次线上事故能把 Redis 内存吃光。
 _DEAD_MAXLEN = env_int("QUEUE_DEAD_MAXLEN", 1000)
-# 一条消息在 PEL 里闲置多久算「上一个 worker 大概是挂了」。要明显长于单轮任务耗时（本仓约 40s，
-# 长续聊几分钟），否则会把还在正常跑的任务抢过来重跑一遍——那不是容错是双跑。
-_CLAIM_IDLE_MS = env_int("QUEUE_CLAIM_IDLE_MS", 600_000)
+# 一条消息在 PEL 里闲置多久算「上一个 worker 大概是挂了」。在跑的消息靠心跳续租（每
+# ``_HEARTBEAT_SEC`` 秒 ``XCLAIM JUSTID`` 一次把 idle 清零），所以这个阈值只需盖住
+# 「几次心跳没跳上」，不再需要长于任务耗时——早年没有心跳时它是 600s，worker 崩了要等十分钟
+# 才有人接手。
+# 取 6 倍心跳：Redis / 事件循环偶发卡一两拍不至于被误抢，真崩了 30s 级别就被接管。
+_HEARTBEAT_SEC = env_float("QUEUE_HEARTBEAT_SEC", 5.0)
+_CLAIM_IDLE_MS = env_int("QUEUE_CLAIM_IDLE_MS", 30_000)
+# 已有这几种终态的任务再被投递（worker 写完终态、XACK 之前被 kill），直接 ack 跳过，不重跑。
+# 不含 ``failed``：失败那条路本来就是「留 PEL 等重投」，写了 failed 再重跑正是设计意图。
+_SKIP_ON_REDELIVERY = frozenset({"done", "cancelled", "interrupted"})
 _BLOCK_MS = env_int("QUEUE_BLOCK_MS", 2000)
 _MAX_DELIVERIES = env_int("QUEUE_MAX_DELIVERIES", 3)
 
@@ -143,6 +150,7 @@ class RedisStreamQueue:
         block_ms: int = _BLOCK_MS,
         max_deliveries: int = _MAX_DELIVERIES,
         claim_idle_ms: int = _CLAIM_IDLE_MS,
+        heartbeat_sec: float = _HEARTBEAT_SEC,
     ) -> None:
         """消费循环。跑到 ``should_stop()`` 为真、且在途任务收干净才返回。
 
@@ -162,6 +170,13 @@ class RedisStreamQueue:
         会留下一批孤儿协程——进程都在退出了，它们还在跑 LLM，而消息既没 ack 也没人管。
         """
         await self.ensure_group()
+        if heartbeat_sec > 0 and claim_idle_ms < heartbeat_sec * 3000:
+            # 阈值不到 3 次心跳：一次网络抖动就可能让在跑的任务被别的 worker 抢走双跑。
+            logger.warning(
+                "QUEUE_CLAIM_IDLE_MS=%d 小于 3 倍心跳（%.1fs），存在误抢风险",
+                claim_idle_ms,
+                heartbeat_sec,
+            )
         limit = max(1, concurrency)
         sem = asyncio.Semaphore(limit)
         in_flight: set[asyncio.Task[None]] = set()
@@ -179,7 +194,14 @@ class RedisStreamQueue:
                     in_flight.add(
                         asyncio.create_task(
                             self._handle_one(
-                                stream, message_id, fields, handler, max_deliveries, sem
+                                stream,
+                                message_id,
+                                fields,
+                                handler,
+                                max_deliveries,
+                                sem,
+                                consumer=consumer,
+                                heartbeat_sec=heartbeat_sec,
                             )
                         )
                     )
@@ -246,6 +268,9 @@ class RedisStreamQueue:
         handler: TaskHandler,
         max_deliveries: int,
         sem: asyncio.Semaphore,
+        *,
+        consumer: str = "",
+        heartbeat_sec: float = 0.0,
     ) -> None:
         raw = fields.get("payload") or fields.get(b"payload")
         if not raw:
@@ -258,18 +283,76 @@ class RedisStreamQueue:
             # 解不开的消息重投一万次也还是解不开，直接进死信，不能让它卡住队列。
             await self._to_dead(stream, message_id, text, f"payload 解析失败：{exc}")
             return
-        async with sem:
+        if await self._already_finished(task.task_id):
+            # at-least-once 的另一面：worker 写完终态、XACK 之前被 kill，这条会被接管方再领一次。
+            # 按 task_id 查终态去重，别把一轮已经给了用户答复的对话重跑一遍。
+            logger.info("任务已有终态，重投跳过：%s", task.task_id)
+            await self._ack(stream, message_id)
+            return
+        # 心跳从领到手就开始跳，不是从拿到信号量才开始：在信号量上排队的消息同样挂在 PEL 里、
+        # idle 同样在涨，不续租就会被别的 worker 当成孤儿抢走。
+        beat = (
+            asyncio.create_task(self._heartbeat(stream, message_id, consumer, heartbeat_sec))
+            if consumer and heartbeat_sec > 0
+            else None
+        )
+        try:
+            async with sem:
+                try:
+                    await handler(task)
+                except asyncio.CancelledError:
+                    # 取消不算失败：不 ack、不进死信，留在 PEL 里等下一个 worker 捡。优雅退出的
+                    # 正常路径走不到这儿——handler（worker.handle_task）自己按 interrupted 收尾后
+                    # 正常返回，由下面那行 ack 掉。走到这儿的是收尾也没兜住的意外取消，留 PEL
+                    # 是兜底。
+                    raise
+                except Exception as exc:
+                    await self._on_failure(stream, message_id, text, task, exc, max_deliveries)
+                    return
+                await self._ack(stream, message_id)
+        finally:
+            if beat is not None:
+                beat.cancel()
+
+    async def _already_finished(self, task_id: str) -> bool:
+        try:
+            status = await self.get_status(task_id)
+        except Exception:
+            return False  # 查不到就当没跑过：宁可重跑一次（写工具另有 operation_id 幂等），不能丢
+        return status is not None and status.state in _SKIP_ON_REDELIVERY
+
+    async def _heartbeat(
+        self, stream: str, message_id: str, consumer: str, interval: float
+    ) -> None:
+        """续租：定期 ``XCLAIM ... JUSTID`` 给自己，把这条消息在 PEL 里的 idle 清零。
+
+        用 ``JUSTID`` 是因为它**不累加投递计数**——心跳要是把 times_delivered 往上顶，跑得久的任务
+        失败一次就会被当成「重投超限」直接进死信。
+
+        续租前先确认 PEL 里的属主还是自己：阈值被击穿（进程卡死几十秒又活过来）时别的 worker 可能
+        已经接管，此时再 XCLAIM 会把消息抢回来，两边都以为自己是正主。发现易主就停跳，本地这一份
+        跑完照常 ack（XACK 作用于整个组的 PEL、不看属主）；双跑由终态去重与写工具幂等兜住。
+        """
+        while True:
+            await asyncio.sleep(interval)
             try:
-                await handler(task)
+                pending = await self._client.xpending_range(
+                    stream, self._group, min=message_id, max=message_id, count=1
+                )
+                if not pending:
+                    return  # 已经 ack 掉了
+                owner = _s(pending[0].get("consumer", consumer))
+                if owner != consumer:
+                    logger.warning("租约已被 %s 接管，停止续租：%s", owner, message_id)
+                    return
+                await self._client.xclaim(
+                    stream, self._group, consumer, 0, [message_id], justid=True
+                )
             except asyncio.CancelledError:
-                # 取消不算失败：不 ack、不进死信，留在 PEL 里等下一个 worker 捡。优雅退出的正常
-                # 路径走不到这儿——handler（worker.handle_task）自己按 interrupted 收尾后正常返回，
-                # 由下面那行 ack 掉。走到这儿的是收尾也没兜住的意外取消，留 PEL 是兜底。
                 raise
             except Exception as exc:
-                await self._on_failure(stream, message_id, text, task, exc, max_deliveries)
-                return
-            await self._ack(stream, message_id)
+                # 一次没跳上不致命：阈值是心跳的 6 倍，留足了重试余量。
+                logger.debug("心跳续租失败（%s）：%s", message_id, exc)
 
     async def _on_failure(
         self,
