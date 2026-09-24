@@ -25,9 +25,12 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import secrets
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
@@ -47,6 +50,63 @@ _current_trace_id: ContextVar[str | None] = ContextVar("langfuse_trace_id", defa
 # score comment 的截断：单条 rationale 与整段 comment 各设上限，防 judge 长篇大论灌爆 UI 那一栏。
 _RATIONALE_CLIP = 200
 _COMMENT_CLIP = 1500
+
+# W3C Trace Context 的 traceparent：``00-<32 hex trace_id>-<16 hex span_id>-<2 hex flags>``。
+# 只认 version 00；全零 id 按规范是非法值（「没有 trace」），一并拒掉。
+_TRACEPARENT_RE = re.compile(r"^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$")
+
+
+@dataclass(frozen=True)
+class TraceParent:
+    """跨进程传的那一截 trace 上下文（W3C traceparent 的三段）。
+
+    **为什么手写而不用 OTel propagator 的 extract**：extract 出来的是 OTel Context，接续时要 attach
+    进当前上下文；而接收方的根 span 由 Langfuse 起，官方接续口是 ``trace_context={trace_id,
+    parent_span_id}``——它会把远端父 span 强制标成 sampled。走 attach 那条路，API 侧没开观测时
+    发来的 flags=00 会让 ParentBased 采样器把 worker 整轮 span 丢掉，
+    症状是「开着观测却一条都没有」。
+    """
+
+    trace_id: str
+    span_id: str
+    sampled: bool
+
+    def header(self) -> str:
+        return f"00-{self.trace_id}-{self.span_id}-{'01' if self.sampled else '00'}"
+
+
+def parse_traceparent(value: str | None) -> TraceParent | None:
+    """解析 traceparent；空串 / 格式不对 / 全零 id 返回 None（老消息没有这个字段，属正常）。"""
+    m = _TRACEPARENT_RE.match((value or "").strip().lower())
+    if m is None:
+        return None
+    trace_id, span_id, flags = m.groups()
+    if int(trace_id, 16) == 0 or int(span_id, 16) == 0:
+        return None
+    return TraceParent(trace_id, span_id, sampled=bool(int(flags, 16) & 0x01))
+
+
+def new_traceparent() -> TraceParent:
+    """观测没开时也造一个 traceparent：trace_id 照样是两个进程日志的关联键。
+
+    flags 记 00（未采样）——这一截确实没有被记录，接收方据此不去挂一个不存在的父 span。
+    """
+    return TraceParent(secrets.token_hex(16), secrets.token_hex(8), sampled=False)
+
+
+def _current_otel_traceparent() -> TraceParent | None:
+    """当前 OTel 上下文里的活动 span → traceparent；没有有效 span 返回 None。"""
+    try:
+        from opentelemetry import trace as otel_trace
+
+        ctx = otel_trace.get_current_span().get_span_context()
+    except Exception:
+        return None
+    if not ctx.is_valid:
+        return None
+    return TraceParent(
+        f"{ctx.trace_id:032x}", f"{ctx.span_id:016x}", sampled=bool(ctx.trace_flags.sampled)
+    )
 
 
 def langfuse_host() -> str:
@@ -191,7 +251,6 @@ def flush_traces() -> None:
         logger.warning("Langfuse flush 失败，可能有 score 未上报", exc_info=True)
 
 
-
 def tracing_middlewares() -> list[Any]:
     """Agent 装配时要挂的观测中间件（未启用 / 未装包 → 空表，装配处无需判断）。"""
     if _get_client() is None:
@@ -206,11 +265,60 @@ def tracing_middlewares() -> list[Any]:
 
 
 @contextmanager
+def enqueue_span(
+    *,
+    task_id: str,
+    session_id: str | None = None,
+    user_id: str | None = None,
+    kind: str = "normal",
+) -> Iterator[TraceParent]:
+    """API 进程入队那一段的 span，交出要随消息带走的 :class:`TraceParent`。
+
+    **这是整条 trace 的根**：队列模式下 ``run_agent`` 跑在另一个进程，OTel 上下文靠 ContextVar
+    过不去，只能把 traceparent 写进消息、由 worker 用 :func:`turn_span` 的 ``parent`` 接上。
+    没这一段时一次请求在 trace 里断成两截，排队等了多久在任何一截里都看不见。
+
+    无 client 时交出 :func:`new_traceparent` 造的那个——观测关了，日志关联照样要有。
+    异常处理口径与 :func:`turn_span` 相同（业务异常原样穿透、观测自身故障降级）。
+    """
+    client = _get_client()
+    if client is None:
+        yield new_traceparent()
+        return
+    yielded = False
+    body_exc: BaseException | None = None
+    try:
+        from langfuse import propagate_attributes
+
+        with client.start_as_current_observation(
+            name="shoppingx.enqueue",
+            as_type="span",
+            metadata={"task_id": task_id, "kind": kind},
+        ):
+            with propagate_attributes(session_id=session_id or None, user_id=user_id or None):
+                parent = _current_otel_traceparent() or new_traceparent()
+                yielded = True
+                try:
+                    yield parent
+                except BaseException as exc:  # noqa: BLE001 —— 只做标记，紧接着原样抛回
+                    body_exc = exc
+                    raise
+    except Exception as exc:
+        if exc is body_exc:
+            raise
+        logger.warning("Langfuse 入队 span 创建失败，本次降级无观测", exc_info=True)
+        if yielded:
+            return
+        yield new_traceparent()
+
+
+@contextmanager
 def turn_span(
     session_id: str | None = None,
     user_id: str | None = None,
     prompt_version: str | None = None,
     ab_bucket: int | None = None,
+    parent: str = "",
 ) -> Iterator[Any]:
     """把一轮 ``run_agent`` 包成一条 trace 的根 span（无 client 时是个空壳，不改变行为）。
 
@@ -223,17 +331,31 @@ def turn_span(
     原生的 ``version`` 维度（UI 里能直接按版本切分对比），后者进 metadata。**两个都要**——只有
     版本时看不出「这个人是被分进来的还是手工钉的」，桶号是把线上 trace 与离线 A/B 报告对上账的
     唯一钥匙。
+
+    ``parent``：队列消息带来的 traceparent（见 :func:`enqueue_span`）。有它时本轮挂在 API 那段
+    span 下面、与它同一个 trace_id；空串 / 解析不了就照旧自成一条 trace（直连模式、离线脚本）。
+    上游没采样（flags=00，API 侧观测关着）时只沿用 trace_id、不挂父 span——那个父 span 并不存在。
     """
     client = _get_client()
     if client is None:
         yield None
         return
+    remote = parse_traceparent(parent)
+    trace_context: dict[str, str] | None = None
+    if remote is not None:
+        trace_context = {"trace_id": remote.trace_id}
+        if remote.sampled:
+            trace_context["parent_span_id"] = remote.span_id
     yielded = False
     body_exc: BaseException | None = None
     try:
         from langfuse import propagate_attributes
 
-        with client.start_as_current_observation(name="shoppingx.turn", as_type="agent") as span:
+        with client.start_as_current_observation(
+            name="shoppingx.turn",
+            as_type="agent",
+            trace_context=trace_context,
+        ) as span:
             metadata = {"ab_bucket": ab_bucket} if ab_bucket is not None else None
             with propagate_attributes(
                 session_id=session_id or None,

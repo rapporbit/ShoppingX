@@ -27,6 +27,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
+from app.observability import metrics
 from app.queue.ports import IntentTask, TaskHandler, TaskStatus, cancel_in_flight
 from app.utils.env import env_float, env_int
 
@@ -340,6 +341,8 @@ class RedisStreamQueue:
                     await self._release(key, consumer)
         if out:
             logger.info("接管 %d 条租约已过期的任务（consumer=%s）", len(out), consumer)
+            for stream in STREAMS:
+                metrics.record_queue_reclaimed(stream, sum(1 for s, _, _ in out if s == stream))
         return out
 
     async def _handle_one(

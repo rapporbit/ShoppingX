@@ -226,3 +226,59 @@ def test_webhook_payload_shapes(monkeypatch: pytest.MonkeyPatch) -> None:
     assert alerts._webhook_payload("x") == {"text": "x"}
     monkeypatch.setenv("ALERT_WEBHOOK_KIND", "dingtalk")
     assert alerts._webhook_payload("x") == {"msgtype": "text", "text": {"content": "x"}}
+
+
+# ---------- 队列积压 ----------
+_BACKLOG = "queue:backlog"
+
+
+@pytest.fixture
+def _quiet_security() -> None:
+    """吞掉别的用例留在全局 SECURITY_EVENTS 里的存量，否则首轮评估会把它当增量一起报出来。"""
+    alerts._security_deltas()
+
+
+def test_backlog_threshold_follows_queue_max_depth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """默认阈值 = 429 上限的一半：改了上限忘改告警，告警会在拒人之后才响。"""
+    monkeypatch.delenv("ALERT_QUEUE_BACKLOG", raising=False)
+    monkeypatch.setenv("QUEUE_MAX_DEPTH", "400")
+    assert alerts.backlog_threshold() == 200
+    monkeypatch.setenv("ALERT_QUEUE_BACKLOG", "50")
+    assert alerts.backlog_threshold() == 50
+
+
+@pytest.mark.usefixtures("_quiet_security")
+def test_backlog_fires_holds_in_band_then_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALERT_QUEUE_BACKLOG", "100")
+    assert alerts.check_rules(now=100.0, queue_depth=99) == []
+    assert _keys(alerts.check_rules(now=160.0, queue_depth=100)) == {_BACKLOG: "firing"}
+    # 滞回带（90~100）：不报恢复也不重复报。
+    assert alerts.check_rules(now=220.0, queue_depth=95) == []
+    assert _keys(alerts.check_rules(now=280.0, queue_depth=89)) == {_BACKLOG: "resolved"}
+
+
+@pytest.mark.usefixtures("_quiet_security")
+def test_backlog_skipped_when_depth_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """读不到深度（None）不评估、不推进状态机——不能把「Redis 抖了」当成「积压清零」报恢复。"""
+    monkeypatch.setenv("ALERT_QUEUE_BACKLOG", "10")
+    assert _keys(alerts.check_rules(now=100.0, queue_depth=50)) == {_BACKLOG: "firing"}
+    assert alerts.check_rules(now=160.0, queue_depth=None) == []
+    assert alerts.check_rules(now=220.0, queue_depth=50) == []  # 仍在告警中，冷却内不重复
+
+
+@pytest.mark.usefixtures("_quiet_security")
+async def test_check_and_notify_reads_queue_depth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """后台轮询那条路真的读了队列：只测纯函数的话，漏接 IO 那一步测不出来，线上永远不响。"""
+    sent: list[alerts.Alert] = []
+
+    async def _depth() -> int:
+        return 500
+
+    async def _send(alert: alerts.Alert) -> None:
+        sent.append(alert)
+
+    monkeypatch.setenv("ALERT_QUEUE_BACKLOG", "100")
+    monkeypatch.setattr(alerts, "_read_queue_depth", _depth)
+    monkeypatch.setattr(alerts, "send_alert", _send)
+    await alerts.check_and_notify()
+    assert [a.key for a in sent] == [_BACKLOG]

@@ -66,6 +66,16 @@ def _usage_total(res: Any) -> int:
         return 0
 
 
+def _record_throttle_wait(stage: str, seconds: float) -> None:
+    """限流等待打点（``stage`` = bucket / gateway）。观测是附属品，打点失败不许冒泡进模型调用。"""
+    try:
+        from app.observability import metrics
+
+        metrics.record_llm_throttle_wait(stage, seconds)
+    except Exception:  # pragma: no cover
+        logger.debug("限流等待打点失败", exc_info=True)
+
+
 class GatewayThrottle:
     """并发信号量 + 起点间隔的组合闸门。一个进程一份，主 / 子 / 快档共享。"""
 
@@ -175,11 +185,15 @@ class ThrottledChatModel(OpenAIChatModel):
         # 令牌桶（跨副本）排在**取 slot 之前**：等令牌等的是全局配额，占着本进程的并发位去等，
         # 等于拿 20 个槽换一条跨副本的队——槽要留给真正在飞的请求。顺序与断路器同理。
         messages = kwargs.get("messages") or (args[0] if args else None)
+        waited_from = time.monotonic()
         reserved = await bucket_acquire(
             self.model, estimate_prompt_tokens(messages, kwargs.get("tools"))
         )
+        slot_from = time.monotonic()
+        _record_throttle_wait("bucket", slot_from - waited_from)
         cm = self._throttle.slot()
         await cm.__aenter__()
+        _record_throttle_wait("gateway", time.monotonic() - slot_from)
         # 计时从**拿到 slot 之后**开始：排队等并发位、等起点间隔是我们自己的节流，算进首 token
         # 预算里就会在高并发时集体误判对面挂了。真正的打点在 ``_call_api``（每次尝试一次）。
         attempt = _Attempt()

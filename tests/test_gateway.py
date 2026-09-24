@@ -373,3 +373,28 @@ async def test_bucket_does_not_settle_on_failure(monkeypatch: pytest.MonkeyPatch
 
     assert len(spy.acquired) == 1
     assert spy.settled == []
+
+
+def _wait_sample(stage: str, suffix: str) -> float:
+    from prometheus_client import REGISTRY
+
+    name = f"shoppingx_llm_throttle_wait_seconds_{suffix}"
+    return REGISTRY.get_sample_value(name, {"stage": stage}) or 0.0
+
+
+@pytest.mark.asyncio
+async def test_throttle_wait_is_recorded_per_stage() -> None:
+    """限流等待按段记：并发位只有 1 个时，第二个调用在 gateway 段干等第一个跑完（~0.1s）。
+
+    每次调用两段都记一笔（含 0 秒）——分位数要有分母，只记「等过的」会把 P50 抬成假象。
+    """
+    model = _model(GatewayThrottle(max_concurrency=1, min_interval=0.0))
+    _patch_call(model, _Tracker(), hold=0.1)
+    count0, sum0 = _wait_sample("gateway", "count"), _wait_sample("gateway", "sum")
+    bucket0 = _wait_sample("bucket", "count")
+
+    await asyncio.gather(model([]), model([]))
+
+    assert _wait_sample("gateway", "count") - count0 == 2
+    assert _wait_sample("gateway", "sum") - sum0 >= 0.08, "第二个调用排队等并发位的那段没记上"
+    assert _wait_sample("bucket", "count") - bucket0 == 2

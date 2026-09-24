@@ -284,6 +284,7 @@ async def run_agent(
     run_id: str | None = None,
     request_id: str = "",
     enqueued_at: str = "",
+    traceparent: str = "",
 ) -> dict[str, Any]:
     """:func:`_run_turn` 的薄壳，只多做一件事：把这一轮的**收尾结果**记进 SLO 成功率（阶段 6）。
 
@@ -302,6 +303,7 @@ async def run_agent(
             run_id=run_id,
             request_id=request_id,
             enqueued_at=enqueued_at,
+            traceparent=traceparent,
         )
     except asyncio.CancelledError:
         # 用户自己掐的、或 worker 排空掐的：不是服务质量问题，不进分母。
@@ -326,6 +328,7 @@ async def _run_turn(
     run_id: str | None = None,
     request_id: str = "",
     enqueued_at: str = "",
+    traceparent: str = "",
 ) -> dict[str, Any]:
     """主 AgentLoop 的入口：一轮任务从这里进、从这里出。
 
@@ -340,6 +343,9 @@ async def _run_turn(
 
     ``enqueued_at``：任务入队时刻（ISO 串，同样随队列消息带过来），首事件延迟 SLO 的计时起点。
     空串 / 解析不了 = 按「此刻」起算（直连模式、离线脚本），那时排队耗时本来就是 0。
+
+    ``traceparent``：API 入队 span 的 W3C 上下文（同样随消息带来）。本轮根 span 挂到它下面，
+    一次请求在 trace 里才是一条而不是两截；空串 = 自成一条 trace（见 ``tracing.turn_span``）。
 
     ``skill``：用户在输入框 ``/`` 显式选中的 skill 目录名。服务端在首次模型调用前校验归属并把
     正文拼进本轮用户消息（``authority=reference_only``）；找不到就报错结束本轮，**不静默降级
@@ -364,14 +370,15 @@ async def _run_turn(
             request_id=request_id or None,
         ),
         platform_scope(platforms) as enabled_platforms,
-        # 一轮 = 一条 trace 的根 span。主 loop 与 worker 的 span 靠 OTEL 上下文自动挂进来
-        # （不必手工传 trace_id），多轮再靠 session_id=thread_id 聚成 Session。
+        # 一轮的根 span。进程内的模型 / 工具 span 靠 OTEL 上下文自动挂进来；跨进程那一跳靠
+        # traceparent 挂到 API 入队 span 下面。多轮再靠 session_id=thread_id 聚成 Session。
         # 未启用观测时它是个空壳。
         turn_span(
             session_id=thread_id,
             user_id=user_id,
             prompt_version=ab_assign.version,
             ab_bucket=ab_assign.bucket,
+            parent=traceparent,
         ),
     ):
         # SLO 计时（阶段 6）：起点是**入队时刻**，所以排队等待也算进首事件延迟——用户不关心
