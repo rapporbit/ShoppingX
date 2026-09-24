@@ -1,7 +1,7 @@
 """批 2 · 削峰队列的确定性单测：双流分级 / ack / pending 重投 / 死信 / 进程内回落。
 
 **测试策略沿用 `tests/test_event_replay.py` 的惯例**：一个内存 FakeRedis 实现 Stream 消费者组的最小
-子集（xadd / xreadgroup / xack / xpending_range / xautoclaim 等），不依赖真 Redis，也不引
+子集（xadd / xreadgroup / xack / xpending_range / xclaim / 租约 Lua 等），不依赖真 Redis，也不引
 fakeredis 包。真 Redis 的价值在于验协议细节，而这里要钉的是**我们自己的取舍**——normal 先于 large、
 ack 回原流、失败留 PEL、超限进死信——这些用假客户端反而断言得更死（能把「投递第几次」直接摆出来）。
 
@@ -18,11 +18,20 @@ from typing import Any
 
 import pytest
 
-from app import worker
 from app import queue as queue_pkg
+from app import worker
 from app.queue import InProcessQueue, RedisStreamQueue, get_task_queue, set_task_queue
 from app.queue.ports import IntentTask, TaskQueue, TaskStatus
-from app.queue.redis_stream import GROUP, STREAM_DEAD, STREAM_LARGE, STREAM_NORMAL
+from app.queue.redis_stream import (
+    GROUP,
+    LEASE_ACQUIRE,
+    LEASE_RELEASE,
+    LEASE_RENEW,
+    STREAM_DEAD,
+    STREAM_LARGE,
+    STREAM_NORMAL,
+    _lease_key,
+)
 
 
 class FakeRedis:
@@ -32,6 +41,8 @@ class FakeRedis:
         self.streams: dict[str, list[tuple[str, dict[str, Any]]]] = {}
         self.groups: dict[tuple[str, str], dict[str, Any]] = {}
         self.kv: dict[str, str] = {}
+        self.expiry: dict[str, float] = {}
+        self.eval_calls: dict[str, int] = {}
         self.counter = 0
         self.xclaim_calls = 0
 
@@ -93,19 +104,33 @@ class FakeRedis:
         return 1 if state["pending"].pop(message_id, None) is not None else 0
 
     async def xpending_range(
-        self, stream: str, group: str, min: str, max: str, count: int = 10
+        self,
+        stream: str,
+        group: str,
+        min: str,
+        max: str,
+        count: int = 10,
+        idle: int | None = None,
     ) -> list[dict[str, Any]]:
+        """单条查询（min == max）与 ``- +`` 全扫两种形态；``idle`` 同真 Redis 按闲置毫秒过滤。"""
         state = self.groups.get((stream, group), {"pending": {}})
-        entry = state["pending"].get(min)
-        if entry is None:
-            return []
-        return [
-            {
-                "message_id": min,
-                "consumer": entry["consumer"],
-                "times_delivered": entry["times_delivered"],
-            }
-        ]
+        now = time.monotonic()
+        ids = list(state["pending"]) if min == "-" else [min]
+        out = []
+        for sid in ids:
+            entry = state["pending"].get(sid)
+            if entry is None:
+                continue
+            if idle is not None and (now - entry["delivered_at"]) * 1000 < idle:
+                continue
+            out.append(
+                {
+                    "message_id": sid,
+                    "consumer": entry["consumer"],
+                    "times_delivered": entry["times_delivered"],
+                }
+            )
+        return out[:count]
 
     async def xclaim(
         self,
@@ -114,11 +139,10 @@ class FakeRedis:
         consumer: str,
         min_idle_time: int,
         message_ids: list[str],
-        justid: bool = False,
-    ) -> list[str]:
-        """只实现心跳用到的 JUSTID 形态：换属主 + idle 清零，**不**累加投递计数（同真 Redis）。"""
-        assert justid, "FakeRedis 只模拟 XCLAIM JUSTID"
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """换属主 + idle 清零 + 投递计数 +1（不带 JUSTID 的真 Redis 行为）；未到 idle 的不领。"""
         state = self.groups.get((stream, group), {"pending": {}})
+        body = dict(self.streams.get(stream, []))
         now = time.monotonic()
         out = []
         for sid in message_ids:
@@ -126,35 +150,11 @@ class FakeRedis:
             if entry is None or (now - entry["delivered_at"]) * 1000 < min_idle_time:
                 continue
             entry["consumer"] = consumer
-            entry["delivered_at"] = now
-            self.xclaim_calls += 1
-            out.append(sid)
-        return out
-
-    async def xautoclaim(
-        self,
-        stream: str,
-        group: str,
-        consumer: str,
-        min_idle_time: int = 0,
-        count: int = 10,
-    ) -> tuple[str, list[tuple[str, dict[str, Any]]], list[str]]:
-        state = self.groups.get((stream, group))
-        if state is None:
-            return "0-0", [], []
-        now = time.monotonic()
-        claimed: list[tuple[str, dict[str, Any]]] = []
-        body = dict(self.streams.get(stream, []))
-        for sid, entry in list(state["pending"].items()):
-            if len(claimed) >= count:
-                break
-            if (now - entry["delivered_at"]) * 1000 < min_idle_time:
-                continue
-            entry["consumer"] = consumer
             entry["times_delivered"] += 1
             entry["delivered_at"] = now
-            claimed.append((sid, body.get(sid, {})))
-        return "0-0", claimed, []
+            self.xclaim_calls += 1
+            out.append((sid, body.get(sid, {})))
+        return out
 
     async def xinfo_groups(self, stream: str) -> list[dict[str, Any]]:
         if stream not in self.streams:
@@ -172,13 +172,60 @@ class FakeRedis:
             )
         return out
 
-    # ── 状态键 ──────────────────────────────────────────────────────────────
-    async def set(self, key: str, value: str, ex: int | None = None) -> bool:
+    # ── 状态键 / 租约键 ─────────────────────────────────────────────────────
+    def _live(self, key: str) -> str | None:
+        exp = self.expiry.get(key)
+        if exp is not None and time.monotonic() >= exp:
+            self.kv.pop(key, None)
+            self.expiry.pop(key, None)
+        return self.kv.get(key)
+
+    async def set(
+        self,
+        key: str,
+        value: str,
+        ex: int | None = None,
+        px: int | None = None,
+        nx: bool = False,
+    ) -> bool | None:
+        if nx and self._live(key) is not None:
+            return None  # 同真 Redis：NX 未写入回 None
         self.kv[key] = value
+        self.expiry.pop(key, None)
+        if px is not None:
+            self.expiry[key] = time.monotonic() + px / 1000
         return True
 
     async def get(self, key: str) -> str | None:
-        return self.kv.get(key)
+        return self._live(key)
+
+    async def eval(self, script: str, numkeys: int, *args: Any) -> int:
+        """只认 redis_stream 里那三段租约 Lua，按它们的语义在内存里执行（单线程即原子）。"""
+        key, owner = args[0], args[1]
+        cur = self._live(key)
+        if script == LEASE_RELEASE:
+            if cur == owner:
+                self.kv.pop(key, None)
+                self.expiry.pop(key, None)
+                return 1
+            return 0
+        self.eval_calls[script] = self.eval_calls.get(script, 0) + 1
+        ttl = int(args[2]) / 1000
+        if script == LEASE_RENEW:
+            if cur != owner:
+                return 0
+        elif script == LEASE_ACQUIRE:
+            if cur is not None and cur != owner:
+                return 0
+            self.kv[key] = owner
+        else:
+            raise AssertionError("FakeRedis 不认识的 Lua 脚本")
+        self.expiry[key] = time.monotonic() + ttl
+        return 1
+
+    def expire_now(self, key: str) -> None:
+        """测试辅助：让某个键立刻过期（模拟持有者死掉、不再续期）。"""
+        self.expiry[key] = time.monotonic() - 1
 
     # ── 测试辅助 ────────────────────────────────────────────────────────────
     def pending_ids(self, stream: str, group: str = GROUP) -> list[str]:
@@ -301,6 +348,7 @@ async def test_failure_keeps_message_pending(rq: RedisStreamQueue, fake: FakeRed
     # 失败不 ack：消息留在 PEL 里等重投，且还没到死信。
     assert fake.pending_ids(STREAM_NORMAL) != []
     assert STREAM_DEAD not in fake.streams
+    assert _leases(fake) == {}  # 失败即释放租约：重投不必干等它自然过期
 
 
 async def test_redelivery_then_dead_letter(rq: RedisStreamQueue, fake: FakeRedis) -> None:
@@ -327,11 +375,18 @@ async def test_reclaim_covers_large_stream(rq: RedisStreamQueue, fake: FakeRedis
     assert fake.pending_ids(STREAM_LARGE) == []
 
 
-# ── 心跳续租与重投去重 ──────────────────────────────────────────────────────
-async def test_heartbeat_keeps_long_task_from_being_stolen(
+# ── 租约与重投去重 ──────────────────────────────────────────────────────────
+_SHORT = dict.fromkeys((STREAM_NORMAL, STREAM_LARGE), 150)
+
+
+def _leases(fake: FakeRedis) -> dict[str, str]:
+    return {k: v for k, v in fake.kv.items() if k.startswith("globex:lease:") and fake._live(k)}
+
+
+async def test_lease_keeps_long_task_from_being_stolen(
     rq: RedisStreamQueue, fake: FakeRedis
 ) -> None:
-    """跑得比 claim 阈值还久的任务，靠心跳续租不被别的 worker 抢走，且投递计数不涨。"""
+    """跑得比租约还久的任务靠续期不被接管——别人不行，自己的空转扫描也不能把它再领一遍。"""
     await rq.ensure_group()
     await rq.enqueue(_task(tid="long"))
     done = asyncio.Event()
@@ -341,37 +396,80 @@ async def test_heartbeat_keeps_long_task_from_being_stolen(
         done.set()
 
     consumer = asyncio.create_task(
-        _consume_until(rq, done.is_set, _slow, block_ms=0, claim_idle_ms=10_000, heartbeat_sec=0.05)
+        _consume_until(
+            rq, done.is_set, _slow, block_ms=0, claim_idle_ms=0, heartbeat_sec=0.04, lease_ms=150
+        )
     )
-    await asyncio.sleep(0.3)  # 已远超 0.2s 的阈值，没心跳的话这时它早就是孤儿了
-    stolen = await rq._reclaim("thief", 200, 10)
+    await asyncio.sleep(0.3)  # 已是租约的 2 倍：不续期的话早过期了
+    assert await rq._reclaim("thief", 0, 10, _SHORT) == []
+    assert await rq._reclaim("worker-1", 0, 10, _SHORT) == []
     await consumer
-    assert stolen == []
-    assert fake.xclaim_calls >= 3
+    assert fake.eval_calls[LEASE_RENEW] >= 3
+    assert fake.xclaim_calls == 0
     assert fake.pending_ids(STREAM_NORMAL) == []
+    assert _leases(fake) == {}  # 跑完即释放
 
 
-async def test_without_heartbeat_idle_message_is_reclaimed(
-    rq: RedisStreamQueue, fake: FakeRedis
-) -> None:
-    """对照组：同样的时序关掉心跳，消息会被接管——证明上一条用例绿不是因为阈值没到。"""
+async def test_expired_lease_is_taken_over(rq: RedisStreamQueue, fake: FakeRedis) -> None:
+    """对照组：持有者不再续期，租约过期后被接管，投递计数 +1、租约换成接管方。"""
     await rq.ensure_group()
     await rq.enqueue(_task(tid="long"))
     await fake.xreadgroup(GROUP, "dead-worker", {STREAM_NORMAL: ">"}, count=1, block=0)
-    await asyncio.sleep(0.3)
-    stolen = await rq._reclaim("thief", 200, 10)
-    assert [mid for _s, mid, _f in stolen] == fake.pending_ids(STREAM_NORMAL)
+    [mid] = fake.pending_ids(STREAM_NORMAL)
+    key = _lease_key(STREAM_NORMAL, mid)
+    assert await rq._acquire(key, "dead-worker", 100)
+    assert await rq._reclaim("thief", 0, 10, _SHORT) == []  # 租约还在：idle 再大也不动
+    await asyncio.sleep(0.15)
+    stolen = await rq._reclaim("thief", 0, 10, _SHORT)
+    assert [m for _s, m, _f in stolen] == [mid]
+    entry = fake.groups[(STREAM_NORMAL, GROUP)]["pending"][mid]
+    assert entry["consumer"] == "thief" and entry["times_delivered"] == 2
+    assert fake.kv[key] == "thief"
 
 
-async def test_heartbeat_stops_once_lease_is_lost(rq: RedisStreamQueue, fake: FakeRedis) -> None:
-    """属主已换人时心跳停跳、不把消息抢回来——否则两边都以为自己是正主。"""
+async def test_idle_threshold_guards_the_pre_lease_window(
+    rq: RedisStreamQueue, fake: FakeRedis
+) -> None:
+    """刚领到、还没来得及占租约的消息 idle 很小，不在接管候选里。"""
     await rq.ensure_group()
     await rq.enqueue(_task(tid="a"))
-    await fake.xreadgroup(GROUP, "other", {STREAM_NORMAL: ">"}, count=1, block=0)
-    [mid] = fake.pending_ids(STREAM_NORMAL)
-    await asyncio.wait_for(rq._heartbeat(STREAM_NORMAL, mid, "me", 0.01), 1.0)
-    assert fake.groups[(STREAM_NORMAL, GROUP)]["pending"][mid]["consumer"] == "other"
-    assert fake.xclaim_calls == 0
+    await fake.xreadgroup(GROUP, "fresh", {STREAM_NORMAL: ">"}, count=1, block=0)
+    assert await rq._reclaim("thief", 10_000, 10, _SHORT) == []
+    assert _leases(fake) == {}  # 连租约都没去抢
+
+
+async def test_two_takers_only_one_wins(rq: RedisStreamQueue, fake: FakeRedis) -> None:
+    """两个接管方同时看到租约没了：SET NX 只放一个过去，不会双双 XCLAIM。"""
+    await rq.ensure_group()
+    await rq.enqueue(_task(tid="a"))
+    await fake.xreadgroup(GROUP, "dead-worker", {STREAM_NORMAL: ">"}, count=1, block=0)
+    a, b = await asyncio.gather(
+        rq._reclaim("w-a", 0, 10, _SHORT), rq._reclaim("w-b", 0, 10, _SHORT)
+    )
+    assert sorted([len(a), len(b)]) == [0, 1]
+    assert fake.xclaim_calls == 1
+
+
+async def test_renew_never_resurrects_a_lost_lease(rq: RedisStreamQueue, fake: FakeRedis) -> None:
+    """持有者卡住、租约过期被别人占走后醒来：续期失败即停，不把租约抢回来。
+
+    这正是上一版（XPENDING 查属主 → XCLAIM JUSTID 续租）两条命令之间的漏洞。
+    """
+    key = _lease_key(STREAM_NORMAL, "1-0")
+    assert await rq._acquire(key, "me", 1000)
+    fake.expire_now(key)
+    assert await fake.set(key, "thief", px=1000, nx=True)
+    await asyncio.wait_for(rq._heartbeat(key, "me", 0.01, 1000), 1.0)
+    assert fake.kv[key] == "thief"
+
+
+async def test_release_only_deletes_own_lease(rq: RedisStreamQueue, fake: FakeRedis) -> None:
+    key = _lease_key(STREAM_NORMAL, "1-0")
+    await fake.set(key, "thief", px=1000)
+    await rq._release(key, "me")
+    assert fake.kv[key] == "thief"
+    await rq._release(key, "thief")
+    assert key not in fake.kv
 
 
 @pytest.mark.parametrize("state", ["done", "cancelled", "interrupted"])

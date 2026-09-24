@@ -3,10 +3,10 @@
 用法（需要一台**可清空**的真 Redis，默认 localhost:6380 的 db 15）::
 
     uv run python scripts/chaos_queue_kill.py --flush
-    uv run python scripts/chaos_queue_kill.py --flush --heartbeat 0   # 对照组：关心跳
+    uv run python scripts/chaos_queue_kill.py --flush --heartbeat 0   # 对照组：占租约但不续期
 
 **测的是队列层，不是整条 Agent 链路。** worker 子进程跑的是真 :class:`RedisStreamQueue.consume`
-（心跳、XAUTOCLAIM、终态去重都是生产代码），handler 换成桩：记一笔开始时刻 → sleep 随机时长 →
+（租约、续期、接管、终态去重都是生产代码），handler 换成桩：记一笔开始时刻 → sleep 随机时长 →
 写 ``done`` 终态。这样一次实验几分钟、零 LLM 花费，量出来的就是调度层自己的数。
 
 **四个数怎么算。**
@@ -14,7 +14,7 @@
 - 接管耗时：被杀 worker 手上的每条任务，``kill 时刻 → 别的 worker 第一次开始跑它`` 的秒数。
 - 丢失：入队了、实验结束时仍没有 ``done`` 终态的任务数（死信另计）。
 - 误抢：**没被杀的** worker 正在跑的任务被别人重跑了（开始记录 > 1 且首个 worker 不是被杀的那个）。
-  任务时长故意有一部分超过 claim 阈值，心跳失效的话这个数立刻不为 0。
+  任务时长故意有一部分超过租约，续期失效的话这个数立刻不为 0。
 - 重复完成：同一 task_id 写了两次 ``done``（终态去重失效的指纹）。
 """
 
@@ -65,6 +65,7 @@ async def run_worker(args: argparse.Namespace) -> None:
         args.concurrency,
         claim_idle_ms=args.claim_idle_ms,
         heartbeat_sec=args.heartbeat,
+        lease_ms=args.lease_ms,
     )
 
 
@@ -72,7 +73,7 @@ async def run_worker(args: argparse.Namespace) -> None:
 def _spawn(args: argparse.Namespace, name: str) -> subprocess.Popen[bytes]:
     cmd = [sys.executable, __file__, "worker", "--name", name, "--redis-url", args.redis_url]
     cmd += ["--concurrency", str(args.concurrency), "--claim-idle-ms", str(args.claim_idle_ms)]
-    cmd += ["--heartbeat", str(args.heartbeat)]
+    cmd += ["--heartbeat", str(args.heartbeat), "--lease-ms", str(args.lease_ms)]
     return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
@@ -144,9 +145,7 @@ async def orchestrate(args: argparse.Namespace) -> dict[str, object]:
             t for t, s in zip(durations, status_rows, strict=True) if s is None or s.state != "done"
         ],
         "dead_letters": await client.xlen("globex:intents:dead"),
-        "longer_than_claim_idle": sum(
-            1 for s in durations.values() if s * 1000 > args.claim_idle_ms
-        ),
+        "longer_than_lease": sum(1 for s in durations.values() if s * 1000 > args.lease_ms),
         "victim": victim,
         "orphans": len(orphans),
         "takeover_sec": {
@@ -174,11 +173,12 @@ def main() -> None:
     ap.add_argument("--concurrency", type=int, default=8)
     ap.add_argument("--tasks", type=int, default=24)
     ap.add_argument("--min-sec", type=float, default=5.0)
-    # 上限刻意超过 claim 阈值：有一批任务跑得比阈值还久，心跳不灵就会出现误抢。
+    # 上限刻意超过租约：有一批任务跑得比租约还久，续期不灵就会出现误抢。
     ap.add_argument("--max-sec", type=float, default=60.0)
     ap.add_argument("--kill-after", type=float, default=3.0)
-    ap.add_argument("--heartbeat", type=float, default=5.0)
-    ap.add_argument("--claim-idle-ms", type=int, default=30_000)
+    ap.add_argument("--heartbeat", type=float, default=10.0)
+    ap.add_argument("--lease-ms", type=int, default=30_000)
+    ap.add_argument("--claim-idle-ms", type=int, default=10_000)
     ap.add_argument("--timeout", type=float, default=300.0)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--out", default="")

@@ -138,7 +138,7 @@ def scenario_dup() -> tuple[bool, str]:
 
 # ── 场景 2：kill -9 一个 worker ────────────────────────────────────────────────
 def scenario_kill_worker() -> tuple[bool, str]:
-    """判据：跑到一半的任务**不丢**——消息留在 PEL 里，另一个 worker 在 claim idle 后领回重跑。
+    """判据：跑到一半的任务**不丢**——消息留在 PEL 里，租约过期后另一个 worker 领回重跑。
 
     这条是 at-least-once 的兑现方式，也是 1-3 之后**唯一**还会走 PEL 重跑的路径：SIGKILL 下没有
     任何收尾代码能跑，与「关停掐断」那条路正好互补。
