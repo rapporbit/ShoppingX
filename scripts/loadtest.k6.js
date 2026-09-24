@@ -21,6 +21,12 @@ const failed = new Counter("failed_other");
 const t429 = new Trend("latency_429", true); // 连 WS 起 → 拿到 429
 const tFirst = new Trend("latency_first_event", true); // 连 WS 起 → 第一条 monitor_event
 const tTotal = new Trend("latency_total", true); // 连 WS 起 → 终态
+// 以下扣掉 WS 建连 / 等 ws_ready，只从 POST 发出算起（同机同钟，可与服务端时间戳相减）。
+const t429Post = new Trend("post_429", true); // POST 发出 → 拿到 429（客户端看到）
+const t429Wait = new Trend("post_429_waiting", true); // 429 的 TTFB：请求发完 → 首字节，≈服务端处理
+const tPostWait = new Trend("post_accept_waiting", true); // 准入 POST 的 TTFB，≈服务端入队处理
+const tFirstPost = new Trend("post_first_event", true); // POST 发出 → 客户端收到首事件
+const tFirstSrv = new Trend("post_first_event_server", true); // POST 发出 → 服务端发出首事件（payload.timestamp）
 
 // 一档「同时按下」突发：VUS 个虚拟用户各跑一次。分档用 -e VUS=100/200/500 跑三遍，
 // 每遍一张独立汇总，比一份里按 scenario 标签拆好读。
@@ -41,6 +47,7 @@ export default function () {
   const thread = tid();
   const t0 = Date.now();
   let first = null;
+  let tPost = null;
   ws.connect(`${WS_BASE}/ws/${thread}`, {}, (socket) => {
     socket.setTimeout(() => {
       failed.add(1);
@@ -49,6 +56,7 @@ export default function () {
     socket.on("message", (raw) => {
       const msg = JSON.parse(raw);
       if (msg.type === "ws_ready") {
+        tPost = Date.now();
         const res = http.post(
           `${BASE}/api/task`,
           JSON.stringify({ query: "买一个通勤双肩包，预算 300", thread_id: thread }),
@@ -57,8 +65,12 @@ export default function () {
         if (res.status === 429) {
           rejected.add(1);
           t429.add(Date.now() - t0);
+          t429Post.add(Date.now() - tPost);
+          t429Wait.add(res.timings.waiting);
           socket.close();
-        } else if (res.status >= 400) {
+        } else if (res.status < 400) {
+          tPostWait.add(res.timings.waiting);
+        } else {
           failed.add(1);
           socket.close();
         }
@@ -68,6 +80,10 @@ export default function () {
       if (first === null) {
         first = Date.now() - t0;
         tFirst.add(first);
+        if (tPost !== null) {
+          tFirstPost.add(Date.now() - tPost);
+          tFirstSrv.add(Date.parse(msg.timestamp) - tPost);
+        }
       }
       if (msg.event === "task_result") {
         succeeded.add(1);
