@@ -171,29 +171,24 @@ async def test_shipping_calc_dest_changes_landed_cost(tmp_path) -> None:
 # ---------- 4. 四层优先级 ----------
 @pytest.mark.asyncio
 async def test_dest_country_layers(tmp_path, monkeypatch) -> None:
-    """用户原话 > 会话 P_t > 默认国；只有落到默认国才算「假设」，只有第 1 层算「本轮明示」。"""
+    """本轮原话 > 前几轮原话 > 默认国；只有落到默认国才算「假设」。"""
     from app.api import context as ctx
-    from app.memory.session_state import SessionPrefState
     from app.tools.planner import resolve_dest_country_layered
 
     with thread_scope("t-layers", tmp_path):
-        # 第 1 层：本轮原话压过一切（哪怕 P_t 里存着别的国家），且是唯一 stated_now=True 的层。
-        ctx.set_session_pt(SessionPrefState(dest_country="SG"))
-        assert await resolve_dest_country_layered("寄到日本") == ("JP", False, True)
+        # 第 1 层：本轮原话压过一切（哪怕前几轮说过别的国家）。
+        ctx.set_prior_queries(["寄到新加坡"])
+        assert await resolve_dest_country_layered("寄到日本") == ("JP", False)
 
-        # 第 2 层：本轮没提 → 用会话 P_t 里存着的收货国，不算「假设」也不算「本轮明示」。
-        assert await resolve_dest_country_layered("再推荐几个") == ("SG", False, False)
+        # 第 2 层：本轮没提 → 用前几轮原话里的明示，不算「假设」。
+        assert await resolve_dest_country_layered("再推荐几个") == ("SG", False)
 
-        # 裸国名（产地/流派修饰）不触发第 1 层 → 仍落到 P_t，不被「英国」劫持。
-        assert await resolve_dest_country_layered("我要英国文学作品") == ("SG", False, False)
+        # 裸国名（产地/流派修饰）不触发第 1 层 → 仍落到前几轮，不被「英国」劫持。
+        assert await resolve_dest_country_layered("我要英国文学作品") == ("SG", False)
 
-        # 第 4 层：既没提、P_t 也空 → 落默认国，标记为「假设」（回复里必须声明）。
-        ctx.set_session_pt(SessionPrefState())
-        assert await resolve_dest_country_layered("再推荐几个") == (
-            DEFAULT_DEST_COUNTRY,
-            True,
-            False,
-        )
+        # 第 4 层：既没提、前几轮也没说 → 落默认国，标记为「假设」（回复里必须声明）。
+        ctx.set_prior_queries([])
+        assert await resolve_dest_country_layered("再推荐几个") == (DEFAULT_DEST_COUNTRY, True)
 
 
 @pytest.mark.asyncio

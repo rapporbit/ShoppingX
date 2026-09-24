@@ -125,20 +125,20 @@ async def test_run_agent_starts_fresh_without_session_file(
 async def test_run_agent_resumes_from_session_file(
     monkeypatch: pytest.MonkeyPatch, patched: dict[str, Any]
 ) -> None:
-    """有 session.json 就恢复它（含 middle_context 里的 P_t），当轮只追加一条 user 消息。"""
-    from app.memory.session_state import SessionPrefState, pt_into_state
+    """有 session.json 就恢复它（含 middle_context 里的前几轮原话），当轮只追加一条 user 消息。"""
+    from app.api.context import get_prior_queries
 
     session_dir = orch.ensure_session_dir("as-t2")
     prior = AgentState()
     prior.context = [Msg(name="user", role="user", content=[TextBlock(type="text", text="上轮")])]
-    pt_into_state(prior.middle_context, SessionPrefState(category="旅行包", exclude_terms=["塑料"]))
+    prior.middle_context[orch.PRIOR_QUERIES_KEY] = ["想买旅行包，不要塑料"]
     (session_dir / orch.STATE_FILE).write_text(prior.model_dump_json(), encoding="utf-8")
 
     agent = _fake_agent("好的。")
 
     async def _build(**kw: Any) -> Any:
         patched["state_arg"] = kw.get("state")
-        patched["pt_seen"] = orch.get_session_pt()
+        patched["prior_seen"] = get_prior_queries()
         return agent, SimpleNamespace()
 
     monkeypatch.setattr(orch, "build_main_agent", _build)
@@ -148,16 +148,14 @@ async def test_run_agent_resumes_from_session_file(
     assert isinstance(state_arg, AgentState)
     assert state_arg.context[0].get_text_content() == "上轮"
     assert [m.role for m in agent.inputs] == ["user"]
-    # 追问轮继承上一轮约束：P_t 从 middle_context 读回、进 ContextVar（planner / picker 机制读）
-    assert patched["pt_seen"].exclude_terms == ["塑料"]
+    # 追问轮的 planner 靠前几轮原话重算约束：从 middle_context 读回、进 run 状态
+    assert patched["prior_seen"] == ["想买旅行包，不要塑料"]
 
 
-async def test_run_agent_saves_state_with_pt_for_next_turn(
+async def test_run_agent_saves_state_with_queries_for_next_turn(
     monkeypatch: pytest.MonkeyPatch, patched: dict[str, Any]
 ) -> None:
-    """成功收尾 → session.json 落盘，P_t 住 middle_context（跨轮唯一产物）。"""
-    from app.memory.session_state import pt_from_state
-
+    """成功收尾 → session.json 落盘，本轮原话追加进 middle_context（跨轮唯一产物）。"""
     ctx = [Msg(name="user", role="user", content=[TextBlock(type="text", text="本轮")])]
     agent = _fake_agent("好的。", context=ctx)
 
@@ -170,7 +168,8 @@ async def test_run_agent_saves_state_with_pt_for_next_turn(
     session_dir = orch.ensure_session_dir("as-t3")
     saved = orch.load_session_state(session_dir)
     assert saved is not None and saved.context[0].get_text_content() == "本轮"
-    assert "pt" in saved.middle_context and pt_from_state(saved.middle_context).is_empty()
+    assert saved.middle_context[orch.PRIOR_QUERIES_KEY] == ["买个包"]
+    assert "pt" not in saved.middle_context  # 累积 P_t 已不落盘
     # 老的多份产物一份都不再写
     for legacy in ("agent_state.json", "pt.json", "candidates.json", "history.json"):
         assert not (session_dir / legacy).exists()

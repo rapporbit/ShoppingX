@@ -3,17 +3,15 @@ import {
   addPreference,
   clearPreferences,
   deletePreference,
-  deleteSessionConstraint,
   fetchPreferences,
-  fetchSessionConstraints,
   updatePreference,
 } from "../api";
-import type { FactWrite, Preference, SessionSnapshot } from "../types";
+import type { FactWrite, Preference } from "../types";
 import { CloseIcon, HeartIcon, RefreshIcon } from "./icons";
 import { PreferenceEditor } from "./PreferenceEditor";
 import { PreferenceItem } from "./PreferenceItem";
 
-// 长期记忆管理页。三块：本次会话的临时约束 / 添加一条 / 已有记忆（可改可删，可全部清空）。
+// 长期记忆管理页。两块：添加一条 / 已有记忆（可改可删，可全部清空）。
 //
 // **用户必须能看、能改、能删**——这是这套记忆设计里唯一不可省的一环：模型在后台自动学、
 // 自动写，那就得有一个地方让人原样看到它记了什么，并且改得动。展示的字段与注入给模型的完全
@@ -27,12 +25,6 @@ type PreferenceDrawerProps = {
   open: boolean;
   refreshKey: number;
   onClose: () => void;
-  // 会话级 P_t（可见可纠）：约束抽取过 LLM 的手且无自愈性，抽错时唯一的兜底是用户看得见、
-  // 点得掉。快照由 WS 的 session_constraints 事件实时推（hook 持有），打开面板时再主动拉一次
-  // 兜底（断线重连 / 刚切会话时事件还没来）。无会话（threadId=null）不渲染该区。
-  threadId: string | null;
-  session: SessionSnapshot | null;
-  onSessionChange: (s: SessionSnapshot | null) => void;
 };
 
 // 手填新条目的初值：category 落 preference（最轻的一档）。硬规则要用户自己选——
@@ -48,9 +40,6 @@ export function PreferenceDrawer({
   open,
   refreshKey,
   onClose,
-  threadId,
-  session,
-  onSessionChange,
 }: PreferenceDrawerProps) {
   const [prefs, setPrefs] = useState<Preference[]>([]);
   const [loading, setLoading] = useState(false);
@@ -73,23 +62,6 @@ export function PreferenceDrawer({
   useEffect(() => {
     if (open) void load();
   }, [open, load, refreshKey]);
-
-  // 打开面板时主动拉一次会话约束兜底（session_constraints 是瞬态事件，刚切会话 / 重连时
-  // 本地快照可能还是空的）。拉不到只是该区显示为空，不报错。
-  useEffect(() => {
-    if (open && threadId) {
-      void fetchSessionConstraints(threadId).then(onSessionChange);
-    }
-    // onSessionChange 是 hook 的 setState，引用稳定；refreshKey 变化时也重拉（与长期偏好同步）
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, threadId, refreshKey]);
-
-  const removeSessionConstraint = async (cid: string) => {
-    if (!threadId || !session) return;
-    // 乐观删除即时响应；后端删完还会经 WS 推一次权威快照，两者同构不跳动。
-    onSessionChange({ ...session, constraints: session.constraints.filter((c) => c.id !== cid) });
-    await deleteSessionConstraint(threadId, cid);
-  };
 
   useEffect(() => {
     if (!open) return;
@@ -160,82 +132,6 @@ export function PreferenceDrawer({
         </div>
 
         <div className="drawer-user">用户：{userId}</div>
-
-        {threadId &&
-          session &&
-          (session.constraints.length > 0 || session.current_intent || session.category) && (
-          <section className="pref-section">
-            <div className="pref-section-title">
-              本次会话 <span className="pref-count">{session.constraints.length}</span>
-            </div>
-            {/* 选购摘要：Agent 当前以为你要什么（意图 / 品类 / 预算 / 已定槽位）。它理解偏了，
-                在对话里纠正一句即可；这里只负责让偏差看得见。 */}
-            {(session.current_intent || session.category || session.budget_usd != null) && (
-              <dl className="session-summary">
-                {session.current_intent && (
-                  <div>
-                    <dt>当前需求</dt>
-                    <dd>{session.current_intent}</dd>
-                  </div>
-                )}
-                {session.category && (
-                  <div>
-                    <dt>品类</dt>
-                    <dd>{session.category}</dd>
-                  </div>
-                )}
-                {session.budget_usd != null && (
-                  <div>
-                    <dt>预算</dt>
-                    <dd>${session.budget_usd.toFixed(0)}</dd>
-                  </div>
-                )}
-                {Object.entries(session.slots ?? {}).map(([k, v]) => (
-                  <div key={k}>
-                    <dt>{k}</dt>
-                    <dd>{v}</dd>
-                  </div>
-                ))}
-              </dl>
-            )}
-            <div className="pref-section-hint">
-              这次聊天里记下的临时约束（会话结束自动清）。记错了点 × 删掉，立刻不再生效。
-            </div>
-            <ul className="drawer-list">
-              {session.constraints.map((c) => (
-                <li
-                  key={c.id}
-                  className={`pref-item ${c.polarity === "dislike" ? "pref-dislike" : ""}`}
-                >
-                  <div>
-                    <div>
-                      {c.content}
-                      <span className="pref-meta">
-                        {" "}
-                        ·{" "}
-                        {c.polarity === "dislike"
-                          ? c.blocking
-                            ? "直接排除"
-                            : "降低排序"
-                          : "优先推荐"}
-                      </span>
-                    </div>
-                    {c.source_quote && (
-                      <div className="pref-meta">来自你说的「{c.source_quote}」</div>
-                    )}
-                  </div>
-                  <button
-                    className="pref-del"
-                    title="删除这条会话约束"
-                    onClick={() => void removeSessionConstraint(c.id)}
-                  >
-                    ×
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
 
         <section className="pref-section">
           <div className="pref-section-title">添加一条</div>

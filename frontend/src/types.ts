@@ -28,9 +28,6 @@ export type AguiEvent = {
     // 与 summary_delta 是同一条思路的两半——那个管文案、这个管卡片。收尾的 task_result 会用
     // 定稿那批原样覆盖（两者同构）。不进活动流（它是结果本身，不是一行「思考」）。
     | "items_preview"
-    // 会话级 P_t 约束快照（data: SessionSnapshot）：planner 每轮落 P_t 后推，偏好面板「本次
-    // 会话」区据此实时刷新。瞬态：断线重连后面板走 GET /api/session/{tid}/constraints 主动拉。
-    | "session_constraints"
     // 交易确认卡：
     // 载荷是一条完整的服务端确认记录。真源在库里（GET /api/threads/{id}/confirmations），事件只是
     // 「有变化」的通知；前端按 confirmation_id 合并、决议单向推进（lib/confirmations.ts）。
@@ -211,29 +208,6 @@ export type FactWrite = {
 export type LearnedPref = {
   content: string;
   key: string;
-};
-
-// 会话级 P_t 约束（session_constraints 事件 / GET /api/session/{tid}/constraints）。
-// id 形如 `<bucket>:<term>`（bucket = exclude / avoid / prefer），删除按它打 DELETE；
-// source_quote 现恒为空串、epoch 恒为 0（P_t 已退回词表结构，按词撤回，不再存原话）。
-export type SessionConstraint = {
-  id: string;
-  content: string;
-  source_quote: string;
-  polarity: "like" | "dislike";
-  blocking: boolean;
-};
-
-export type SessionSnapshot = {
-  epoch: number;
-  budget_usd: number | null;
-  category: string;
-  // 「本次选购摘要」：planner 累积的一句话意图与已确定的槽位（如 收货国 / 尺码），偏好面板
-  // 「本次会话」区展示，让用户看得见 Agent 当前以为的需求是什么。旧快照可能缺这几个字段。
-  current_intent?: string;
-  slots?: Record<string, string>;
-  turn?: number;
-  constraints: SessionConstraint[];
 };
 
 // GET /api/history/{tid} 返回的一条逐轮对话（后端 turns.json 累加的精简 user→assistant 对）。

@@ -26,7 +26,6 @@ import type {
   LearnedPref,
   ProductItem,
   SessionMeta,
-  SessionSnapshot,
   TurnExperiment,
   TurnTokens,
 } from "../types";
@@ -191,8 +190,6 @@ function rebuildTurns(history: HistoryTurn[]): Turn[] {
 export function useShoppingXTask() {
   const [threadId, setThreadId] = useState<string | null>(null);
   const [turns, setTurns] = useState<Turn[]>([]);
-  // 会话级 P_t 约束快照（session_constraints 事件实时推；换会话清空，偏好面板打开时主动拉兜底）。
-  const [sessionConstraints, setSessionConstraints] = useState<SessionSnapshot | null>(null);
   // 交易确认卡（会话级，不挂在某一轮上）：一张卡从出现到决议可能跨好几轮对话，且刷新后要还在。
   // 真源是 GET /api/threads/{id}/confirmations，事件流只是「有变化」的通知，两路都经 mergeConfirmations。
   const [confirmations, setConfirmations] = useState<TradeConfirmation[]>([]);
@@ -491,12 +488,6 @@ export function useShoppingXTask() {
         return;
       }
 
-      // 会话约束快照（瞬态事件）：只喂偏好面板的「本次会话」区，**不进 events**（不是思考行）。
-      if (evt.event === "session_constraints") {
-        setSessionConstraints(evt.data as unknown as SessionSnapshot);
-        return;
-      }
-
       if (evt.event === "memory_updated") {
         const learned = (evt.data.preferences as LearnedPref[]) ?? [];
         patchLastTurn((t) => ({ learnedPrefs: [...t.learnedPrefs, ...learned] }));
@@ -713,7 +704,6 @@ export function useShoppingXTask() {
       setThreadId(tid);
       localStorage.setItem(THREAD_KEY, tid);
       setTurns([]);
-      setSessionConstraints(null); // 旧会话的约束别糊到新会话；面板打开时按新 thread 主动拉
       setStatusSafe("idle");
       fetchHistory(tid)
         .then((history) => {
@@ -744,7 +734,6 @@ export function useShoppingXTask() {
         localStorage.removeItem(THREAD_KEY);
         setThreadId(null);
         setTurns([]);
-        setSessionConstraints(null);
         setStatusSafe("idle");
       }
     },
@@ -759,7 +748,6 @@ export function useShoppingXTask() {
     localStorage.removeItem(THREAD_KEY);
     setThreadId(null);
     setTurns([]);
-    setSessionConstraints(null);
     setStatusSafe("idle");
   }, [setStatusSafe, teardownActive]);
 
@@ -843,8 +831,6 @@ export function useShoppingXTask() {
     running,
     waiting,
     sessions,
-    sessionConstraints,
-    setSessionConstraints,
     confirmations,
     confirmationBusy,
     confirmationError,

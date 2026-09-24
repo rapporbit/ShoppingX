@@ -101,10 +101,15 @@ class _RunScope:
     run_agent 入口（主 context）写一次；planner 一开始写 P_t，同一个坑就要踩第三次。
     """
 
-    # 本会话的短期偏好状态 P_t（逐轮累积的约束）——run_agent 入口从 session.json 读回后写入、
-    # **planner 在识别出本轮约束后当轮改写**，供 item_picker 等工具机制性读取并强制执行
+    # 本轮生效约束（沿用 P_t 的名字与形状）——**只由 planner 写**，每轮从前几轮原话 + 本轮原话
+    # 整体重算，不跨轮累积、不落盘；供 item_picker 等工具机制性读取并强制执行
     # （把「不要塑料」「预算 ≤X」从 prompt 建议升为硬保证，不靠模型每轮转述）。
     pt: "SessionPrefState | None" = None
+
+    # 前几轮的用户原话（旧 → 新，不含本轮）——run_agent 入口从 session.json 读回后写入，
+    # planner 据它重算仍生效的约束。存原话而不从 messages 里抠：messages 里是拼了运行时
+    # 上下文的版本，且会被框架压缩掉。
+    prior_queries: list[str] = field(default_factory=list)
 
     # planner 本轮判定的任务清单（recommend / price_compare / landed_cost / ...）——「用户要不要
     # 比价」同样是意图判断，只有 planner 有依据。收线通告读它来定向（无比价诉求时提示模型跳过
@@ -209,10 +214,22 @@ def clamp_timeout(base: float) -> float:
     return max(left, _DEADLINE_FLOOR)
 
 
+def set_prior_queries(queries: Sequence[str]) -> None:
+    """记下前几轮的用户原话（``run_agent`` 入口写，旧 → 新）。"""
+    st = run_slot(_RunScope)
+    if st is not None:
+        st.prior_queries = list(queries)
+
+
+def get_prior_queries() -> list[str]:
+    """读前几轮的用户原话；无会话作用域（单测直调）或首轮返回空列表。"""
+    st = peek_run_slot(_RunScope)
+    return list(st.prior_queries) if st is not None else []
+
+
 def set_session_pt(pt: "SessionPrefState | None") -> None:
-    """写入本会话的短期状态 P_t。两个写入点：``run_agent`` 入口（从 session.json 读回后）与
-    ``planner``（识别出本轮约束后当轮改写）。按 session_dir 聚合，故**跨工具可见**；fork 子 Agent
-    继承父 session_dir，因此天然读到同一份。无 session_dir（单测直调工具）时静默丢弃。"""
+    """写入本轮生效约束 P_t。唯一写者是 ``planner``（每轮整体重算后覆盖）。按 session_dir
+    聚合，故**跨工具可见**。无 session_dir（单测直调工具）时静默丢弃。"""
     st = run_slot(_RunScope)
     if st is not None:
         st.pt = pt

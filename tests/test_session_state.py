@@ -1,134 +1,84 @@
-"""会话级短期偏好状态 P_t（``app.memory.session_state``，lite 结构）的确定性测试。
+"""本轮约束 P_t（无状态）：构造规则 + planner 的上文渲染 / 预算出处 / 收货国第 2 层 + 原话落盘。
 
-覆盖：
-- merge_pt_lite：并入去重 / 极性翻转 / 撤回按词核验（宁紧）/ 换域清表保预算 / 预算放开 / 收货国。
-- middle_context 读写与容错（读坏、旧格式 → 空开局；无 TTL）。
-- 偏好面板：三个词表 → 行 / 按行 id 删。
+P_t 不再跨轮合并（2026-09-25），跨轮只存用户原话。这里钉住三件确定性的事：
+① ``SessionPrefState.build`` 的词表形态；② planner 怎么用前几轮原话（上文、预算币种、收货国）；
+③ orchestrator 怎么读回原话（坏数据按空）。「LLM 能否从原话里把旧约束重新抽出来」不在这里测。
 """
 
-import json
-from datetime import UTC, datetime, timedelta
+from agentscope.state import AgentState
 
-from app.memory.session_state import (
-    SessionPrefState,
-    constraint_rows,
-    drop_constraint,
-    merge_pt_lite,
-    pt_from_state,
-    pt_into_state,
+from app.agent.orchestrator import PRIOR_QUERIES_KEY, _prior_queries
+from app.api.context import set_prior_queries
+from app.api.run_state import reset_run_state
+from app.memory.session_state import SessionPrefState
+from app.tools.planner import (
+    _render_prior_context,
+    budget_source,
+    resolve_budget_currency,
+    resolve_dest_country_layered,
 )
+from app.utils.thread_ctx import thread_scope
 
 
-def test_first_turn_fills_three_buckets_and_budget() -> None:
-    pt = merge_pt_lite(
-        SessionPrefState(),
-        exclude=["塑料", "Plastic", "塑料"],
-        avoid=["花哨"],
-        prefer=["帆布", "小众"],
-        category="旅行收纳",
+def test_build_normalizes_and_dedups_across_buckets() -> None:
+    pt = SessionPrefState.build(
+        category="背包",
         budget_usd=42.0,
+        exclude=["Plastic", "plastic", " "],
+        avoid=["plastic", "flashy"],
+        prefer=["flashy", "canvas"],
     )
-    assert pt.exclude_terms == ["塑料", "plastic"]  # 小写、去重、保序
-    assert pt.avoid_terms == ["花哨"] and pt.prefer_terms == ["帆布", "小众"]
-    assert pt.budget_usd == 42.0 and pt.category == "旅行收纳"
-    assert pt.dislike_terms() == ["塑料", "plastic"]
-    assert pt.soft_dislike_terms() == ["花哨"] and pt.like_terms() == ["帆布", "小众"]
+    assert pt.exclude_terms == ["plastic"]
+    assert pt.avoid_terms == ["flashy"]  # 已进硬淘汰的不再重复进软桶
+    assert pt.prefer_terms == ["canvas"]  # 同理，按「硬 > 软 > 加分」只留一处
+    assert pt.dislike_terms() == ["plastic"] and pt.like_terms() == ["canvas"]
 
 
-def test_followup_turn_inherits_and_appends() -> None:
-    prev = merge_pt_lite(SessionPrefState(), exclude=["plastic"], budget_usd=42.0)
-    pt = merge_pt_lite(prev, prefer=["waterproof"])  # 本轮没提预算 → 保持
-    assert pt.exclude_terms == ["plastic"] and pt.prefer_terms == ["waterproof"]
-    assert pt.budget_usd == 42.0
+def test_empty_state() -> None:
+    assert SessionPrefState().is_empty()
+    assert not SessionPrefState.build(budget_usd=10.0).is_empty()
 
 
-def test_retract_only_when_word_in_utterance() -> None:
-    """撤回宁紧：词在本轮原话里出现才删；幻觉词不删（含中→英扩词：撤「塑料」连带 plastic）。"""
-    prev = merge_pt_lite(SessionPrefState(), exclude=["塑料", "plastic", "nylon"])
-    pt = merge_pt_lite(prev, retract_terms=["塑料", "nylon"], user_utterance="算了，塑料的也行")
-    assert pt.exclude_terms == ["nylon"]  # nylon 原话没提 → 留下（宁紧）
+def test_render_prior_context_first_turn_is_empty() -> None:
+    assert _render_prior_context([]) == ""
 
 
-def test_polarity_flip_moves_word_between_buckets() -> None:
-    prev = merge_pt_lite(SessionPrefState(), exclude=["blue"])
-    pt = merge_pt_lite(prev, prefer=["blue"])  # 「还是要蓝色」→ 最新表达为准
-    assert pt.exclude_terms == [] and pt.prefer_terms == ["blue"]
+def test_render_prior_context_lists_queries_in_order() -> None:
+    text = _render_prior_context(["想买背包，不要塑料", "预算 80 美元"])
+    assert text.index("1. 想买背包，不要塑料") < text.index("2. 预算 80 美元")
+    assert text.rstrip().endswith("【本轮用户原话】")
 
 
-def test_topic_switch_clears_terms_keeps_budget() -> None:
-    prev = merge_pt_lite(
-        SessionPrefState(),
-        exclude=["plastic"],
-        prefer=["canvas"],
-        category="双肩包",
-        budget_usd=80.0,
-    )
-    pt = merge_pt_lite(prev, category="颈枕", topic_switch=True, exclude=["leather"])
-    assert pt.exclude_terms == ["leather"] and pt.prefer_terms == []
-    assert pt.budget_usd == 80.0 and pt.category == "颈枕"
+def test_budget_source_prefers_newest_digit_match() -> None:
+    utts = ["预算 80 美元", "不要皮革的", "预算改成 80 块"]
+    assert budget_source(80, utts) == "预算改成 80 块"
+    assert budget_source(80, utts[:2]) == "预算 80 美元"
 
 
-def test_no_topic_switch_keeps_terms_despite_wording_drift() -> None:
-    prev = merge_pt_lite(SessionPrefState(), exclude=["plastic"], category="旅行包")
-    pt = merge_pt_lite(prev, category="travel backpack")
-    assert pt.exclude_terms == ["plastic"]  # 品类措辞漂移不清表，清不清只看 topic_switch
+def test_budget_source_currency_follows_the_source_turn() -> None:
+    """旧版坑：前几轮说的 80 美元，按本轮原话（没提币种）解析会落默认 CNY，缩水 7 倍。"""
+    src = budget_source(80, ["预算 80 美元", "换一个颜色"])
+    assert src == "预算 80 美元"  # 「换一个」里的「一」不能抢先
+    assert resolve_budget_currency(src)[0] == "USD"
 
 
-def test_legacy_session_json_with_domains_still_loads() -> None:
-    """2026-09-25 前落盘的 P_t 带 domains 键；extra=forbid 下要能读回，不能让老会话丢 P_t。"""
-    pt = SessionPrefState.model_validate({"category": "双肩包", "domains": ["bags"]})
-    assert pt.category == "双肩包"
+def test_budget_source_rejects_made_up_amount() -> None:
+    assert budget_source(500, ["预算 80 美元", "不要皮革的"]) is None
 
 
-def test_clear_budget_and_dest_country() -> None:
-    prev = merge_pt_lite(SessionPrefState(), budget_usd=42.0, dest_country="jp")
-    pt = merge_pt_lite(prev, clear_budget=True)
-    assert pt.budget_usd is None and pt.dest_country == "JP"  # 收货国本轮没提 → 保持
+def test_prior_queries_from_state_tolerates_bad_shapes() -> None:
+    assert _prior_queries(None) == []
+    st = AgentState()
+    st.middle_context[PRIOR_QUERIES_KEY] = ["a", "", 3, "b"]
+    assert _prior_queries(st) == ["a", "b"]
+    st.middle_context[PRIOR_QUERIES_KEY] = "not a list"
+    assert _prior_queries(st) == []
 
 
-# ---------- middle_context roundtrip 与容错 ----------
-def test_state_roundtrip() -> None:
-    s = merge_pt_lite(SessionPrefState(), exclude=["plastic"], budget_usd=42.0, category="旅行收纳")
-    ctx: dict = {}
-    pt_into_state(ctx, s)
-    loaded = pt_from_state(json.loads(json.dumps(ctx)))  # 走一遍 JSON：模拟 session.json 落盘读回
-    assert loaded.exclude_terms == ["plastic"] and loaded.budget_usd == 42.0
-    assert loaded.category == "旅行收纳" and loaded.updated_at
-
-
-def test_load_missing_or_corrupt_returns_empty() -> None:
-    assert pt_from_state({}).is_empty()
-    assert pt_from_state({"pt": {"exclude_terms": "不是列表"}}).is_empty()
-
-
-def test_load_old_id_format_degrades_to_empty() -> None:
-    """旧格式（带 constraints / epoch / next_id）→ extra=forbid 触发 ValidationError → 空开局。"""
-    old = {"category": "x", "constraints": [{"id": "c1", "content": "不要塑料"}], "epoch": 1}
-    assert pt_from_state({"pt": old}).is_empty()
-
-
-def test_stale_state_is_not_expired() -> None:
-    """P_t 没有 TTL：同一 thread 隔多久回来都接着上次（随 session.json 同生共死）。"""
-    stale = SessionPrefState(
-        prefer_terms=["蓝色"], updated_at=(datetime.now(UTC) - timedelta(hours=999)).isoformat()
-    )
-    assert not pt_from_state({"pt": stale.model_dump()}).is_empty()
-
-
-# ---------- render / 面板 ----------
-def test_render_empty_placeholder_and_buckets() -> None:
-    assert "尚无累积约束" in SessionPrefState().render()
-    text = SessionPrefState(exclude_terms=["plastic"], avoid_terms=["花哨"], budget_usd=42).render()
-    assert "硬排除" in text and "plastic" in text and "软避讳" in text and "$42" in text
-
-
-def test_constraint_rows_and_drop() -> None:
-    pt = SessionPrefState(exclude_terms=["plastic"], prefer_terms=["canvas"])
-    rows = constraint_rows(pt)
-    assert [(r["id"], r["polarity"], r["blocking"]) for r in rows] == [
-        ("exclude:plastic", "dislike", True),
-        ("prefer:canvas", "like", False),
-    ]
-    assert drop_constraint(pt, "exclude:plastic") is True and pt.exclude_terms == []
-    assert drop_constraint(pt, "exclude:plastic") is False  # 幂等
-    assert drop_constraint(pt, "nope:x") is False
+async def test_dest_country_layer2_reads_prior_queries(tmp_path) -> None:
+    with thread_scope("t-prior", tmp_path):
+        set_prior_queries(["买个背包，寄到日本", "再便宜点"])
+        assert await resolve_dest_country_layered("换个颜色") == ("JP", False)
+        # 本轮明示压过前几轮
+        assert (await resolve_dest_country_layered("改寄到英国"))[0] == "GB"
+    reset_run_state(tmp_path)

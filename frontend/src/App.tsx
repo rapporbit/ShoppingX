@@ -229,8 +229,6 @@ function Workspace({
     running,
     waiting,
     sessions,
-    sessionConstraints,
-    setSessionConstraints,
     confirmations,
     confirmationBusy,
     confirmationError,
@@ -452,9 +450,6 @@ function Workspace({
             open={prefsOpen}
             refreshKey={prefRefresh}
             onClose={() => setPrefsOpen(false)}
-            threadId={threadId}
-            session={sessionConstraints}
-            onSessionChange={setSessionConstraints}
           />
 
           <FavoritesDrawer
