@@ -25,7 +25,7 @@ from app.api.run_state import peek_run_slot, run_slot
 from app.utils.env import env_bool
 
 if TYPE_CHECKING:
-    from app.memory.session_state import SessionPrefState
+    from app.memory.turn_constraints import TurnConstraints
 
 # 当前请求的 thread_id（由 /api/task 入口或 thread_scope 设置）。
 _thread_id_var: ContextVar[str | None] = ContextVar("shoppingx_thread_id", default=None)
@@ -104,7 +104,7 @@ class _RunScope:
     # 本轮生效约束（沿用 P_t 的名字与形状）——**只由 planner 写**，每轮从前几轮原话 + 本轮原话
     # 整体重算，不跨轮累积、不落盘；供 item_picker 等工具机制性读取并强制执行
     # （把「不要塑料」「预算 ≤X」从 prompt 建议升为硬保证，不靠模型每轮转述）。
-    pt: "SessionPrefState | None" = None
+    constraints: "TurnConstraints | None" = None
 
     # 前几轮的用户原话（旧 → 新，不含本轮）——run_agent 入口从 session.json 读回后写入，
     # planner 据它重算仍生效的约束。存原话而不从 messages 里抠：messages 里是拼了运行时
@@ -227,26 +227,26 @@ def get_prior_queries() -> list[str]:
     return list(st.prior_queries) if st is not None else []
 
 
-def set_session_pt(pt: "SessionPrefState | None") -> None:
+def set_turn_constraints(pt: "TurnConstraints | None") -> None:
     """写入本轮生效约束 P_t。唯一写者是 ``planner``（每轮整体重算后覆盖）。按 session_dir
     聚合，故**跨工具可见**。无 session_dir（单测直调工具）时静默丢弃。"""
     st = run_slot(_RunScope)
     if st is not None:
-        st.pt = pt
+        st.constraints = pt
 
 
-def get_session_pt() -> "SessionPrefState | None":
+def get_turn_constraints() -> "TurnConstraints | None":
     """读取本会话的 P_t；未设置（无会话上下文 / 首轮空态）时返回 None。"""
     st = peek_run_slot(_RunScope)
-    return st.pt if st is not None else None
+    return st.constraints if st is not None else None
 
 
-def reset_session_pt() -> None:
+def reset_turn_constraints() -> None:
     """清掉本会话的 P_t（run_agent 收尾，与 reset_session_tasks 对称——run 状态表不像
     ContextVar 会随 task 结束自动回收，不清就会按 session_dir 一直攒着）。"""
     st = peek_run_slot(_RunScope)
     if st is not None:
-        st.pt = None
+        st.constraints = None
 
 
 def get_session_dir() -> Path | None:

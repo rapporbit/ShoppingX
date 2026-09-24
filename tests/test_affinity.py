@@ -11,11 +11,11 @@ from uuid import uuid4
 
 import pytest
 
-from app.api.context import set_session_pt
+from app.api.context import set_turn_constraints
 from app.memory.affinity import affinity_terms
 from app.memory.assemble import assemble
-from app.memory.session_state import SessionPrefState
 from app.memory.store import FavoriteItem, UserDataStore, get_user_data_store
+from app.memory.turn_constraints import TurnConstraints
 from app.tools.item_picker import item_picker
 from app.tools.schemas import ItemCandidate
 from app.utils.thread_ctx import thread_scope
@@ -101,7 +101,7 @@ async def test_explicit_dislike_beats_favorites(store: UserDataStore, tmp_path: 
     await _fav_titles(store, uid, "Genuine Leather Bag", "Genuine Leather Wallet")
     # P_t 按 session_dir 聚合（见 api.context），所以要在 thread_scope 里写、里读。
     with thread_scope("t-aff-dislike", tmp_path, user_id=uid):
-        set_session_pt(SessionPrefState(avoid_terms=["皮革"]))  # ← 真实产物：中文原子词
+        set_turn_constraints(TurnConstraints(avoid_terms=["皮革"]))  # ← 真实产物：中文原子词
         bundle = await assemble(uid)
     assert "皮革" in bundle.penalty
     # 亲和词是 'genuine leather'（英文、且比 blocked 里的 '皮革' 归一后更长）——跨语言 + 长词

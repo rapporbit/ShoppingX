@@ -221,17 +221,17 @@ async def test_item_picker_display_gate_drops_low_relevance(monkeypatch: Any) ->
     assert ids  # 保底：至少留头部一件，展示门不主动产空清单
 
 
-async def test_item_picker_enforces_session_pt() -> None:
+async def test_item_picker_enforces_turn_constraints() -> None:
     """会话级 P_t 机制性强制：调用**不传** exclude_keywords / budget_usd，仍按 P_t 累积约束淘汰。
 
     这是把「续聊里上一轮说过的不要塑料 / 预算≤X」从 prompt 建议升为硬保证——item_picker 从
     ContextVar 读 P_t，硬 dislike 并入 exclude、预算兜底，不靠模型每轮把旧约束转述进本次调用。
     """
-    from app.api.context import set_session_pt
-    from app.memory.session_state import SessionPrefState
+    from app.api.context import set_turn_constraints
+    from app.memory.turn_constraints import TurnConstraints
     from app.tools.item_picker import item_picker
 
-    pt = SessionPrefState(budget_usd=100.0, exclude_terms=["plastic"])
+    pt = TurnConstraints(budget_usd=100.0, exclude_terms=["plastic"])
     cands = [
         ItemCandidate(
             item_id="X1", platform="a", title="plastic bottle set", landed_usd=10, rating=4.0
@@ -244,7 +244,7 @@ async def test_item_picker_enforces_session_pt() -> None:
     from app.utils.thread_ctx import thread_scope
 
     with thread_scope("t-pt-enforce", Path(tempfile.mkdtemp())):
-        set_session_pt(pt)
+        set_turn_constraints(pt)
         # 关键：调用不传 exclude_keywords / budget_usd，全靠 P_t 强制。
         out = await item_picker.ainvoke({"candidates": [c.model_dump() for c in cands], "top_k": 5})
 
@@ -438,12 +438,12 @@ async def test_item_picker_reports_zero_must_hits(monkeypatch: Any) -> None:
 async def test_item_picker_pt_like_hard_routes_to_must(monkeypatch: Any) -> None:
     """会话级 P_t 的 like-hard 约束机制性路由到 must_have（正向硬强上浮，不淘汰不匹配的）。"""
     import app.tools.item_picker as mod
-    from app.api.context import set_session_pt
-    from app.memory.session_state import SessionPrefState
+    from app.api.context import set_turn_constraints
+    from app.memory.turn_constraints import TurnConstraints
 
     monkeypatch.setattr(mod, "_W_MATCH_SEM", 0.0)
     monkeypatch.setattr(mod, "_W_MATCH_HARD_SEM", 0.0)
-    pt = SessionPrefState(prefer_terms=["metal"])
+    pt = TurnConstraints(prefer_terms=["metal"])
     cands = [
         ItemCandidate(item_id="A", platform="p", title="plastic case", landed_usd=20, rating=4.0),
         ItemCandidate(item_id="B", platform="p", title="metal case", landed_usd=20, rating=4.0),
@@ -451,7 +451,7 @@ async def test_item_picker_pt_like_hard_routes_to_must(monkeypatch: Any) -> None
     from app.utils.thread_ctx import thread_scope
 
     with thread_scope("t-pt-must", Path(tempfile.mkdtemp())):
-        set_session_pt(pt)  # P_t 按 session_dir 聚合 → 必须在会话作用域内注入
+        set_turn_constraints(pt)  # P_t 按 session_dir 聚合 → 必须在会话作用域内注入
         out = await mod.item_picker.ainvoke(
             {"candidates": [c.model_dump() for c in cands], "top_k": 5}
         )
@@ -636,8 +636,8 @@ async def test_item_picker_emits_items_preview(monkeypatch: pytest.MonkeyPatch) 
 async def test_item_picker_auto_excludes_session_dislikes(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from app.api.context import set_session_pt
-    from app.memory.session_state import SessionPrefState
+    from app.api.context import set_turn_constraints
+    from app.memory.turn_constraints import TurnConstraints
     from app.tools.item_picker import item_picker
     from app.utils.thread_ctx import thread_scope
 
@@ -652,7 +652,7 @@ async def test_item_picker_auto_excludes_session_dislikes(
     # 注意：调用方**没有**传 exclude_keywords=["plastic"]——用户本轮亲口说的「不要塑料」
     # 由 P_t 确定性兜住，不靠模型每轮记得转述。
     with thread_scope("t-g1", tmp_path, user_id="user-x"):
-        set_session_pt(SessionPrefState(exclude_terms=["plastic"]))
+        set_turn_constraints(TurnConstraints(exclude_terms=["plastic"]))
         out = await item_picker.ainvoke({"candidates": [c.model_dump() for c in cands], "top_k": 5})
     assert "P1" in out.excluded
     assert [p.item_id for p in out.picks] == ["P2"]
@@ -694,8 +694,8 @@ async def test_item_picker_attenuates_soft_dislikes() -> None:
 async def test_item_picker_auto_attenuates_session_soft_dislikes(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from app.api.context import set_session_pt
-    from app.memory.session_state import SessionPrefState
+    from app.api.context import set_turn_constraints
+    from app.memory.turn_constraints import TurnConstraints
     from app.tools.item_picker import item_picker
     from app.utils.thread_ctx import thread_scope
 
@@ -704,7 +704,7 @@ async def test_item_picker_auto_attenuates_session_soft_dislikes(
         ItemCandidate(item_id="P2", platform="a", title="canvas pouch", landed_usd=20, rating=4.5),
     ]
     with thread_scope("t-soft", tmp_path, user_id="user-s"):
-        set_session_pt(SessionPrefState(avoid_terms=["plastic"]))
+        set_turn_constraints(TurnConstraints(avoid_terms=["plastic"]))
         out = await item_picker.ainvoke({"candidates": [c.model_dump() for c in cands], "top_k": 5})
     ids = [c.item_id for c in out.picks]
     assert out.excluded == []  # 软避讳不淘汰，只减分
@@ -869,8 +869,8 @@ async def test_item_search_session_exclusion_at_recall_stage(
     长期记忆那条腿已随 M4 删：它只经模型上下文生效，由模型自己写进 brand_exclude / query。
     """
     import app.tools.item_search as mod
-    from app.api.context import set_session_pt
-    from app.memory.session_state import SessionPrefState
+    from app.api.context import set_turn_constraints
+    from app.memory.turn_constraints import TurnConstraints
     from app.utils.thread_ctx import thread_scope
 
     recall = await _build_tiny_recall()
@@ -878,7 +878,7 @@ async def test_item_search_session_exclusion_at_recall_stage(
     monkeypatch.setattr(mod, "get_tower_client", lambda: TowerClient(model=None, local_dim=32))
 
     with thread_scope("t-ms-recall", tmp_path, user_id="user-ms-recall"):
-        set_session_pt(SessionPrefState(exclude_terms=["canvas"]))  # 用户本轮说的「不要帆布」
+        set_turn_constraints(TurnConstraints(exclude_terms=["canvas"]))  # 用户本轮说的「不要帆布」
         out = await mod.item_search.ainvoke(
             {"query": "canvas travel bag", "platform": "amazon", "top_k": 5}
         )
@@ -1439,8 +1439,8 @@ async def test_planner_writes_session_pt_same_turn(monkeypatch: Any) -> None:
     亲口说的「不要塑料」机制侧一条没执行，全靠模型自觉转述进 exclude_keywords。
     """
     import app.tools.planner as mod
-    from app.api.context import get_session_pt, set_session_pt
-    from app.memory.session_state import SessionPrefState
+    from app.api.context import get_turn_constraints, set_turn_constraints
+    from app.memory.turn_constraints import TurnConstraints
     from app.tools.planner import ExcludeTerm, PlanOutput
     from app.utils.thread_ctx import thread_scope
 
@@ -1458,9 +1458,9 @@ async def test_planner_writes_session_pt_same_turn(monkeypatch: Any) -> None:
 
     session_dir = Path(tempfile.mkdtemp())
     with thread_scope("t-pt", session_dir, user_id="u-pt"):
-        set_session_pt(SessionPrefState())  # 开局空 P_t（首轮）
+        set_turn_constraints(TurnConstraints())  # 开局空 P_t（首轮）
         await mod.planner.ainvoke({"intent": "想买旅行三件套，预算300，不要塑料，喜欢小众"})
-        pt = get_session_pt()
+        pt = get_turn_constraints()
 
     assert pt is not None
     # 硬排除词当轮可被 item_picker 机制淘汰（pt.dislike_terms() → exclude）

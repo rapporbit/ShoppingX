@@ -33,7 +33,7 @@ def _atoms(words: Iterable[str]) -> list[str]:
     return out
 
 
-class SessionPrefState(BaseModel):
+class TurnConstraints(BaseModel):
     """本轮生效约束 P_t（planner 写，run 内有效）。
 
     - ``exclude_terms``：硬淘汰（用户说「不要 X」）→ item_picker 命中即淘汰。
@@ -63,7 +63,7 @@ class SessionPrefState(BaseModel):
         exclude: Iterable[str] = (),
         avoid: Iterable[str] = (),
         prefer: Iterable[str] = (),
-    ) -> SessionPrefState:
+    ) -> TurnConstraints:
         """从 planner 的产出构造。一个词同时进了多个表时按「硬淘汰 > 软减分 > 加分」只留一处。"""
         ex = _atoms(exclude)
         av = [w for w in _atoms(avoid) if w not in ex]

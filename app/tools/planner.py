@@ -8,7 +8,7 @@
 
 **planner 是本轮约束 P_t 的唯一写者，且无状态。** 它每轮都跑，输入是「前几轮用户原话 + 本轮
 原话」，**整体重算**本轮仍生效的全部约束（当轮落进 P_t、当轮被 item_picker 执行）。撤回、换品类
-都随重算自然生效，没有跨轮合并逻辑（2026-09-25 删，见 :mod:`app.memory.session_state`）。
+都随重算自然生效，没有跨轮合并逻辑（2026-09-25 删，见 :mod:`app.memory.turn_constraints`）。
 curator 只判长期库，不碰 P_t——双写者时代它曾用更差的输出覆盖 planner（无档位 draft、脑内换汇），
 教训见 ``app.memory.curator``。
 
@@ -44,10 +44,10 @@ from app.api.context import (
     get_session_dir,
     get_user_id,
     set_dest_country,
-    set_session_pt,
     set_session_tasks,
+    set_turn_constraints,
 )
-from app.memory.session_state import SessionPrefState
+from app.memory.turn_constraints import TurnConstraints
 from app.recall.fx import to_base_or_none
 from app.recall.geo import (
     DEFAULT_DEST_COUNTRY,
@@ -509,7 +509,7 @@ def _atoms(words: list[str]) -> list[str]:
 PRIOR_QUERY_WINDOW = 6
 
 
-def _sync_session_pt(plan: PlanOutput) -> None:
+def _sync_turn_constraints(plan: PlanOutput) -> None:
     """把 planner 重算出的本轮约束**当轮**写进 P_t —— 约束的机制执行通路。
 
     P_t 不靠模型每轮把「不要塑料」转述进 ``item_picker(exclude_keywords=...)``：planner 识别完
@@ -518,8 +518,8 @@ def _sync_session_pt(plan: PlanOutput) -> None:
     """
     if get_session_dir() is None:
         return  # 没会话（单测 / examples 直调工具）→ 无 P_t 可言，退化成纯拆解
-    set_session_pt(
-        SessionPrefState.build(
+    set_turn_constraints(
+        TurnConstraints.build(
             category=plan.category,
             budget_usd=plan.budget_usd,
             exclude=_atoms(plan.exclude_keywords),
@@ -620,9 +620,9 @@ async def planner(intent: str) -> PlanOutput:
         reset_session_bundle()
     if plan.bundle_slots:  # validator 已收口成「≥2 槽或空」
         set_session_bundle(plan.bundle_slots, mode=plan.slot_mode)
-    # 本轮约束当轮落 P_t —— 约束的机制执行通路（见 _sync_session_pt）。放在币种确定性回填
+    # 本轮约束当轮落 P_t —— 约束的机制执行通路（见 _sync_turn_constraints）。放在币种确定性回填
     # **之后**：P_t 要存的是回填后的最终值，不是模型的原始猜测。
-    _sync_session_pt(plan)
+    _sync_turn_constraints(plan)
     # 给前端「思考过程」展开看的人读摘要：这一步把自然语言意图拆成了哪些结构化字段。
     plan_lines: list[str] = []
     if plan.tasks:

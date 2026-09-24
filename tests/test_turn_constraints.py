@@ -1,7 +1,7 @@
 """本轮约束 P_t（无状态）：构造规则 + planner 的上文渲染 / 预算出处 / 收货国第 2 层 + 原话落盘。
 
 P_t 不再跨轮合并（2026-09-25），跨轮只存用户原话。这里钉住三件确定性的事：
-① ``SessionPrefState.build`` 的词表形态；② planner 怎么用前几轮原话（上文、预算币种、收货国）；
+① ``TurnConstraints.build`` 的词表形态；② planner 怎么用前几轮原话（上文、预算币种、收货国）；
 ③ orchestrator 怎么读回原话（坏数据按空）。「LLM 能否从原话里把旧约束重新抽出来」不在这里测。
 """
 
@@ -10,7 +10,7 @@ from agentscope.state import AgentState
 from app.agent.orchestrator import PRIOR_QUERIES_KEY, _prior_queries
 from app.api.context import set_prior_queries
 from app.api.run_state import reset_run_state
-from app.memory.session_state import SessionPrefState
+from app.memory.turn_constraints import TurnConstraints
 from app.tools.planner import (
     _render_prior_context,
     budget_source,
@@ -21,7 +21,7 @@ from app.utils.thread_ctx import thread_scope
 
 
 def test_build_normalizes_and_dedups_across_buckets() -> None:
-    pt = SessionPrefState.build(
+    pt = TurnConstraints.build(
         category="背包",
         budget_usd=42.0,
         exclude=["Plastic", "plastic", " "],
@@ -35,8 +35,8 @@ def test_build_normalizes_and_dedups_across_buckets() -> None:
 
 
 def test_empty_state() -> None:
-    assert SessionPrefState().is_empty()
-    assert not SessionPrefState.build(budget_usd=10.0).is_empty()
+    assert TurnConstraints().is_empty()
+    assert not TurnConstraints.build(budget_usd=10.0).is_empty()
 
 
 def test_render_prior_context_first_turn_is_empty() -> None:

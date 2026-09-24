@@ -45,7 +45,7 @@ from app.api import monitor
 from app.api.context import (
     get_dest_country,
     get_original_query,
-    get_session_pt,
+    get_turn_constraints,
     get_user_id,
 )
 from app.memory.assemble import MemoryBundle, assemble
@@ -395,7 +395,7 @@ async def _category_relevance(
             (slot_query(s), by_slot[s.name]) for s in slots if slot_query(s) and by_slot.get(s.name)
         ]
     else:  # 普通轮：全池一批，query = planner 判的英文主品类
-        pt = get_session_pt()
+        pt = get_turn_constraints()
         category = pt.category.strip() if pt is not None else ""
         if category:
             # 锚核验（解锚）：category 是 planner 的 LLM 输出，能反证它的只有用户原文词面。
@@ -519,7 +519,7 @@ async def _prepare_inputs(
     )
     must, must_specs = _split_specs(normalize_terms(_merge_terms(must_have, mem.must)))
     # 打分用的 ``must`` 含 ``mem.must``，而后者是 ``assemble`` 用 ``pt.like_terms()`` 装进来的
-    # ——那是**软偏好**（``polarity="like"``、不分 blocking，见 SessionPrefState.like_terms 的
+    # ——那是**软偏好**（``polarity="like"``、不分 blocking，见 TurnConstraints.like_terms 的
     # docstring），拿来加分完全合理。但它**不能进 rerank query**：``_category_relevance`` 的契约
     # 第①条写着「绝不拼 prefer 偏好词，拼了实测排序反转」，而软偏好正是 prefer 性质的东西。
     #

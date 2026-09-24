@@ -10,7 +10,7 @@
   （用户级**行为数据**：行为历史与收藏。长期记忆不在这儿，旧的 ``preferences`` 表已随迁移
   ``0016_drop_preferences`` 删除）。
 - :mod:`app.memory.injector`：行为历史的渲染与写入。
-- :mod:`app.memory.session_state`：本轮生效约束 P_t（planner 每轮从前几轮原话整体重算，
+- :mod:`app.memory.turn_constraints`：本轮生效约束 P_t（planner 每轮从前几轮原话整体重算，
   不落盘、不进长期库）。
 - :mod:`app.memory.assemble`：P_t + 收藏亲和的装配（**不含长期记忆**——它只经模型上下文生效）。
 - :mod:`app.memory.domains`：品类域词表，运行时只服务 item_picker 品类门锚核验；
