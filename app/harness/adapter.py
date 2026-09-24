@@ -26,6 +26,7 @@ from collections.abc import AsyncGenerator, Callable
 from difflib import SequenceMatcher
 from typing import TYPE_CHECKING, Any
 
+from agentscope.event import ReplyFinishedReason
 from agentscope.message import (
     HintBlock,
     Msg,
@@ -347,7 +348,12 @@ class HarnessAgentAdapter(MiddlewareBase):
         await self._prefill(agent)
         async for event in next_handler(**input_kwargs):
             if type(event).__name__ == "ReplyEndEvent" and s.retry_nudge:
-                if self._force_another_round(agent, s.retry_nudge):
+                # 被打断（用户取消 / 超时）的 reply 不催：吞掉它等于把 INTERRUPTED 藏起来，
+                # 事件泵认不出取消，还白往上下文里塞一条催收尾提示。
+                interrupted = (
+                    getattr(event, "finished_reason", None) == ReplyFinishedReason.INTERRUPTED
+                )
+                if not interrupted and self._force_another_round(agent, s.retry_nudge):
                     s.retry_nudge = None
                     continue  # 吞掉结束事件 = 强制再来一轮（框架原生语义）
                 s.retry_nudge = None

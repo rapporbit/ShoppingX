@@ -8,6 +8,7 @@
 3. 写工具是**精准放行**的——没进放行表的工具照样要用户确认（不能靠 BYPASS 一档全开）。
 """
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -388,6 +389,138 @@ async def test_pump_does_not_fake_clarification_on_confirm_event(
 
     assert await ev.pump_events(_stream()) is None
     assert asked == []
+
+
+def _hanging_agent() -> Any:
+    """模型调用挂 30s 的**真框架** Agent：钉的是框架吞取消这一行为本身，手搓事件流钉不住。"""
+    from agentscope.agent import Agent
+
+    model = _fake_model()
+
+    async def _hang(*_a: object, **_kw: object) -> Any:
+        await asyncio.sleep(30)
+
+    model._call_api = _hang  # type: ignore[method-assign]
+    return Agent(name="t", system_prompt="sys", model=model)
+
+
+def _user(text: str) -> Msg:
+    return Msg(name="user", role="user", content=[TextBlock(type="text", text=text)])
+
+
+async def test_pump_reraises_cancel_swallowed_by_framework() -> None:
+    """用户取消：框架在 reply 内吞掉 CancelledError 并吐英文兜底，泵必须补抛。"""
+    from app.agent.events import pump_events
+
+    agent = _hanging_agent()
+    task = asyncio.create_task(pump_events(agent.reply_stream(_user("hi"), yield_final_msg=True)))
+    await asyncio.sleep(0.2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_pump_turns_swallowed_timeout_into_timeout_error() -> None:
+    """外层 asyncio.timeout 到点：同样被框架吞，补抛后由 timeout 自己换成 TimeoutError。"""
+    from app.agent.events import pump_events
+
+    agent = _hanging_agent()
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.2):
+            await pump_events(agent.reply_stream(_user("hi"), yield_final_msg=True))
+
+
+async def test_cancel_propagates_through_assembled_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """真装配：终结纪律会在被打断的 reply 上置 retry_nudge，适配器不得借此吞掉 INTERRUPTED。
+
+    曾经的症状：适配器把 ReplyEnd 当「强制再来一轮」吞了，事件泵认不出取消，用户点取消后
+    任务记 done、英文兜底文案当回答发出、上下文里还多一条催收尾提示。
+    """
+    from app.agent import agents as ag
+    from app.agent.events import pump_events
+    from app.harness.adapter import HarnessAgentAdapter
+    from app.harness.setup import setup_harness
+
+    async def _no_prefill(self: Any, agent: Any) -> None:
+        return None
+
+    setup_harness()
+    hanging = _hanging_agent().model
+    monkeypatch.setattr(HarnessAgentAdapter, "_prefill", _no_prefill)
+    monkeypatch.setattr(ag, "get_tier_llm", lambda _tier: hanging)
+    monkeypatch.setattr("app.agent.llm.get_llm", lambda: hanging)
+    monkeypatch.setattr("app.agent.llm.get_fast_llm", lambda: hanging)
+    agent, _ = await ag.build_main_agent(original_query="你好")
+
+    task = asyncio.create_task(pump_events(agent.reply_stream(_user("你好"), yield_final_msg=True)))
+    await asyncio.sleep(0.3)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    users = [m.get_text_content() for m in agent.state.context if m.role == "user"]
+    assert users == ["你好"]  # 没有被塞催收尾提示
+
+
+async def test_pump_interrupted_always_reraises() -> None:
+    """INTERRUPTED 即补抛，不看 ``cancelling()``：框架在并发工具批里会 uncancel 把计数清零。"""
+    from agentscope.event import ReplyEndEvent, ReplyFinishedReason
+
+    from app.agent import events as ev
+
+    async def _stream() -> Any:
+        yield ReplyEndEvent(
+            session_id="s1", reply_id="r1", finished_reason=ReplyFinishedReason.INTERRUPTED
+        )
+        yield Msg(name="a", role="assistant", content=[TextBlock(type="text", text="兜底")])
+
+    with pytest.raises(asyncio.CancelledError):
+        await ev.pump_events(_stream())
+
+
+async def _slow_tool_agent() -> Any:
+    """模型第一步调一个睡 30s 的工具（默认 ``is_concurrency_safe=True``，走框架并发批）。"""
+    from agentscope.agent import Agent
+    from agentscope.message import ToolCallBlock, ToolResultState
+    from agentscope.model import ChatResponse
+    from agentscope.tool import FunctionTool, ToolChunk, Toolkit
+
+    async def slow_tool() -> ToolChunk:
+        """睡 30 秒。"""
+        await asyncio.sleep(30)
+        return ToolChunk(content=[TextBlock(type="text", text="slept")], state=ToolResultState.SUCCESS)
+
+    model = _fake_model()
+
+    async def _call(*_a: object, **_kw: object) -> ChatResponse:
+        blk = ToolCallBlock(type="tool_call", id="c1", name="slow_tool", input="{}")
+        return ChatResponse(content=[blk], is_last=True)
+
+    model._call_api = _call  # type: ignore[method-assign]
+    toolkit = Toolkit()
+    await toolkit.add_tool(FunctionTool(slow_tool, is_read_only=True))
+    return Agent(name="t", system_prompt="sys", model=model, toolkit=toolkit)
+
+
+async def test_cancel_during_concurrent_tool_reraises() -> None:
+    """工具执行中取消：框架 uncancel 清零计数后，泵仍须补抛（修前这里被吞、任务正常返回）。"""
+    from app.agent.events import pump_events
+
+    agent = await _slow_tool_agent()
+    task = asyncio.create_task(pump_events(agent.reply_stream(_user("hi"), yield_final_msg=True)))
+    await asyncio.sleep(0.2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_timeout_during_concurrent_tool_becomes_timeout_error() -> None:
+    """工具执行中超时：计数被清零后 ``asyncio.timeout`` 仍须把补抛的取消换成 TimeoutError。"""
+    from app.agent.events import pump_events
+
+    agent = await _slow_tool_agent()
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.2):
+            await pump_events(agent.reply_stream(_user("hi"), yield_final_msg=True))
 
 
 # ---------- 权限：精准放行，不是 BYPASS ----------
