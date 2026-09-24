@@ -99,7 +99,7 @@ async def test_rerank_capped_to_top_k_by_vector_score(monkeypatch: pytest.Monkey
         for i in range(40)
     ]
     with thread_scope("t-rerank-cap", Path(tempfile.mkdtemp())):
-        set_session_pt(SessionPrefState(category="backpack", domains=["bags"]))
+        set_session_pt(SessionPrefState(category="backpack"))
         out = await mod.item_picker.ainvoke({"candidates": [c.model_dump() for c in cands]})
     assert seen == [5]  # 只送了 5 件
     assert {c.item_id for c in out.picks} <= {f"C{i}" for i in range(35, 40)}  # 向量分最高的那截

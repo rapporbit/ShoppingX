@@ -398,8 +398,8 @@ async def _category_relevance(
         pt = get_session_pt()
         category = pt.category.strip() if pt is not None else ""
         if category:
-            # 锚核验（解锚）：category 与 domains 同出 planner 一张嘴，互证无意义；能反证的
-            # 只有用户原文词面。两侧词表域都判得出且交集为空 → 锚不可信 → 本轮不执法。
+            # 锚核验（解锚）：category 是 planner 的 LLM 输出，能反证它的只有用户原文词面。
+            # 两侧词表域都判得出且交集为空 → 锚不可信 → 本轮不执法。
             # 任一侧空集 = 词表覆盖不到 = 无反证证据，照旧执法（宁漏勿错，见 DOMAIN_TERMS）。
             # 套装轮不做：槽 keywords 经 ask_user 组成确认，已有人工核验通路。
             anchor_d = infer_domains_from_text(category)

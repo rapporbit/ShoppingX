@@ -117,7 +117,7 @@ class _RunScope:
     dest_country: tuple[str, bool] | None = None
 
     # 本轮**原始用户 query**（未经任何 LLM 转述）——工具侧唯一的「用户到底说了什么」确定性
-    # 信号源。planner 的 domains / category 都是 LLM 结构化输出，「合法但错」时下游拿它当锚会
+    # 信号源。planner 的 category 是 LLM 结构化输出，「合法但错」时下游拿它当锚会
     # 静默反转（品类门反着杀）；反证只能靠独立信号，而独立信号只有原文词面。
     original_query: str = ""
 
@@ -240,8 +240,8 @@ def get_session_dir() -> Path | None:
 def set_original_query(query: str) -> None:
     """记下本轮原始用户 query（``run_agent`` 入口写，每轮覆盖）。
 
-    给 planner 的域反证与 item_picker 的品类门锚核验当独立信号：LLM 结构化输出互相印证
-    没有意义（domains 与 category 同出一张嘴），能反证它们的只有用户原文的词面。
+    给 item_picker 的品类门锚核验当独立信号：planner 的 category 是 LLM 结构化输出，
+    能反证它的只有用户原文的词面。
     """
     st = run_slot(_RunScope)
     if st is not None:

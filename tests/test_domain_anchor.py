@@ -1,8 +1,7 @@
-"""域反证与品类门解锚（第四病根：LLM 结构化输出「合法但错」无核验、后果静默反转）。
+"""品类门解锚（第四病根：LLM 结构化输出「合法但错」无核验、后果静默反转）。
 
-三层防线各测一块：
+两块：
 - ``infer_domains_from_text``：用户原文词面 → 域投票（确定性、宁漏勿错）。
-- ``reconcile_domains``：planner 域漏判时词面证据**并入不替换**（手表 badcase 的主修）。
 - ``_category_relevance`` 锚核验：category 锚与原文词面分歧 → 门 fail-open 不执法——
   「合法但错」的锚会让品类门反着杀（把真手表沉底、留西装），不执法比反向执法安全。
 """
@@ -14,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from app.memory.domains import infer_domains_from_text, reconcile_domains
+from app.memory.domains import infer_domains_from_text
 from app.utils.thread_ctx import thread_scope
 
 
@@ -32,18 +31,6 @@ class TestInferDomains:
         """词表覆盖不到 → 空集 =「无证据」，不是「不属于任何域」。"""
         assert infer_domains_from_text("") == set()
         assert infer_domains_from_text("送长辈的礼物，有什么推荐") == set()
-
-
-class TestReconcileDomains:
-    def test_union_not_replace(self) -> None:
-        """漂移主修：planner 判 apparel、原文词面判 jewelry_watches → 并入，不丢 planner 的。"""
-        out = reconcile_domains(["apparel"], "formal dress watch men business")
-        assert "jewelry_watches" in out and "apparel" in out
-
-    def test_no_evidence_keeps_planner_verdict(self) -> None:
-        """词面无证据时原样返回（返回同一列表对象，零开销）。"""
-        domains = ["apparel"]
-        assert reconcile_domains(domains, "送长辈的礼物") is domains
 
 
 @pytest.mark.asyncio
@@ -141,11 +128,11 @@ async def test_no_must_terms_falls_back_to_category(monkeypatch) -> None:
     assert seen == ["backpack"]
 
 
-def test_planner_domains_out_of_enum_dropped() -> None:
-    """planner 自造域（2026-09-25「旅行颈枕」→ travel）不再打挂整份 PlanOutput。"""
+def test_planner_topic_switch_replaces_domains() -> None:
+    """planner 不再输出域：旧模型吐的 domains 被忽略，不会再因越界值打挂整份 PlanOutput。"""
     from app.tools.planner import PlanOutput
 
-    assert PlanOutput.model_validate({"category": "颈枕", "domains": ["travel"]}).domains == ["other"]
-    mixed = PlanOutput.model_validate({"category": "颈枕", "domains": ["travel", "health"]})
-    assert mixed.domains == ["health"]
-    assert PlanOutput.model_validate({"category": "x", "domains": []}).domains == []
+    plan = PlanOutput.model_validate(
+        {"category": "颈枕", "domains": ["travel"], "topic_switch": True}
+    )
+    assert plan.topic_switch is True and not hasattr(plan, "domains")

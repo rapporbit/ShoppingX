@@ -32,27 +32,19 @@ import os
 import re
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from app.agent.invoke import call_structured
 from app.agent.llm import get_planner_llm
 from app.agent.prompts import get_planner_prompt
 from app.api import monitor
 from app.api.context import (
-    get_original_query,
     get_session_dir,
     get_session_pt,
     get_user_id,
     set_dest_country,
     set_session_pt,
     set_session_tasks,
-)
-from app.memory.domains import (
-    DOMAIN_GLOBAL,
-    PrefDomain,
-    coerce_domains,
-    domain_menu,
-    reconcile_domains,
 )
 from app.memory.session_state import SessionPrefState, merge_pt_lite
 from app.recall.fx import to_base_or_none
@@ -298,20 +290,15 @@ class PlanOutput(BaseModel):
             "把握理解这个说法」，拿不准且带时效词才填 web，别把普通模糊需求都推给搜索。"
         ),
     )
-    domains: list[PrefDomain] = Field(
-        default_factory=list,
+    topic_switch: bool = Field(
+        default=False,
         description=(
-            "本轮在买哪些**品类域**（可多选，如「旅行三件套」= bags + apparel）。它决定用户的长期"
-            "偏好哪些在本轮生效——「买鞋时不喜欢皮革」不该在买沙发时也把皮沙发全排掉。\n"
-            "**只要本轮涉及具体商品，就必须至少填一个**：买跑鞋 → [footwear]；买降噪耳机 → "
-            "[electronics]；买手表/腕表 → [jewelry_watches]（**不是** furniture——线上真实误判过，"
-            "按商品本体归域，别被使用场景带偏）；归不进任何具体域（如「送人的小礼物」）→ [other]。"
-            "只有纯闲聊、完全不涉及商品时才留空。\n"
-            "**绝不要填 global**——那是偏好侧「跨品类底线」专用的标记，不是「本轮什么都买」的意思。"
-            "可选值：\n" + domain_menu()
+            "本轮要买的东西是否换成了**另一类商品**（对照【上一轮的会话状态】里的品类）："
+            "双肩包 → 颈枕、耳机 → 沙发 = true；"
+            "双肩包 → 更轻的双肩包、加预算、换平台、追问比较 = false。"
+            "没有上一轮状态时填 false。true 时上一轮说的「不要 X / 喜欢 X」会被清空，别轻易填。"
         ),
     )
-    _domains_in_enum = field_validator("domains", mode="before")(coerce_domains)
 
     budget_amount: float | None = Field(
         default=None, description="用户原话给的预算金额（**不要换算**，照原数填），无则 None"
@@ -514,13 +501,6 @@ def _atoms(words: list[str]) -> list[str]:
     return out
 
 
-def _domain_switch(prev: SessionPrefState | None, domains: list[str]) -> bool:
-    """本轮是否换了品类域（与既有域无交集，两边都非空）——套装状态随之清掉的判据。"""
-    if prev is None or not prev.domains or not domains:
-        return False
-    return not set(prev.domains) & set(domains)
-
-
 def _sync_session_pt(plan: PlanOutput, intent: str, *, dest_stated_now: bool = False) -> None:
     """把 planner 刚识别出的本轮约束**当轮**写进 P_t —— 短期记忆的机制执行通路。
 
@@ -545,7 +525,7 @@ def _sync_session_pt(plan: PlanOutput, intent: str, *, dest_stated_now: bool = F
         retract_terms=plan.retract_terms,
         user_utterance=intent,
         category=plan.category,
-        domains=plan.domains,
+        topic_switch=plan.topic_switch,
         budget_usd=plan.budget_usd,
         # 撤销权与产生权同归 planner（单写者）。机制闸：本轮原话里有落地的新预算数字时无视
         # clear_budget——「预算改成 500」被模型顺手多勾一个 clear 不该把新预算清掉；两者同真时
@@ -644,29 +624,17 @@ async def planner(intent: str) -> PlanOutput:
     # 不该每轮重新指望模型判对——确定性回填，与币种 / 收货国同一套路子。
     if "recommend" in plan.tasks and "landed_cost" not in plan.tasks:
         plan.tasks.append("landed_cost")
-    # 品类域：与币种 / 收货国不同，品类**无法纯规则解析**（「旅行三件套」映射到哪几个域是语义
-    # 判断），故由 LLM 填、代码只做一道净化：剔掉 global——它是偏好侧「跨品类底线」的标记，不是
-    # 「本轮什么都买」的意思，模型填了也不认（否则域集合里混个 global，等于把域隔离整个短路掉）。
-    plan.domains = [d for d in plan.domains if d != DOMAIN_GLOBAL]
-    # 域反证（badcase：手表 query 判成 apparel，prompt 反例已被证伪治不住）：用「用户原文 +
-    # 主品类」的词面命中（DOMAIN_TERMS 高精度词表，独立于 LLM 的信号）核验，漏判的域**并入**。
-    # 并入不替换——词表也可能误判：并入的失效方向是「多注入一个域的偏好」（软性减分/加分，
-    # 可见可纠），替换的失效方向是「把 planner 判对的域丢了」（域隔离静默失效）。
-    reconciled = reconcile_domains(plan.domains, f"{get_original_query()} {plan.category}".strip())
-    if reconciled != plan.domains:
-        logger.info("域反证：词面证据补入 %s（planner 判 %s）", reconciled, plan.domains)
-        plan.domains = reconciled
-    # 任务清单同样落 session 级（同 domains 的聚合方式）：收线通告读它，
+    # 任务清单落 session 级：收线通告读它，
     # 在「无比价 / 到手价诉求」的轮次提示模型跳过 price_compare / shipping_calc——动机层提示，
     # 不是硬闸（这两个工具始终可用，用户中途改口还能调）。
     set_session_tasks(plan.tasks)
-    # 同一轮里重调 planner 且换了域（旅行套装 → 沙发）时旧槽表清掉；跨轮本来就不留（只活一轮）。
-    if _domain_switch(get_session_pt(), plan.domains):
+    # 换了一类商品（旅行套装 → 沙发）时旧槽表清掉。
+    if plan.topic_switch:
         reset_session_bundle()
     if plan.bundle_slots:  # validator 已收口成「≥2 槽或空」
         set_session_bundle(plan.bundle_slots, mode=plan.slot_mode)
-    # 本轮约束当轮落 P_t —— 短期记忆的机制执行通路（见 _sync_session_pt）。放在币种 / 收货国 /
-    # 品类域全部确定性回填**之后**：P_t 要存的是这些回填后的最终值，不是模型的原始猜测。
+    # 本轮约束当轮落 P_t —— 短期记忆的机制执行通路（见 _sync_session_pt）。放在币种 / 收货国
+    # 确定性回填**之后**：P_t 要存的是这些回填后的最终值，不是模型的原始猜测。
     _sync_session_pt(plan, intent, dest_stated_now=dest_stated_now)
     # 约束集变化推给前端偏好面板（可见可纠）。无会话（单测直调）时 _sync 没写 P_t，也就不推。
     if (pt_now := get_session_pt()) is not None:
@@ -699,11 +667,6 @@ async def planner(intent: str) -> PlanOutput:
             if any(not s.evidence.strip() for s in plan.bundle_slots):
                 bundle_line += "（组成含推断项，用户未逐一点名——建议先与用户确认增删）"
             plan_lines.append(bundle_line)
-    # 品类域摆进思考过程：它决定「哪些长期偏好本轮生效」，判错了用户得看得见——记忆最怕的就是
-    # 静默失效（域判错 → 偏好没生效 → 用户只觉得「搜出来的东西不对」，却归因不到记忆头上）。
-    plan_lines.append(
-        "品类域：" + ("、".join(plan.domains) if plan.domains else "判不出（本轮全部偏好生效）")
-    )
     if plan.budget_usd is not None:
         plan_lines.append(f"预算：≤ ${plan.budget_usd:.0f}")
     if "landed_cost" in plan.tasks:  # 只在要算到手价时显示，否则是噪音

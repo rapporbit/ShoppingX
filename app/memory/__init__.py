@@ -13,12 +13,12 @@
 - :mod:`app.memory.session_state`：会话级短期状态 P_t（本轮约束，随 session.json 的
   ``middle_context`` 落盘，不进长期库）。
 - :mod:`app.memory.assemble`：P_t + 收藏亲和的装配（**不含长期记忆**——它只经模型上下文生效）。
-- :mod:`app.memory.domains`：``PrefDomain`` 封闭枚举，现在只服务 planner 的品类判定与评测。
+- :mod:`app.memory.domains`：品类域词表，运行时只服务 item_picker 品类门锚核验；
+  枚举冻结给 planner 训练腿。
 - :mod:`app.memory.strategies`：成功策略库（18-4）——学的是 **Agent 的打法**而非用户的取向，
   全局无 user_id，与 curator 那条路并列、零共享状态（两张表、两个 Store）。
 """
 
-from app.memory.domains import PrefDomain
 from app.memory.fact_store import MemoryFactStore, get_fact_store
 from app.memory.facts import MemoryCategory, MemoryFact, validate_fact
 from app.memory.store import (
@@ -41,7 +41,6 @@ __all__ = [
     "MemoryCategory",
     "MemoryFact",
     "MemoryFactStore",
-    "PrefDomain",
     "Strategy",
     "StrategyStore",
     "UserDataStore",

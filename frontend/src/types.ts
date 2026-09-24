@@ -1,9 +1,6 @@
 // 前后端唯一约定：AGUI 事件结构。后端 monitor.py 每条事件都是这个信封，
 // 前端只看 event 字段分发、看 data 取业务字段（见 app/api/monitor.py）。
 
-
-// 域枚举定义在 domains.ts（那里还有中文标签 / 下拉顺序），这里转出一手，组件按需从任一处取。
-
 export type AguiEvent = {
   type: "monitor_event";
   event:
@@ -17,10 +14,7 @@ export type AguiEvent = {
     // curator 本轮沉淀了新长期偏好（data.preferences: [{content, dedup_key}]）——回复下方画一行
     // 「记住了 … ✕」，✕ 即 DELETE 掉那条。自动写入，但看得见、撤得掉。
     | "memory_updated"
-    // 本轮**读取侧**用到了哪些长期记忆（data: {domains, excluded, attenuated}）——思考过程里画一行
-    // 「按你的长期偏好：排除 N 项、降权 M 项」。记忆最危险的失败是静默的：一条偏好误杀了一批商品，
-    // 用户只会觉得「怎么老是搜不出东西」，且归因不到记忆头上。这一行就是解药。
-      | "task_result"
+    | "task_result"
     | "task_cancelled"
     // 服务端关停掐断了这一轮（data: {reason, retryable}）。后端已 ack 掉那条消息、不会背着用户
     // 重跑，所以这里只负责把「没结果、重发一次」说清楚。

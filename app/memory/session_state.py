@@ -14,7 +14,7 @@
 **less is more（2026-09-14 重构）**：曾经每条约束带 id / epoch / archived / source_quote / TTL，
 撤回靠「LLM 抄 id + 词面核验」——五个机制服务一个「撤回精确到条」的能力，实测用得极少。现在
 退回论文原型：**词表就是状态**，撤回按词（``retract_terms``，逐词对原话核验，过了才删，宁紧），
-换品类域整表清空、预算保留。无 id、无代际、无 TTL。
+换品类（planner 判 topic_switch）整表清空、预算保留。无 id、无代际、无 TTL。
 
 **存放：** 住 ``AgentState.middle_context["pt"]``，随会话唯一的跨轮产物 session.json 一起落盘 /
 读回（:func:`pt_into_state` / :func:`pt_from_state`），不单独成文件、不进长期库。读坏只记日志
@@ -28,7 +28,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.utils.terms import normalize_terms, term_hits
 
@@ -59,8 +59,8 @@ class SessionPrefState(BaseModel):
       就是拿误杀去赌——「花哨」这种词一旦匹上（「塑料感」连坐 plastic），杀掉的可能正是用户要的。
     - ``prefer_terms``：加分。正向**不做二值淘汰**（数据没有可靠的材质 / 风格字段，keep-only 会
       误杀一大片），所以即便「必须金属」也只作强加分。
-    - ``category`` / ``domains``：本轮主品类与品类域。换域（bags → footwear）时三个词表清空、
-      预算保留——「不要塑料」是买鞋时说的，买沙发不该还在生效；预算是人的钱包，跨品类也在。
+    - ``category``：本轮主品类。planner 判换品类（``topic_switch``）时三个词表清空、预算保留——
+      「不要塑料」是买鞋时说的，买沙发不该还在生效；预算是人的钱包，跨品类也在。
     - ``dest_country``：本会话明示过的收货国（「寄到日本」），供到手价四层解析的第 2 层。
 
     消费接口沿用旧名（``dislike_terms`` / ``soft_dislike_terms`` / ``like_terms``），下游
@@ -69,8 +69,15 @@ class SessionPrefState(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_legacy_domains(cls, data: object) -> object:
+        """老 session.json 带已删的 ``domains`` 键；extra=forbid 下不丢就恢复失败。"""
+        if isinstance(data, dict) and "domains" in data:
+            data = {k: v for k, v in data.items() if k != "domains"}
+        return data
+
     category: str = Field(default="", description="本轮主品类（最近一次明确的）")
-    domains: list[str] = Field(default_factory=list, description="本轮品类域（换域判据）")
     budget_usd: float | None = Field(default=None, description="累积的预算上限 USD，无则 None")
     dest_country: str = Field(default="", description="本会话明示过的收货国 ISO 码")
     exclude_terms: list[str] = Field(default_factory=list, description="硬淘汰词")
@@ -209,15 +216,15 @@ def merge_pt_lite(
     retract_terms: Iterable[str] = (),
     user_utterance: str = "",
     category: str = "",
-    domains: Iterable[str] = (),
+    topic_switch: bool = False,
     budget_usd: float | None = None,
     clear_budget: bool = False,
     dest_country: str = "",
 ) -> SessionPrefState:
     """把本轮增量 merge 进 P_t——顺序固定、全部确定性代码。
 
-    1. **换域**：本轮 ``domains`` 与既有域**无交集**（两边都非空）→ 三个词表清空，预算保留。
-       只比域不比品类字符串：planner 对同一件东西每轮措辞会漂（旅行包 / travel bag），按字符串
+    1. **换品类**：planner 判 ``topic_switch``（双肩包 → 颈枕）→ 三个词表清空，预算保留。
+       交给 planner 判而不比品类字符串：同一件东西每轮措辞会漂（旅行包 / travel bag），按字符串
        比会把追问轮误判成换品类。
     2. **撤回按词、宁紧**：``retract_terms`` 逐词——只有该词**在本轮原话里出现**（:func:`term_hits`）
        才从三个词表里删掉与之同义的词；核验不过记 warning 不删（幻觉词被这道闸挡住）。
@@ -226,9 +233,8 @@ def merge_pt_lite(
     4. 预算 / 品类 / 收货国：None / 空 = 本轮未提及保持不变；``clear_budget`` 单列——「明确放开」
        必须可表达，否则 item_picker 的「无预算用 P_t 兜底」会让旧预算每轮暗中卡人。
     """
-    new_domains = _atoms(domains)
-    if prev.domains and new_domains and not set(prev.domains) & set(new_domains):
-        logger.info("P_t 换域 %s → %s，词表清空、预算保留", prev.domains, new_domains)
+    if topic_switch:
+        logger.info("P_t 换品类 %s → %s，词表清空、预算保留", prev.category, category)
         ex, av, pf = [], [], []
     else:
         ex, av, pf = list(prev.exclude_terms), list(prev.avoid_terms), list(prev.prefer_terms)
@@ -256,7 +262,6 @@ def merge_pt_lite(
         budget = prev.budget_usd
     return SessionPrefState(
         category=category or prev.category,
-        domains=new_domains or list(prev.domains),
         budget_usd=budget,
         dest_country=(dest_country or prev.dest_country).strip().upper(),
         exclude_terms=ex,

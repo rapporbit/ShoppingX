@@ -26,19 +26,18 @@ def test_first_turn_fills_three_buckets_and_budget() -> None:
         avoid=["花哨"],
         prefer=["帆布", "小众"],
         category="旅行收纳",
-        domains=["bags"],
         budget_usd=42.0,
     )
     assert pt.exclude_terms == ["塑料", "plastic"]  # 小写、去重、保序
     assert pt.avoid_terms == ["花哨"] and pt.prefer_terms == ["帆布", "小众"]
-    assert pt.budget_usd == 42.0 and pt.category == "旅行收纳" and pt.domains == ["bags"]
+    assert pt.budget_usd == 42.0 and pt.category == "旅行收纳"
     assert pt.dislike_terms() == ["塑料", "plastic"]
     assert pt.soft_dislike_terms() == ["花哨"] and pt.like_terms() == ["帆布", "小众"]
 
 
 def test_followup_turn_inherits_and_appends() -> None:
-    prev = merge_pt_lite(SessionPrefState(), exclude=["plastic"], budget_usd=42.0, domains=["bags"])
-    pt = merge_pt_lite(prev, prefer=["waterproof"], domains=["bags"])  # 本轮没提预算 → 保持
+    prev = merge_pt_lite(SessionPrefState(), exclude=["plastic"], budget_usd=42.0)
+    pt = merge_pt_lite(prev, prefer=["waterproof"])  # 本轮没提预算 → 保持
     assert pt.exclude_terms == ["plastic"] and pt.prefer_terms == ["waterproof"]
     assert pt.budget_usd == 42.0
 
@@ -56,25 +55,29 @@ def test_polarity_flip_moves_word_between_buckets() -> None:
     assert pt.exclude_terms == [] and pt.prefer_terms == ["blue"]
 
 
-def test_domain_switch_clears_terms_keeps_budget() -> None:
+def test_topic_switch_clears_terms_keeps_budget() -> None:
     prev = merge_pt_lite(
         SessionPrefState(),
         exclude=["plastic"],
         prefer=["canvas"],
-        domains=["bags"],
+        category="双肩包",
         budget_usd=80.0,
     )
-    pt = merge_pt_lite(prev, category="沙发", domains=["furniture"], exclude=["leather"])
+    pt = merge_pt_lite(prev, category="颈枕", topic_switch=True, exclude=["leather"])
     assert pt.exclude_terms == ["leather"] and pt.prefer_terms == []
-    assert pt.budget_usd == 80.0 and pt.domains == ["furniture"]
+    assert pt.budget_usd == 80.0 and pt.category == "颈枕"
 
 
-def test_same_domain_different_wording_does_not_clear() -> None:
-    prev = merge_pt_lite(
-        SessionPrefState(), exclude=["plastic"], category="旅行包", domains=["bags"]
-    )
-    pt = merge_pt_lite(prev, category="travel backpack", domains=["bags", "apparel"])
-    assert pt.exclude_terms == ["plastic"]  # 品类措辞漂移不算换域
+def test_no_topic_switch_keeps_terms_despite_wording_drift() -> None:
+    prev = merge_pt_lite(SessionPrefState(), exclude=["plastic"], category="旅行包")
+    pt = merge_pt_lite(prev, category="travel backpack")
+    assert pt.exclude_terms == ["plastic"]  # 品类措辞漂移不清表，清不清只看 topic_switch
+
+
+def test_legacy_session_json_with_domains_still_loads() -> None:
+    """2026-09-25 前落盘的 P_t 带 domains 键；extra=forbid 下要能读回，不能让老会话丢 P_t。"""
+    pt = SessionPrefState.model_validate({"category": "双肩包", "domains": ["bags"]})
+    assert pt.category == "双肩包"
 
 
 def test_clear_budget_and_dest_country() -> None:
