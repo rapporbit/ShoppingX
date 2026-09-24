@@ -278,6 +278,46 @@ class TestDriftDetector:
         assert result is None
         assert state.round_counter == 1
 
+    @pytest.mark.asyncio
+    async def test_drift_skips_closing_round(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """收尾轮（终结工具已置位 / 本条消息发了终结调用）不查——纠正已无下一轮可注入。
+
+        round_counter 设成下一次就轮到检测，且把 LLM 判定换成必炸：跳过时不该走到那里。
+        """
+        from app.agent import llm
+        from app.harness.hooks.drift import detect_drift
+
+        def _boom() -> None:
+            raise AssertionError("收尾轮不该调漂移 LLM")
+
+        monkeypatch.setattr(llm, "get_fast_llm", _boom)
+        closing_msg = SimpleNamespace(
+            content=[SimpleNamespace(type="tool_call", name="shopping_summary", input="{}")]
+        )
+        guard = GuardState()
+        guard.terminal_reached = True
+        for extra in ({"_guard": guard}, {"response_ai_message": closing_msg}):
+            state = DriftState()
+            state.round_counter = 2  # 不跳过的话 +1 后正好 3 % 3 == 0
+            ctx = {"_drift_state": state, "original_query": "test", "recent_actions_summary": "x"}
+            assert await detect_drift({**ctx, **extra}) is None
+            assert state.round_counter == 2
+
+    @pytest.mark.asyncio
+    async def test_drift_still_checks_non_terminal_tool_round(self) -> None:
+        """ask_user(closes_turn=False) 只是暂停等回复，不算收尾，照常计轮。"""
+        from app.harness.hooks.drift import detect_drift
+
+        msg = SimpleNamespace(
+            content=[
+                SimpleNamespace(type="tool_call", name="ask_user", input={"closes_turn": False})
+            ]
+        )
+        state = DriftState()
+        ctx = {"_drift_state": state, "original_query": "test", "response_ai_message": msg}
+        assert await detect_drift(ctx) is None
+        assert state.round_counter == 1
+
 
 # ============================================================
 # Phase Hooks
@@ -357,46 +397,29 @@ class TestPhaseHooks:
         assert agent.state.context == []
 
     @pytest.mark.asyncio
-    async def test_prefill_prefetches_kb_alongside_planner_hooks(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """round3 刀 4：planner 判出品类 + 购物任务 → category_insight(quick) 预取并作为第二对
-        tool 块预置；控制面状态与模型亲手调一致（called_tools）。纯交易 / 无品类不预取。"""
-        import app.harness.prefill as prefill_mod
+    async def test_prefill_no_longer_prefetches_kb(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """品类知识库预取已删（2026-09-24，卡片粒度对不上具体需求）：有品类 + 购物任务也只预置
+        planner 一对 tool 块，不碰 category_insight。"""
         import app.tools.category_insight as ci_mod
         import app.tools.planner as planner_mod
         from app.harness.adapter import HarnessAgentAdapter
         from app.tools.planner import PlanOutput
 
-        calls: list[dict] = []
-
         async def fake_planner(args):
             return PlanOutput(tasks=["recommend"], category="通勤背包")
 
-        async def fake_ci(args):
-            calls.append(args)
-            return {"category": args["category"], "components": []}  # _to_text 按 JSON 渲染
+        async def boom(args):
+            raise AssertionError("不该再预取 category_insight")
 
         monkeypatch.setattr(planner_mod, "planner", SimpleNamespace(ainvoke=fake_planner))
-        monkeypatch.setattr(ci_mod, "category_insight", SimpleNamespace(ainvoke=fake_ci))
+        monkeypatch.setattr(ci_mod, "category_insight", SimpleNamespace(ainvoke=boom))
 
         session = _mw("通勤背包")
         agent = _StubAgent()
         await HarnessAgentAdapter(session)._prefill(agent)
-        assert calls == [{"category": "通勤背包", "depth": "quick"}]
-        assert "category_insight" in session.called_tools
+        assert "category_insight" not in session.called_tools
         names = [b.name for b in agent.state.context[-1].content]
-        assert names == ["planner", "planner", "category_insight", "category_insight"]
-
-        # 纯交易任务不预取
-        async def trade_planner(args):
-            return PlanOutput(tasks=["query_order"], category="通勤背包")
-
-        monkeypatch.setattr(planner_mod, "planner", SimpleNamespace(ainvoke=trade_planner))
-        calls.clear()
-        await HarnessAgentAdapter(_mw("我的订单"))._prefill(_StubAgent())
-        assert calls == []
-        assert not prefill_mod._kb_prefetch_due(PlanOutput(tasks=["recommend"], category=""))
+        assert names == ["planner", "planner"]
 
     @pytest.mark.asyncio
     async def test_prefill_never_injects_skill_bodies(

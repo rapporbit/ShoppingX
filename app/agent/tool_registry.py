@@ -15,7 +15,6 @@ from app.agent.skills import skill_loaders
 from app.tools._shell import ToolShell, to_function_tool
 from app.tools.ask_user import ask_user
 from app.tools.cancel_order import cancel_order
-from app.tools.category_insight import category_insight
 from app.tools.chat_fallback import chat_fallback
 from app.tools.create_order import create_order
 from app.tools.image_understand import image_understand
@@ -45,13 +44,14 @@ TERMINAL_TOOLS = _TERMINAL_TOOLS
 # （计划 §3.2 第 2 条，与常见实现一致）——模型手里不该有抹掉用户记忆的能力。
 # 回合后的 curator（app/memory/curator.py）仍是另一条写路径，两条都过 facts.validate_fact
 # 同一道门、按 key 覆盖同一张表，不构成两套语义。
+# category_insight 2026-09-24 摘出：品类卡片是整品类统计，对具体需求常常答非所问（「降噪耳机」
+# 拿到监听 / 游戏 / 儿童耳机的爆款）。模块与知识库仍在（评测脚本在用），恢复即加回这里 + prompt。
 _BUSINESS_TOOLS: list[ToolShell] = [
     planner,
     image_understand,
     item_search,
     price_compare,
     shipping_calc,
-    category_insight,
     item_picker,
     web_search,
     research,
@@ -78,7 +78,6 @@ _READ_ONLY_TOOLS = frozenset(
         "item_search",
         "price_compare",
         "shipping_calc",
-        "category_insight",
         "item_picker",
         "web_search",
         "research",

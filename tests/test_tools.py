@@ -40,7 +40,6 @@ def test_registry_complete() -> None:
         "item_search",
         "price_compare",
         "shipping_calc",
-        "category_insight",
         "item_picker",
         "web_search",
         "chat_fallback",

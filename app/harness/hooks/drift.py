@@ -21,6 +21,7 @@ import logging
 import re
 from typing import Any
 
+from app.harness.budgets import is_terminal_call
 from app.harness.middleware import harness_hook
 from app.harness.signals import blacklist_hits
 from app.harness.state import guard_of
@@ -285,6 +286,30 @@ def _apply_correction(
     return context
 
 
+def _turn_closing(context: dict[str, Any]) -> bool:
+    """本轮是否已进入收尾：终结工具已执行（``terminal_reached``），或本条 AI 消息里就发了终结调用。
+
+    两个信号都看，是因为 post_reflect 与工具执行的先后不由这里决定——只认置位，工具若晚于
+    post_reflect 执行就会漏判。
+    """
+    guard = guard_of(context)
+    if guard is not None and guard.terminal_reached:
+        return True
+    msg = context.get("response_ai_message")
+    for block in getattr(msg, "content", None) or []:
+        if getattr(block, "type", None) != "tool_call":
+            continue
+        args = getattr(block, "input", None)
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except ValueError:
+                args = None
+        if is_terminal_call(getattr(block, "name", None), args):
+            return True
+    return False
+
+
 @harness_hook("post_reflect", name="drift_detector", priority=20)
 async def detect_drift(context: dict[str, Any]) -> dict[str, Any] | None:
     """每 N 轮检测一次 Agent 是否偏离目标。
@@ -293,6 +318,11 @@ async def detect_drift(context: dict[str, Any]) -> dict[str, Any] | None:
     预检不确定时才走轻量 LLM（三选一判定）。
     """
     if not DRIFT_ENABLED:
+        return None
+    # 收尾轮不查：终结工具已发出，loop 即将结束，纠正没有下一轮可注入；LLM 判定却挂在
+    # post_reflect 上同步等，拖在 task_result 之前（2026-09-24 实测 3/3 落在收尾轮，
+    # 每次 0.8~1.9s）。
+    if _turn_closing(context):
         return None
 
     state: DriftState | None = context.get("_drift_state")
