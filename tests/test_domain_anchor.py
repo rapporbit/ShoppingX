@@ -139,3 +139,13 @@ async def test_no_must_terms_falls_back_to_category(monkeypatch) -> None:
         cands = [ItemCandidate(item_id="B1", platform="amazon", title="Backpack")]
         await ip._category_relevance(cands, [])
     assert seen == ["backpack"]
+
+
+def test_planner_domains_out_of_enum_dropped() -> None:
+    """planner 自造域（2026-09-25「旅行颈枕」→ travel）不再打挂整份 PlanOutput。"""
+    from app.tools.planner import PlanOutput
+
+    assert PlanOutput.model_validate({"category": "颈枕", "domains": ["travel"]}).domains == ["other"]
+    mixed = PlanOutput.model_validate({"category": "颈枕", "domains": ["travel", "health"]})
+    assert mixed.domains == ["health"]
+    assert PlanOutput.model_validate({"category": "x", "domains": []}).domains == []

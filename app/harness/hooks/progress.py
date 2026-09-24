@@ -462,7 +462,10 @@ async def check_phase_permission(context: dict[str, Any]) -> dict[str, Any] | No
         )
     guard = guard_of(context)
     forced = guard is not None and guard.force_conclude
-    if not forced and "planner" not in context.get("called_tools", set()):
+    # planner 本轮失败过就不再索要它：再催只会让模型换着措辞撞同一个 schema 错误
+    # （2026-09-25 实测连撞 10 次、180s）。第三条 item_picker 仍然照查。
+    planner_tried = "planner" in context.get("failed_tools", set())
+    if not forced and not planner_tried and "planner" not in context.get("called_tools", set()):
         raise HookRejectSignal(
             "还没有为本轮做过精挑，不能直接出清单。手上的候选是上一轮按上一轮条件搜的，"
             "请先调 planner 判断本轮意图，再用 item_picker 按本轮条件精挑，然后收尾。"

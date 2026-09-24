@@ -26,7 +26,10 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Literal, get_args
+
+logger = logging.getLogger(__name__)
 
 PrefDomain = Literal[
     # 穿戴
@@ -159,6 +162,22 @@ def infer_domains_from_text(text: str) -> set[PrefDomain]:
 
     lowered = text.lower()
     return {d for d, terms in DOMAIN_TERMS.items() if any(term_hits(t, lowered) for t in terms)}
+
+
+def coerce_domains(raw: object) -> object:
+    """LLM 吐的域列表里**枚举外的值丢掉**，全丢光则落 ``other``；非列表原样交给 Pydantic。
+
+    2026-09-25 长会话实测：「旅行颈枕」planner 自造 ``travel``，Literal 校验一个值不合法就废掉
+    整份 PlanOutput → 本轮 planner 连挂 10 次。域只管 P_t 换域清词表，是次要字段，不该有能力
+    打挂整次拆解；丢掉越界值后 :func:`reconcile_domains` 还会用词面证据补域。
+    """
+    if not isinstance(raw, list):
+        return raw
+    kept = [d for d in raw if d in ALL_DOMAINS]
+    dropped = [d for d in raw if d not in ALL_DOMAINS]
+    if dropped:
+        logger.warning("planner 域越界已丢弃：%s（保留 %s）", dropped, kept)
+    return kept if kept or not raw else [DOMAIN_OTHER]
 
 
 def reconcile_domains(domains: list[PrefDomain], evidence_text: str) -> list[PrefDomain]:

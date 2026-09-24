@@ -58,5 +58,14 @@ def drop_none_values(data: object) -> object:
     ``Optional[...] = None`` 字段是语义无损的（丢了以后默认值还是 None）。
     """
     if isinstance(data, dict):
-        return {k: v for k, v in data.items() if v is not None}
+        return {k: v for k, v in data.items() if not _is_null(v)}
     return data
+
+
+# 第四形态（2026-09-25 长会话实测）：qwen3.8-flash 把 ``budget_amount`` 写成**字符串** "None"，
+# float 解析失败打挂整份 PlanOutput。只认这几个字面量，空串不算（str 字段的 "" 是合法值）。
+_NULL_LITERALS = frozenset({"none", "null"})
+
+
+def _is_null(v: object) -> bool:
+    return v is None or (isinstance(v, str) and v.strip().lower() in _NULL_LITERALS)

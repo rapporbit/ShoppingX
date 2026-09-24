@@ -32,7 +32,7 @@ import os
 import re
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.agent.invoke import call_structured
 from app.agent.llm import get_planner_llm
@@ -50,6 +50,7 @@ from app.api.context import (
 from app.memory.domains import (
     DOMAIN_GLOBAL,
     PrefDomain,
+    coerce_domains,
     domain_menu,
     reconcile_domains,
 )
@@ -310,6 +311,8 @@ class PlanOutput(BaseModel):
             "可选值：\n" + domain_menu()
         ),
     )
+    _domains_in_enum = field_validator("domains", mode="before")(coerce_domains)
+
     budget_amount: float | None = Field(
         default=None, description="用户原话给的预算金额（**不要换算**，照原数填），无则 None"
     )

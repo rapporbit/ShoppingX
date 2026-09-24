@@ -98,6 +98,7 @@ async def prefill(session: HarnessSession, agent: Agent) -> None:
         out = await planner_tool.ainvoke(args)
     except Exception:
         logger.warning("planner 预置失败，回退为模型自行调用（老路径）", exc_info=True)
+        s.failed_tools.add("planner")
         append_prefilled(agent, blocks)  # 图的结论已经拿到了，别连它一起丢
         return
     text = out.model_dump_json() if isinstance(out, BaseModel) else str(out)
