@@ -81,9 +81,29 @@ def make_stub(sleep_s_default: float) -> Any:
     return stub_run_agent
 
 
-def run_api(sleep_s: float, host: str, port: int) -> None:
+def stub_app() -> Any:
+    """多进程时 uvicorn 在每个子进程里调这个工厂：桩得在子进程里各打一遍，睡眠秒数走 env。"""
+    from app.api import server
+
+    server.run_agent = make_stub(float(os.environ.get("STUB_SLEEP_SEC", "3")))  # type: ignore[attr-defined]
+    return server.app
+
+
+def run_api(sleep_s: float, host: str, port: int, workers: int = 1) -> None:
     import uvicorn
 
+    if workers > 1:
+        # 压测用：N 个进程共享同一个监听 socket，内核分发连接（同 uvicorn --workers）。
+        os.environ["STUB_SLEEP_SEC"] = str(sleep_s)
+        uvicorn.run(
+            "scripts.stub_agent:stub_app",
+            factory=True,
+            host=host,
+            port=port,
+            workers=workers,
+            log_level="warning",
+        )
+        return
     from app.api import server
 
     server.run_agent = make_stub(sleep_s)  # type: ignore[attr-defined]
@@ -108,9 +128,10 @@ def main() -> None:
     p.add_argument("--sleep", type=float, default=float(os.environ.get("STUB_SLEEP_SEC", "3")))
     p.add_argument("--host", default="0.0.0.0")  # noqa: S104 - 容器内监听；compose 不发布端口
     p.add_argument("--port", type=int, default=8000)
+    p.add_argument("--workers", type=int, default=1)  # 仅 api 模式：uvicorn 进程数
     args = p.parse_args()
     if args.mode == "api":
-        run_api(args.sleep, args.host, args.port)
+        run_api(args.sleep, args.host, args.port, args.workers)
     else:
         run_worker(args.sleep)
 

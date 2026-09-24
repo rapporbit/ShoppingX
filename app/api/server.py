@@ -93,10 +93,10 @@ from app.db.accounts import MIN_PASSWORD_LEN, assert_owner, claim_thread, ensure
 from app.db.holds import REASON_CONCURRENCY, HoldResult, acquire_hold, release
 from app.db.quota import disabled_status as _disabled_quota
 from app.db.quota import get_quota, quota_enabled
-from app.db.runs import claim_thread_run, release_thread_run
+from app.db.runs import RunClaim, claim_thread_and_run, release_thread_run
 from app.db.session import init_db, session_factory
 from app.deployment import assert_deployment_deps
-from app.memory.history import read_turns
+from app.memory.history import count_turns, read_turns
 from app.observability import alerts, metrics
 from app.observability.logging import bind_log_context, configure_logging, unbind_log_context
 from app.queue import (
@@ -438,6 +438,27 @@ async def _claim_thread_if_needed(thread_id: str, user_id: str | None, query: st
             raise HTTPException(401, "凭证已失效，请重新登录") from exc
 
 
+async def _claim_thread_and_run_or_reject(
+    thread_id: str, run_id: str, user_id: str | None, query: str
+) -> RunClaim:
+    """起任务的归属登记 + 幂等第 1 层（合并版，见 :func:`app.db.runs.claim_thread_and_run`）。
+
+    它排在预扣之后（预扣必须在幂等判定之前，理由见 create_task），所以越权 / 凭证失效时要先把
+    刚占的那笔还掉再报错，否则那笔额度要挂到 TTL。
+    """
+    authed = auth_enabled() and bool(user_id)
+    try:
+        return await claim_thread_and_run(
+            thread_id, run_id, query, user_id=user_id or "", verify_user=authed
+        )
+    except PermissionError as exc:
+        await release(run_id)
+        raise HTTPException(403, "无权访问该会话") from exc
+    except LookupError as exc:  # token 合法但用户已不存在 → 让他重新登录
+        await release(run_id)
+        raise HTTPException(401, "凭证已失效，请重新登录") from exc
+
+
 async def _history_turns(thread_id: str) -> int:
     """该 thread 已积累的历史轮数（分类器的输入）。读不到一律按 0 算 → normal 池。
 
@@ -446,7 +467,7 @@ async def _history_turns(thread_id: str) -> int:
     等于给准入判定开了个竞态窗口。轮数只是分池的输入（normal / heavy），早读一步不影响正确性。
     """
     try:
-        return len(await read_turns(thread_id, safe_join(OUTPUT_ROOT, thread_id)))
+        return await count_turns(thread_id, safe_join(OUTPUT_ROOT, thread_id))
     except Exception:
         return 0
 
@@ -699,11 +720,9 @@ async def create_task(
     user_id = resolve_identity(auth_uid, req.user_id)
     thread_id = req.thread_id or uuid.uuid4().hex
 
-    # 配额闸与归属登记都在最前（各自 docstring 说明为什么），且都在本 handler「无 await 区间」的
-    # 前半段：下面「幂等判定 → 占槽 / 入队登记 → 写 active_tasks」那一整段仍然一个 await 都没有，
-    # 原子性不受影响（单线程事件循环里，没有 await 就不会被别的请求插进来）。
+    # 配额闸在最前。归属登记不再单独一步：它与幂等第 1 层并成下面那一次 claim_thread_and_run
+    # （一个会话一次 commit），越权 / 凭证失效在那里报，报之前把预扣还掉。
     await _enforce_quota(user_id)
-    await _claim_thread_if_needed(thread_id, user_id, req.query)
 
     # 分档的输入（历史轮数）在这里就取好：它要查库（await），而下面从幂等判定到入队登记那一整段
     # 必须一个 await 都没有——原子性全靠这个，见 _history_turns 的 docstring。
@@ -725,7 +744,9 @@ async def create_task(
     # 判定与占位是同一条条件 UPDATE（见 app.db.runs），所以同一个 thread 打到两台副本时，只有
     # 一台的影响行数是 1，另一台按 already_running 把用户领回去。``active_tasks`` 降级为本进程
     # 缓存：它还管着取消口、/inflight 与影子协程的身份校验，但不再是「谁在跑」的答案。
-    claim = await claim_thread_run(thread_id, run_id, req.query)
+    #
+    # 归属登记（M16）也在这一步：属主校验、首轮插行、顶 updated_at 与占位同在一次提交里。
+    claim = await _claim_thread_and_run_or_reject(thread_id, run_id, user_id, req.query)
     old = active_tasks.get(thread_id)
     if not claim.can_start:
         # 同一句话又发了一遍 → 领回原任务，不重跑、不占新槽、不动旧任务。
