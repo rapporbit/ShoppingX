@@ -84,7 +84,6 @@ class AlertRule:
 DEFAULT_RULES: tuple[AlertRule, ...] = (
     # 外呼型（跨网，最该盯）。
     AlertRule("item_search", p95_threshold_ms=1_000, hard_ms=8_000),  # 实测 P95 470 / P99 1888
-    AlertRule("category_insight", p95_threshold_ms=3_000, hard_ms=10_000),  # 实测 P95 1287
     AlertRule("web_search", p95_threshold_ms=5_000, hard_ms=15_000),  # 实测 P95 2391（Tavily 外网）
     # 本地计算型：查表 + 算术，慢了说明数据结构或 IO 出了问题。实测都在 20ms 以内。
     AlertRule("price_compare", p95_threshold_ms=500, hard_ms=3_000),  # 实测 P95 20

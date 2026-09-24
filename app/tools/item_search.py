@@ -353,6 +353,11 @@ async def item_search(
     参数：query 用品类核心词（场景/人群词交给 item_picker 的 prefer）；platform 见
     <enabled_platforms>；price_usd_max / min_rating / brand_exclude 召回期过滤；top_k 不用传；
     slot 只在多槽位轮传槽名（一槽一条、同轮发）。
+    造检索词（每次都适用，单品直搜不读 skill 也照做）：
+    - 库里是英文标题：把中文口语（抗造 / 小众）翻成英文品类词 + 属性词，原话留在身后。
+    - 用户明说的硬条件进 price_usd_max / min_rating / brand_exclude；你猜的进 query 措辞。
+    - <user_long_term_memory> 已有的事实直接写进入参，不再问；缺预算尺寸不挡着搜。
+    - plan 判 intent_grounding=web（新说法 / 潮流词）→ 先 web_search 翻成品类词再搜，结果不当候选。
     返回 filtered_out = 库里有但被条件挡住（不是候选，如实说被哪个条件挡的）。
     """
     # 个性化**不再由系统悄悄拼词**（M4）：长期偏好每轮注入给模型看，由模型自己决定要不要写进

@@ -6,15 +6,15 @@
 **这里预取的只有事实，不含 skill 正文**（2026-09-19 按 Anthropic ``commerce-agents`` 的分界
 线收敛，曾有过的套装 skill 预注入 D1 已删）。那条线是：
 
-* **机制（预取 / 强制）管事实接地** —— planner 拆出的字段、品类行情、订单。漏了就是幻觉，
+* **机制（预取 / 强制）管事实接地** —— planner 拆出的字段、订单。漏了就是幻觉，
   不可恢复，所以不赌模型。常见实现同样只对读工具做 grounding（``grounding.py``：店铺条款 /
   订单 / 没见过的 product_id）。
 * **模型自觉管打法加载** —— skill 正文靠模型读 ``<agent-skills>`` 目录里的 description 自己调
-  ``Skill(skill=…)`` 取（``prompt.py`` 那句「call ``load_skill`` in the same round as your
-  first read」）。漏了只是流程走样，可评测、可回归。
+  ``Skill(skill=…)`` 取，**先读完再行动**（prompts.yml 分流表；2026-09-24 前是「与第一条检索
+  同轮发」，实测正文比检索晚到、管不到检索词，改回框架默认的串行，首次读 skill 的轮次多一次
+  往返）。漏了只是流程走样，可评测、可回归。
 
-推翻预注入的三条实据：① 省往返的说法不成立——同轮可以既发 ``Skill`` 又发 ``item_search``，
-串行是 prompt 措辞造成的；② 判据不硬——C6 禁改 planner schema 后，「送礼」「怎么选」这类只能
+推翻预注入的另两条实据（原第①条「同轮发省往返」已随上面的串行化作废）：② 判据不硬——C6 禁改 planner schema 后，「送礼」「怎么选」这类只能
 退回关键词正则，误判率不比模型读 description 低，而 ``bundle_slots`` 本身也是 LLM 输出；
 ③ ``HarnessSession`` 每轮新建、``state.context`` 跨轮累积，预注入会让同一份正文在多轮会话里
 躺 N 份（实测 ``prefill_planner`` 在 3 轮会话里出现 6 次）。
@@ -112,11 +112,10 @@ async def prefill(session: HarnessSession, agent: Agent) -> None:
     ctx["tool_name"] = "planner"
     ctx["tool_args"] = args
     ctx["tool_result"] = text
-    # round3 刀 4：planner 的 post_tool_call（域内长期偏好读取 + 注入，走 DB）与品类知识库预取
-    # （进程内两段式检索）互不依赖，并发跑；KB 预取的结果作为第二对 tool 块预置进上下文，
-    # 模型第 1 轮就拿着 plan + 品类行情直接检索（改前 9/9 遍第 1 轮都在调 category_insight）。
-    kb_task = asyncio.create_task(_prefetch_kb(s, out)) if _kb_prefetch_due(out) else None
-    # 订单 grounding（D4）：问订单的轮次直接把最近几张摆上去，与 KB 预取并发。
+    # 品类知识库预取（round3 刀 4）已于 2026-09-24 删除：卡片是整品类统计，粒度对不上具体需求
+    # （「降噪耳机」注入的爆款是监听 / 游戏 / 儿童耳机），category_insight 也一并摘出工具表。
+    # 品类常识交给模型自身知识，库外行情走 web_search / research。
+    # 订单 grounding（D4）：问订单的轮次直接把最近几张摆上去，与 planner 的 post_tool_call 并发。
     orders_due = _orders_prefetch_due(out, s.original_query)
     orders_task = asyncio.create_task(_prefetch_orders(s)) if orders_due else None
     ctx = await harness.run("post_tool_call", ctx)
@@ -127,36 +126,9 @@ async def prefill(session: HarnessSession, agent: Agent) -> None:
         text = guarded
 
     blocks.extend(tool_blocks(call_id, "planner", args, text))
-    if kb_task is not None:
-        blocks.extend(await kb_task)
     if orders_task is not None:
         blocks.extend(await orders_task)
     append_prefilled(agent, blocks)
-
-
-def _kb_prefetch_due(plan: Any) -> bool:
-    """要不要预取品类知识库：开关开 + planner 判出品类 + 本轮有购物类任务（纯交易 / 闲聊不取）。"""
-    if os.getenv("KB_PREFETCH", "1").strip().lower() in {"0", "false", "off"}:
-        return False
-    category = str(getattr(plan, "category", "") or "").strip()
-    tasks = set(getattr(plan, "tasks", None) or [])
-    return bool(category) and bool(tasks & {"recommend", "evaluate", "category_intel"})
-
-
-async def _prefetch_kb(s: HarnessSession, plan: Any) -> list[Any]:
-    """按 planner 的品类预取 category_insight（quick），走与真实调用同一条成功后管线。失败即空。"""
-    from app.harness.adapter import after_tool_success
-    from app.tools._shell import _to_text
-    from app.tools.category_insight import category_insight
-
-    args = {"category": str(plan.category).strip(), "depth": "quick"}
-    try:
-        out = await category_insight.ainvoke(args)
-        text = await after_tool_success(s, "category_insight", args, _to_text(out))
-    except Exception:
-        logger.warning("品类知识库预取失败，交回模型自行决定是否调 category_insight", exc_info=True)
-        return []
-    return tool_blocks("prefill_category_insight", "category_insight", args, text)
 
 
 def _orders_prefetch_due(plan: Any, query: str) -> bool:

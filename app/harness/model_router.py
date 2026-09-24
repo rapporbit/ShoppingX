@@ -97,7 +97,7 @@ def current_tier() -> Tier:
 # 模型偶尔会把这段整个抄进给用户的回答里，输出审核靠这个前缀把它剔掉。
 MINIMAL_HINT = (
     "[预算提醒] 本次任务的 token 预算已所剩不多（不足 20%）。从现在起：\n"
-    "- 不要再发起任何新的检索（item_search / web_search / category_insight）或 fork 子任务；\n"
+    "- 不要再发起任何新的检索（item_search / web_search / research）或 fork 子任务；\n"
     "- Think 阶段不要展开长推理，直接给结论；\n"
     "- 基于已有的候选和观察结果，立刻走完剩余步骤并**调用终结性工具收尾**"
     "（有商品卡 → shopping_summary；纯文字 → chat_fallback）。"
