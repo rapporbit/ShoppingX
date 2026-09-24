@@ -50,6 +50,10 @@ if _w := os.environ.get("PLANNER_REWARD_WEIGHTS"):
 
 PARSE_FAIL_REWARD = -1.0
 
+# econ 饱和区封顶阈值。0 = 关（默认，评测口径与 r1~r5 / RFT 各轮完全一致）。
+# 训练时设 PLANNER_ECON_CAP=0.85 打开，见 score_econ 的注释。
+ECON_CAP = float(os.environ.get("PLANNER_ECON_CAP", "0") or 0)
+
 # top20 里有一半命中 must_have 锚就算满分。要求 100% 是不现实的——库里同品类商品本来就
 # 掺着配件与周边（accessory_flood 那一族的根因是数据不是算法），把标准定在够不着的地方，
 # 梯度就永远指向「再堆几个同义词」这种没用的方向。
@@ -153,11 +157,17 @@ def score_econ(plan: dict) -> tuple[float | None, dict]:
     overlap = 1.0 - (len(set(all_toks)) / len(all_toks)) if all_toks else 0.0
 
     score = count_score * (1 - 0.5 * long_ratio) * (1 - 0.6 * min(1.0, overlap * 2))
-    return max(0.0, min(1.0, score)), {
-        "n": n,
-        "长词占比": round(long_ratio, 2),
-        "词面重叠": round(overlap, 2),
-    }
+    score = max(0.0, min(1.0, score))
+    detail = {"n": n, "长词占比": round(long_ratio, 2), "词面重叠": round(overlap, 2)}
+    if ECON_CAP and score >= ECON_CAP:
+        # **饱和区封顶**（默认关，靠 PLANNER_ECON_CAP 打开，只在训练时开、评测时绝不开）。
+        # 2026-09-23 实测：GRPO 把 econ 从 .80 推到 .92 后就不动了（step300→404 在噪声里晃），
+        # 而同期 retrieval 被单调侵蚀 .6596→.6537。econ 是确定性低方差维、梯度最好拿，
+        # 饱和之后它仍占着组内优势的注意力。封顶是把这段无效梯度削平，逼 GRPO 去啃
+        # 权重 .45 的 retrieval —— 它到底是「没梯度可用」还是「本身高方差学不动」，这一刀能分开。
+        score = 1.0
+        detail["封顶"] = ECON_CAP
+    return score, detail
 
 
 # ── R_field：与 golden 的字段级一致。**弃权维度不计分**，不是当 0 分罚 ──────────────
@@ -175,6 +185,20 @@ def _cat_match(pred: str, gold: str) -> float:
     return round(inter / max(1, len(pc | gc)), 3) if inter else 0.0
 
 
+def _num_eq(pred: object, gold: object) -> bool:
+    """预算金额比大小。**转不成数就算不匹配，不能让它抛**。
+
+    2026-09-22 拿**基座**当对照跑 dev 时炸出来的：基座会把 budget_amount 吐成 `"300美元"`，
+    `float()` 直接 ValueError，一条脏输出掀掉整个评测进程。带 adapter 的模型不犯这个错
+    （SFT 教的第一件事就是别把金额写成字符串），所以这条路径此前从没被走到过——
+    **reward 是给没训好的模型打分的，它的健壮性必须按最差输入设计，不能按自家模型的水平设计**。
+    """
+    try:
+        return abs(float(pred) - float(gold)) < 1e-6
+    except (TypeError, ValueError):
+        return False
+
+
 def _budget_match(plan: dict, gold: dict) -> float | None:
     """预算：金额 + clear_budget。`budget_uncertain` 的样本返回 None（跳过计分）。"""
     if gold.get("budget_uncertain"):
@@ -186,7 +210,7 @@ def _budget_match(plan: dict, gold: dict) -> float | None:
         else 0.0
         if gb is None or pb is None
         else 1.0
-        if abs(float(pb) - float(gb)) < 1e-6
+        if _num_eq(pb, gb)
         else 0.0
     )
     clear_ok = 1.0 if bool(plan.get("clear_budget")) == bool(gold.get("clear_budget")) else 0.0
