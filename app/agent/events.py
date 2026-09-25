@@ -20,6 +20,7 @@
 重复或不准的事件——AGUI 事件流是用户唯一能看见 Agent 在干什么的窗口，重复即噪声。
 """
 
+import asyncio
 import logging
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -46,11 +47,17 @@ async def pump_events(stream: AsyncGenerator[Any, None]) -> Msg | None:
     返回 ``None`` 表示这次 reply 没有产出最终消息（被打断 / 挂起等外部交互）。
     """
     final: Msg | None = None
+    interrupted = False
     async for event in stream:
         if isinstance(event, Msg):
             final = event
+            # 最终 Msg 自带收尾原因：中间件为「强制再来一轮」吞掉 ReplyEnd 时，这是唯一的痕迹。
+            interrupted = interrupted or event.finished_reason == ReplyFinishedReason.INTERRUPTED
             continue
         if isinstance(event, ReplyEndEvent):
+            if event.finished_reason == ReplyFinishedReason.INTERRUPTED:
+                interrupted = True
+                continue
             # 收尾原因从 ``ReplyEndEvent.finished_reason`` 读，**不认 ``ExceedMaxItersEvent``**：
             # 2.0.7 起后者已 deprecated（框架两个都发），认两处就会把同一次超限报两遍。
             if event.finished_reason == ReplyFinishedReason.EXCEED_MAX_ITERS:
@@ -75,4 +82,18 @@ async def pump_events(stream: AsyncGenerator[Any, None]) -> Msg | None:
                 names,
             )
             continue
+    if interrupted:
+        # 框架（2.0.7.post1）在 reply 内部**吞掉** CancelledError：补齐被打断的工具结果，发
+        # INTERRUPTED 的 ReplyEnd，再吐一条英文兜底 Msg，调用方看到的是「正常返回」。
+        # ``interruption_raise_cancelled_error=True`` 实测也不往外抛。不在这里补抛的话，用户
+        # 取消与 ``asyncio.timeout`` 超时都会被 orchestrator 当成功收尾：状态记 done、把那句
+        # 英文当回答发出去、被打断的半轮写进 session.json。
+        # **不能按 ``current_task().cancelling() > 0`` 判断「是不是真取消」**：取消落在并发工具
+        # 批里时，框架会 ``uncancel()`` 把计数清零（``_agent.py`` ``_execute_concurrent_tool_calls``），
+        # 而本仓工具默认 ``is_concurrency_safe=True``——工具在跑的那段时间，取消 / 超时全认不出来。
+        # 本仓 INTERRUPTED 只有这一个来源（不发 ``UserInterruptEvent``、工具不回 INTERRUPTED 态），
+        # 所以一律补抛。外层是 ``asyncio.timeout`` 时，它的 ``__aexit__`` 在计数为 0 时同样把
+        # CancelledError 换成 TimeoutError（3.11：``uncancel() <= 进入时计数``）。
+        # 将来若接 ``UserInterruptEvent``，这里要改成按来源区分，不能照抄。
+        raise asyncio.CancelledError
     return final
