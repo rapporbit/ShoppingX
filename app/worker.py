@@ -40,12 +40,14 @@ from contextlib import suppress
 from typing import Any
 
 from app.agent.orchestrator import run_agent
+from app.agent.tracing import parse_traceparent
 from app.api import clarification, control, monitor
 from app.config import store as config_store
 from app.db.holds import mark_running, release
 from app.db.runs import release_thread_run
 from app.db.session import init_db
 from app.deployment import assert_deployment_deps
+from app.observability import metrics
 from app.observability.logging import bind_log_context, configure_logging, unbind_log_context
 from app.queue import IntentTask, TaskQueue, TaskStatus, get_task_queue
 from app.utils.env import env_int
@@ -56,6 +58,9 @@ logger = logging.getLogger("shoppingx.worker")
 # 本进程同时跑几个 AgentLoop。默认 4 而不是 API 侧准入池的 8（5+3）：那 8 个槽是「一个进程既收请求
 # 又跑 Agent」时的上限，拆开之后 worker 可以横向加副本，单副本压满反而让长尾更长。
 WORKER_CONCURRENCY = env_int("WORKER_CONCURRENCY", 4)
+# worker 自己的 /metrics 端口（API 那边走 FastAPI 路由）。0 = 不暴露；同机多开时后起的几个会
+# 撞端口，记 warning 照常消费——需要逐个抓就给每个进程配不同的值。
+WORKER_METRICS_PORT = env_int("WORKER_METRICS_PORT", 9101)
 # 收到 SIGTERM 后最多等在飞任务多久。**必须 ≥ 单轮超时 ``MAIN_AGENT_TIMEOUT_SEC``（300）加余量**：
 # 小于它就等于每次发布都主动掐掉一批「本来再等几十秒就会自己超时收尾」的任务（旧默认 120 < 300，
 # 跑过 2 分钟的 run 必被掐）。330 = 300 + 30s 收尾余量；真到了 330 还没完的，按 interrupted 收场。
@@ -130,7 +135,11 @@ async def handle_task(task: IntentTask, queue: TaskQueue | None = None) -> None:
     agent_started = False
     # 绑在整个 handle_task 外层，而不是只靠 run_agent 里那次（阶段 4-5）：取消、关停掐断、
     # 重投超限这几条路根本走不到 run_agent，而它们恰恰是最需要跨进程对账的日志。
-    log_tokens = bind_log_context(request_id=task.request_id or None)
+    # trace_id 与 API 入队那段同值（随 traceparent 带过来）：两边日志按它一筛就是整条线。
+    parent = parse_traceparent(task.traceparent)
+    log_tokens = bind_log_context(
+        request_id=task.request_id or None, trace_id=parent.trace_id if parent else None
+    )
     try:
         # 排队期间就被取消的：领到手先自查标记，一步都不用跑。这是「还在排队的任务也取消得掉」
         # 的落点——广播只能送到已经领走它的那个 worker，还没被领走的只能靠这张标记。
@@ -171,6 +180,8 @@ async def handle_task(task: IntentTask, queue: TaskQueue | None = None) -> None:
             request_id=task.request_id,
             # 入队时刻：首事件延迟 SLO 的计时起点，**排队等的那几秒也算在内**（阶段 6）。
             enqueued_at=task.enqueued_at,
+            # API 入队 span 的上下文：本轮根 span 挂到它下面，排队与 Agent 两段才是同一条 trace。
+            traceparent=task.traceparent,
         )
     except asyncio.CancelledError:
         if not control.was_cancelled_locally(task.task_id):
@@ -335,6 +346,9 @@ async def bootstrap() -> None:
     的旧值跑，而这种偏差不会报错（见记忆 ``structured-output-method-must-be-pinned``）。
     """
     configure_logging()
+    # 队列模式下 run_agent 的全部指标都记在本进程，不暴露就等于没记（理由见 serve_worker_metrics）。
+    if metrics.serve_worker_metrics(WORKER_METRICS_PORT):
+        logger.info("worker metrics 已暴露在 :%d/metrics", WORKER_METRICS_PORT)
     await init_db()
     await config_store.load_into_memory()
     ok = await asyncio.to_thread(warm_tokenizer)

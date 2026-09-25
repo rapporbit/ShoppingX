@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from app.agent.tracing import trace_url
 from app.observability.metrics import SECURITY_EVENTS
 from app.utils.circuit_breaker import CLOSED, all_breakers
-from app.utils.env import env_bool, env_float
+from app.utils.env import env_bool, env_float, env_int
 
 logger = logging.getLogger("shoppingx.alerts")
 
@@ -289,14 +289,65 @@ def _evaluate_security() -> list[Alert]:
     ]
 
 
-def check_rules(now: float | None = None) -> list[Alert]:
-    """评估全部规则，返回本周期该发的通知。纯计算（只推进内部状态机），无 IO，可单测。"""
+_BACKLOG_KEY = "queue:backlog"
+
+
+def backlog_threshold() -> int:
+    """积压告警阈值：``ALERT_QUEUE_BACKLOG`` 显式配了用它，否则取 ``QUEUE_MAX_DEPTH`` 的一半。
+
+    跟着 429 的那条线走而不是另写死一个数：积压到上限就开始拒人了，**过半**时报是给人留出扩 worker
+    的时间。两个数各配各的，改了上限忘改告警，告警就会在拒人之后才响、或者永远不响。
+    """
+    explicit = env_int("ALERT_QUEUE_BACKLOG", 0)
+    if explicit > 0:
+        return explicit
+    return max(1, env_int("QUEUE_MAX_DEPTH", 200) // 2)
+
+
+def _evaluate_backlog(depth: int | None, now: float, cooldown: float) -> Alert | None:
+    """队列积压（两条流未领取数之和）越线即告警；``depth=None``（没取到）不评估、不改状态。
+
+    与工具 RT 互补：RT 看「已经在跑的慢不慢」，积压看「还没轮到的有多少」——worker 全挂时 RT 窗口
+    里一条样本都没有，只有这条会响。滞回同 RT（跌回阈值 90% 以下才报恢复）。
+    """
+    if depth is None:
+        return None
+    threshold = backlog_threshold()
+    breached = depth >= threshold
+    cleared = depth < threshold * _RESOLVE_RATIO
+    level = _transition(_BACKLOG_KEY, breached, cleared, now, cooldown)
+    if level is None:
+        return None
+    if level == "resolved":
+        return Alert("resolved", _BACKLOG_KEY, "队列积压已回落", f"待领取 {depth} 条")
+    detail = f"待领取 {depth} 条 ≥ 阈值 {threshold}，worker 消费跟不上或已停摆"
+    return Alert(level, _BACKLOG_KEY, "任务队列积压", detail)
+
+
+def check_rules(now: float | None = None, queue_depth: int | None = None) -> list[Alert]:
+    """评估全部规则，返回本周期该发的通知。纯计算（只推进内部状态机），无 IO，可单测。
+
+    ``queue_depth`` 由调用方读好传进来（读队列是 IO）；None = 本轮不评估积压。
+    """
     now = time.monotonic() if now is None else now
     cooldown = env_float("ALERT_COOLDOWN_SEC", 900.0)
     alerts = [a for r in DEFAULT_RULES if (a := _evaluate_rt(r, now, cooldown)) is not None]
     alerts.extend(_evaluate_breakers(now, cooldown))
     alerts.extend(_evaluate_security())
+    if (backlog := _evaluate_backlog(queue_depth, now, cooldown)) is not None:
+        alerts.append(backlog)
     return alerts
+
+
+async def _read_queue_depth() -> int | None:
+    """读一次队列深度；队列建不起来返回 None（本轮跳过积压规则，别的规则照评）。"""
+    try:
+        from app.queue import get_task_queue
+
+        return await get_task_queue().depth()
+    except Exception:
+        logger.debug("读队列深度失败，本轮跳过积压告警", exc_info=True)
+        return None
 
 
 # ────────────────────────────── 通知 ──────────────────────────────
@@ -347,8 +398,9 @@ async def send_alert(alert: Alert) -> None:
 
 async def check_and_notify() -> None:
     """跑一轮规则评估并推送。异常全吞，保证后台轮询 task 不会因为一次故障而死掉。"""
+    depth = await _read_queue_depth()
     try:
-        alerts = check_rules()
+        alerts = check_rules(queue_depth=depth)
     except Exception:
         logger.warning("告警规则评估失败，跳过本轮", exc_info=True)
         return

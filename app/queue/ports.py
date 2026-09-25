@@ -70,6 +70,11 @@ class IntentTask:
     # 侧根 span 生成、只覆盖 run_agent 内部），两个同名不同物的 id 会让排查时对着日志猜是哪个。
     # 老消息没有这个字段，留空即可。
     request_id: str = ""
+    # W3C traceparent（``00-<trace_id>-<span_id>-<flags>``）：API 入队 span 的上下文，worker 据此把
+    # run_agent 的根 span 挂到它下面，一次请求才是一条 trace 而不是两截。**与 request_id 并存**：
+    # request_id 是 HTTP 请求的 id（一次请求一个），traceparent 管的是 trace 树的父子关系；
+    # 观测关着时 API 也会造一个，trace_id 照样是跨进程日志的关联键。老消息没有，留空即可。
+    traceparent: str = ""
 
     @classmethod
     def create(
@@ -110,6 +115,7 @@ class IntentTask:
             "kind": self.kind,
             "enqueued_at": self.enqueued_at,
             "request_id": self.request_id,
+            "traceparent": self.traceparent,
         }
 
     @staticmethod
@@ -131,6 +137,7 @@ class IntentTask:
             kind="heavy" if kind == "heavy" else "normal",
             enqueued_at=raw.get("enqueued_at", ""),
             request_id=str(raw.get("request_id") or ""),
+            traceparent=str(raw.get("traceparent") or ""),
         )
 
 

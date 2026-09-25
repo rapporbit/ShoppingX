@@ -16,12 +16,15 @@ Prometheus 来拉。规模上来再谈远端写。
 
 from __future__ import annotations
 
+import logging
+
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     Counter,
     Gauge,
     Histogram,
     generate_latest,
+    start_http_server,
 )
 
 from app.utils.circuit_breaker import HALF_OPEN, OPEN, all_breakers
@@ -63,6 +66,20 @@ GATE_EVENTS = Counter("shoppingx_gate_events_total", "硬闸拒绝/逃生事件"
 # LLM 令牌桶事件：event=degraded（Redis 不可用，退进程内桶）/ overflow（等满上限仍无令牌，放行）。
 # 两条都不该常亮：degraded 抬头查 Redis，overflow 抬头说明限额配小了或副本开多了。
 LLM_BUCKET_EVENTS = Counter("shoppingx_llm_bucket_events_total", "LLM 令牌桶事件", ["event"])
+# LLM 调用在自家限流闸前等了多久：stage=bucket（跨副本令牌桶）/ gateway（本进程并发位 + 起点间隔）。
+# 「用户说没反应」时要分得清是排在队列里、卡在限流闸前、还是模型本身慢——前两段是我们自己的
+# 节流，不会出现在任何模型 span 的耗时里。每次调用都记（含 0 秒），分位数才有分母。
+LLM_THROTTLE_WAIT = Histogram(
+    "shoppingx_llm_throttle_wait_seconds",
+    "LLM 调用在限流闸前的等待耗时（秒）",
+    ["stage"],
+    buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0),
+)
+# 队列接管：租约过期、被别的 worker XCLAIM 领回来重跑的任务数（stream=两条流名）。平时应接近 0；
+# 抬头说明 worker 在崩 / 被 OOM / 事件循环卡死续不上租约——每一次都意味着用户那轮被重跑了一遍。
+QUEUE_RECLAIMED = Counter(
+    "shoppingx_queue_reclaimed_total", "租约过期被接管重跑的任务数", ["stream"]
+)
 
 # --- SLO 两条（阶段 6）-------------------------------------------------------
 #
@@ -133,6 +150,18 @@ def record_llm_bucket(event: str) -> None:
     LLM_BUCKET_EVENTS.labels(event=event).inc()
 
 
+def record_llm_throttle_wait(stage: str, seconds: float) -> None:
+    """记一次 LLM 限流等待。``stage`` 取 ``bucket`` / ``gateway``；负数（时钟回拨）丢弃。"""
+    if seconds >= 0:
+        LLM_THROTTLE_WAIT.labels(stage=stage).observe(seconds)
+
+
+def record_queue_reclaimed(stream: str, n: int = 1) -> None:
+    """记 ``n`` 条被接管的任务（``RedisStreamQueue._reclaim`` 领回时调）。"""
+    if n > 0:
+        QUEUE_RECLAIMED.labels(stream=stream).inc(n)
+
+
 def record_run_outcome(outcome: str) -> None:
     """记一次 run 的收尾结果（SLO 第一条）。
 
@@ -191,3 +220,23 @@ def refresh_circuit_breakers() -> None:
 def render() -> tuple[bytes, str]:
     """渲染 Prometheus 文本格式，返回 ``(body, content_type)`` 供 /metrics 端点直接回。"""
     return generate_latest(), CONTENT_TYPE_LATEST
+
+
+def serve_worker_metrics(port: int) -> bool:
+    """在 worker 进程里起一个独立的 ``/metrics`` 端口（API 进程走 FastAPI 路由，不用它）。
+
+    **为什么 worker 要自己暴露**：队列模式下 run_agent、工具、模型调用全在 worker 里跑，SLO / 工具
+    耗时 / 限流等待 / 接管次数都记在 worker 的进程内 registry 里；只抓 API 的 ``/metrics`` 看到的
+    这些全是 0。``port <= 0`` 关掉；端口被占（同机多开 worker）只记 warning 不拦启动——指标是
+    附属品，不能因为它起不来而让消费停摆。
+    """
+    if port <= 0:
+        return False
+    try:
+        start_http_server(port)
+    except OSError as exc:
+        logging.getLogger("shoppingx.metrics").warning(
+            "worker metrics 端口 %d 起不来：%s", port, exc
+        )
+        return False
+    return True

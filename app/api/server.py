@@ -42,7 +42,7 @@ import logging
 import os
 import uuid
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from fastapi import (
@@ -57,6 +57,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from app.agent.tracing import enqueue_span, parse_traceparent
 from app.api import (
     accounts,
     admin,
@@ -487,22 +488,37 @@ async def _queue_depth_or_429(kind: str) -> int:
     return depth
 
 
-async def _enqueue_intent(intent: IntentTask, depth: int) -> None:
-    """先落 ``queued`` 状态、再入队。
+async def _enqueue_intent(intent: IntentTask, depth: int) -> IntentTask:
+    """先落 ``queued`` 状态、再入队；返回带上 traceparent 的那份任务。
 
     顺序反过来会**把状态倒退**：worker 可能已经领走并置成 running，我们随后写的 queued 会盖掉它，
     轮询方看见任务从「跑着」变回「排队」。先写则 worker 只会把状态往前推。
+
+    整段包在入队 span 里（trace 的根），traceparent 随消息走，worker 那边接上。这段期间的日志绑
+    trace_id——与 worker 侧同一个值，按它一筛就是两个进程的整条线。
     """
     queue = get_task_queue()
-    await queue.set_status(
-        TaskStatus(
-            task_id=intent.task_id,
-            state="queued",
-            thread_id=intent.thread_id,
-            queue_depth=depth,
-        )
-    )
-    await queue.enqueue(intent)
+    with enqueue_span(
+        task_id=intent.task_id,
+        session_id=intent.thread_id,
+        user_id=intent.user_id,
+        kind=intent.kind,
+    ) as parent:
+        intent = replace(intent, traceparent=parent.header())
+        log_tokens = bind_log_context(trace_id=parent.trace_id)
+        try:
+            await queue.set_status(
+                TaskStatus(
+                    task_id=intent.task_id,
+                    state="queued",
+                    thread_id=intent.thread_id,
+                    queue_depth=depth,
+                )
+            )
+            await queue.enqueue(intent)
+        finally:
+            unbind_log_context(log_tokens)
+    return intent
 
 
 async def _report_cancel_if_queued(task_id: str, thread_id: str) -> None:
@@ -583,7 +599,7 @@ async def _queued_runner(intent: IntentTask, position: int) -> None:
     deadline = asyncio.get_running_loop().time() + QUEUE_WAIT_TIMEOUT_SEC
     try:
         try:
-            await _enqueue_intent(intent, position - 1)
+            intent = await _enqueue_intent(intent, position - 1)
         except Exception as exc:
             # 入队失败必须让用户看见。走 error 事件而不是 HTTP 5xx：响应早就返回了，而前端本就按
             # error 事件收尾（run_agent 抛异常时也是这条路），故零改动即可显示。
@@ -592,6 +608,9 @@ async def _queued_runner(intent: IntentTask, position: int) -> None:
                 "enqueue_failed", f"任务入队失败：{exc}", thread_id=thread_id
             )
             return
+        # 本协程余下的日志（排队超时 / 作废）也带 trace_id。它是独立 task，绑定不外溢，不必还原。
+        parent = parse_traceparent(intent.traceparent)
+        bind_log_context(trace_id=parent.trace_id if parent else None)
         if position > 1:
             metrics.record_task_queued(intent.kind)
             await monitor.report_queue_status(

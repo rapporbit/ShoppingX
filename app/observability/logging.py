@@ -16,7 +16,9 @@ user_id 的同时，顺手用 structlog 的 contextvars 绑定同样的字段。
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from collections.abc import Mapping
 from typing import Any
 
@@ -26,6 +28,64 @@ from app.security.log_sanitizer import sanitize_log_processor
 from app.utils.env import env_bool
 
 _configured = False
+
+# 注入 stdlib 日志的上下文字段。**不含 user_id**：structlog 那条路有脱敏处理器，这条没有，
+# 放进来就是每条日志一份明文 user_id。
+_STDLIB_FIELDS = ("trace_id", "request_id", "thread_id")
+
+
+class _ContextFieldsFilter(logging.Filter):
+    """把 structlog contextvars 里的关联字段抄到 stdlib LogRecord 上。
+
+    **为什么需要它。** 全仓日志几乎都走 stdlib ``logging.getLogger``，而 ``bind_log_context``
+    只进 structlog 的 contextvars——不桥接的话 request_id / trace_id 绑了也打不出来，跨进程对账
+    只剩一句空话。filter 挂在 handler 上，读的是**发日志那一刻**所在协程的上下文。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        bound = structlog.contextvars.get_contextvars()
+        fields = {k: bound[k] for k in _STDLIB_FIELDS if bound.get(k)}
+        record.ctx_fields = fields
+        record.ctx = "".join(f" {k}={v}" for k, v in fields.items())
+        return True
+
+
+class _JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        body = {
+            "timestamp": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
+            "level": record.levelname.lower(),
+            "logger": record.name,
+            "event": record.getMessage(),
+            **getattr(record, "ctx_fields", {}),
+        }
+        if record.exc_info:
+            body["exception"] = self.formatException(record.exc_info)
+        return json.dumps(body, ensure_ascii=False)
+
+
+def _configure_stdlib(json_logs: bool) -> None:
+    """由应用接管 root：换上带上下文字段的 handler（级别走 ``LOG_LEVEL``，默认 INFO）。
+
+    **原先 root 上那个 handler 是 import 的副作用**：``app/mcp/fx_server.py`` 在模块级建 FastMCP，
+    它的构造函数调 ``logging.basicConfig`` 挂了一个 RichHandler——日志打得出来，但格式归第三方管、
+    一个上下文字段都没有。这里把它摘掉换成自己的；只摘 RichHandler，pytest 的 caplog 等别的 handler
+    原样留着。挂在 root 而不是 ``shoppingx`` / ``app`` 两棵子树上：子树再挂一个会与 root 那个
+    各打一遍，关 ``propagate`` 又会让 caplog 收不到。
+    """
+    root = logging.getLogger()
+    for existing in list(root.handlers):
+        if type(existing).__name__ == "RichHandler":
+            root.removeHandler(existing)
+    handler = logging.StreamHandler()
+    handler.addFilter(_ContextFieldsFilter())
+    handler.setFormatter(
+        _JsonFormatter()
+        if json_logs
+        else logging.Formatter("%(asctime)s %(levelname)s %(name)s%(ctx)s %(message)s")
+    )
+    root.addHandler(handler)
+    root.setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
 
 
 def configure_logging() -> None:
@@ -57,6 +117,7 @@ def configure_logging() -> None:
         logger_factory=structlog.PrintLoggerFactory(),
         cache_logger_on_first_use=True,
     )
+    _configure_stdlib(json_logs)
     _configured = True
 
 

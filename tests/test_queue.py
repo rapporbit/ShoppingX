@@ -14,9 +14,12 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from dataclasses import replace
 from typing import Any
 
 import pytest
+import structlog
+from prometheus_client import REGISTRY
 
 from app import queue as queue_pkg
 from app import worker
@@ -309,6 +312,17 @@ def test_request_id_survives_the_queue() -> None:
     assert IntentTask.from_dict(task.to_dict()).request_id == "ab12cd34"
 
 
+_TP = "00-" + "ab" * 16 + "-" + "cd" * 8 + "-01"
+
+
+def test_traceparent_survives_the_queue() -> None:
+    """traceparent 同 request_id：加在 dataclass 上忘了进 payload，同进程测全绿、过队列静默丢。"""
+    task = replace(_task(), traceparent=_TP)
+    assert IntentTask.from_dict(json.loads(json.dumps(task.to_dict()))).traceparent == _TP
+    lean = IntentTask.from_dict({"task_id": "a", "thread_id": "t", "query": "q"})
+    assert lean.traceparent == "", "老消息没有 traceparent，留空由 worker 自成一条 trace"
+
+
 async def test_enqueue_routes_by_kind(rq: RedisStreamQueue, fake: FakeRedis) -> None:
     await rq.ensure_group()
     await rq.enqueue(_task(turns=0, tid="short"))
@@ -370,9 +384,17 @@ async def test_reclaim_covers_large_stream(rq: RedisStreamQueue, fake: FakeRedis
     await fake.xreadgroup(GROUP, "dead-worker", {STREAM_LARGE: ">"}, count=10, block=0)
     assert fake.pending_ids(STREAM_LARGE) != []
 
+    before = _reclaimed(STREAM_LARGE)
     handled = await _drain(rq, 1, block_ms=0, claim_idle_ms=0)
     assert [t.task_id for t in handled] == ["long"]
     assert fake.pending_ids(STREAM_LARGE) == []
+    # 接管次数按流记：这一次是 large 流被领回来重跑。
+    assert _reclaimed(STREAM_LARGE) - before == 1
+
+
+def _reclaimed(stream: str) -> float:
+    value = REGISTRY.get_sample_value("shoppingx_queue_reclaimed_total", {"stream": stream})
+    return value or 0.0
 
 
 # ── 租约与重投去重 ──────────────────────────────────────────────────────────
@@ -616,6 +638,25 @@ async def test_worker_writes_running_then_done(monkeypatch: pytest.MonkeyPatch) 
     done = await queue.get_status("t1")
     assert done is not None and done.state == "done"
     assert done.final_text == "这三件更耐操"
+
+
+async def test_worker_continues_trace_and_binds_trace_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """worker 把 traceparent 原样交给 run_agent（根 span 靠它挂到 API 那段下面），并把 trace_id
+    绑进日志上下文——两个进程的日志靠它串成一条线。"""
+    seen: dict[str, Any] = {}
+
+    async def _fake_run(query: str, thread_id: str, **kw: Any) -> dict[str, Any]:
+        seen["traceparent"] = kw.get("traceparent")
+        seen["log_ctx"] = structlog.contextvars.get_contextvars()
+        return {"final_text": "ok"}
+
+    monkeypatch.setattr(worker, "run_agent", _fake_run)
+    await worker.handle_task(replace(_task(), traceparent=_TP, request_id="rq1"), InProcessQueue())
+
+    assert seen["traceparent"] == _TP
+    assert seen["log_ctx"]["trace_id"] == "ab" * 16
+    assert seen["log_ctx"]["request_id"] == "rq1"
+    assert "trace_id" not in structlog.contextvars.get_contextvars(), "收尾要解绑，不许外溢"
 
 
 async def test_worker_failure_writes_failed_and_reraises(monkeypatch: pytest.MonkeyPatch) -> None:
