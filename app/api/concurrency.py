@@ -9,7 +9,7 @@
 
 - 用户级并发 = `run_holds` 里 queued/running 的行数（`MAX_CONCURRENT_RUNS`，阶段 1 条 2，
   真相在 DB）；
-- 全局背压 = 队列深度 `QUEUE_MAX_DEPTH`（超了 429 + Retry-After，见 `server._queue_depth_or_429`）；
+- 全局背压 = 队列深度 `QUEUE_MAX_DEPTH`（超了 429 + Retry-After，见 `server._admit_or_429`）；
 - 实际并行度 = 每个 worker 的 `WORKER_CONCURRENCY` × 副本数。
 
 留下来的只有「分档」这一件事：档位既决定 `run_holds` 预扣多少 credits（见 `app.db.holds`），也

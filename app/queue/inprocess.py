@@ -42,6 +42,7 @@ class InProcessQueue:
             "heavy": deque(),
         }
         self._status: OrderedDict[str, TaskStatus] = OrderedDict()
+        self._admitted: set[str] = set()  # 已过背压闸、还没入队的 ticket（见 TaskQueue.admit）
         # 有新任务时唤醒消费循环。不用 asyncio.Queue：要的是「两条队列按优先级取」，而 Queue 的
         # get() 只能挂在一条上，挂错那条就会在另一条有货时干等。
         self._arrival = asyncio.Event()
@@ -62,6 +63,18 @@ class InProcessQueue:
 
     async def depth(self) -> int:
         return sum(len(q) for q in self._pending.values())
+
+    async def admit(self, ticket: str, limit: int) -> int | None:
+        # 判定到登记之间没有 await，单线程事件循环里即原子。
+        # 进程内没有「持有者崩了」的问题，不设过期。
+        total = await self.depth() + len(self._admitted)
+        if total >= limit:
+            return None
+        self._admitted.add(ticket)
+        return total
+
+    async def release_admission(self, ticket: str) -> None:
+        self._admitted.discard(ticket)
 
     async def close(self) -> None:
         self._arrival.set()  # 唤醒可能正挂着的消费循环，让它看见 should_stop
