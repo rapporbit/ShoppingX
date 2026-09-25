@@ -224,6 +224,17 @@ class TaskQueue(Protocol):
         """待消费任务数（两条流之和）。取不到时返回 0——观测不该拖垮主链路。"""
         ...
 
+    async def admit(self, ticket: str, limit: int) -> int | None:
+        """背压闸：「待消费数 + 已准入未入队数」没到 ``limit`` 就登记 ``ticket``、返回登记前的
+        总数，到了返回 ``None``。**判定与登记必须一步完成**——拆成读深度再入队，突发时一批
+        请求同时读到「没满」会一起放进来（2026-09-25 实测 100 并发、上限 8，放进 47 条）。
+        """
+        ...
+
+    async def release_admission(self, ticket: str) -> None:
+        """撤掉准入登记。入队成功后撤（此后由待消费数计它），没走到入队的路径也要撤。"""
+        ...
+
     async def consume(
         self,
         consumer: str,

@@ -96,6 +96,37 @@ if redis.call('GET', KEYS[1]) == ARGV[1] then
 end
 return 0
 """
+# 背压闸：「各流未投递数 + 已准入未入队数」判定与登记在一条脚本里做完（理由见 TaskQueue.admit）。
+# 登记用 ZSET（score=登记时刻），超过 ARGV[3] 毫秒的视为持有者已崩、先清掉再算——写法同带超时的
+# 计数信号量，API 进程被 kill 在「准入 → 入队」之间也不会把名额永久占住。时刻取 Redis 的 TIME，
+# 多个 API 进程之间不必对钟。lag 取不到时退回 pending，口径同 _stream_depth。
+# KEYS = [登记 ZSET, 流...]；ARGV = [消费组, ticket, 过期毫秒, 上限]。
+ADMIT = """
+local t = redis.call('TIME')
+local now = t[1] * 1000 + math.floor(t[2] / 1000)
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now - tonumber(ARGV[3]))
+local total = redis.call('ZCARD', KEYS[1])
+for i = 2, #KEYS do
+  local ok, groups = pcall(redis.call, 'XINFO', 'GROUPS', KEYS[i])
+  if ok then
+    for _, g in ipairs(groups) do
+      local f = {}
+      for j = 1, #g, 2 do f[g[j]] = g[j + 1] end
+      if f['name'] == ARGV[1] then
+        total = total + (tonumber(f['lag']) or tonumber(f['pending']) or 0)
+      end
+    end
+  end
+end
+if total >= tonumber(ARGV[4]) then
+  return -1
+end
+redis.call('ZADD', KEYS[1], now, ARGV[2])
+redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[3]) * 2)
+return total
+"""
+_ADMIT_KEY = "globex:admitted"
+_ADMIT_TTL_MS = env_int("QUEUE_ADMIT_TTL_MS", 30_000)
 # 已有这几种终态的任务再被投递（worker 写完终态、XACK 之前被 kill），直接 ack 跳过，不重跑。
 # 不含 ``failed``：失败那条路本来就是「留 PEL 等重投」，写了 failed 再重跑正是设计意图。
 _SKIP_ON_REDELIVERY = frozenset({"done", "cancelled", "interrupted"})
@@ -168,6 +199,15 @@ class RedisStreamQueue:
         for stream in STREAMS:
             total += await self._stream_depth(stream)
         return total
+
+    async def admit(self, ticket: str, limit: int) -> int | None:
+        total = await self._client.eval(
+            ADMIT, 1 + len(STREAMS), _ADMIT_KEY, *STREAMS, self._group, ticket, _ADMIT_TTL_MS, limit
+        )
+        return None if int(total) < 0 else int(total)
+
+    async def release_admission(self, ticket: str) -> None:
+        await self._client.zrem(_ADMIT_KEY, ticket)
 
     async def _stream_depth(self, stream: str) -> int:
         """单流的未投递数（lag）。流还没建 / Redis 抖了都返回 0——观测不该拖垮主链路。"""

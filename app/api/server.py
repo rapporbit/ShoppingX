@@ -473,19 +473,36 @@ async def _history_turns(thread_id: str) -> int:
         return 0
 
 
-async def _queue_depth_or_429(kind: str) -> int:
-    """队列模式的背压闸：读一次队列深度，超过 :data:`QUEUE_MAX_DEPTH` 就 429（理由见该常数）。"""
-    depth = await get_task_queue().depth()
-    if depth >= QUEUE_MAX_DEPTH:
+async def _admit_or_429(run_id: str) -> int:
+    """队列模式的背压闸：待消费 + 已准入未入队到 :data:`QUEUE_MAX_DEPTH` 就 429（理由见该常数）。
+
+    **放在 handler 最前**：被拒的请求不该先付归属登记、读历史轮数这些库操作（挪前之前 100 并发下
+    429 P95 541ms，与放行的请求一样慢）。判定与登记是一步（``TaskQueue.admit``），所以挪前不会
+    放大超卖。通过后由调用方负责 ``release_admission``：入队后撤，或没走到入队时撤。
+
+    Redis 不可达时放行（口径同 ``depth()`` 取不到按 0）：真不可达的话后面的入队会失败并如实报错。
+    """
+    try:
+        depth = await get_task_queue().admit(run_id, QUEUE_MAX_DEPTH)
+    except Exception:
+        logger.warning("背压闸读取失败，本次放行", exc_info=True)
+        return 0
+    if depth is None:
         metrics.record_task_rejected("queue_full")
         raise HTTPException(
             429,
-            f"服务繁忙：队列已积压 {depth} 条（上限 {QUEUE_MAX_DEPTH}），"
-            f"请 {TASK_RETRY_AFTER_SEC}s 后重试",
+            f"服务繁忙：队列已满（上限 {QUEUE_MAX_DEPTH}），请 {TASK_RETRY_AFTER_SEC}s 后重试",
             headers={"Retry-After": str(TASK_RETRY_AFTER_SEC)},
         )
-    logger.debug("队列深度 %d（kind=%s）", depth, kind)
     return depth
+
+
+async def _release_admission(run_id: str) -> None:
+    """撤准入登记；失败只记日志——登记自带过期（``QUEUE_ADMIT_TTL_MS``），漏撤只是晚一会儿还名额。"""
+    try:
+        await get_task_queue().release_admission(run_id)
+    except Exception:
+        logger.warning("撤准入登记失败：%s", run_id, exc_info=True)
 
 
 async def _enqueue_intent(intent: IntentTask, depth: int) -> IntentTask:
@@ -608,6 +625,9 @@ async def _queued_runner(intent: IntentTask, position: int) -> None:
                 "enqueue_failed", f"任务入队失败：{exc}", thread_id=thread_id
             )
             return
+        finally:
+            # 入队成功后它已计在待消费数里，失败则名额该还——两种都撤（登记见 _admit_or_429）。
+            await _release_admission(intent.task_id)
         # 本协程余下的日志（排队超时 / 作废）也带 trace_id。它是独立 task，绑定不外溢，不必还原。
         parent = parse_traceparent(intent.traceparent)
         bind_log_context(trace_id=parent.trace_id if parent else None)
@@ -738,24 +758,40 @@ async def create_task(
     """
     user_id = resolve_identity(auth_uid, req.user_id)
     thread_id = req.thread_id or uuid.uuid4().hex
+    run_id = uuid.uuid4().hex
+    # 背压闸排第一（理由见 _admit_or_429）：连配额都排在它后面——过载时额度用尽的人先拿到 429
+    # 而非 402，重试时再见 402，换来的是拒绝不必先查库。
+    queue_depth = await _admit_or_429(run_id)
+    try:
+        body, handed_off = await _submit_admitted(req, user_id, thread_id, run_id, queue_depth)
+    except BaseException:
+        await _release_admission(run_id)
+        raise
+    if not handed_off:  # 幂等命中 / 去重：没入队，名额当场还
+        await _release_admission(run_id)
+    return body
 
+
+async def _submit_admitted(
+    req: TaskRequest, user_id: str | None, thread_id: str, run_id: str, queue_depth: int
+) -> tuple[dict[str, Any], bool]:
+    """``create_task`` 过了背压闸之后的部分。返回 ``(响应体, 是否已交给入队协程)``。"""
     # 配额闸在最前。归属登记不再单独一步：它与幂等第 1 层并成下面那一次 claim_thread_and_run
-    # （一个会话一次 commit），越权 / 凭证失效在那里报，报之前把预扣还掉。
+    # （一个会话一次 commit），越权 / 凭证失效在那里报，报之前把预扣还掉。以上都在本 handler
+    # 「无 await 区间」的前半段：下面「幂等判定 → 占槽 / 入队登记 → 写 active_tasks」那一整段
+    # 仍然一个 await 都没有，原子性不受影响（单线程事件循环里，没有 await 就不会被别的请求插进来）。
     await _enforce_quota(user_id)
 
     # 分档的输入（历史轮数）在这里就取好：它要查库（await），而下面从幂等判定到入队登记那一整段
     # 必须一个 await 都没有——原子性全靠这个，见 _history_turns 的 docstring。
     turn_count = await _history_turns(thread_id)
     kind = classify_request(turn_count)
-    # 深度背压同理要先算好——depth() 是一次 Redis 往返，塞进下面那段就等于给幂等判定开个竞态窗口。
-    queue_depth = await _queue_depth_or_429(kind)
 
     # ── 预授权：占住额度 + 数在飞数。**必须在幂等判定之前** ──
     #
     # 位置是被无 await 区间逼出来的：下面从幂等第 1 层到占槽 / 入队那一整段的原子性全靠「一个
     # await 都没有」（同 thread 同 query 的两个请求若在中间被切开，会双双通过第 1 层各起一个 run）。
     # 代价是幂等命中的请求也先占一笔——那几条路各自在 return 前把它还掉，下面三处 release。
-    run_id = uuid.uuid4().hex
     await _acquire_hold_or_reject(run_id=run_id, user_id=user_id, thread_id=thread_id, kind=kind)
 
     # ── 幂等第 1 层：同 thread 上一个任务还活着。**真相在 DB，不在本进程**（阶段 1-2）──
@@ -772,7 +808,7 @@ async def create_task(
         metrics.record_task_rejected("already_running")
         logger.info("幂等命中（同 thread 同 query）：thread_id=%s", thread_id)
         await release(run_id)  # 没起新任务 → 那笔预扣当场还掉
-        return {"status": "already_running", "thread_id": thread_id}
+        return {"status": "already_running", "thread_id": thread_id}, False
     # 同 thread 但换了 query → 覆盖重发。旧 run 可能跑在**另一个进程**里（队列模式 / 另一台副本），
     # 所以取消要按 claim 带回来的旧 run_id 送（run_id == task_id，1-1 起两者同一个东西）；本进程
     # 恰好也有影子协程时再顺手 cancel 一下，让 /inflight 立刻干净。
@@ -805,7 +841,7 @@ async def create_task(
             metrics.record_task_rejected("duplicate")
             logger.info("幂等命中（指纹去重）：原 thread_id=%s", dup_thread)
             await _rollback_claim(run_id, thread_id)
-            return {"status": "duplicate", "thread_id": dup_thread}
+            return {"status": "duplicate", "thread_id": dup_thread}, False
 
     # ── 交给 worker ──
     if is_replace and previous_run_id is not None:
@@ -822,7 +858,7 @@ async def create_task(
         control.request_cancel_nowait(thread_id, previous_run_id)
         if old is not None:
             old.task.cancel()
-    return _start_queued(req, thread_id, user_id, turn_count, queue_depth, run_id)
+    return _start_queued(req, thread_id, user_id, turn_count, queue_depth, run_id), True
 
 
 @app.post("/api/task/async")
@@ -840,42 +876,48 @@ async def create_task_async(
     """
     user_id = resolve_identity(auth_uid, req.user_id)
     thread_id = req.thread_id or uuid.uuid4().hex
-    await _enforce_quota(user_id)
-    await _claim_thread_if_needed(thread_id, user_id, req.query)
-    turn_count = await _history_turns(thread_id)
-    kind = classify_request(turn_count)
-    depth = await _queue_depth_or_429(kind)
-    # 预授权与主路径同一道闸：脚本批量灌入正是并发透支最容易发生的地方，放过它等于把闸开在
-    # 用不着的那一边。这条路没有幂等三层，拿到就直接入队，不需要任何 release 分支。
     run_id = uuid.uuid4().hex
-    await _acquire_hold_or_reject(run_id=run_id, user_id=user_id, thread_id=thread_id, kind=kind)
-    intent = IntentTask.create(
-        task_id=run_id,
-        thread_id=thread_id,
-        query=req.query,
-        history_turns=turn_count,
-        user_id=user_id,
-        platforms=req.platforms,
-        image_paths=req.image_paths,
-        skill=req.skill,
-        request_id=_request_id_var.get(),
-    )
+    depth = await _admit_or_429(run_id)  # 排第一，理由同 create_task
     try:
-        await _enqueue_intent(intent, depth)
-    except Exception as exc:
-        # 队列的降级口径：入队失败必抛（见 app/queue/ports.py）。这里是「调用方决定」的那一半——
-        # 同步提交口有 WS 可以补一条 error 事件，这个口子只有 HTTP 响应，故 503 说清楚。
-        logger.exception("异步提交入队失败：thread_id=%s", thread_id)
-        raise HTTPException(503, "任务入队失败，请稍后重试") from exc
-    position = depth + 1
-    return {
-        "task_id": intent.task_id,
-        "thread_id": thread_id,
-        "status": "queued",
-        "queue_position": position,
-        # 同 _queued_runner：预估等待按「前面有几个人」算，排第 1 位就是 0（口径见那里的注释）。
-        "estimated_wait_seconds": estimated_wait_seconds(depth, WORKER_CONCURRENCY),
-    }
+        await _enforce_quota(user_id)
+        await _claim_thread_if_needed(thread_id, user_id, req.query)
+        turn_count = await _history_turns(thread_id)
+        kind = classify_request(turn_count)
+        # 预授权与主路径同一道闸：脚本批量灌入正是并发透支最容易发生的地方，放过它等于把闸开在
+        # 用不着的那一边。这条路没有幂等三层，拿到就直接入队，不需要任何 release 分支。
+        await _acquire_hold_or_reject(
+            run_id=run_id, user_id=user_id, thread_id=thread_id, kind=kind
+        )
+        intent = IntentTask.create(
+            task_id=run_id,
+            thread_id=thread_id,
+            query=req.query,
+            history_turns=turn_count,
+            user_id=user_id,
+            platforms=req.platforms,
+            image_paths=req.image_paths,
+            skill=req.skill,
+            request_id=_request_id_var.get(),
+        )
+        try:
+            await _enqueue_intent(intent, depth)
+        except Exception as exc:
+            # 队列的降级口径：入队失败必抛（见 app/queue/ports.py）。这里是「调用方决定」的那一半——
+            # 同步提交口有 WS 可以补一条 error 事件，这个口子只有 HTTP 响应，故 503 说清楚。
+            logger.exception("异步提交入队失败：thread_id=%s", thread_id)
+            raise HTTPException(503, "任务入队失败，请稍后重试") from exc
+        position = depth + 1
+        return {
+            "task_id": intent.task_id,
+            "thread_id": thread_id,
+            "status": "queued",
+            "queue_position": position,
+            # 同 _queued_runner：预估等待按「前面有几个人」算，排第 1 位就是 0（口径见那里的注释）。
+            "estimated_wait_seconds": estimated_wait_seconds(depth, WORKER_CONCURRENCY),
+        }
+    finally:
+        # 入队成功后由待消费数计它，失败 / 被别的闸拒则名额该还——两种都撤。
+        await _release_admission(run_id)
 
 
 @app.get("/api/task/{task_id}")
