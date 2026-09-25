@@ -290,7 +290,7 @@ class PlanOutput(BaseModel):
             "说「我的订单/那单怎么样」→ query_order；说「取消/不要了」→ cancel_order。"
         ),
     )
-    category: str = Field(default="", description="主品类，如「旅行收纳」「跑鞋」")
+    category: str = Field(default="", description="主品类：用户本轮要买的那类东西（中文品类名）")
     intent_grounding: IntentGrounding = Field(
         default="internal",
         description=(
@@ -543,6 +543,9 @@ def _render_prior_context(prior: list[str]) -> str:
         + lines
         + "\n→ 输出本轮**仍生效**的全部约束：前几轮说过、本轮没撤回的照样要给；本轮撤回 / 改口的"
         "不再给；换成另一类商品时，前一类的材质 / 风格偏好不带过来，预算与收货国照旧。\n"
+        "→ **品类（category）先看本轮原话**：本轮点名了要买的东西（「推荐一个保温杯」），category"
+        " 就是它，与前几轮不同则 topic_switch=true；本轮只改条件、没点名东西（「商务一点的」"
+        "「便宜点」），才沿用最近一轮的品类。\n"
         "\n【本轮用户原话】\n"
     )
 
