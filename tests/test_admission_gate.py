@@ -104,6 +104,8 @@ async def test_failure_after_gate_returns_the_slot(
     async def _deny(*_a: Any, **_kw: Any) -> None:
         raise server.HTTPException(403, "无权访问该会话")
 
+    # /api/task 走合并版 claim（perf/claim-merge），/api/task/async 仍走单独的归属登记
+    monkeypatch.setattr(server, "_claim_thread_and_run_or_reject", _deny)
     monkeypatch.setattr(server, "_claim_thread_if_needed", _deny)
     for path in ("/api/task", "/api/task/async"):
         resp = await client.post(path, json={"query": "买帐篷", "thread_id": "f1"})
