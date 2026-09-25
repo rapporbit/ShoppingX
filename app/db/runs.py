@@ -35,10 +35,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 
-from sqlalchemy import CursorResult, Executable, or_, update
+from sqlalchemy import CursorResult, Executable, func, or_, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Thread
+from app.db.accounts import TITLE_MAX
+from app.db.models import Thread, User
 from app.db.session import session_factory
 from app.utils.env import env_int
 
@@ -77,50 +79,87 @@ async def _rowcount(db: AsyncSession, stmt: Executable) -> int:
     return result.rowcount or 0
 
 
-async def claim_thread_run(thread_id: str, run_id: str, query: str) -> RunClaim:
-    """认领这个 thread 的「在跑」位置，返回三种结局之一（见模块 docstring）。
+async def claim_thread_and_run(
+    thread_id: str,
+    run_id: str,
+    query: str,
+    *,
+    user_id: str,
+    verify_user: bool,
+    title_max: int = TITLE_MAX,
+) -> RunClaim:
+    """归属登记 + 抢「在跑」位置，**一个会话、一次 commit**（起任务的热路径）。
 
-    **第一条 UPDATE 就是判定本身**：抢到（影响 1 行）= 没有别人在跑，或者在跑的那位已经过期。
-    抢不到才回头读一行看是谁、跑的是哪句话。这个顺序不能倒过来——先读后判是「读后判」，两个并发
-    请求会双双读到「空闲」再各自写入。
+    原先是两步：``accounts.claim_thread``（读行 → 校验属主 → 插行或顶 ``updated_at`` → commit）
+    再 ``claim_thread_run``（条件 UPDATE → commit），同一行写两遍、两个会话、两次提交。
+    合并后续聊的常见路径只剩**一条** UPDATE：属主、空闲、顶时间戳、占位同在一个 WHERE 里，
+    影响 1 行就全部成立，原子性仍由数据库的条件更新保证（见模块 docstring）。
 
-    **覆盖重发那条路也是条件更新**（``WHERE active_run_id = :旧``）：读到旧 run 与真正接班之间，
-    旧 run 可能刚好结束、另一个请求已经接了班；带上旧 id 就只有一个人能接管，抢输的那个按
-    ``already_running`` 领回——宁可让他去看已经在跑的那轮，也不能两轮一起跑。
+    影响 0 行才回头读一行分辨是哪种：行不存在（首轮 → 插行，插时就带 running）、属主不是自己
+    （``PermissionError``）、同一句话（``already_running``）、换了一句话（``replaced``）。
+    异常语义与 ``claim_thread`` 一致：越权 ``PermissionError``，凭证用户不存在 ``LookupError``。
     """
     text = query[:QUERY_MAX]
+    title = query[:title_max]
+    now = datetime.now(UTC)
+    running = {"active_run_id": run_id, "run_status": "running", "active_query": text}
     async with session_factory()() as db:
-        free = update(Thread).where(
-            Thread.id == thread_id,
-            or_(
-                Thread.active_run_id.is_(None),
-                Thread.run_status != "running",
-                Thread.updated_at < _stale_before(),
-            ),
+        # **本事务用 READ COMMITTED**：MySQL 默认 REPEATABLE READ 下，快路径那条 UPDATE 命中不存在的
+        # 行（首轮）会加间隙锁，并发首轮各持一把再去 INSERT 就互相等成死锁（1213）——而且 id 不同、
+        # 只是落在同一个间隙里的新会话也会互卡，500 路新会话突发必现。RC 不加间隙锁；条件更新的
+        # 原子性不受影响（同一行上的两条 UPDATE 后到的等锁、拿到后按最新提交版本重判 WHERE）。
+        if db.bind.dialect.name == "mysql":
+            await db.connection(execution_options={"isolation_level": "READ COMMITTED"})
+        fast = (
+            update(Thread)
+            .where(
+                Thread.id == thread_id,
+                Thread.user_id == user_id,
+                or_(
+                    Thread.active_run_id.is_(None),
+                    Thread.run_status != "running",
+                    Thread.updated_at < _stale_before(),
+                ),
+            )
+            .values(
+                **running,
+                updated_at=now,
+                title=func.coalesce(func.nullif(Thread.title, ""), title),
+            )
         )
-        taken = await _rowcount(
-            db, free.values(active_run_id=run_id, run_status="running", active_query=text)
-        )
-        await db.commit()
-        if taken:
+        if await _rowcount(db, fast):
+            await db.commit()
             return RunClaim("started")
 
         row = await db.get(Thread, thread_id)
         if row is None:
-            # 行不该不存在（起任务前一定先登记归属），但真不存在时不能把用户卡死：放行，
-            # 这一轮退回「进程内 active_tasks 说了算」的老语义，并留一条日志说明真相层缺位。
-            logger.warning("thread 未登记，幂等第 1 层退回进程内：thread_id=%s", thread_id)
-            return RunClaim("started")
+            if verify_user and await db.get(User, user_id) is None:
+                raise LookupError("凭证对应的用户不存在")
+            db.add(Thread(id=thread_id, user_id=user_id, title=title, updated_at=now, **running))
+            try:
+                await db.commit()
+                return RunClaim("started")
+            except IntegrityError:
+                # 并发首轮：另一个请求刚插了同一个 thread_id。回滚后按「行已存在」重新分辨。
+                await db.rollback()
+                row = await db.get(Thread, thread_id)
+                if row is None:  # 插入冲突后又被删掉，极端罕见：让调用方当作库故障
+                    raise
+        if row.user_id != user_id:
+            raise PermissionError("无权访问该会话")
 
         previous = row.active_run_id
         if row.active_query == text:
+            # 领回原任务。仍把 updated_at 顶一下：原先的归属登记每次都会顶（侧栏按它排序）。
+            await db.execute(update(Thread).where(Thread.id == thread_id).values(updated_at=now))
+            await db.commit()
             return RunClaim("already_running", previous)
 
         replaced = await _rowcount(
             db,
             update(Thread)
             .where(Thread.id == thread_id, Thread.active_run_id == previous)
-            .values(active_run_id=run_id, run_status="running", active_query=text),
+            .values(**running, updated_at=now),
         )
         await db.commit()
         if replaced:

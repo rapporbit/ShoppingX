@@ -103,14 +103,20 @@ def _to_rows(thread_id: str, turns: list[dict[str, Any]], start_seq: int) -> lis
     ]
 
 
-async def _backfill_legacy(db: AsyncSession, thread_id: str, session_dir: Path | None) -> int:
+async def _backfill_legacy(
+    db: AsyncSession, thread_id: str, session_dir: Path | None, count: int | None = None
+) -> int:
     """把旧 turns.json 整段导进库（仅当库里这个 thread 一条都没有）。返回导入的条数。
 
     **只在库为空时导**：库里已有内容说明这个 thread 早就迁过（或本就是库时代新建的），再导一遍
     就是把老轮次插到新轮次之后，把一段对话的顺序搅乱。这也让本函数天然幂等——反复调用只有第一次
     真的写。
     """
-    if session_dir is None or await _count(db, thread_id) > 0:
+    if session_dir is None:
+        return 0
+    if count is None:
+        count = await _count(db, thread_id)
+    if count > 0:
         return 0
     legacy = _load_turns_raw(_turns_path(session_dir))
     if not legacy:
@@ -185,6 +191,26 @@ async def read_turns(thread_id: str, session_dir: Path | None = None) -> list[di
     except SQLAlchemyError as exc:
         logger.warning("读取对话历史失败，按空处理（thread=%s）：%s", thread_id, exc)
         return []
+
+
+async def count_turns(thread_id: str, session_dir: Path | None = None) -> int:
+    """本段会话已有几轮——只数行数，不把正文读出来（起任务时分 normal / heavy 用）。
+
+    原先是 ``len(read_turns(...))``：为了一个数字把整段历史连同 items / activity 的 JSON 全读出来，
+    会话越长越慢，而它就在 ``POST /api/task`` 的热路径上。旧 turns.json 的惰性迁移语义保留：
+    库里为 0 条时顺带迁一次，迁进来几条就算几轮。
+
+    库故障返回 0（按 normal 算），与 :func:`read_turns` 读失败按空处理同一口径。
+    """
+    try:
+        async with session_factory()() as db:
+            n = await _count(db, thread_id)
+            if n == 0:
+                n = await _backfill_legacy(db, thread_id, session_dir, count=0)
+            return n
+    except SQLAlchemyError as exc:
+        logger.warning("统计对话轮数失败，按 0 处理（thread=%s）：%s", thread_id, exc)
+        return 0
 
 
 async def append_turn(
