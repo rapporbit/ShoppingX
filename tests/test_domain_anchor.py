@@ -1,8 +1,7 @@
-"""域反证与品类门解锚（第四病根：LLM 结构化输出「合法但错」无核验、后果静默反转）。
+"""品类门解锚（第四病根：LLM 结构化输出「合法但错」无核验、后果静默反转）。
 
-三层防线各测一块：
+两块：
 - ``infer_domains_from_text``：用户原文词面 → 域投票（确定性、宁漏勿错）。
-- ``reconcile_domains``：planner 域漏判时词面证据**并入不替换**（手表 badcase 的主修）。
 - ``_category_relevance`` 锚核验：category 锚与原文词面分歧 → 门 fail-open 不执法——
   「合法但错」的锚会让品类门反着杀（把真手表沉底、留西装），不执法比反向执法安全。
 """
@@ -14,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from app.memory.domains import infer_domains_from_text, reconcile_domains
+from app.memory.domains import infer_domains_from_text
 from app.utils.thread_ctx import thread_scope
 
 
@@ -34,30 +33,18 @@ class TestInferDomains:
         assert infer_domains_from_text("送长辈的礼物，有什么推荐") == set()
 
 
-class TestReconcileDomains:
-    def test_union_not_replace(self) -> None:
-        """漂移主修：planner 判 apparel、原文词面判 jewelry_watches → 并入，不丢 planner 的。"""
-        out = reconcile_domains(["apparel"], "formal dress watch men business")
-        assert "jewelry_watches" in out and "apparel" in out
-
-    def test_no_evidence_keeps_planner_verdict(self) -> None:
-        """词面无证据时原样返回（返回同一列表对象，零开销）。"""
-        domains = ["apparel"]
-        assert reconcile_domains(domains, "送长辈的礼物") is domains
-
-
 @pytest.mark.asyncio
 async def test_anchor_conflict_fails_open(monkeypatch) -> None:
     """category 锚（planner 输出）与用户原文词面分歧 → 门不执法且**不触发 reranker**。"""
     import app.tools.item_picker as ip
-    from app.api.context import set_original_query, set_session_pt
-    from app.memory.session_state import SessionPrefState
+    from app.api.context import set_original_query, set_turn_constraints
+    from app.memory.turn_constraints import TurnConstraints
     from app.tools.schemas import ItemCandidate
 
     monkeypatch.setattr(ip, "get_reranker", lambda: pytest.fail("锚分歧下不该走到打分"))
     sd = Path(tempfile.mkdtemp())
     with thread_scope("t-anchor-conf", sd):
-        set_session_pt(SessionPrefState(category="dress shoes"))  # 锚漂成鞋履
+        set_turn_constraints(TurnConstraints(category="dress shoes"))  # 锚漂成鞋履
         set_original_query("想买一块正装手表")  # 原文明明在买表
         cands = [ItemCandidate(item_id="W1", platform="amazon", title="Quartz Watch")]
         scores, gate_on, conflict = await ip._category_relevance(cands)
@@ -68,8 +55,8 @@ async def test_anchor_conflict_fails_open(monkeypatch) -> None:
 async def test_anchor_agreement_enforces_gate(monkeypatch) -> None:
     """锚与原文一致 → 照旧执法（对照组，防解锚把门整个焊死）。"""
     import app.tools.item_picker as ip
-    from app.api.context import set_original_query, set_session_pt
-    from app.memory.session_state import SessionPrefState
+    from app.api.context import set_original_query, set_turn_constraints
+    from app.memory.turn_constraints import TurnConstraints
     from app.tools.schemas import ItemCandidate
 
     class _Fake:
@@ -79,7 +66,7 @@ async def test_anchor_agreement_enforces_gate(monkeypatch) -> None:
     monkeypatch.setattr(ip, "get_reranker", lambda: _Fake())
     sd = Path(tempfile.mkdtemp())
     with thread_scope("t-anchor-ok", sd):
-        set_session_pt(SessionPrefState(category="watch"))
+        set_turn_constraints(TurnConstraints(category="watch"))
         set_original_query("想买一块正装手表")
         cands = [ItemCandidate(item_id="W1", platform="amazon", title="Quartz Watch")]
         scores, gate_on, conflict = await ip._category_relevance(cands)
@@ -95,8 +82,8 @@ async def test_must_terms_join_rerank_query(monkeypatch) -> None:
     **prefer 软偏好词绝不能进**（背包 badcase：偏好词字面命中把跨品类垃圾抬到真品之上）。
     """
     import app.tools.item_picker as ip
-    from app.api.context import set_original_query, set_session_pt
-    from app.memory.session_state import SessionPrefState
+    from app.api.context import set_original_query, set_turn_constraints
+    from app.memory.turn_constraints import TurnConstraints
     from app.tools.schemas import ItemCandidate
 
     seen: list[str] = []
@@ -109,7 +96,7 @@ async def test_must_terms_join_rerank_query(monkeypatch) -> None:
     monkeypatch.setattr(ip, "get_reranker", lambda: _Fake())
     sd = Path(tempfile.mkdtemp())
     with thread_scope("t-must-join", sd):
-        set_session_pt(SessionPrefState(category="backpack"))
+        set_turn_constraints(TurnConstraints(category="backpack"))
         set_original_query("想买一个防水的双肩包")
         cands = [ItemCandidate(item_id="B1", platform="amazon", title="Waterproof Backpack")]
         await ip._category_relevance(cands, ["waterproof"])
@@ -120,8 +107,8 @@ async def test_must_terms_join_rerank_query(monkeypatch) -> None:
 async def test_no_must_terms_falls_back_to_category(monkeypatch) -> None:
     """没有 must（多数轮次的常态）→ 退回纯品类词，行为与 M22 之前一致。"""
     import app.tools.item_picker as ip
-    from app.api.context import set_original_query, set_session_pt
-    from app.memory.session_state import SessionPrefState
+    from app.api.context import set_original_query, set_turn_constraints
+    from app.memory.turn_constraints import TurnConstraints
     from app.tools.schemas import ItemCandidate
 
     seen: list[str] = []
@@ -134,8 +121,18 @@ async def test_no_must_terms_falls_back_to_category(monkeypatch) -> None:
     monkeypatch.setattr(ip, "get_reranker", lambda: _Fake())
     sd = Path(tempfile.mkdtemp())
     with thread_scope("t-must-none", sd):
-        set_session_pt(SessionPrefState(category="backpack"))
+        set_turn_constraints(TurnConstraints(category="backpack"))
         set_original_query("想买一个双肩包")
         cands = [ItemCandidate(item_id="B1", platform="amazon", title="Backpack")]
         await ip._category_relevance(cands, [])
     assert seen == ["backpack"]
+
+
+def test_planner_topic_switch_replaces_domains() -> None:
+    """planner 不再输出域：旧模型吐的 domains 被忽略，不会再因越界值打挂整份 PlanOutput。"""
+    from app.tools.planner import PlanOutput
+
+    plan = PlanOutput.model_validate(
+        {"category": "颈枕", "domains": ["travel"], "topic_switch": True}
+    )
+    assert plan.topic_switch is True and not hasattr(plan, "domains")

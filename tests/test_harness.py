@@ -707,7 +707,12 @@ def _mw(query: str = "想买便宜又抗造的旅行三件套，预算300"):
 
 
 async def _run_tool(
-    mw, name: str, args: dict | None = None, result: str = "{}", diag: dict | None = None
+    mw,
+    name: str,
+    args: dict | None = None,
+    result: str = "{}",
+    diag: dict | None = None,
+    error: bool = False,
 ):
     """驱动一次 ``HarnessToolAdapter.on_tool_call``，返回聚合后的结果（``.content`` 是文本）。
 
@@ -725,7 +730,7 @@ async def _run_tool(
             report_diagnostics(name, diag)
         yield ToolChunk(
             content=[TextBlock(type="text", text=result)],
-            state=ToolResultState.SUCCESS,
+            state=ToolResultState.ERROR if error else ToolResultState.SUCCESS,
         )
 
     adapter = HarnessToolAdapter(mw)
@@ -1095,6 +1100,25 @@ class TestPhaseGateTerminalExemption:
         monkeypatch.setattr(pc, "candidate_count", lambda: 5)
         mw = _mw()
         mw.called_tools.add("planner")
+        await _run_tool(mw, "item_picker", {}, result='{"picks": []}')
+        result = await _run_tool(mw, "shopping_summary", {}, result='{"items": []}')
+        assert "[Harness 拒绝]" not in result.content
+
+    @pytest.mark.asyncio
+    async def test_summary_not_blocked_on_failed_planner(self, clean_phase, monkeypatch) -> None:
+        """planner 本轮失败过 → 不再索要 planner，只查 item_picker（2026-09-25 长会话死锁）。
+
+        旧行为：闸只认成功过的 planner，planner 撞 schema 错误时模型被反复赶回去换措辞重试，
+        连撞 10 次、180s 超时收场。
+        """
+        from app.harness.hooks import progress as pc
+
+        monkeypatch.setattr(pc, "candidate_count", lambda: 5)
+        mw = _mw()
+        await _run_tool(mw, "planner", {"intent": "颈枕"}, result="[error] schema", error=True)
+        assert "planner" in mw.failed_tools and "planner" not in mw.called_tools
+        blocked = await _run_tool(mw, "shopping_summary", {}, result='{"items": []}')
+        assert "item_picker" in blocked.content and "先调 planner" not in blocked.content
         await _run_tool(mw, "item_picker", {}, result='{"picks": []}')
         result = await _run_tool(mw, "shopping_summary", {}, result='{"items": []}')
         assert "[Harness 拒绝]" not in result.content

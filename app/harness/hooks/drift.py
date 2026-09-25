@@ -390,9 +390,9 @@ def _pt_goal_terms() -> set[str]:
     返回即刷新（本 hook 在它 post_tool_call 时调用）。读失败返回空集：信号退回 query 词面，
     不中断 Agent。"""
     try:
-        from app.api.context import get_session_pt
+        from app.api.context import get_turn_constraints
 
-        pt = get_session_pt()
+        pt = get_turn_constraints()
         if pt is None:
             return set()
         terms = pt.like_terms() + pt.dislike_terms() + pt.soft_dislike_terms()

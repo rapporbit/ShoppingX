@@ -231,3 +231,16 @@ async def test_call_text_handles_non_streaming_model() -> None:
             return SimpleNamespace(content=[{"type": "text", "text": "ok"}], usage=None)
 
     assert await call_text(_Blocking(), "q") == "ok"
+
+
+def test_string_null_literal_is_absent() -> None:
+    """字符串 "None" / "null" 也归一为缺席（2026-09-25：qwen3.8-flash 把预算写成 "None"）。"""
+
+    class _Budget(BaseModel):
+        _null_is_absent = model_validator(mode="before")(staticmethod(drop_none_values))
+        budget_amount: float | None = None
+        category: str = ""
+
+    plan = _Budget.model_validate({"budget_amount": "None", "category": "null"})
+    assert plan.budget_amount is None and plan.category == ""
+    assert _Budget.model_validate({"category": ""}).category == ""

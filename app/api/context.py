@@ -25,7 +25,7 @@ from app.api.run_state import peek_run_slot, run_slot
 from app.utils.env import env_bool
 
 if TYPE_CHECKING:
-    from app.memory.session_state import SessionPrefState
+    from app.memory.turn_constraints import TurnConstraints
 
 # 当前请求的 thread_id（由 /api/task 入口或 thread_scope 设置）。
 _thread_id_var: ContextVar[str | None] = ContextVar("shoppingx_thread_id", default=None)
@@ -101,10 +101,15 @@ class _RunScope:
     run_agent 入口（主 context）写一次；planner 一开始写 P_t，同一个坑就要踩第三次。
     """
 
-    # 本会话的短期偏好状态 P_t（逐轮累积的约束）——run_agent 入口从 session.json 读回后写入、
-    # **planner 在识别出本轮约束后当轮改写**，供 item_picker 等工具机制性读取并强制执行
+    # 本轮生效约束（沿用 P_t 的名字与形状）——**只由 planner 写**，每轮从前几轮原话 + 本轮原话
+    # 整体重算，不跨轮累积、不落盘；供 item_picker 等工具机制性读取并强制执行
     # （把「不要塑料」「预算 ≤X」从 prompt 建议升为硬保证，不靠模型每轮转述）。
-    pt: "SessionPrefState | None" = None
+    constraints: "TurnConstraints | None" = None
+
+    # 前几轮的用户原话（旧 → 新，不含本轮）——run_agent 入口从 session.json 读回后写入，
+    # planner 据它重算仍生效的约束。存原话而不从 messages 里抠：messages 里是拼了运行时
+    # 上下文的版本，且会被框架压缩掉。
+    prior_queries: list[str] = field(default_factory=list)
 
     # planner 本轮判定的任务清单（recommend / price_compare / landed_cost / ...）——「用户要不要
     # 比价」同样是意图判断，只有 planner 有依据。收线通告读它来定向（无比价诉求时提示模型跳过
@@ -117,7 +122,7 @@ class _RunScope:
     dest_country: tuple[str, bool] | None = None
 
     # 本轮**原始用户 query**（未经任何 LLM 转述）——工具侧唯一的「用户到底说了什么」确定性
-    # 信号源。planner 的 domains / category 都是 LLM 结构化输出，「合法但错」时下游拿它当锚会
+    # 信号源。planner 的 category 是 LLM 结构化输出，「合法但错」时下游拿它当锚会
     # 静默反转（品类门反着杀）；反证只能靠独立信号，而独立信号只有原文词面。
     original_query: str = ""
 
@@ -209,27 +214,39 @@ def clamp_timeout(base: float) -> float:
     return max(left, _DEADLINE_FLOOR)
 
 
-def set_session_pt(pt: "SessionPrefState | None") -> None:
-    """写入本会话的短期状态 P_t。两个写入点：``run_agent`` 入口（从 session.json 读回后）与
-    ``planner``（识别出本轮约束后当轮改写）。按 session_dir 聚合，故**跨工具可见**；fork 子 Agent
-    继承父 session_dir，因此天然读到同一份。无 session_dir（单测直调工具）时静默丢弃。"""
+def set_prior_queries(queries: Sequence[str]) -> None:
+    """记下前几轮的用户原话（``run_agent`` 入口写，旧 → 新）。"""
     st = run_slot(_RunScope)
     if st is not None:
-        st.pt = pt
+        st.prior_queries = list(queries)
 
 
-def get_session_pt() -> "SessionPrefState | None":
+def get_prior_queries() -> list[str]:
+    """读前几轮的用户原话；无会话作用域（单测直调）或首轮返回空列表。"""
+    st = peek_run_slot(_RunScope)
+    return list(st.prior_queries) if st is not None else []
+
+
+def set_turn_constraints(pt: "TurnConstraints | None") -> None:
+    """写入本轮生效约束 P_t。唯一写者是 ``planner``（每轮整体重算后覆盖）。按 session_dir
+    聚合，故**跨工具可见**。无 session_dir（单测直调工具）时静默丢弃。"""
+    st = run_slot(_RunScope)
+    if st is not None:
+        st.constraints = pt
+
+
+def get_turn_constraints() -> "TurnConstraints | None":
     """读取本会话的 P_t；未设置（无会话上下文 / 首轮空态）时返回 None。"""
     st = peek_run_slot(_RunScope)
-    return st.pt if st is not None else None
+    return st.constraints if st is not None else None
 
 
-def reset_session_pt() -> None:
+def reset_turn_constraints() -> None:
     """清掉本会话的 P_t（run_agent 收尾，与 reset_session_tasks 对称——run 状态表不像
     ContextVar 会随 task 结束自动回收，不清就会按 session_dir 一直攒着）。"""
     st = peek_run_slot(_RunScope)
     if st is not None:
-        st.pt = None
+        st.constraints = None
 
 
 def get_session_dir() -> Path | None:
@@ -240,8 +257,8 @@ def get_session_dir() -> Path | None:
 def set_original_query(query: str) -> None:
     """记下本轮原始用户 query（``run_agent`` 入口写，每轮覆盖）。
 
-    给 planner 的域反证与 item_picker 的品类门锚核验当独立信号：LLM 结构化输出互相印证
-    没有意义（domains 与 category 同出一张嘴），能反证它们的只有用户原文的词面。
+    给 item_picker 的品类门锚核验当独立信号：planner 的 category 是 LLM 结构化输出，
+    能反证它的只有用户原文的词面。
     """
     st = run_slot(_RunScope)
     if st is not None:

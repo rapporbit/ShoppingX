@@ -1,9 +1,6 @@
 // 前后端唯一约定：AGUI 事件结构。后端 monitor.py 每条事件都是这个信封，
 // 前端只看 event 字段分发、看 data 取业务字段（见 app/api/monitor.py）。
 
-
-// 域枚举定义在 domains.ts（那里还有中文标签 / 下拉顺序），这里转出一手，组件按需从任一处取。
-
 export type AguiEvent = {
   type: "monitor_event";
   event:
@@ -17,10 +14,7 @@ export type AguiEvent = {
     // curator 本轮沉淀了新长期偏好（data.preferences: [{content, dedup_key}]）——回复下方画一行
     // 「记住了 … ✕」，✕ 即 DELETE 掉那条。自动写入，但看得见、撤得掉。
     | "memory_updated"
-    // 本轮**读取侧**用到了哪些长期记忆（data: {domains, excluded, attenuated}）——思考过程里画一行
-    // 「按你的长期偏好：排除 N 项、降权 M 项」。记忆最危险的失败是静默的：一条偏好误杀了一批商品，
-    // 用户只会觉得「怎么老是搜不出东西」，且归因不到记忆头上。这一行就是解药。
-      | "task_result"
+    | "task_result"
     | "task_cancelled"
     // 服务端关停掐断了这一轮（data: {reason, retryable}）。后端已 ack 掉那条消息、不会背着用户
     // 重跑，所以这里只负责把「没结果、重发一次」说清楚。
@@ -34,9 +28,6 @@ export type AguiEvent = {
     // 与 summary_delta 是同一条思路的两半——那个管文案、这个管卡片。收尾的 task_result 会用
     // 定稿那批原样覆盖（两者同构）。不进活动流（它是结果本身，不是一行「思考」）。
     | "items_preview"
-    // 会话级 P_t 约束快照（data: SessionSnapshot）：planner 每轮落 P_t 后推，偏好面板「本次
-    // 会话」区据此实时刷新。瞬态：断线重连后面板走 GET /api/session/{tid}/constraints 主动拉。
-    | "session_constraints"
     // 交易确认卡：
     // 载荷是一条完整的服务端确认记录。真源在库里（GET /api/threads/{id}/confirmations），事件只是
     // 「有变化」的通知；前端按 confirmation_id 合并、决议单向推进（lib/confirmations.ts）。
@@ -217,29 +208,6 @@ export type FactWrite = {
 export type LearnedPref = {
   content: string;
   key: string;
-};
-
-// 会话级 P_t 约束（session_constraints 事件 / GET /api/session/{tid}/constraints）。
-// id 形如 `<bucket>:<term>`（bucket = exclude / avoid / prefer），删除按它打 DELETE；
-// source_quote 现恒为空串、epoch 恒为 0（P_t 已退回词表结构，按词撤回，不再存原话）。
-export type SessionConstraint = {
-  id: string;
-  content: string;
-  source_quote: string;
-  polarity: "like" | "dislike";
-  blocking: boolean;
-};
-
-export type SessionSnapshot = {
-  epoch: number;
-  budget_usd: number | null;
-  category: string;
-  // 「本次选购摘要」：planner 累积的一句话意图与已确定的槽位（如 收货国 / 尺码），偏好面板
-  // 「本次会话」区展示，让用户看得见 Agent 当前以为的需求是什么。旧快照可能缺这几个字段。
-  current_intent?: string;
-  slots?: Record<string, string>;
-  turn?: number;
-  constraints: SessionConstraint[];
 };
 
 // GET /api/history/{tid} 返回的一条逐轮对话（后端 turns.json 累加的精简 user→assistant 对）。

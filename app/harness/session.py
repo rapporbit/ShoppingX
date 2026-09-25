@@ -47,6 +47,9 @@ class HarnessSession:
         self.guard = guard if guard is not None else GuardState()
         self.round_counter = 0
         self.called_tools: set[str] = set()
+        # 本轮以 ERROR 收场过的工具（不进 called_tools）。闸据它判「前置工具已尽力」，
+        # 不再把模型往一个一直失败的工具上赶（2026-09-25 planner 连挂 10 次的死锁）。
+        self.failed_tools: set[str] = set()
         self.drift_state = DriftState()
         self.recent_actions: list[str] = []
         # 接力通道 1：Hook 产出的注入消息 → 下一次 pre_think 消费
@@ -73,6 +76,7 @@ class HarnessSession:
             "original_query": self.original_query,
             "round_number": self.round_counter,
             "called_tools": set(self.called_tools),
+            "failed_tools": set(self.failed_tools),
             "_drift_state": self.drift_state,
             "_guard": self.guard,
         }

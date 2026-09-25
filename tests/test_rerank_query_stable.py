@@ -19,8 +19,8 @@ from pathlib import Path
 
 import pytest
 
-from app.api.context import set_session_pt
-from app.memory.session_state import SessionPrefState
+from app.api.context import set_turn_constraints
+from app.memory.turn_constraints import TurnConstraints
 from app.tools.item_picker import item_picker
 from app.tools.schemas import ItemCandidate
 from app.utils.thread_ctx import thread_scope
@@ -34,9 +34,9 @@ def _cand(item_id: str, title: str) -> ItemCandidate:
     )
 
 
-def _pt(like_terms: list[str]) -> SessionPrefState:
+def _pt(like_terms: list[str]) -> TurnConstraints:
     """带正向偏好词的 P_t —— 正是 planner 每轮现生成、每轮都不同的那种软偏好。"""
-    return SessionPrefState(category="旅行收纳", prefer_terms=list(like_terms))
+    return TurnConstraints(category="旅行收纳", prefer_terms=list(like_terms))
 
 
 async def _query_used(monkeypatch, tmp_path: Path, tag: str, like_terms: list[str]) -> str:
@@ -54,9 +54,9 @@ async def _query_used(monkeypatch, tmp_path: Path, tag: str, like_terms: list[st
     sd = tmp_path / tag
     sd.mkdir(parents=True, exist_ok=True)
     with thread_scope(f"t-rrq-{tag}", sd):
-        # P_t 只有 ContextVar 一个读法（assemble 与 _category_relevance 都读 get_session_pt）。
+        # P_t 只有 ContextVar 一个读法（assemble 与 _category_relevance 都读 get_turn_constraints）。
         pt = _pt(like_terms)
-        set_session_pt(pt)
+        set_turn_constraints(pt)
         await item_picker.ainvoke(
             {
                 "candidates": [

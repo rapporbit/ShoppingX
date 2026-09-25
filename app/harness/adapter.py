@@ -564,6 +564,7 @@ class HarnessToolAdapter(ToolMiddlewareBase):
                 chunks.append(chunk)
         except Exception as exc:
             _observe_tool(tool_name, time.monotonic() - start, "error")
+            s.failed_tools.add(tool_name)
             # 参数校验类失败（ValidationError）**不计入熔断**：那是调用方（模型）的锅，不是工具
             # 基础设施故障。断路器是进程级共享的，计入会让一个会话连发 3 次畸形参数就把该工具对
             # 全进程所有会话熔断 60s。不记也不会卡死断路器：HALF_OPEN 下一次调用照常放行探测。
@@ -585,6 +586,7 @@ class HarnessToolAdapter(ToolMiddlewareBase):
         # 不跑 post_tool_call。只喂 LoopDetector——硬撞同一个错误正是打转。
         if last is not None and last.state == ToolResultState.ERROR:
             _observe_tool(tool_name, time.monotonic() - start, "error")
+            s.failed_tools.add(tool_name)
             meta = dict(last.metadata or {})
             # 错误分级（阶段 4-3）：依赖挂了的那一档，提示优先于循环提示——LoopDetector 要撞够
             # 阈值才说话，而依赖不可用第一次就该停，等它撞满就是三次超时白等。record 仍照记

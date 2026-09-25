@@ -14,7 +14,7 @@
 剩下两路都不是长期记忆：
 
 - **会话级 P_t**：用户**本轮**亲口说的「不要 X」/「要 Y」。它本来就只活在这次会话里，
-  由模型之外的机制维护（`memory/session_state.py`），不存在「跨轮跨品类误杀」的问题。
+  由模型之外的机制维护（`memory/turn_constraints.py`），不存在「跨轮跨品类误杀」的问题。
 - **行为亲和**：从**收藏**聚合出的弱正向证据（零 LLM，见 :mod:`app.memory.affinity`），
   只进 item_picker 的弱加分。因为是推断，档位压到最低：不淘汰、不进检索词、冲突时让位于显式表达。
 """
@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from app.api.context import get_session_pt
+from app.api.context import get_turn_constraints
 from app.memory.affinity import affinity_terms
 from app.memory.store import UserDataStore
 from app.utils.terms import normalize_terms, term_hits
@@ -57,7 +57,7 @@ def _merge(*groups: list[str]) -> list[str]:
 
 async def assemble(user_id: str, store: UserDataStore | None = None) -> MemoryBundle:
     """装配本轮约束：会话级 P_t（本轮亲口说的）+ 行为亲和（收藏聚合）。"""
-    pt = get_session_pt()
+    pt = get_turn_constraints()
 
     exclude = _merge(pt.dislike_terms() if pt else [])
     penalty = _merge(pt.soft_dislike_terms() if pt else [])

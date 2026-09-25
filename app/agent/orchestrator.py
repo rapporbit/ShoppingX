@@ -1,6 +1,6 @@
 """主链路执行入口：一条 query 从入口跑到收尾（``run_agent`` 的唯一实现）。
 
-编排顺序是建会话目录 → 读历史 / P_t → 跑 loop → 收尾落产物 → 记忆判定。三处值得单独记住的
+编排顺序是建会话目录 → 读历史 / 前几轮原话 → 跑 loop → 收尾落产物 → 记忆判定。三处值得单独记住的
 接线（都是 AgentScope 运行时的特性，迁移时逐条验过）：
 
 1. **loop 怎么跑**：``Agent.reply_stream`` + 事件泵（见 ``app/agent/events.py``），
@@ -8,8 +8,8 @@
 2. **on_session_end 不在这里调**：由 ``HarnessAgentAdapter.on_reply`` 在框架内部改写最终
    ``Msg``，所以这里拿到的 ``final_text`` **已经是审核后的**。别再补一次——重复审核会把哨兵
    文案二次剥离，且 ``output_audit`` 的计数会翻倍。
-3. **会话恢复只有一条腿**：``session.json``（``AgentState.model_dump_json()``，P_t 住
-   ``middle_context``）。读不到 / 读坏 → 空开局，不回放 messages 表——那张表只给前端回看，
+3. **会话恢复只有一条腿**：``session.json``（``AgentState.model_dump_json()``，前几轮用户
+   原话住 ``middle_context``）。读不到 / 读坏 → 空开局，不回放 messages 表——那张表只给前端回看，
    Agent 不读。见 :func:`load_session_state` / :func:`save_session_state`。
 
 与运行时无关的那几件事（当轮上下文拼装、产物落盘、配额记账）住在 ``app/agent/session_io.py``。
@@ -48,10 +48,9 @@ from app.api.context import (
     begin_learned_prefs,
     get_learned_pref_items,
     get_learned_prefs,
-    get_session_pt,
     set_deadline,
     set_original_query,
-    set_session_pt,
+    set_prior_queries,
 )
 from app.api.run_state import reset_run_state
 from app.db.quota import remaining_usd
@@ -63,7 +62,6 @@ from app.memory.fact_store import get_fact_store
 from app.memory.facts import select_tier_one_facts
 from app.memory.history import append_turn
 from app.memory.injector import build_history_block, record_search_history
-from app.memory.session_state import pt_from_state, pt_into_state
 from app.observability import metrics
 from app.recall.semantic_cache import (
     TurnCacheEntry,
@@ -81,7 +79,7 @@ from app.utils.thread_ctx import thread_scope
 
 logger = logging.getLogger("shoppingx.orchestrator")
 
-# 会话唯一的跨轮产物：AgentState 全量（含 messages 上下文、框架摘要、middle_context 里的 P_t）。
+# 会话唯一的跨轮产物：AgentState 全量（messages 上下文、框架摘要、middle_context 里的前几轮原话）。
 STATE_FILE = "session.json"
 
 
@@ -120,6 +118,20 @@ def save_session_state(session_dir: Path, state: AgentState) -> None:
     except Exception:
         logger.warning("写 session.json 失败，下轮按空开局", exc_info=True)
         tmp.unlink(missing_ok=True)
+
+
+#: 前几轮用户原话在 ``AgentState.middle_context`` 里的键（旧 → 新，不含本轮）。
+PRIOR_QUERIES_KEY = "prior_queries"
+#: 落盘保留的条数。比 planner 实际回看的窗口（``PRIOR_QUERY_WINDOW``）多留几条，调窗口不用迁数据。
+PRIOR_QUERY_KEEP = 20
+
+
+def _prior_queries(state: AgentState | None) -> list[str]:
+    """从恢复回来的 state 取前几轮用户原话；缺失 / 形状不对一律按空，不抛。"""
+    raw = state.middle_context.get(PRIOR_QUERIES_KEY) if state is not None else None
+    if not isinstance(raw, list):
+        return []
+    return [q for q in raw if isinstance(q, str) and q.strip()]
 
 
 def _extract_summary(messages: Sequence[Msg]) -> ShoppingSummaryOutput | None:
@@ -408,11 +420,11 @@ async def _run_turn(
         history_block = await build_history_block(user_id or "")
 
         # 续聊恢复唯一一条腿：session.json → AgentState（模型视野的完整上下文 + middle_context
-        # 里的 P_t）。缺失 / 读坏 → 空开局。候选池**不跨轮**：追问轮照常重搜，跨轮引用
+        # 里的前几轮用户原话）。缺失 / 读坏 → 空开局。候选池**不跨轮**：追问轮照常重搜，跨轮引用
         # （「买第 2 个」）按 item_id 回源 Qdrant（见 _candidates.hydrate）。
         prior_state = load_session_state(session_dir)
-        pt = pt_from_state(prior_state.middle_context) if prior_state else pt_from_state({})
-        set_session_pt(pt)
+        prior_queries = _prior_queries(prior_state)
+        set_prior_queries(prior_queries)
 
         # 整轮结果缓存（默认关，压测 / 演示用）。**只有干净的第一轮才参与**：带上文的轮次，
         # 答案依赖的上文根本不在 key 里，命中就是串味。查得到就直接回放，一轮 LLM 都不跑。
@@ -458,7 +470,6 @@ async def _run_turn(
         try:
             async with asyncio.timeout(MAIN_AGENT_TIMEOUT_SEC):
                 final_msg = await pump_events(agent.reply_stream(inputs, yield_final_msg=True))
-            pt = get_session_pt() or pt
         except asyncio.CancelledError:
             await monitor.report_task_cancelled()
             raise
@@ -507,9 +518,10 @@ async def _run_turn(
         # 由 HarnessAgentAdapter 在 on_reply 里改写**流出去的**消息（L4），state 里留的是原文。
         # 从 context 取等于把未审核的文本发给用户、落进产物和历史——审核就白做了。
         final_text = (final_msg.get_text_content() or "") if final_msg is not None else ""
-        # 成功收尾的唯一写点：P_t 填进 middle_context，随 AgentState 一起原子落盘。取消 / 超时
-        # 走不到这里，session.json 保持上一轮那份。append_turn 只喂前端回看，Agent 不读它。
-        pt_into_state(agent.state.middle_context, pt)
+        # 成功收尾的唯一写点：本轮原话追加进 middle_context，随 AgentState 一起原子落盘。取消 /
+        # 超时走不到这里，session.json 保持上一轮那份。append_turn 只喂前端回看，Agent 不读它。
+        agent.state.middle_context.pop("pt", None)  # 旧版落盘的累积 P_t，已不再读
+        agent.state.middle_context[PRIOR_QUERIES_KEY] = [*prior_queries, query][-PRIOR_QUERY_KEEP:]
         save_session_state(session_dir, agent.state)
 
         # 用量以**记账树**为准（snap 在 finally 里取，那时树还没 reset）：一次 reply 只落一条

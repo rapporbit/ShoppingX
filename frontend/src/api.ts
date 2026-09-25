@@ -13,7 +13,6 @@ import type {
   FactWrite,
   PrepareOrderInput,
   ProductItem,
-  SessionSnapshot,
   SkillCatalogItem,
   TradeConfirmation,
   UserSkill,
@@ -187,28 +186,6 @@ export async function deletePreference(userId: string, key: string): Promise<voi
 // 整批作废——否则刚清完，上一轮的抽取结果转头又落回空库里。
 export async function clearPreferences(userId: string): Promise<void> {
   await authFetch(`/api/preferences/${encodeURIComponent(userId)}`, { method: "DELETE" });
-}
-
-// 读本次会话累积的 P_t 约束集（偏好面板「本次会话」区；打开面板 / 断线重连时主动拉）。
-// 拉不到只兜底空快照——面板少一个区，不拖垮页面。
-export async function fetchSessionConstraints(threadId: string): Promise<SessionSnapshot> {
-  const empty: SessionSnapshot = { epoch: 0, budget_usd: null, category: "", constraints: [] };
-  try {
-    const resp = await authFetch(`/api/session/${encodeURIComponent(threadId)}/constraints`);
-    if (!resp.ok) return empty;
-    return (await resp.json()) as SessionSnapshot;
-  } catch {
-    return empty;
-  }
-}
-
-// 删本次会话的一条 P_t 约束（面板「本次会话」区每行的 ×）——约束抽取出错时的人纠错入口。
-// 后端删完会经 WS 推新快照（session_constraints 事件），无需手动重拉。
-export async function deleteSessionConstraint(threadId: string, cid: string): Promise<void> {
-  await authFetch(
-    `/api/session/${encodeURIComponent(threadId)}/constraints/${encodeURIComponent(cid)}`,
-    { method: "DELETE" },
-  );
 }
 
 // 读某 thread 的逐轮对话（GET /api/history/{tid}），用于刷新 / 重进页面后「回看」并接着聊。

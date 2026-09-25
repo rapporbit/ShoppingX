@@ -6,10 +6,11 @@
 （加分）——让下游的 ``item_search`` 和 ``item_picker`` 直接吃结构化入参，不必各自再解析一遍
 自然语言。
 
-**planner 是会话态 P_t 的唯一写者（产生与撤销都归它）。** 它每轮都跑、看的是用户原话，产出得早
-（当轮就落进 P_t、当轮被 item_picker 执行）且带 blocking 档位；撤销走「模型按词提议进
-``retract_terms`` + ``merge_pt_lite`` 对原话逐词核验」。curator 只判长期库，不碰 P_t——双写者
-时代它曾用更差的输出覆盖 planner（无档位 draft、脑内换汇），教训见 ``app.memory.curator``。
+**planner 是本轮约束 P_t 的唯一写者，且无状态。** 它每轮都跑，输入是「前几轮用户原话 + 本轮
+原话」，**整体重算**本轮仍生效的全部约束（当轮落进 P_t、当轮被 item_picker 执行）。撤回、换品类
+都随重算自然生效，没有跨轮合并逻辑（2026-09-25 删，见 :mod:`app.memory.turn_constraints`）。
+curator 只判长期库，不碰 P_t——双写者时代它曾用更差的输出覆盖 planner（无档位 draft、脑内换汇），
+教训见 ``app.memory.curator``。
 
 **档位（blocking）由机制判，不由模型判**：模型判「尽量别太花哨」算硬排除还是软避讳，实测约 1/4
 的概率判错，但它**转述用户原话**是稳的。所以 ``exclude_terms`` 的每个词都必须附 evidence（原话
@@ -39,21 +40,14 @@ from app.agent.llm import get_planner_llm
 from app.agent.prompts import get_planner_prompt
 from app.api import monitor
 from app.api.context import (
-    get_original_query,
+    get_prior_queries,
     get_session_dir,
-    get_session_pt,
     get_user_id,
     set_dest_country,
-    set_session_pt,
     set_session_tasks,
+    set_turn_constraints,
 )
-from app.memory.domains import (
-    DOMAIN_GLOBAL,
-    PrefDomain,
-    domain_menu,
-    reconcile_domains,
-)
-from app.memory.session_state import SessionPrefState, merge_pt_lite
+from app.memory.turn_constraints import TurnConstraints
 from app.recall.fx import to_base_or_none
 from app.recall.geo import (
     DEFAULT_DEST_COUNTRY,
@@ -148,14 +142,11 @@ _SCALE_SUFFIXES = {
 
 
 def budget_amount_grounded(intent: str, amount: float) -> bool:
-    """模型填的 ``budget_amount`` 是否真在**本轮原话**里出现过（机制闸，防抄上文重折）。
+    """模型填的 ``budget_amount`` 是否真在这句原话里出现过（机制闸，防编造 / 防错配币种）。
 
-    追问轮（「不要皮革的」）里模型会把 P_t 渲染出的「≤ $80」抄进 budget_amount，而币种解析
-    只看本轮原话——没提币种就落默认 CNY，80 美元被当 80 人民币折成 $11.2，P_t 预算悄悄缩水
-    7 倍（真实 e2e 复现）。规则核对：本轮原话里找得到这个数（含 "1,000" 逗号形式与 k/千/万
-    量级缩写）才算「本轮提过」；原话没有任何数字也没有中文数词 → 判「本轮没提预算」（budget
-    置 None，merge_pt_lite 语义即「保持上一轮不变」）；含中文数词（「预算三百」）无法确定性核对，
-    放行模型的值——宁可放过，不误删真预算。
+    规则核对：原话里找得到这个数（含 "1,000" 逗号形式与 k/千/万量级缩写）才算「这句提过」；
+    原话没有任何数字也没有中文数词 → 判「没提」；含中文数词（「预算三百」）无法确定性核对，
+    放行模型的值——宁可放过，不误删真预算。调用方见 :func:`budget_source`。
     """
     values: set[float] = set()
     for m in _NUM_RE.finditer(intent):
@@ -169,29 +160,42 @@ def budget_amount_grounded(intent: str, amount: float) -> bool:
     return any(abs(amount - v) < 1e-6 for v in values)
 
 
-async def resolve_dest_country_layered(text: str) -> tuple[str, bool, bool]:
-    """四层确定性决定本轮收货国，返回 ``(ISO 码, 是否为「假设值」, 是否本轮明示)``。
+def budget_source(amount: float, utterances: list[str]) -> str | None:
+    """找出 ``amount`` 出自哪句原话（新 → 旧），币种按**那句**解析；都找不到返回 None。
+
+    预算可能是前几轮说的（「预算 80 美元」→ 本轮「不要皮革的」）。币种若按本轮原话解析，没提
+    币种就落默认 CNY，80 美元被当 80 人民币折成 $11.2，预算悄悄缩水 7 倍（旧版真实 e2e 复现）。
+    所以先认数字确实对得上的那句；中文数词那条放行路径只作后备，否则「换一个」里的「一」会抢先。
+    """
+    for u in reversed(utterances):
+        if _NUM_RE.search(u) and budget_amount_grounded(u, amount):
+            return u
+    for u in reversed(utterances):
+        if not _NUM_RE.search(u) and budget_amount_grounded(u, amount):
+            return u
+    return None
+
+
+async def resolve_dest_country_layered(text: str) -> tuple[str, bool]:
+    """四层确定性决定本轮收货国，返回 ``(ISO 码, 是否为「假设值」)``。
 
     优先级（高 → 低），**任一层命中即停**：
     1. 本轮用户明说（「寄到日本」）—— 纯规则解析，见 :func:`app.recall.geo.resolve_dest_country`。
-    2. 会话级 P_t 的 ``dest_country`` —— 本会话前几轮说过一次，后面一直生效。
+    2. 前几轮用户原话（新 → 旧）里的明示 —— 本会话说过一次，后面一直生效。
     3. 长期记忆里 key 为 ``default_ship_to`` 的事实 —— 跨会话记住常用收货地。
     4. env ``DEFAULT_DEST_COUNTRY`` 默认值。
 
-    只有走到第 4 层才算「假设」（返回 ``assumed=True``）——前三层都有用户依据。1~3 层里
-    **只有第 1 层是「本轮明示」**（``stated_now=True``），但 2/3 层同样源于用户自己说过的话，
-    不该每轮都去骚扰他确认，故不标 assumed；标 assumed 的目的只是提醒模型「这是系统替你猜的，
-    得在回复里讲明」。``stated_now`` 单独返回是给 slots 写入门槛用的：**只有本轮带收货语境的
-    明示才值得固化成会话事实**——第 2 层写回是自我循环，第 3 层写入则会把长期记忆「快照」进
-    会话，用户中途改了记忆本会话也不跟着变。
+    只有走到第 4 层才算「假设」（返回 ``assumed=True``）——前三层都有用户依据，不该每轮都去
+    骚扰他确认；标 assumed 的目的只是提醒模型「这是系统替你猜的，得在回复里讲明」。
     """
     country, explicit = resolve_dest_country(text)
     if explicit:  # 第 1 层：本轮原话（门控明示）
-        return country, False, True
+        return country, False
 
-    pt = get_session_pt()  # 第 2 层：会话级 P_t
-    if pt is not None and pt.dest_country:
-        return pt.dest_country, False, False
+    for prior in reversed(get_prior_queries()):  # 第 2 层：前几轮原话
+        country, explicit = resolve_dest_country(prior)
+        if explicit:
+            return country, False
 
     user_id = get_user_id()  # 第 3 层：长期记忆（跨会话常用收货地）
     if user_id:
@@ -205,12 +209,12 @@ async def resolve_dest_country_layered(text: str) -> tuple[str, bool, bool]:
                     # 若再要求语境词反而可能漏掉。M2 起按 key 取，不再按已废的 category/polarity。
                     code = match_country_name(fact.value)
                     if code:
-                        return code, False, False
+                        return code, False
                     break  # 有这条但解析不出国家（写成「欧洲」之类）→ 不再找别条，退默认
         except Exception:  # noqa: BLE001 —— 记忆后端挂了不该崩掉 planner，降级到默认国即可
             pass
 
-    return DEFAULT_DEST_COUNTRY, True, False  # 第 4 层：系统默认 → 必须在回复里标注假设
+    return DEFAULT_DEST_COUNTRY, True  # 第 4 层：系统默认 → 必须在回复里标注假设
 
 
 # 弱表达标记：命中即说明用户那句话是「避讳」而非「排除」，对应的词必须降级到 soft_dislikes。
@@ -297,21 +301,22 @@ class PlanOutput(BaseModel):
             "把握理解这个说法」，拿不准且带时效词才填 web，别把普通模糊需求都推给搜索。"
         ),
     )
-    domains: list[PrefDomain] = Field(
-        default_factory=list,
+    topic_switch: bool = Field(
+        default=False,
         description=(
-            "本轮在买哪些**品类域**（可多选，如「旅行三件套」= bags + apparel）。它决定用户的长期"
-            "偏好哪些在本轮生效——「买鞋时不喜欢皮革」不该在买沙发时也把皮沙发全排掉。\n"
-            "**只要本轮涉及具体商品，就必须至少填一个**：买跑鞋 → [footwear]；买降噪耳机 → "
-            "[electronics]；买手表/腕表 → [jewelry_watches]（**不是** furniture——线上真实误判过，"
-            "按商品本体归域，别被使用场景带偏）；归不进任何具体域（如「送人的小礼物」）→ [other]。"
-            "只有纯闲聊、完全不涉及商品时才留空。\n"
-            "**绝不要填 global**——那是偏好侧「跨品类底线」专用的标记，不是「本轮什么都买」的意思。"
-            "可选值：\n" + domain_menu()
+            "本轮要买的东西是否换成了**另一类商品**（对照【前几轮用户原话】）："
+            "双肩包 → 颈枕、耳机 → 沙发 = true；"
+            "双肩包 → 更轻的双肩包、加预算、换平台、追问比较 = false。"
+            "没有前几轮原话时填 false。true 时上一轮的套装槽位会被清掉，别轻易填。"
         ),
     )
+
     budget_amount: float | None = Field(
-        default=None, description="用户原话给的预算金额（**不要换算**，照原数填），无则 None"
+        default=None,
+        description=(
+            "当前仍生效的预算金额（本轮或前几轮原话里给的，以最新一次为准；**不要换算**，"
+            "照原数填），无则 None"
+        ),
     )
     currency: str = Field(
         default="", description="预算币种 ISO 码——由系统规则确定性回填，**模型不要填**"
@@ -326,8 +331,8 @@ class PlanOutput(BaseModel):
     clear_budget: bool = Field(
         default=False,
         description=(
-            "用户本轮**明确取消 / 放开**了预算（「算了不限预算」「贵点也行，不设上限」「直接上"
-            "最好的别管价格」）→ true。只是本轮没提预算 → false（那是「保持不变」，不是「取消」）。"
+            "用户**明确取消 / 放开**了预算（「算了不限预算」「贵点也行，不设上限」「直接上"
+            "最好的别管价格」），且之后没再给新预算 → true。只是没提预算 → false。"
         ),
     )
     dest_country: str = Field(
@@ -376,8 +381,8 @@ class PlanOutput(BaseModel):
     exclude_terms: list[ExcludeTerm] = Field(
         default_factory=list,
         description=(
-            "**绝对排除**的原子词（命中即淘汰）：用户**本轮新说**的「不要 X / 不能 X」里的那个 X"
-            "（已累积约束系统自动带轮，不要重放）。\n"
+            "**绝对排除**的原子词（命中即淘汰）：用户说过的「不要 X / 不能 X」里的那个 X"
+            "（本轮和前几轮说过、且没被撤回的都要给）。\n"
             "**材质、颜色也填这里**——商品数据里没有材质字段，拿关键词匹标题是这条约束唯一的"
             "执行通路。**英文必给**（「不要塑料」→ plastic，可另附中文原词）：**商品标题基本都是"
             "英文**，只给中文这条硬约束几乎等于没写（系统另有词表兜底，但覆盖不到的只能靠你给）。\n"
@@ -392,7 +397,7 @@ class PlanOutput(BaseModel):
     soft_dislikes: list[str] = Field(
         default_factory=list,
         description=(
-            "**软性避讳**的原子词（命中减分、**不淘汰**）：用户**本轮新说**的「不太喜欢 / "
+            "**软性避讳**的原子词（命中减分、**不淘汰**）：用户说过且仍生效的「不太喜欢 / "
             "尽量避免 / 能不要就不要」"
             "这类非绝对排斥（如「太花哨」「塑料感」）。绝对不要的放 exclude_keywords，别混。"
             "**同样优先给英文**（商品标题是英文）。"
@@ -401,25 +406,13 @@ class PlanOutput(BaseModel):
     prefer_keywords: list[str] = Field(
         default_factory=list,
         description=(
-            "正向偏好的原子词（命中加分，**只填本轮新说的**）：材质 / 功能 / 做工填这里。"
+            "正向偏好的原子词（命中加分，本轮和前几轮说过且仍生效的都要给）："
+            "材质 / 功能 / 做工填这里。"
             "**优先给会出现在英文商品标题里**"
             "的具象词**（「抗造」→ durable、「帆布」→ canvas、「防水」→ waterproof），"
             "而不是 niche / unique 这类抽象词——电商标题不会写 niche，给了也命中不了。"
             "抽象风格取向照样可以给（另有语义打分通道消费它），但别只给抽象词。"
         ),
-    )
-    retract_terms: list[str] = Field(
-        default_factory=list,
-        description=(
-            "用户本轮**明确撤回 / 改口**的既有会话约束词（「算了塑料也行」「不用非得蓝色」）：把"
-            "【上一轮的会话状态】里那个词**照抄**进来（塑料 / plastic 都抄），不要自己编。"
-            "只是补充新条件、没推翻旧的 → 留空。撤回的同时改成别的（「不要蓝色了改黑色」）→ "
-            "旧词进这里，新的照常进三个词桶。系统会逐词核对用户本轮原话，对不上的不删。"
-        ),
-    )
-    session_state: str = Field(
-        default="",
-        description="合并后的本会话累积状态（品类/预算/三个词表）——由系统回填，**模型不要填**",
     )
 
     @model_validator(mode="after")
@@ -511,71 +504,45 @@ def _atoms(words: list[str]) -> list[str]:
     return out
 
 
-def _domain_switch(prev: SessionPrefState | None, domains: list[str]) -> bool:
-    """本轮是否换了品类域（与既有域无交集，两边都非空）——套装状态随之清掉的判据。"""
-    if prev is None or not prev.domains or not domains:
-        return False
-    return not set(prev.domains) & set(domains)
+#: planner 回看的前几轮用户原话条数（不含本轮）。更早的约束靠用户重说——窗口越大，planner
+#: 输入越长、「旧约束被重新抽出来」的判断也越难。
+PRIOR_QUERY_WINDOW = 6
 
 
-def _sync_session_pt(plan: PlanOutput, intent: str, *, dest_stated_now: bool = False) -> None:
-    """把 planner 刚识别出的本轮约束**当轮**写进 P_t —— 短期记忆的机制执行通路。
+def _sync_turn_constraints(plan: PlanOutput) -> None:
+    """把 planner 重算出的本轮约束**当轮**写进 P_t —— 约束的机制执行通路。
 
-    **这是在补一条断掉的链。** 改造前 P_t 只由 curator 在**会话收尾之后**写，于是本轮 item_picker
-    读到的 P_t 永远是上一轮的：用户这轮亲口说的「不要塑料」，机制侧一条都没执行，全靠主 loop 的
-    模型自觉把它转述进 ``item_picker(exclude_keywords=...)``。也就是说，长期记忆有机制路（确定性
-    并入 + 域闸），**短期记忆反倒没有**——而短期约束的明确性远高于长期推断。
-
-    planner 本来就产出了这些结构化字段、也本来就在跑 LLM，这里零额外调用：识别完立刻落 P_t，
-    item_picker 当轮就能硬执行（``pt.dislike_terms()`` → 淘汰，``pt.like_terms()`` → 强加分）。
-    合并的全部规则（换域清表、撤回按词核验、极性翻转）在 :func:`merge_pt_lite`。
+    P_t 不靠模型每轮把「不要塑料」转述进 ``item_picker(exclude_keywords=...)``：planner 识别完
+    立刻落 P_t，item_picker 当轮就能硬执行（``dislike_terms()`` 淘汰、``like_terms()`` 加分）。
+    整体覆盖、不与上一轮合并：planner 的输入本来就含前几轮原话，产出即全集。
     """
     if get_session_dir() is None:
         return  # 没会话（单测 / examples 直调工具）→ 无 P_t 可言，退化成纯拆解
-    # 「还没有 P_t」的正确语义是**空 P_t**，不是「不写 P_t」——首轮本来就没有，正是要在这里开第一份。
-    prev = get_session_pt() or SessionPrefState()
-    merged = merge_pt_lite(
-        prev,
-        exclude=_atoms(plan.exclude_keywords),
-        avoid=_atoms(plan.soft_dislikes),
-        prefer=_atoms(plan.prefer_keywords),
-        retract_terms=plan.retract_terms,
-        user_utterance=intent,
-        category=plan.category,
-        domains=plan.domains,
-        budget_usd=plan.budget_usd,
-        # 撤销权与产生权同归 planner（单写者）。机制闸：本轮原话里有落地的新预算数字时无视
-        # clear_budget——「预算改成 500」被模型顺手多勾一个 clear 不该把新预算清掉；两者同真时
-        # 新值为准，clear 只在「放开且没给新数」时生效（失效方向=宁松，预算误清可见可纠）。
-        clear_budget=plan.clear_budget and plan.budget_usd is None,
-        # 收货国只固化「本轮带收货语境的明示」——线上事故教训：一次误判写进会话就毒化整个
-        # 会话（第 2 层从此短路长期记忆）。第 2/3 层的值本就有各自的持久层，不需要再写回。
-        dest_country=plan.dest_country if dest_stated_now else "",
+    set_turn_constraints(
+        TurnConstraints.build(
+            category=plan.category,
+            budget_usd=plan.budget_usd,
+            exclude=_atoms(plan.exclude_keywords),
+            avoid=_atoms(plan.soft_dislikes),
+            prefer=_atoms(plan.prefer_keywords),
+        )
     )
-    # 只写 ContextVar：本轮 item_picker 即时消费；跨轮持久化由 run_agent 成功收尾时把它填进
-    # AgentState.middle_context 随 session.json 落盘（唯一写点）。planner 是 P_t 的唯一写者——
-    # curator 只读不写，没有第二个写者需要协调时序。
-    set_session_pt(merged)
-    plan.session_state = merged.render()
 
 
-def _render_prior_context() -> str:
-    """拼出 planner 判 ``retract_terms`` 所需的上一轮上下文：既有 P_t（品类 / 预算 / 三个词表）。
+def _render_prior_context(prior: list[str]) -> str:
+    """把前几轮用户原话拼在本轮原话前面，供 planner 重算仍生效的约束。首轮返回空串。
 
-    **从 ContextVar 自己读，不让主 loop 的模型转述**——转述既费 token 又会失真，而这份状态本来
-    就在进程里躺着。没有会话上下文（单测 / examples）或 P_t 为空时返回空串，planner 退化成纯拆解。
-
-    **不要求模型重放约束全集**：一次漏吐 = 约束永久静默消失，存续必须不过 LLM 的手。这里只让
-    它做两件小事：新说的进桶、撤回的抄词。
+    只给**用户原话**，不给上一轮的结构化结果：让 planner 从原话重算，撤回 / 改口 / 换品类都在
+    原话里，不需要另设撤回字段；喂结构化结果则等于把上一轮的误判原样带下去。
     """
-    pt = get_session_pt()
-    if pt is None or pt.is_empty():
+    if not prior:
         return ""
+    lines = "\n".join(f"{i}. {q}" for i, q in enumerate(prior, 1))
     return (
-        "【上一轮的会话状态（系统给的判断依据，不是本轮用户的话）】\n"
-        + pt.render()
-        + "\n→ 三个词桶只填用户**本轮新说**的（已累积的系统自动带到下一轮，不必重放）；"
-        "用户明确撤回 / 改口上面某个词时，把那个词照抄进 retract_terms。\n"
+        "【前几轮用户原话（旧 → 新，判断依据，不是本轮的话）】\n"
+        + lines
+        + "\n→ 输出本轮**仍生效**的全部约束：前几轮说过、本轮没撤回的照样要给；本轮撤回 / 改口的"
+        "不再给；换成另一类商品时，前一类的材质 / 风格偏好不带过来，预算与收货国照旧。\n"
         "\n【本轮用户原话】\n"
     )
 
@@ -586,7 +553,8 @@ async def planner(intent: str) -> PlanOutput:
     参数 intent：用户原话。
     """
     await monitor.report_tool_start("planner", intent=intent)
-    prior = _render_prior_context()
+    prior_queries = get_prior_queries()[-PRIOR_QUERY_WINDOW:]
+    prior = _render_prior_context(prior_queries)
     try:
         # 曾经这里要显式钉 ``method="function_calling"``——旧运行时按模型能力画像推断默认
         # method，qwen 系被判成不支持 tools → 回退 response_format=json_object，而 DashScope
@@ -608,21 +576,23 @@ async def planner(intent: str) -> PlanOutput:
         # 模型调用失败也要补一条 end 事件，否则前端（M8）会看到工具「永远在跑」。
         await monitor.report_tool_end("planner", error=True)
         raise
+    # 预算落地闸：这个数在本轮和前几轮原话里都找不到 → 模型编的，置 None。找得到就记下出处，
+    # 币种按**出处那句**解析（见 budget_source）。放开预算（clear_budget）只在本轮没给新数时生效。
+    source = None
+    if plan.budget_amount is not None:
+        source = budget_source(plan.budget_amount, [*prior_queries, intent])
+        if source is None or (plan.clear_budget and source != intent):
+            plan.budget_amount, source = None, None
     # 货币确定性：无视模型对 currency / budget_usd 的自由猜测，用规则解析币种 + fx 静态表折算回填。
     # 这是修「预算 500 每轮被猜成不同币种 → 预算内空召回退化」的关键一步（确定性，可复现）。
-    code, explicit = resolve_budget_currency(intent)
+    code, explicit = resolve_budget_currency(source if source is not None else intent)
     plan.currency = code
     plan.currency_assumed = not explicit
-    # 预算落地闸：本轮原话里不存在这个数 → 模型是从上文（P_t 渲染的「≤ $80」）抄来的，置 None
-    # 让 merge_pt 按「本轮未提及」沿用上一轮已折算好的 USD 预算——否则抄来的 80 会按本轮解析出的
-    # 币种（默认 CNY）重折成 $11.2，预算悄悄缩水（见 budget_amount_grounded）。
-    if plan.budget_amount is not None and not budget_amount_grounded(intent, plan.budget_amount):
-        plan.budget_amount = None
     plan.budget_usd = to_base_or_none(plan.budget_amount, code, "USD")
-    # 收货国确定性：同一套范式（规则解析 > 会话 slots > 长期记忆 > 默认国），模型同样无权自由填。
+    # 收货国确定性：同一套范式（规则解析 > 前几轮原话 > 长期记忆 > 默认国），模型同样无权自由填。
     # 收货国决定关税免征额（US $0 / CN $7 / AU $660，差两个数量级），判错整条到手价就废了。
     # 写进 ContextVar 供 shipping_calc 机制兜底——不指望模型每次都记得把参数传对。
-    dest, assumed, dest_stated_now = await resolve_dest_country_layered(intent)
+    dest, assumed = await resolve_dest_country_layered(intent)
     plan.dest_country = dest
     plan.dest_country_assumed = assumed
     set_dest_country(dest, assumed)
@@ -641,33 +611,18 @@ async def planner(intent: str) -> PlanOutput:
     # 不该每轮重新指望模型判对——确定性回填，与币种 / 收货国同一套路子。
     if "recommend" in plan.tasks and "landed_cost" not in plan.tasks:
         plan.tasks.append("landed_cost")
-    # 品类域：与币种 / 收货国不同，品类**无法纯规则解析**（「旅行三件套」映射到哪几个域是语义
-    # 判断），故由 LLM 填、代码只做一道净化：剔掉 global——它是偏好侧「跨品类底线」的标记，不是
-    # 「本轮什么都买」的意思，模型填了也不认（否则域集合里混个 global，等于把域隔离整个短路掉）。
-    plan.domains = [d for d in plan.domains if d != DOMAIN_GLOBAL]
-    # 域反证（badcase：手表 query 判成 apparel，prompt 反例已被证伪治不住）：用「用户原文 +
-    # 主品类」的词面命中（DOMAIN_TERMS 高精度词表，独立于 LLM 的信号）核验，漏判的域**并入**。
-    # 并入不替换——词表也可能误判：并入的失效方向是「多注入一个域的偏好」（软性减分/加分，
-    # 可见可纠），替换的失效方向是「把 planner 判对的域丢了」（域隔离静默失效）。
-    reconciled = reconcile_domains(plan.domains, f"{get_original_query()} {plan.category}".strip())
-    if reconciled != plan.domains:
-        logger.info("域反证：词面证据补入 %s（planner 判 %s）", reconciled, plan.domains)
-        plan.domains = reconciled
-    # 任务清单同样落 session 级（同 domains 的聚合方式）：收线通告读它，
+    # 任务清单落 session 级：收线通告读它，
     # 在「无比价 / 到手价诉求」的轮次提示模型跳过 price_compare / shipping_calc——动机层提示，
     # 不是硬闸（这两个工具始终可用，用户中途改口还能调）。
     set_session_tasks(plan.tasks)
-    # 同一轮里重调 planner 且换了域（旅行套装 → 沙发）时旧槽表清掉；跨轮本来就不留（只活一轮）。
-    if _domain_switch(get_session_pt(), plan.domains):
+    # 换了一类商品（旅行套装 → 沙发）时旧槽表清掉。
+    if plan.topic_switch:
         reset_session_bundle()
     if plan.bundle_slots:  # validator 已收口成「≥2 槽或空」
         set_session_bundle(plan.bundle_slots, mode=plan.slot_mode)
-    # 本轮约束当轮落 P_t —— 短期记忆的机制执行通路（见 _sync_session_pt）。放在币种 / 收货国 /
-    # 品类域全部确定性回填**之后**：P_t 要存的是这些回填后的最终值，不是模型的原始猜测。
-    _sync_session_pt(plan, intent, dest_stated_now=dest_stated_now)
-    # 约束集变化推给前端偏好面板（可见可纠）。无会话（单测直调）时 _sync 没写 P_t，也就不推。
-    if (pt_now := get_session_pt()) is not None:
-        await monitor.report_session_constraints(pt_now)
+    # 本轮约束当轮落 P_t —— 约束的机制执行通路（见 _sync_turn_constraints）。放在币种确定性回填
+    # **之后**：P_t 要存的是回填后的最终值，不是模型的原始猜测。
+    _sync_turn_constraints(plan)
     # 给前端「思考过程」展开看的人读摘要：这一步把自然语言意图拆成了哪些结构化字段。
     plan_lines: list[str] = []
     if plan.tasks:
@@ -696,11 +651,6 @@ async def planner(intent: str) -> PlanOutput:
             if any(not s.evidence.strip() for s in plan.bundle_slots):
                 bundle_line += "（组成含推断项，用户未逐一点名——建议先与用户确认增删）"
             plan_lines.append(bundle_line)
-    # 品类域摆进思考过程：它决定「哪些长期偏好本轮生效」，判错了用户得看得见——记忆最怕的就是
-    # 静默失效（域判错 → 偏好没生效 → 用户只觉得「搜出来的东西不对」，却归因不到记忆头上）。
-    plan_lines.append(
-        "品类域：" + ("、".join(plan.domains) if plan.domains else "判不出（本轮全部偏好生效）")
-    )
     if plan.budget_usd is not None:
         plan_lines.append(f"预算：≤ ${plan.budget_usd:.0f}")
     if "landed_cost" in plan.tasks:  # 只在要算到手价时显示，否则是噪音

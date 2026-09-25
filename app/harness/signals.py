@@ -138,9 +138,9 @@ def blacklist_terms() -> list[str]:
     curator 从长期偏好合流，覆盖绝大多数场景。
     """
     try:
-        from app.api.context import get_session_pt
+        from app.api.context import get_turn_constraints
 
-        pt = get_session_pt()
+        pt = get_turn_constraints()
         if pt is None:
             return []
         return pt.dislike_terms()

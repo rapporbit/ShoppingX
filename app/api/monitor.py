@@ -45,10 +45,6 @@ EVENT_TOOL_END = "tool_end"
 EVENT_CLARIFICATION_REQUEST = "clarification_request"
 EVENT_QUEUE_STATUS = "queue_status"
 EVENT_MEMORY_UPDATED = "memory_updated"
-# 会话级 P_t 约束集快照（每轮 planner 落 P_t 后推送）：偏好面板的「本次会话」区据此实时刷新。
-# **瞬态**（不进活动流、不进回放存档）：断线重连后面板走 GET /api/session/{thread}/constraints
-# 主动拉，一条随时可重建的状态快照不值得进存档。
-EVENT_SESSION_CONSTRAINTS = "session_constraints"
 EVENT_TASK_RESULT = "task_result"
 EVENT_TASK_CANCELLED = "task_cancelled"
 # worker 关停排空超时把这一轮掐掉时发（阶段 1-3）。与 task_cancelled 分开：那条是「用户不要了」，
@@ -375,34 +371,6 @@ async def report_memory_updated(prefs: list[dict[str, str]]) -> None:
     if not prefs:
         return
     await _emit(EVENT_MEMORY_UPDATED, f"记住了 {len(prefs)} 条新偏好", {"preferences": prefs})
-
-
-async def report_session_constraints(pt: Any, thread_id: str | None = None) -> None:
-    """P_t 约束集变化（新增 / 撤回 / 换代 / 面板删除）后推当前快照——偏好面板「本次会话」区实时刷新。
-
-    可见可纠的第二腿（步骤三①的事件侧）：约束「录入」仍过 LLM 的手（极性判反 / keywords 抽漏
-    照样进 P_t，且无自愈性），抽错时唯一的兜底是**用户看得见、点得掉**——看得见的前提是推送。
-    每条带 ``id``（``<词表>:<词>``，面板删除按 id 打 DELETE）；lite P_t 没有 source_quote（留空）。
-
-    瞬态：面板打开 / 断线重连走 GET 主动拉，快照不进回放存档。空约束集也推——撤回 / 换代后
-    面板要能清空，不推就永远停在删除前的样子。``thread_id`` 显式传入供 API 层（面板删除）使用，
-    那里不在 thread_scope 里。
-    """
-    from app.memory.session_state import constraint_rows
-
-    rows = constraint_rows(pt)
-    await _emit(
-        EVENT_SESSION_CONSTRAINTS,
-        f"本会话累积约束 {len(rows)} 条",
-        {
-            "epoch": 0,  # lite P_t 无代际；字段保留给前端契约
-            "budget_usd": pt.budget_usd,
-            "category": pt.category,
-            "constraints": rows,
-        },
-        thread_id=thread_id,
-        transient=True,
-    )
 
 
 async def report_task_result(
