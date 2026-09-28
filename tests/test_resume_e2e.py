@@ -44,6 +44,14 @@ def _wire(monkeypatch: pytest.MonkeyPatch, rig: _Rig) -> None:
 
     monkeypatch.setattr(ag, "build_toolkit", _toolkit)
 
+    # 收尾后的记忆管家：它按值 import 了 get_fast_llm，上面换模型换不到它，带 user_id 的用例里
+    # 它会去连 conftest 的哑地址、重试几次再降级（白等几秒）。也不能让它用 rig 的桩模型——那会把
+    # 它的调用算进模型调用次数，续跑「只多调 1 次」的断言就被带偏了。
+    async def _no_curate(*_a: Any, **_kw: Any) -> list[Any]:
+        return []
+
+    monkeypatch.setattr("app.agent.orchestrator.curate_turn", _no_curate)
+
 
 def _users(out: dict[str, Any]) -> int:
     return sum(1 for m in out["messages"] if getattr(m, "role", None) == "user")
