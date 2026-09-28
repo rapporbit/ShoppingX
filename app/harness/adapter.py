@@ -26,7 +26,7 @@ from collections.abc import AsyncGenerator, Callable
 from difflib import SequenceMatcher
 from typing import TYPE_CHECKING, Any
 
-from agentscope.event import ReplyFinishedReason
+from agentscope.event import ReplyFinishedReason, ReplyStartEvent
 from agentscope.message import (
     HintBlock,
     Msg,
@@ -38,7 +38,9 @@ from agentscope.tool import ToolMiddlewareBase
 from agentscope.tool._response import ToolChunk, ToolResultState
 from pydantic import ValidationError
 
+from app.agent import checkpoint
 from app.api import monitor
+from app.api.context import get_run_id
 from app.harness.autopick import maybe_autopick
 from app.harness.middleware import harness
 from app.harness.msgs import _attr, block_text, iter_tool_results, terminal_summary, text_of
@@ -220,6 +222,8 @@ class HarnessAgentAdapter(MiddlewareBase):
         next_handler: Callable[..., Any],
     ) -> ChatResponse | AsyncGenerator[ChatResponse, None]:
         s = self._s
+        # 按步检查点 ①：上一步的工具结果已全部落进 context、本步还没动任何状态——轮次的天然分界。
+        await checkpoint.save(get_run_id(), agent, s, self._turn_start)
         messages: list[Msg] = list(input_kwargs.get("messages") or [])
 
         # 终结直出：shopping_summary 已产出面向用户的完整清单，此处再
@@ -303,6 +307,9 @@ class HarnessAgentAdapter(MiddlewareBase):
         async for event in next_handler(**input_kwargs):
             yield event
         await self._run_post_reflect(agent)
+        # 按步检查点 ②：模型已决定调哪些工具、工具还没跑。崩在工具里时，续跑直接补跑这批调用，
+        # 省掉一次模型调用（框架从最后一条消息里挑「有调用无结果」的执行）。
+        await checkpoint.save(get_run_id(), agent, self._s, self._turn_start)
 
     async def _run_post_reflect(self, agent: Agent) -> None:
         s = self._s
@@ -340,13 +347,24 @@ class HarnessAgentAdapter(MiddlewareBase):
         next_handler: Callable[..., AsyncGenerator],
     ) -> AsyncGenerator:
         s = self._s
+        # 按步续跑：本轮起点与迭代计数都用检查点里的，不能现取——此刻 context 里已经躺着本轮
+        # 崩溃前的那几步了。取走即清空，免得它跟着下一次检查点被存回去。
+        resume, s.resume = s.resume, None
         # 记在 prefill **之前**：此刻 context 里全是历史轮，本轮一个字都还没写进去——与
         # orchestrator 在 ``agent.reply`` 之前取 ``len(state.context)`` 是同一时刻。
         # （prefill 预置的 planner / KB / 订单那条 assistant 消息落在本轮 user 消息之前，
         #   算进本轮也无妨：它里面没有任何文本型终结工具。）
-        self._turn_start = len(agent.state.context)
-        await self._prefill(agent)
+        self._turn_start = resume[1] if resume else len(agent.state.context)
+        await self._prefill(agent)  # 续跑时 s.prefilled 已是 True，空操作
         async for event in next_handler(**input_kwargs):
+            if resume is not None and isinstance(event, ReplyStartEvent):
+                # reply(None) 走的是框架的「新 reply」分支：cur_iter 清零、reply_id 换新。两样都写回：
+                # - cur_iter 不写回，续跑这一轮等于白拿一整份 max_iters；
+                # - reply_id 不写回，后续块会落进一条**新** assistant 消息（append_context 按 id
+                #   认消息），「一轮 reply 一条消息」的结构被拆开——_has_tool_calls / _step_body
+                #   这些按整条消息读结构的判断全会变样（实测：终结纪律把续跑催到 max_iters）。
+                agent.state.reply_context.cur_iter = resume[0]
+                agent.state.reply_context.reply_id = resume[2]
             if type(event).__name__ == "ReplyEndEvent" and s.retry_nudge:
                 # 被打断（用户取消 / 超时）的 reply 不催：吞掉它等于把 INTERRUPTED 藏起来，
                 # 事件泵认不出取消，还白往上下文里塞一条催收尾提示。

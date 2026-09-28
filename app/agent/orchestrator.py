@@ -28,6 +28,7 @@ from typing import Any
 from agentscope.message import Msg, TextBlock
 from agentscope.state import AgentState
 
+from app.agent import checkpoint
 from app.agent.ab import assign as assign_prompt_version
 from app.agent.agents import build_main_agent
 from app.agent.events import pump_events
@@ -52,7 +53,7 @@ from app.api.context import (
     set_original_query,
     set_prior_queries,
 )
-from app.api.run_state import reset_run_state
+from app.api.run_state import reset_run_state, restore_run_state
 from app.db.quota import remaining_usd
 from app.harness.msgs import iter_tool_results
 from app.harness.setup import setup_harness
@@ -415,8 +416,15 @@ async def _run_turn(
 
         begin_learned_prefs()
 
+        # 按步续跑：上一次跑这一轮的 worker 被硬杀（SIGKILL / OOM）时，它的 finally 没机会删检查点，
+        # 接管方在这里读到它，就从最近一步接着跑而不是整轮重来。其余一切收尾路径都会删，所以
+        # 「有检查点」本身就等于「上次是被硬杀的」，不需要再看投递次数。见 app.agent.checkpoint。
+        ck = await checkpoint.load(run_id or "")
+        if ck is not None:
+            logger.info("按步续跑：run_id=%s 从第 %d 步接着跑", run_id, ck.cur_iter)
+
         selected_skill: tuple[str, str] | None = None
-        if skill:
+        if skill and ck is None:  # 续跑时方案正文早已拼进本轮用户消息
             selected_skill = await resolve_selected_skill(skill)
             if selected_skill is None:
                 await monitor.report_error("SkillNotFound", f"所选方案 {skill!r} 不存在或已删除")
@@ -429,9 +437,14 @@ async def _run_turn(
         # 续聊恢复唯一一条腿：session.json → AgentState（模型视野的完整上下文 + middle_context
         # 里的前几轮用户原话）。缺失 / 读坏 → 空开局。候选池**不跨轮**：追问轮照常重搜，跨轮引用
         # （「买第 2 个」）按 item_id 回源 Qdrant（见 _candidates.hydrate）。
-        prior_state = load_session_state(session_dir)
+        ck_state = AgentState.model_validate_json(ck.state_json) if ck is not None else None
+        prior_state = ck_state if ck_state is not None else load_session_state(session_dir)
         prior_queries = _prior_queries(prior_state)
         set_prior_queries(prior_queries)
+        if ck is not None and ck_state is not None:
+            # 放在所有开局写入（任务上限 / 原话 / 前几轮原话）之后：整张表换成崩溃前那一刻的。
+            restore_run_state(ck.run_slots)
+            ck.harness.resume = (ck.cur_iter, ck.turn_start, ck_state.reply_id)
 
         # 整轮结果缓存（默认关，压测用）。**只有干净的第一轮才参与**：带上文的轮次，
         # 答案依赖的上文根本不在 key 里，命中就是串味。查得到就直接回放，一轮 LLM 都不跑。
@@ -454,7 +467,16 @@ async def _run_turn(
             original_query=query,
             image_paths=tuple(image_paths or ()),
             state=prior_state,
+            session=ck.harness if ck is not None else None,
         )
+        if ck is not None:
+            # 崩溃时在跑的工具：前端已收到它的 tool_start、永远等不到 tool_end。续跑会补跑它、再发
+            # 一对 start/end，而前端按工具名先进先出配对——不先把旧的那行关掉，新发的 end 会关旧行、
+            # 新行一直转圈。事件 id 本身不用续编：它是 Redis Stream 的 XADD id，跨进程天然单调。
+            for call in agent.state.get_unfinished_tool_calls(agent.name):
+                await monitor.report_tool_end(
+                    call.name, error="执行被中断（服务重启），正在接着重跑"
+                )
         turn_query = inject_runtime_context(
             query,
             history_block,
@@ -463,12 +485,16 @@ async def _run_turn(
         )
         if selected_skill is not None:
             turn_query = f"{turn_query}\n\n{render_selected_skill(*selected_skill)}"
-        inputs: list[Msg] = [
-            Msg(name="user", role="user", content=[TextBlock(type="text", text=turn_query)]),
-        ]
+        # 续跑不再追加用户消息：它已经在 state 里了。reply(None) 会让框架从最后一条消息里挑出
+        # 「有调用无结果」的工具补跑，没有就直接进下一次推理。
+        inputs: list[Msg] | None = (
+            None
+            if ck is not None
+            else [Msg(name="user", role="user", content=[TextBlock(type="text", text=turn_query)])]
+        )
         # 本轮消息的起点：恢复回来的 state 里还躺着前几轮的上下文，收尾产物（清单 / 商品卡）只能
         # 从这个下标往后找，否则第二轮用 chat_fallback 收尾时会把上一轮的清单当成本轮产物。
-        turn_start = len(agent.state.context)
+        turn_start = ck.turn_start if ck is not None else len(agent.state.context)
 
         # 本轮的截止时刻：与下面那个 asyncio.timeout 同一个预算，区别只在**谁看得见它**。
         # timeout 是从外面一刀砍下来，出站点对它一无所知，只能按自己的超时傻等；deadline 把同一个
@@ -511,6 +537,9 @@ async def _run_turn(
             # 诊断侧信道的键是 thread_id 不是 session_dir（同一目录上的两个 loop 不该互相消费
             # 对方的诊断），不在那张表里，单独清。
             reset_diagnostics(thread_id)
+            # 走得到 finally 的都有了定论（成功 / 失败 / 超时 / 取消 / 关停掐断），检查点没用了；
+            # 失败那条被重投时整轮重跑，不从出事前一步接着跑同一个错。只有硬杀走不到这里。
+            await checkpoint.discard(run_id or "")
             if snap is not None:
                 await charge_quota(
                     user_id, snap, prompt_version=ab_assign.version, run_id=run_id or ""

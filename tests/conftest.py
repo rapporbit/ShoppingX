@@ -156,6 +156,18 @@ def _isolate_search_cache() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _no_step_checkpoint() -> Iterator[None]:
+    """按步检查点默认关：否则每次模型调用都去连 ``QUEUE_REDIS_URL``（开发机上往往是通的）。
+    要测它的用例自己 ``checkpoint.set_client(FakeRedis())``。
+    """
+    from app.agent import checkpoint
+
+    checkpoint.set_client(None)
+    yield
+    checkpoint.set_client(None)
+
+
+@pytest.fixture(autouse=True)
 def fake_redis() -> Iterator[FakeRedis]:
     """给幂等第 3 层一份进程内的去重窗口（现在它在 Redis 上）。
 

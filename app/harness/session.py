@@ -70,6 +70,9 @@ class HarnessSession:
         self.autopick_armed = False
         # post_reflect 判定「该催收尾」后挂在这里，由 on_reply 在 ReplyEnd 时兑现
         self.retry_nudge: str | None = None
+        # 按步续跑的一次性指令 (cur_iter, turn_start, reply_id)：orchestrator 从检查点恢复时置上，
+        # on_reply 进门即取走清空（见 HarnessAgentAdapter.on_reply 与 app.agent.checkpoint）。
+        self.resume: tuple[int, int, str] | None = None
 
     def base_context(self) -> dict[str, Any]:
         return {

@@ -55,14 +55,19 @@ async def _assemble(
     original_query: str = "",
     image_paths: Sequence[str] = (),
     state: AgentState | None = None,
+    session: HarnessSession | None = None,
     tier: str,
 ) -> tuple[Agent, HarnessSession]:
     """按「一个 session + 一份 Toolkit + 一个 Agent」装一套，返回 Agent 与它的 session。
 
     ``state`` 非空即**会话恢复**：把落盘读回来的那份 ``AgentState`` 原样交给 Agent，它的
     context / permission / tool 上下文一并接上（见 orchestrator 的 session.json）。
+
+    ``session`` 非空即**按步续跑**：worker 接管时从检查点读回的控制面状态（prefill 做没做过、
+    autopick 武装位、GuardState…），与 ``state`` 是同一时刻的快照，见 :mod:`app.agent.checkpoint`。
     """
-    session = HarnessSession(original_query=original_query, image_paths=image_paths)
+    if session is None:
+        session = HarnessSession(original_query=original_query, image_paths=image_paths)
     base_prompt = await _run_system_prompt_hooks(get_system_prompt(), query=original_query)
     # 工具适配器挂在**工具实例**上，所以工具实例不能跨 loop 复用 —— build_toolkit 每次按需
     # 重建一批壳（壳很薄，底下的实现函数与 schema 仍是同一份，见 tool_registry）。
@@ -102,6 +107,7 @@ async def build_main_agent(
     original_query: str = "",
     image_paths: Sequence[str] = (),
     state: AgentState | None = None,
+    session: HarnessSession | None = None,
 ) -> tuple[Agent, HarnessSession]:
     """装配主 Agent。
 
@@ -121,5 +127,6 @@ async def build_main_agent(
         original_query=original_query,
         image_paths=image_paths,
         state=state,
+        session=session,
         tier=main_loop_tier_base(),
     )

@@ -82,3 +82,18 @@ def reset_run_state(session_dir: Path | str | None = None) -> None:
     k = str(session_dir) if session_dir is not None else _key()
     if k is not None:
         _RUNS.pop(k, None)
+
+
+def snapshot_run_state() -> dict[type, object]:
+    """本 run 全部状态格的浅拷贝（表本身拷一份，格里的对象是同一批）——按步检查点用，调用方
+    须当场序列化，见 :func:`app.agent.checkpoint.save`。无 session 作用域返回空表。
+    """
+    k = _key()
+    return dict(_RUNS.get(k, {})) if k is not None else {}
+
+
+def restore_run_state(slots: dict[type, object]) -> None:
+    """用检查点里的状态格整张替换本 run 的表——worker 接管续跑时代替开局的 ``reset_run_state``。"""
+    k = _key()
+    if k is not None:
+        _RUNS[k] = dict(slots)

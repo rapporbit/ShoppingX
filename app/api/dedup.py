@@ -24,10 +24,9 @@ connect-first：它自己生成 thread_id、先连 WS、再 POST。把它并进�
 所以进门就登记；后面被 429 / ``already_running`` 拒掉的路径各自调 :func:`forget` 撤销——**不撤的
 话用户退避重试会被自己刚才那次失败的请求挡住**，陷入「越重试越被判重复」的死循环。
 
-**原方案的第二层（Checkpoint 防重跑）本项目不做。** 它依赖 LangGraph checkpointer 把中断的图
-状态存进 Redis、重启后从断点恢复。本项目是轮级快照（session.json），没有 step 级恢复需求
-。所以幂等只有第一层（threads 条件更新）
-和第三层（本模块）。
+**原方案的第二层（Checkpoint 防重跑）不在这里。** 它管的是另一件事：worker 被硬杀后接管方
+从断点接着跑，而不是整轮重跑——见 :mod:`app.agent.checkpoint`（按步检查点存 Redis，思路同
+LangGraph checkpointer）。请求入口的幂等仍是第一层（threads 条件更新）和第三层（本模块）。
 """
 
 from __future__ import annotations
