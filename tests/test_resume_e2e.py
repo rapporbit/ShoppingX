@@ -105,3 +105,131 @@ async def test_no_checkpoint_runs_fresh(monkeypatch: pytest.MonkeyPatch) -> None
     _wire(monkeypatch, rig)
     await run_agent("hi", "t2", run_id="r2")
     assert rig.runs == {"fast": 1, "slow": 1}
+
+
+class _OrderRig:
+    """剧本：登记候选 A1 → create_order(A1) → 收尾。与 ``_wire`` 同形（slow_tool 不上场）。
+
+    模型按 context 里已有的工具结果决定下一步（不靠进程内计数），续跑时照样按剧本走。
+    崩溃点由测试在 ``prepare_order_confirmation`` 返回**之后**挂住：卡已落库、工具结果还没写回
+    ——最近的检查点是「刚决定调 create_order」那一刻，续跑会把它**再执行一遍**。
+    """
+
+    ORDER = {
+        "item_ids": ["A1"],
+        "recipient_name": "Test Buyer",
+        "country": "US",
+        "city": "Austin",
+        "address_line": "1 Main St",
+    }
+
+    def __init__(self, hang: str) -> None:
+        self.hang = hang
+        self.calls = 0
+        self.runs = {"fast": 0, "slow": 0}
+        self.crash_point = asyncio.Event()
+
+    async def fast_tool(self) -> Any:
+        """登记一件候选。"""
+        from agentscope.message import TextBlock, ToolResultState
+        from agentscope.tool import ToolChunk
+
+        from app.tools._candidates import register
+        from app.tools.schemas import ItemCandidate
+
+        self.runs["fast"] += 1
+        register(
+            [
+                ItemCandidate(
+                    item_id="A1",
+                    platform="amazon",
+                    title="canvas pouch",
+                    price=20,
+                    currency="USD",
+                    rating=4.6,
+                )
+            ]
+        )
+        ok = ToolResultState.SUCCESS
+        return ToolChunk(content=[TextBlock(type="text", text="registered A1")], state=ok)
+
+    async def slow_tool(self) -> Any:
+        """慢工具。"""
+        from agentscope.message import TextBlock, ToolResultState
+        from agentscope.tool import ToolChunk
+
+        self.runs["slow"] += 1
+        if self.hang == "tool":
+            self.crash_point.set()
+            await asyncio.sleep(30)
+        ok = ToolResultState.SUCCESS
+        return ToolChunk(content=[TextBlock(type="text", text="slow-ok")], state=ok)
+
+    async def _call(self, *_a: object, messages: list[Any], **_kw: object) -> Any:
+        import json
+
+        from agentscope.message import TextBlock, ToolCallBlock
+        from agentscope.model import ChatResponse
+
+        self.calls += 1
+        done = {
+            getattr(b, "name", None)
+            for m in messages
+            for b in (m.content if isinstance(m.content, list) else [])
+            if getattr(b, "type", None) == "tool_result"
+        }
+        if "fast_tool" not in done:
+            blk = ToolCallBlock(type="tool_call", id="f1", name="fast_tool", input="{}")
+            return ChatResponse(content=[blk], is_last=True)
+        if "create_order" not in done:
+            order = ToolCallBlock(
+                type="tool_call", id="o1", name="create_order", input=json.dumps(self.ORDER)
+            )
+            return ChatResponse(content=[order], is_last=True)
+        return ChatResponse(content=[TextBlock(type="text", text="done")], is_last=True)
+
+
+async def test_resume_reruns_create_order_without_second_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """续跑重跑 create_order：同一 run_id + 从检查点恢复的候选登记表 → 复用同一张确认卡。
+
+    登记表若没恢复，hydrate 会去 Qdrant 回源（测试环境没有），create_order 直接报「不在候选里」。
+    """
+    import app.tools.create_order as co
+    from app.agent.orchestrator import run_agent
+    from app.trade.repository_sql import confirmation_repository
+
+    redis = FakeRedis()
+    checkpoint.set_client(redis)
+    prepared: list[str] = []
+    real_prepare = co.prepare_order_confirmation
+
+    async def _spy(*a: Any, **kw: Any) -> Any:
+        conf = await real_prepare(*a, **kw)
+        prepared.append(conf.confirmation_id)
+        if rig.hang == "order":  # 卡已落库、工具结果还没写回：在这一刻被硬杀
+            rig.crash_point.set()
+            await asyncio.sleep(30)
+        return conf
+
+    monkeypatch.setattr(co, "prepare_order_confirmation", _spy)
+    rig = _OrderRig("order")
+    _wire(monkeypatch, rig)  # type: ignore[arg-type]
+    task = asyncio.create_task(run_agent("买 A1", "t-order", user_id="u-order", run_id="r-order"))
+    await asyncio.wait_for(rig.crash_point.wait(), 5)
+    key = f"{checkpoint.KEY_PREFIX}r-order"
+    blob = redis.store[key]
+    task.cancel()
+    with contextlib.suppress(BaseException):
+        await task
+    redis.store[key] = blob  # 硬杀
+
+    assert len(prepared) == 1  # 崩溃前卡已落库
+    rig.hang = ""
+    await run_agent("买 A1", "t-order", user_id="u-order", run_id="r-order")
+
+    assert rig.runs["fast"] == 1  # 登记候选那步没重跑，A1 是靠检查点恢复的登记表拿到的
+    assert len(prepared) == 2 and prepared[0] == prepared[1]  # 重跑了，但拿回的是同一张卡
+    cards = await confirmation_repository().list_by_thread("u-order", "t-order")
+    assert len(cards) == 1
