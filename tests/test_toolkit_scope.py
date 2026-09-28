@@ -1,6 +1,6 @@
 """Toolkit 发放范围的结构性不变量。
 
-A4 起只剩主 Agent 一个角色（SearchAgent / task_dispatch 已删）。这里钉死两件事：
+现在只剩主 Agent 一个角色（SearchAgent / task_dispatch 已删）。这里钉死两件事：
 发放的每个工具都在白名单里；已删的派发工具不会被悄悄加回来。
 """
 

@@ -1,7 +1,7 @@
 """I 块 · JWT 鉴权：token 签发/验签 + 开关语义 + 越权读 403 + 任务身份取自 token。
 
 核心断言两件事：
-1. 鉴权**关闭**（默认）：现状不变——任意读他人偏好、user_id 信前端传入（保 demo 连续性）。
+1. 鉴权**关闭**（默认）：现状不变——任意读他人偏好、user_id 信前端传入（保本地开发连续性）。
 2. 鉴权**开启**：身份只认 token 的 sub——越权读他人偏好 403、缺/伪造 token 401、跑任务用 token 身份。
 """
 
@@ -125,7 +125,7 @@ async def test_task_identity_from_token_not_body(
         return {"thread_id": thread_id}
 
     monkeypatch.setattr(worker, "run_agent", _fake_run)
-    # 得先真注册一个用户：M16 起，thread 会被认领到 token 的 sub 名下，而归属表有外键——
+    # 得先真注册一个用户：现在 thread 会被认领到 token 的 sub 名下，而归属表有外键——
     # 给一个查无此人的 user_id 签的 token 现在会被拒（401，见 accounts.claim_thread）。
     reg = await client.post(
         "/api/auth/register", json={"username": "real-user", "password": "sup3r-secret"}

@@ -1,4 +1,4 @@
-"""检索合流后自动比价 + 精挑（延迟治理 round3 刀 2）。
+"""检索合流后自动比价 + 精挑。
 
 **为什么**：改前主 loop 固定 5 轮（planner → 搜 → price_compare → item_picker → summary），
 其中 price_compare / item_picker 两轮模型只是在「把上一步的结论搬进下一步的入参」——零决策、

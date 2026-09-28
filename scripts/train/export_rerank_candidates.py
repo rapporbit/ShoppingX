@@ -1,7 +1,7 @@
 """体检第一段：把 e15 召回的 top-K 候选连同文本导出，等着上 GPU 打精排分。
 
 **为什么要有这一步（而不是本地直接 rerank）：** 本机没有卡，1000 条 query × 1000 候选
-= 100 万对 cross-encoder 打分，走 API 又慢又贵。沿用 M21 已经跑通的分工——本地挖候选、
+= 100 万对 cross-encoder 打分，走 API 又慢又贵。沿用 embedding 精调已经跑通的分工——本地挖候选、
 GPU 打分、本地算指标（同 ``mine_ann_negatives`` → ``score_negatives`` → ``merge_negatives``）。
 分数与指标解耦的好处是：后面调评测口径（换 K、换 gain、换指标）不用重跑 GPU。
 
@@ -153,7 +153,7 @@ def main() -> None:
     ap.add_argument(
         "--qrels",
         default=str(QRELS_PATH),
-        help="金标路径。中英配对体检用 esci_eval_qrels_zh / _en_sub（同 query_id，M21 产）",
+        help="金标路径。中英配对体检用 esci_eval_qrels_zh / _en_sub（同 query_id）",
     )
     ap.add_argument(
         "--text-form",

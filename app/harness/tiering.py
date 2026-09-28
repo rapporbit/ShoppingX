@@ -31,7 +31,7 @@ def first_round_tier(ctx: dict[str, Any]) -> str | None:
 
     **预算降档优先**：调用方只在 ``model_tier`` 仍为空时才问本函数，所以 budget_router 写过
     lite 就是 lite —— 钱不够的时候，「想清楚」让位于「跑完」。（曾有「worker 不加档」一条豁免，
-    A4 删子 Agent 后去掉。）
+    删子 Agent 后去掉。）
     """
     from app.agent.llm import main_loop_tier_base, main_loop_tier_first
 

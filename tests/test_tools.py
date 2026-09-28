@@ -1,4 +1,4 @@
-"""M4 验收：九大工具可独立 ainvoke + 注册表完整。
+"""九大工具可独立 ainvoke + 注册表完整。
 
 分两类：
 - 确定性工具（item_search / price_compare / shipping_calc / category_insight / item_picker）
@@ -85,7 +85,7 @@ async def test_price_compare_normalizes_ranks_and_skips() -> None:
 
 
 async def test_price_compare_fills_landed_cost_in_one_step() -> None:
-    """刀3（延迟归因 round2）：price_compare 一步产出到手价，主链路无需再调 shipping_calc。"""
+    """price_compare 一步产出到手价，主链路无需再调 shipping_calc。"""
     from app.tools.price_compare import price_compare
 
     cands = [
@@ -630,7 +630,7 @@ async def test_item_picker_emits_items_preview(monkeypatch: pytest.MonkeyPatch) 
 
 
 # --------------------------------------------------------------------------
-# G1：item_picker 把**本轮会话**的 P_t 排除词确定性并入（长期记忆腿已随 M4 删，
+# G1：item_picker 把**本轮会话**的 P_t 排除词确定性并入（长期记忆腿已已删，
 # 它现在只经模型上下文生效——由模型自己写进 exclude_keywords）
 # --------------------------------------------------------------------------
 async def test_item_picker_auto_excludes_session_dislikes(
@@ -866,7 +866,7 @@ async def test_item_search_session_exclusion_at_recall_stage(
     反映排除后的真实召回数——web_search 兜底闸靠它判「召回全空」，排除前的假数字会把兜底拦死
     （候选全被排除词杀光时，用户拿到空清单还无处补货）。memory_excluded 把「杀了几条」摆上台面。
 
-    长期记忆那条腿已随 M4 删：它只经模型上下文生效，由模型自己写进 brand_exclude / query。
+    长期记忆那条腿已已删：它只经模型上下文生效，由模型自己写进 brand_exclude / query。
     """
     import app.tools.item_search as mod
     from app.api.context import set_turn_constraints
@@ -1020,7 +1020,7 @@ async def _recall_tower_with_query_spy(
 
 
 async def test_item_picker_does_not_add_long_term_memory_itself(monkeypatch: Any) -> None:
-    """长期记忆**不再由 item_picker 自己去读**（M4）。
+    """长期记忆**不再由 item_picker 自己去读**。
 
     它现在只有一条生效路径：每轮注入给模型 → 模型把它写进 exclude_keywords / must_have。
     这条测试守的是「没有第二条路」——库里存着「绝不要皮革」，而模型这轮没传任何排除词时，
@@ -1110,7 +1110,7 @@ def test_hits_partially_negated_still_hits() -> None:
 
 
 async def test_item_search_never_appends_memory_terms_itself(monkeypatch: Any) -> None:
-    """检索词**只由模型给**（M4）：库里存着「喜欢帆布」，检索词也仍然是原样的 query。
+    """检索词**只由模型给**：库里存着「喜欢帆布」，检索词也仍然是原样的 query。
 
     原来这里由系统把长期 like 词拼进 query，与注入给模型的那份文本是两套来源：模型转述一遍
     就会重复拼，最终检索词是怎么来的谁也说不清。现在个性化只能出现在**工具入参**里——
@@ -1977,7 +1977,7 @@ async def test_stream_draft_asks_auto_not_forced_tool_choice(monkeypatch: Any) -
     """收尾必须用 ``tool_choice=auto``，不许回到 forced 单工具。
 
     这不是风格偏好，是实测的能力开关：同一个模型 forced 臂 ``reasons`` 0/9、auto 臂 9/9，
-    forced 还慢 5.9s（探针 docs/plans/baseline-artifacts/summary_toolchoice_ab.py）。
+    forced 还慢 5.9s（探针 scripts/eval/summary_toolchoice_ab.py）。
     forced 拿回的是存根，而 schema 全字段带默认值 → 校验照过、全程零报错，上线起
     ``reasons`` / ``off_intent`` 两项就没生效过。**改回 forced 这条测试必须红。**
     """
@@ -2052,7 +2052,7 @@ async def test_generate_draft_falls_back_without_streaming(monkeypatch: Any) -> 
 class TestStringifiedListCoercion:
     """StrListArg（app/tools/_args.py）：模型把 list 参数吐成 JSON 字符串时就地解回。
 
-    gcjp 会话 d0724e95（2026-07-16）：qwen3.5-flash 传 exclude_keywords='["塑料","plastic"]'
+    线上会话 d0724e95（2026-07-16）：qwen3.5-flash 传 exclude_keywords='["塑料","plastic"]'
     （字符串不是数组），item_picker 校验连挂 4 次到被强制收尾。字符串形如 JSON 数组无歧义，
     机制层 loads 回来比指望模型自纠可靠（同 planner raw_decode 的教训）。
     """
@@ -2100,7 +2100,7 @@ class TestStringifiedListCoercion:
 class TestNullIsAbsent:
     """drop_none_values（app/tools/_args.py）：结构化输出的显式 null 归一为缺席。
 
-    gcjp 会话 cdee1d6d（2026-07-17，童装追问「放开预算」）：deepseek-v4-flash（关思考 +
+    线上会话 cdee1d6d（2026-07-17，童装追问「放开预算」）：deepseek-v4-flash（关思考 +
     function_calling）把 PlanOutput 的 5 个 list 字段吐成显式 null，default_factory 不接显式
     null，planner 连挂 2 次——报错还被外层包成「Error invoking tool with kwargs
     {外层入参}」，看着像入参问题。四处 with_structured_output 顶层 schema 全挂本容错。
@@ -2145,13 +2145,13 @@ class TestNullIsAbsent:
             {"summary": "文案", "reasons": None, "off_intent": None}
         )
         assert draft.reasons == [] and draft.off_intent == []
-        # M3 起 curator 的输出字段是 facts（key/value/category 三字段的事实），同洞同修。
+        # 起 curator 的输出字段是 facts（key/value/category 三字段的事实），同洞同修。
         assert CurationResult.model_validate({"facts": None}).facts == []
 
 
 @pytest.mark.asyncio
 async def test_recall_memories_filters_by_topic_over_facts() -> None:
-    """M2：recall_memories 改查 ``memory_facts``，按 topic 确定性筛选，不做任何域过滤。
+    """recall_memories 改查 ``memory_facts``，按 topic 确定性筛选，不做任何域过滤。
 
     它补的是自动注入的盲区——每轮注入只给 tier-one 那批（constraint + 最近 8 条），用户问
     「我以前买的那双鞋」时要的恰恰是没进那批的，没有这个工具模型只能回「我不记得」。

@@ -1,6 +1,6 @@
 """召回层共享数据结构。
 
-放在独立模块，避免 ``ann.py`` / ``towers.py`` / M4 的 ``item_search`` 工具之间循环依赖。
+放在独立模块，避免 ``ann.py`` / ``towers.py`` / ``item_search`` 工具之间循环依赖。
 """
 
 from pydantic import BaseModel, Field

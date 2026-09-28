@@ -1,10 +1,10 @@
-"""商品召回门禁：在 ESCI golden（M21 那份 qrels）上打 Recall@20 / MRR / NDCG@20，不达标退非零。
+"""商品召回门禁：在 ESCI golden（qrels）上打 Recall@20 / MRR / NDCG@20，不达标退非零。
 
 **与 `run_category_recall.py` 的分工**：那条量的是品类知识库（进程内 hybrid，几十条金标）；
 这条量的是**商品向量召回**（Qdrant dense，1.1 万条人工标注 query）。改 embedding / 索引 /
 payload filter / coarse_k 前后各跑一遍，两份 JSON 一比就是结论。
 
-**与 M21 基线 `scripts/train/eval_recall.py` 的分工**：那份是训练侧的**模型对照**（K=1000，
+**与 `scripts/train/eval_recall.py` 的分工**：那份是训练侧的**模型对照**（K=1000，
 把「排序空间」全摊开，训前训后差异才量得出）；这份是工程侧的**回归门禁**（K=20 = 线上真实吃
 进下游的条数，跑得快、能挂 CI）。口径（分级 gain / 分母取库内正例）刻意与它逐字一致，只换 K。
 
@@ -22,7 +22,7 @@ payload filter / coarse_k 前后各跑一遍，两份 JSON 一比就是结论。
 
 基线（2026-09-07，`globex_items` 全集 11364 条 / BGE-M3 API / 约 9 分钟）：
 ``recall@20=0.2472  mrr=0.1765  ndcg@20=0.1492  complement_hits@20=0.1716``。
-与 M21 的 `baseline_report.json`（同一份 golden，K=1000 检索后截前 20）差 0.9pt，是 HNSW 的
+与精调基线 `baseline_report.json`（同一份 golden，K=1000 检索后截前 20）差 0.9pt，是 HNSW 的
 ``ef`` 随 limit 变大而变大所致——同一个索引，检索 20 条就是比检索 1000 条再截前 20 略差一点。
 
 ⚠️ **collection 与 encoder 必须配套**：`--collection` 换成自训权重建的索引（如 e15）时，query
@@ -59,14 +59,14 @@ QRELS_PATH = PROJECT_ROOT / "data" / "train" / "esci_eval_qrels.jsonl"
 OUT_PATH = PROJECT_ROOT / "data" / "eval" / "product_recall_report.json"
 
 # 批量编码 + 批量检索。逐条 await 会多两个数量级的往返；**不要换成线程池并发调同步 client**：
-# qdrant-client 的同步 HTTP 连接跨线程复用会炸 Bad file descriptor（M21 全量跑到一半崩过）。
+# qdrant-client 的同步 HTTP 连接跨线程复用会炸 Bad file descriptor（全量跑到一半崩过）。
 ENCODE_BATCH = 128
 
 
 def load_qrels(path: Path, limit: int) -> list[dict]:
     if not path.exists():
         raise SystemExit(
-            f"[2] 找不到 golden {path}。它是 M21 的产物（data/ 在 .gitignore 里），"
+            f"[2] 找不到 golden {path}。它是 embedding 精调的产物（data/ 在 .gitignore 里），"
             "重建：uv run --group train python scripts/train/build_esci_pairs.py"
         )
     rows = [json.loads(x) for x in path.open(encoding="utf-8") if x.strip()]

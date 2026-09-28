@@ -1,4 +1,4 @@
-"""批 2 · 削峰队列的确定性单测：双流分级 / ack / pending 重投 / 死信 / 进程内回落。
+"""削峰队列的确定性单测：双流分级 / ack / pending 重投 / 死信 / 进程内回落。
 
 **测试策略沿用 `tests/test_event_replay.py` 的惯例**：一个内存 FakeRedis 实现 Stream 消费者组的最小
 子集（xadd / xreadgroup / xack / xpending_range / xclaim / 租约 Lua 等），不依赖真 Redis，也不引
@@ -302,7 +302,7 @@ def test_task_dict_roundtrip_and_tolerates_missing_fields() -> None:
 
 
 def test_request_id_survives_the_queue() -> None:
-    """request_id 要跨序列化活下来（阶段 4-5）——它是 API 与 worker 两个进程唯一的那根线。
+    """request_id 要跨序列化活下来——它是 API 与 worker 两个进程唯一的那根线。
 
     盯的是 ``to_dict``：字段加在 dataclass 上而忘了加进 payload，本地跑全绿（同进程直接传对象），
     上了队列才静默丢——而丢了不会报错，只会让日志再也串不起来。
@@ -594,7 +594,7 @@ async def test_inprocess_status_table_is_bounded() -> None:
 
 # ── 工厂 ────────────────────────────────────────────────────────────────────
 def test_factory_builds_a_redis_stream_queue(monkeypatch: pytest.MonkeyPatch) -> None:
-    """工厂恒给 Redis Stream（阶段 1 条 7 删掉 QUEUE_ENABLED）；单例只建一次。"""
+    """工厂恒给 Redis Stream（已删掉 QUEUE_ENABLED）；单例只建一次。"""
     monkeypatch.setattr(queue_pkg, "_queue", None)
     monkeypatch.setenv("QUEUE_REDIS_URL", "redis://127.0.0.1:6379/15")
     q = get_task_queue()
@@ -677,7 +677,7 @@ async def test_worker_failure_writes_failed_and_reraises(monkeypatch: pytest.Mon
 async def test_worker_shutdown_cancel_writes_interrupted(monkeypatch: pytest.MonkeyPatch) -> None:
     """关停掐断写 ``interrupted`` 而不是 failed：任务没毛病，是进程要走了。
 
-    写 failed 会让脚本类调用方按「跑挂了」重试同一条；不写终态（阶段 1-3 之前的做法）则让轮询方
+    写 failed 会让脚本类调用方按「跑挂了」重试同一条；不写终态（早先的做法）则让轮询方
     一直等下去——而消息现在是被 ack 掉的，那边等的东西永远不会再动。
     """
     queue = InProcessQueue()
@@ -735,7 +735,7 @@ async def test_worker_grace_timeout_returns_message_to_pending(
 ) -> None:
     """宽限期内跑不完 → 掐掉在飞任务 → 按 interrupted 收尾并**ack 掉**，PEL 清空。
 
-    阶段 1-3 改的就是这条断言的方向：从前是「不 ack、留 PEL 等重投」，现在是「给个定论、ack 掉，
+    这条断言的方向：从前是「不 ack、留 PEL 等重投」，现在是「给个定论、ack 掉，
     要不要再来一次由用户决定」（理由见 worker 模块 docstring 第 3 条）。
 
     把 ports.cancel_in_flight 那一手去掉即红：消费循环被取消时在途 task 会变成孤儿协程（进程都在

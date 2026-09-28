@@ -31,7 +31,7 @@ from app.utils.env import env_int
 WEB_SEARCH_TASK_QUOTA = env_int("WEB_SEARCH_TASK_QUOTA", 2)
 _TASKS_WANT_WEB = frozenset({"evaluate", "category_intel"})
 
-# ``research``（C2 的有界研究函数）的**独立**会话配额，单位是**搜索条数**不是调用次数：
+# ``research``（有界研究函数）的**独立**会话配额，单位是**搜索条数**不是调用次数：
 # 单次上界 ``RESEARCH_MAX_TARGETS``（3，每 target 一条模板查询、aspects 合进同一条）已在工具侧
 # 截断，这里管的是会话累计 —— 6 条 ≈ 两次满载调用。
 #

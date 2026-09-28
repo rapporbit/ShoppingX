@@ -1,4 +1,4 @@
-"""账户与归属的读写（M16）——注册、登录校验、认领会话、列出会话、校验属主。
+"""账户与归属的读写——注册、登录校验、认领会话、列出会话、校验属主。
 
 **密码怎么存。** bcrypt 摘要，不可逆：库被拖走也拿不到明文密码（用户往往在别处复用同一个密码，
 这是「泄漏一个站 = 泄漏一批账号」的根因）。bcrypt 自带每用户随机盐，且**故意算得慢**——离线爆破
@@ -127,12 +127,12 @@ async def claim_thread(
     **认领是一次性的**：已存在的 thread 绝不改 ``user_id``——否则「用别人的 thread_id 发一条消息」
     就成了把他人会话过户到自己名下的越权写。属主校验（assert_owner）挡的是读，这里挡的是写。
 
-    **鉴权关闭时也要登记**（阶段 1-2，``verify_user=False`` + ``user_id=""``）：``threads`` 行是
+    **鉴权关闭时也要登记**（``verify_user=False`` + ``user_id=""``）：``threads`` 行是
     「这个 thread 上谁在跑」的唯一真相（见 :mod:`app.db.runs`），没有行就没有真相，幂等第 1 层又
     会退回进程内那份各算各的字典。那条路上的 ``user_id`` 是假身份，所以不查 users 表。
 
     ``verify_user`` 顶替的是原先外键抛 ``IntegrityError`` 的那条路：1-2 去掉了
-    ``threads.user_id`` 的外键（demo 身份不在 users 表里，带外键就插不进来），于是「token 验签
+    ``threads.user_id`` 的外键（免鉴权假身份不在 users 表里，带外键就插不进来），于是「token 验签
     通过、它的 sub 在 users 表里查无此人」改由这里显式查一次——仍旧转 401 让用户重新登录，不能
     把一个约束错误当 500 甩到脸上。
     """
@@ -163,8 +163,8 @@ async def claim_thread(
 async def assert_owner(db: AsyncSession, thread_id: str, user_id: str) -> None:
     """校验某会话确属此人，否则抛 PermissionError（路由转 403/404）。
 
-    **未登记的 thread 视为无主、放行**：鉴权关闭时（demo 模式）没人认领会话，若一律拒绝就把整个
-    demo 锁死了。开启鉴权后所有会话都会在起任务时被认领，这条兜底自然失效。
+    **未登记的 thread 视为无主、放行**：鉴权关闭时（免鉴权模式）没人认领会话，若一律拒绝就把整个
+    本地开发锁死了。开启鉴权后所有会话都会在起任务时被认领，这条兜底自然失效。
     """
     row = await db.get(Thread, thread_id)
     if row is not None and row.user_id != user_id:
@@ -176,7 +176,7 @@ async def delete_thread(db: AsyncSession, thread_id: str, user_id: str) -> None:
 
     **只删归属记录，不删 ``output/<tid>/`` 里的对话正文**——与改造前「只删前端索引」的语义一致：
     入口没了，磁盘上的东西还在。真要做「彻底删除我的数据」，得连会话目录一起清，那是另一件事
-    （涉及正在跑的任务、产物文件、事件流），不在本次范围内，诚实标注。
+    （涉及正在跑的任务、产物文件、事件流），不在本次范围内。
     """
     row = await db.get(Thread, thread_id)
     if row is None:

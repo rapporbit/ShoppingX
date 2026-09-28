@@ -1,15 +1,15 @@
-"""批 2 · 事件背板：跨进程 AGUI 事件转发 / origin 去重 / fire-and-forget 强引用 / 静默降级。
+"""事件背板：跨进程 AGUI 事件转发 / origin 去重 / fire-and-forget 强引用 / 静默降级。
 
 **测试策略沿用 `tests/test_queue.py` 的惯例**：一个进程内的 ``FakeBus`` 当「同一个 Redis」，多个
 ``FakeRedis`` 客户端接在上面当「不同进程」。真 Redis 的价值在验协议（`listen()` 会先吐一条
 subscribe 确认帧、data 可能是 bytes），这两件事在 FakeRedis 里**照原样复刻**，其余噪声不引入；
-真双进程的冒烟另跑（见 docs/plans/批2-进度.md）。
+真双进程的冒烟另跑。
 
 本文件要钉死的四件事，每一件失手都不会报错、只会静默出错：
 1. 远端进程的事件能落到本进程挂着的那条 WS 上（背板存在的全部理由）；
 2. **自己发的不再收一遍**（origin 去重失手 = 前端每条事件重复 N 遍）；
 3. publish_nowait 的任务**有人持强引用**（失手 = 偶发丢事件，且无法复现）；
-4. Redis 抽风时一律静默降级（失手 = 事件侧把主链路拖垮，与批2-1 定的降级方向相反）。
+4. Redis 抽风时一律静默降级（失手 = 事件侧把主链路拖垮，与降级方向相反）。
 """
 
 from __future__ import annotations
@@ -213,7 +213,7 @@ async def test_publish_nowait_drops_beyond_max_inflight(wired: Any) -> None:
 
 # ── 4. 静默降级 ────────────────────────────────────────────────────────────────
 async def test_publish_failure_is_silent() -> None:
-    """Redis 挂了：发布返回 False 而不是抛——事件侧的降级方向与队列相反（见批2-1 口径）。"""
+    """Redis 挂了：发布返回 False 而不是抛——事件侧的降级方向与队列相反（见）。"""
     backplane = EventBackplane(FakeRedis(FakeBus(), fail_publish=True), origin="o")
     assert await backplane.publish(make_event()) is False
     backplane.publish_nowait(make_event())  # 也不许从 fire-and-forget 那条路炸出来
@@ -266,7 +266,7 @@ async def test_subscription_reconnects_after_error(monkeypatch: pytest.MonkeyPat
         await api.stop()
 
 
-# ── 5. 工厂：恒开（阶段 1 条 7 删掉 BACKPLANE_ENABLED / QUEUE_ENABLED 两个开关）───────
+# ── 5. 工厂：恒开（已删掉 BACKPLANE_ENABLED / QUEUE_ENABLED 两个开关）───────
 def test_factory_returns_none_when_client_cannot_be_built(monkeypatch: pytest.MonkeyPatch) -> None:
     """URL 非法 → 返回 None 降级为单进程行为，不把 API 进程带下去（可达性那道闸在 lifespan）。"""
     monkeypatch.setattr(bp, "_backplane", None)

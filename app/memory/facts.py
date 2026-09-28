@@ -5,11 +5,11 @@ polarity / domain / slug / blocking 的建模。三处不同是本仓主动改�
 
 1. **匹配口径不用 `split()`**。常见实现按空格切词再判包含，中文没有词间空格，一句「不要塑料的」
    会切成一个 token，与 key `material_plastic` 永远匹配不上。这里保留子串匹配。
-2. **同一事实的判重用字符 bigram Jaccard**，理由同上（M3 会用到，先放这里）。
+2. **同一事实的判重用字符 bigram Jaccard**，理由同上。
 3. **围栏剥离复用 `security.content_filter`**，不自建一套标记。
 
 **记忆只经模型上下文生效**：事实注入进 system 消息后，由主模型自己写进 `item_search` 的入参。
-本模块不提供任何「直接改检索结果」的接口——那条腿（`memory/assemble.py` 的硬淘汰与减分）随 M4 删。
+本模块不提供任何「直接改检索结果」的接口——那条腿（`memory/assemble.py` 的硬淘汰与减分）已删。
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ TIER_ONE_CAP = 8
 
 #: **唯一一个被代码按名字读的 key**：收货国解析的第 3 层（``planner.resolve_dest_country_layered``）
 #: 和旧数据迁移都认它。其余 key 都由模型自拟，只经上下文生效、没有哪段代码按名字取。
-#: 定在这里而不是各自写字面量——写岔一个字符就是静默退回默认国、到手价按错国家算（计划 §4.1 C1）。
+#: 定在这里而不是各自写字面量——写岔一个字符就是静默退回默认国、到手价按错国家算。
 SHIP_TO_KEY = "default_ship_to"
 
 

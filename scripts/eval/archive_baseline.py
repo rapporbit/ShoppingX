@@ -1,6 +1,6 @@
 """把一次 Rubric 全跑存档成**带环境指纹**的基线，供后续 A/B 对照。
 
-**为什么非要存指纹**：A/B 两组只有在同一环境下才可比。M22 的端到端 A/B 之所以无结论，
+**为什么非要存指纹**：A/B 两组只有在同一环境下才可比。reranker 精调的端到端 A/B 之所以无结论，
 噪声是一半原因，另一半是「两次跑之间到底还有什么变了」说不清。模型名、索引名、检索后端
 在不在、代码 commit——任何一个不同，分差就不能全算到被测改动头上。
 
@@ -8,7 +8,7 @@
 上一份合并才是完整基线，按 id 去重、后来者覆盖。
 
 用法：
-    uv run python scripts/eval/archive_baseline.py --name A_M23_S0_4 \\
+    uv run python scripts/eval/archive_baseline.py --name A_baseline \\
         --merge /tmp/rubric_90_partial.json data/eval/rubric_report.json
 """
 
@@ -85,7 +85,7 @@ def _summarize(rows: list[dict]) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--name", required=True, help="基线名，如 A_M23_S0_4")
+    ap.add_argument("--name", required=True, help="基线名，如 A_baseline")
     ap.add_argument(
         "--merge", nargs="+", required=True, help="要合并的 rubric 报告（后者覆盖前者）"
     )

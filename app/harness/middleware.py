@@ -96,7 +96,7 @@ class HarnessMiddleware:
     ) -> None:
         """注册一个 Hook。
 
-        （曾有 ``main_only`` 参数让 Hook 在 worker 里跳过，A4 删子 Agent 时去掉。）
+        （曾有 ``main_only`` 参数让 Hook 在 worker 里跳过，删子 Agent 时去掉。）
         """
         if hook_point not in HOOK_POINTS:
             raise ValueError(f"未知 Hook 点: {hook_point}，可选: {HOOK_POINTS}")

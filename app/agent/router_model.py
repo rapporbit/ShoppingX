@@ -1,4 +1,4 @@
-"""走 LiteLLM Router 的模型实现（阶段 2 第 2 条）。
+"""走 LiteLLM Router 的模型实现。
 
 **落地形态：不翻译，只换出口。** ``OpenAIChatModel._call_api`` 里真正打网络的只有一行
 （``self.client.chat.completions.create(**kwargs)``），前面是 kwargs 装配、后面是

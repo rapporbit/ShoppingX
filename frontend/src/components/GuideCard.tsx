@@ -2,7 +2,7 @@ import type { GuideData } from "../types";
 import { downloadFile } from "../api";
 import { DownloadIcon } from "./icons";
 
-// 选购指南卡（S3 / present_guide）：一节一条标准、要点成列表、来源单独一栏可点。
+// 选购指南卡（GRPO / present_guide）：一节一条标准、要点成列表、来源单独一栏可点。
 //
 // 为什么不复用 FinalAnswer 的 markdown 正文：这份内容的结构本来就是「几条标准 × 几个要点 + 一份
 // 出处」，后端已经把它拆成字段了。画成卡之后节与节分得开、来源不混在正文末尾，扫读比一整篇

@@ -45,7 +45,7 @@ async def check_trade_sequence(context: dict[str, Any]) -> dict[str, Any] | None
 
 # 工具名 → 前置工具候选列表，**满足其一即可**（不是全部都要）。
 PREREQUISITES: dict[str, list[str]] = {
-    # 「搜完直接收尾」（round3 刀 2）是合法序列：自动比价精挑（harness.autopick）走
+    # 「搜完直接收尾」是合法序列：自动比价精挑（harness.autopick）走
     # after_tool_success 同一条管线，item_picker 照样进 called_tools，这条前置自然满足。
     "shopping_summary": ["item_picker"],
     "price_compare": ["item_search"],

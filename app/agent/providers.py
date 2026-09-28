@@ -1,4 +1,4 @@
-"""provider / model 寻址（阶段 2 第 2 条）。
+"""provider / model 寻址。
 
 **这层解决什么**：改造前全仓只有一个模型出口——``OPENAI_BASE_URL`` + ``OPENAI_API_KEY``。
 换供应商等于改全局 env，一条链路上不可能同时用两家，fallback 只能在同一家里换个模型名

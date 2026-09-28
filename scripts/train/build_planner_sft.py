@@ -1,14 +1,14 @@
-"""S2 冷启动数据：golden + 教师产出 → SFT 样本（ms-swift messages 格式）。
+"""冷启动数据：golden + 教师产出 → SFT 样本（ms-swift messages 格式）。
 
-**为什么是「蒸馏 + golden 修正」而不是纯 golden**：S0-2 刻意没给 `keywords` / `exclude_terms`
+**为什么是「蒸馏 + golden 修正」而不是纯 golden**：golden 标注刻意没给 `keywords` / `exclude_terms`
 标字面 golden（检索词天然多解，比字面就是在罚同义改写）。可 SFT 要有个具体的目标串才能训。
 解法是分工——
 - `category` / `domains` / `budget_*`：**用 golden 覆盖教师**。这三组有确定答案，教师答错的
   地方正是我们要纠的。
 - `keywords` / `exclude_terms`：用**教师产出**（线上 API 模型）。它们没有唯一解，SFT 阶段
-  只需要学会「长什么样」，学准是 S3 GRPO 用 R_retrieval 去顶的事。
+  只需要学会「长什么样」，学准是 GRPO 用 R_retrieval 去顶的事。
 
-这也正是 S2 的定位：**冷启动只学 schema 与形态**（验收线是格式正确率 ≥98%），不指望它学对
+这也正是 SFT 冷启动的定位：**冷启动只学 schema 与形态**（验收线是格式正确率 ≥98%），不指望它学对
 判定。把这两件事混在一起要，SFT 就会去死记 golden，反而压缩了 GRPO 的探索空间。
 
 **只训三组字段，system prompt 也只讲这三组**：线上双通道方案里本地 4B 只出这几项，完整
@@ -72,7 +72,7 @@ async def _teacher(row: dict) -> dict | None:
     """教师产出：线上 API 模型跑一遍真实 planner，取它的 keywords / exclude_terms。
 
     复用**线上 prompt + schema**，不碰工具体（那里有 P_t 写入 / 计费 / AGUI 上报等会话副作用，
-    批量跑会互相污染）——与 M21「训练与线上共用 embed_text、不共用会话层」同一条纪律。
+    批量跑会互相污染）——与 embedding 精调「训练与线上共用 embed_text、不共用会话层」同一条纪律。
     """
     from app.agent.invoke import call_structured
     from app.agent.llm import get_fast_llm
@@ -142,7 +142,7 @@ async def main() -> None:
     rows = [json.loads(x) for x in GOLDEN.open(encoding="utf-8") if x.strip()]
     rows = [r for r in rows if r["split"] == args.split]
     # review 状态的样本降权处理 = 直接排除：它们的 category/domains 三票没谈拢，拿去当
-    # SFT 的确定目标不合适（S0-2 的决定：train 里的分歧不裁决，训练时排除）。
+    # SFT 的确定目标不合适（golden 标注的决定：train 里的分歧不裁决，训练时排除）。
     rows = [r for r in rows if r["status"] != "review"]
     if args.limit:
         rows = rows[: args.limit]

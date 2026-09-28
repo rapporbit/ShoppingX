@@ -1,6 +1,6 @@
 """组装 reranker 训练集：相对闸过滤假负 + 正例展开 → ms-swift reranker 格式。
 
-**闸为什么是「相对」的。** M21 给 embedding 挖负例时用的是绝对阈值 0.5，实测闸掉率 52.24%。
+**闸为什么是「相对」的。** 给 embedding 挖负例时用的是绝对阈值 0.5，实测闸掉率 52.24%。
 在这份数据上不能照搬——同一个 cross-encoder 的标定分布是：人工正例 E 中位仅 .5540、p10 低到
 .0027，而人工负例 S 的 p90 到 .6679、C 到 .8927。**E 的 p10 比 I 的 p90 还低，尺子本身就是
 倒挂的**。拍任何一个绝对阈值，都会在闸掉疑似假负的同时，把大量人工确认的 S/C 一并闸掉——
@@ -12,11 +12,11 @@
 
 ``--gate-quantile`` 默认 **1.0（取正例最高分）**，即只剔除「比所有已知正例都更像」的候选。
 刻意保守：我们要治的病是「深池里捞不出正例」，训练数据宁可留一点噪声，也不能把 hard negative
-删光——M21 闸掉 52% 之后剩下的负例偏易，正是这次要避免的。闸掉率会打印出来，用数据说话。
+删光——embedding 精调闸掉 52% 之后剩下的负例偏易，正是这次要避免的。闸掉率会打印出来，用数据说话。
 
 **ESCI 标注的 S/C/I 一律不过闸**：人工标注优先于模型判据，理由同 ``mine_deep_negatives.py``。
 
-**正例展开** 沿用 M21 的唯一有效杠杆（每 query 平均 3.94 个正例，只取第一个等于扔掉 74% 的
+**正例展开** 沿用 embedding 精调的唯一有效杠杆（每 query 平均 3.94 个正例，只取第一个等于扔掉 74% 的
 人工标注）。reranker 这里比 embedding 更安全——listwise loss 按组独立算 CE，没有 in-batch
 negatives，同一 query 的多条样本落进同一 batch 也不会互相当假负。shuffle 照做，图个稳。
 
@@ -137,10 +137,10 @@ def build(
         # ESCI 档位高的先占坑：分级训练里 S/C 是唯一能教「相关但不是最优」的样本，
         # 二值训练里它们也是最像正例的 hard negative，两种格式下都该优先。
         esci_negs.sort(key=lambda t: -t[1])
-        # 随机负例（easy negatives）先占坑。**这一层不能省**：M22 第一版 0% 随机负例，
+        # 随机负例（easy negatives）先占坑。**这一层不能省**：reranker 精调第一版 0% 随机负例，
         # 负例全来自 e15 top-500（清一色向量相似的同品类候选），模型于是只学会「同品类内细排」、
         # 丢掉了粗粒度判别的尺度感——真实 case 上 query="backpack" 给刺绣贴片 .3609、
-        # 真背包 .3512，挤成一团且排序反转。M21 的 embedding 训练配方里随机负例占 28.3%，
+        # 真背包 .3512，挤成一团且排序反转。embedding 精调的 embedding 训练配方里随机负例占 28.3%，
         # reranker 这边当初漏了。gain 恒 0，且不过假负闸（全库随机撞上真相关的概率可忽略）。
         n_rand = round(args.max_neg * args.random_neg) if corpus_texts else 0
         pos_texts = {p["text"] for p in row["pos"]}
@@ -152,7 +152,7 @@ def build(
         stats["rand_kept"] += len(rand_negs)
 
         negs = rand_negs + esci_negs[: max(0, args.max_neg - len(rand_negs))]
-        # 轮询各 rank 层，保证浅/中/深三段都有代表——只喂浅层就退化成 M21 那种「近义干扰」数据集
+        # 轮询各 rank 层，保证浅/中/深三段都有代表——只喂浅层就退化成「近义干扰」数据集
         pools = [rng.sample(v, len(v)) for v in ann_layers.values()]
         while len(negs) < args.max_neg and any(pools):
             for p in pools:
@@ -191,7 +191,7 @@ def main() -> None:
         "--random-neg",
         type=float,
         default=0.0,
-        help="随机负例占 max-neg 的比例（M21 embedding 配方是 0.28；0=不加，即 M22 第一版）",
+        help="随机负例占 max-neg 的比例（embedding 配方是 0.28；0=不加，即第一版）",
     )
     ap.add_argument(
         "--format",
@@ -227,7 +227,7 @@ def main() -> None:
     total_ann = stats["ann_kept"] + stats["ann_gated"]
     rate = stats["ann_gated"] / total_ann if total_ann else 0.0
     print(f"\n{stats}")
-    print(f"相对闸掉率 {rate:.2%}（q={args.gate_quantile}）—— M21 的绝对阈值闸是 52.24%，可对照")
+    print(f"相对闸掉率 {rate:.2%}（q={args.gate_quantile}）—— embedding 的绝对阈值闸是 52.24%")
 
 
 if __name__ == "__main__":

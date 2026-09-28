@@ -12,7 +12,7 @@
 （某个 endpoint / 内部字段名），本层负责 ``re.escape`` 成字面匹配。正则规则只允许人工在
 in-code 那份里写。
 
-**候选态（``state="candidate"``）立即生效**：P0 是红线，宁可误杀不可漏放。但候选规则
+**候选态（``state="candidate"``）立即生效**：P0 是红线，宁可误杀不可漏放（）。但候选规则
 进 ``list_candidates()`` 待人工确认转 ``active`` 或删除——因为触发它的「泄露」判定往往来自 judge，
 judge 会系统性假阳性（见 memory rubric-judge-calibration-pitfalls）。``disabled`` 态不生效。
 """

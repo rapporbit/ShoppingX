@@ -8,8 +8,8 @@ import { Tooltip } from "./ui/Tooltip";
 // 运行状态点，右侧 credit 条、检索平台数、头像。侧栏不再常驻——它收成抽屉，由胶囊最左的 ☰ 唤出；
 // Skill / 长期偏好一天点不了几次，留在抽屉里。退出和后台收进头像菜单。
 //
-// **credit 余额条是有功能的**（M18）：它显示的是后端 usage_ledger 里真实累计的当日成本，归零时
-// POST /api/task 会真的 402 拒任务。后端没开配额（demo / 本地）时 quota.enabled=false，整块不渲染。
+// **credit 余额条是有功能的**：它显示的是后端 usage_ledger 里真实累计的当日成本，归零时
+// POST /api/task 会真的 402 拒任务。后端没开配额（本地）时 quota.enabled=false，整块不渲染。
 const STATUS_TEXT: Record<TaskStatus, string> = {
   idle: "待命",
   connecting: "连接中",

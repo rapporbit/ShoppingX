@@ -1,4 +1,4 @@
-"""orders：交易域两张表（批 1 / 7.2）
+"""orders：交易域两张表
 
 Revision ID: 0007_orders
 Revises: 0006_config_overrides

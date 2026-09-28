@@ -361,7 +361,7 @@ async def append_transition_notice(context: dict[str, Any]) -> dict[str, Any] | 
             "\n\n[阶段推进] 候选已入池，检索阶段就此收线：不要再调用 item_search / "
             "web_search——继续检索只会消耗检索预算并很快被机制拒绝。"
         )
-        # round3 刀 2：普通轮由系统在下一次思考前自动比价 + 精挑（harness.autopick），指路
+        # 普通轮由系统在下一次思考前自动比价 + 精挑（harness.autopick），指路
         # 直接改成「等结果、然后收尾」；套装轮 / 关开关时仍指模型自己走 price_compare → picker。
         if autopick_applies():
             notice += (

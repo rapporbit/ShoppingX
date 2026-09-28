@@ -1,6 +1,6 @@
-"""M1 示例①：最小 AgentLoop —— 跑通 Think → Act → Observe → Reflect。
+"""示例①：最小 AgentLoop —— 跑通 Think → Act → Observe → Reflect。
 
-目的：用最轻的玩具工具，演示「循环次数由模型自判，而非外部写死」。
+目的：用最轻的玩具工具，展示「循环次数由模型自判，而非外部写死」。
 - 工具按主线规范写（async + Pydantic 输出 + 给模型看的 docstring），见 examples/tools_toy.py。
 - 用 AgentScope 的 ``Agent`` 承载循环；模型自己决定先 planner、再 item_search、
   再 price_compare，信息够了就用自然语言收尾、不再调工具。

@@ -94,7 +94,7 @@ async def test_explicit_dislike_beats_favorites(store: UserDataStore, tmp_path: 
     ['genuine leather']，恰好与亲和 token 精确相等 → 压制看着生效，实则只守住了「英文、单词、
     完全同形」这条最窄的路，给 bug 发了通行证（真实链路里中文 dislike 一条都压不住）。
 
-    压制源是**会话级 P_t**（用户本轮亲口说的）。长期记忆那条腿已随 M4 删除——它现在只经模型
+    压制源是**会话级 P_t**（用户本轮亲口说的）。长期记忆那条腿已已删除——它现在只经模型
     上下文生效，不再自己往 bundle 里塞词。
     """
     uid = _uid()

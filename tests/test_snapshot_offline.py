@@ -6,7 +6,7 @@
 2. 卡片路本会话从没展示过、但商品库里有的 id → **计划要求拒，现状放行**（``hydrate`` 登记表未命中
    即按 id 回源 Qdrant），strict xfail 记录缺口，补上来源校验那天它会翻红提醒摘掉；
 3. 终结后的 ``ask_user``：等回复形态被硬停闸拦下，同批的 ``closes_turn=True`` 收尾问句放行
-   （D2 定的口径，计划 §3-10）；
+   ；
 4. ``ask_user(closes_turn=True)`` 本身不登记 waiter、不阻塞、置位终结。
 """
 

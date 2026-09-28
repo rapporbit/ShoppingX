@@ -1,4 +1,4 @@
-"""round3 刀 1：shopping_summary 的文案 / 逐件理由 / off_intent 由主模型在入参里给，工具不再起内部 LLM。
+"""shopping_summary 的文案 / 逐件理由 / off_intent 由主模型在入参里给，工具不再起内部 LLM。
 
 入参有 summary → 零模型调用（get_fast_llm 被换成会炸的桩，一调就红）；没给 summary → 仍走
 旧的内部 LLM 路径（回归由 test_tools.py 的那批用例管）。

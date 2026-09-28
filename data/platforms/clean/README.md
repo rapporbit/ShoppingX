@@ -63,7 +63,7 @@
 6. **可用性过滤**：只丢**明确缺货**（Shopee `stock=0`、Walmart 配送自提皆 false、Amazon 文案含 unavailable）；信号缺失的平台默认在售，不误杀。
 7. **平台内去重**：按 `(归一标题, 价格)` 折叠，留最完整一行。
 
-## 5. 使用注意（诚实标注）
+## 5. 使用注意
 
 - **`price` 暂不可跨平台直接比**：保留 14 种原币种（USD 2910、MYR 430、IDR 247、MXN 217…），**未折算 USD**（货币归一延后给 `recall/fx`）。跨平台比价前必须先折算，否则会把 IDR 标价当 USD 比错。`price_usd` 列待 fx 接入后补。
 - **`sold` 只对 Lazada + Amazon 有效**：Lazada 483 条有效（最大 112057，信号最强）、Amazon 204 条（来自 `bought_past_month`）。**Shopee/SHEIN/Walmart 样本不提供销量**，`sold` 全为 `None`——这是源数据决定的，不是清洗丢的；`0`/空一律按「无数据」置 `None`，避免污染人气排序。

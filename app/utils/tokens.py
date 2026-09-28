@@ -1,6 +1,6 @@
 """Token 计数与按 token 预算截断：Qwen 本地分词器为主，CJK 感知启发式兜底。
 
-**为什么不沿用 char/4**：旧实现统一按「1 token≈4 字符」估算，对中文严重失真。M6 实测
+**为什么不沿用 char/4**：旧实现统一按「1 token≈4 字符」估算，对中文严重失真。实测
 （DashScope ``get_tokenizer``）：中文 ≈ **1.33 字/token**、英文 ≈ **4.2 字/token**——``/4`` 把中文
 当 4 字/token，对中文低估约 3 倍。对全球电商（Lazada/Shopee/Shein 大量中文/东南亚语料）会让
 「token 上限」形同虚设：旧工具结果该压的没压、缓存前缀阈值误判。
@@ -11,7 +11,7 @@
 
 **分层策略**：
   1. 主：``dashscope[tokenizer]`` 的 ``get_tokenizer``——Qwen 系列共用词表，本地 byte-level BPE，
-     无网络、无 API key。实测单次 encode 0.1ms 级（见 M6 性能基准）。
+     无网络、无 API key。实测单次 encode 0.1ms 级。
   2. 兜底：CJK 感知启发式（按字符类别分桶估）——当未装 tokenizer extra、或走非 Qwen 模型
      （如 DeepSeek 子链路，``get_tokenizer`` 不支持）时自动降级。
 
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # Qwen 系列共用同一词表，固定用 qwen-turbo 取分词器即可（与实际部署的 qwen-max/plus 同分词）。
 _TOKENIZER_MODEL = "qwen-turbo"
 
-# CJK 感知启发式的 token/字符 系数（M6 实测：中文≈1.33 字/token、英文≈4.2 字/token）。
+# CJK 感知启发式的 token/字符 系数（实测：中文≈1.33 字/token、英文≈4.2 字/token）。
 _CJK_TOKENS_PER_CHAR = 0.75  # 1 / 1.33
 _OTHER_TOKENS_PER_CHAR = 0.25  # 1 / 4.0
 

@@ -46,13 +46,11 @@ __pycache__/
 # 将来若要共享项目级配置，用 !.claude/settings.json 反选。
 /.claude/
 
-
 # 编辑器本地配置
 /.sc/
 
 # 部署凭据（basic auth 口令等），绝不入库
 .deploy-credentials
 
-# M16：SQLite 库文件（账户 / 会话归属）——数据不入库，靠注册流程重建
+# SQLite 库文件（账户 / 会话归属）——数据不入库，靠注册流程重建
 /var/
-

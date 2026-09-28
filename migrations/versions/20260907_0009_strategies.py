@@ -1,4 +1,4 @@
-"""strategies 表（批 4 / 18-4 记忆成功策略沉淀）
+"""strategies 表（成功策略沉淀）
 
 Revision ID: 0009_strategies
 Revises: 0008_prompt_version

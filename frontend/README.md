@@ -1,6 +1,6 @@
 # ShoppingX 前端（React + Vite）
 
-M10 前后端闭环的前端：对话框 → 实时 AGUI 事件流 → 精选商品卡 → 最终清单（可下载）→ 长期偏好面板。
+前端：对话框 → 实时 AGUI 事件流 → 精选商品卡 → 最终清单（可下载）→ 长期偏好面板。
 重点不是 UI 细节，而是**怎么消费 AGUI 事件流**和 **connect-first 不丢事件**。
 
 ## 跑起来
@@ -47,7 +47,7 @@ npm run build      # tsc -b（strict）+ vite build → dist/
 
 ## 商品动作：详情 / 对比 / 下单表单 / 确认卡按钮
 
-前端补的四块交互，共同原则是**前端不新增任何绕过 Agent 的写路径**：
+四块商品交互，共同原则是**前端不新增任何绕过 Agent 的写路径**：
 
 - `ProductDetail.tsx`：商品详情弹窗（大图 / 全部理由 / 收藏 / 搜同款 / 加入对比 / 去下单）。数据就是收尾下发的那份结构化商品，不另外请求。
 - `ProductComparison.tsx`：勾选 2～4 件并排看；「让 Agent 帮我比一比」把 item_id 组成一句话发进对话，比价仍由 `price_compare` / `shipping_calc` 在会话内跑。

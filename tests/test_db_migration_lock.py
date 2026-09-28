@@ -1,4 +1,4 @@
-"""多副本首启的迁移串行闸（阶段 1 · 条 9）。
+"""多副本首启的迁移串行闸。
 
 要挡的事故：四个容器（2 API + 2 worker）同时首启、一起 ``upgrade head``。MySQL 的 DDL 不是事务性的，
 两个进程同时建同一张表 → 一个撞 ``1050 Table already exists`` 半途退出，留一张建了一半的库，重跑
@@ -39,8 +39,8 @@ class _FakeConn:
         return _FakeResult(self.replies.pop(0) if self.replies else None)
 
 
-MYSQL_DSN = "mysql+aiomysql://u:p@h:3306/globex?charset=utf8mb4"
-PG_DSN = "postgresql+asyncpg://u:p@h:5432/globex"
+MYSQL_DSN = "mysql+aiomysql://u:p@h:3306/shoppingx?charset=utf8mb4"
+PG_DSN = "postgresql+asyncpg://u:p@h:5432/shoppingx"
 
 
 @pytest.mark.asyncio

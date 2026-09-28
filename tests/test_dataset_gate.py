@@ -119,7 +119,7 @@ def test_seeds_flags_missing_field_and_dup_id_and_blank_prior() -> None:
 
 
 def test_seeds_in_sync_catches_jsonl_only_edits() -> None:
-    """只改产物不改脚本 = 下次重建就被冲掉（批 1 踩过，三条交易 case 差点丢）。"""
+    """只改产物不改脚本 = 下次重建就被冲掉（踩过，三条交易 case 差点丢）。"""
     from scripts.eval.build_eval_queries import QUERIES
 
     rows = [{"id": q["id"], "query": q["query"]} for q in QUERIES]

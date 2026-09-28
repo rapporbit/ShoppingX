@@ -1,4 +1,4 @@
-"""跨进程控制面（批 2）——把「取消」「澄清回复」这两条**反方向**的指令从 API 送到 worker。
+"""跨进程控制面——把「取消」「澄清回复」这两条**反方向**的指令从 API 送到 worker。
 
 **与事件背板的关系是一对镜像。** :mod:`app.api.backplane` 解决的是 worker → 浏览器（AGUI 事件往
 外流）；本模块解决的是浏览器 → worker（用户的指令往里流）。队列模式下这两条路都断着：任务在
@@ -225,7 +225,7 @@ _resolved = False
 
 
 def get_control_bus() -> ControlBus | None:
-    """返回进程级控制面（恒开，阶段 1 条 7 删掉 ``CONTROL_ENABLED``）。
+    """返回进程级控制面（恒开，已删掉 ``CONTROL_ENABLED``）。
 
     Redis 客户端建不起来时返回 ``None`` 退化为纯进程内取消——与背板同一个取舍，可达性那道闸在
     ``server.lifespan`` 里守，这里不该把整个进程带下去。
@@ -353,7 +353,7 @@ async def consume_cancel_mark(task_id: str) -> bool:
 
 
 async def mark_cancel_only(task_id: str) -> bool:
-    """只落标记，**不本地掐、不广播**（阶段 4-1 的入队等待超时用）。
+    """只落标记，**不本地掐、不广播**（入队等待超时用）。
 
     与 :func:`request_cancel` 的区别是「要作废的那条任务不在本进程里」：它还躺在队列中没人领，本地
     掐无从掐起，广播也没有接收方——真正兑现这次作废的是 worker 将来领到它时的

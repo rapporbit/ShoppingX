@@ -4,7 +4,7 @@ Agent 在 Think 阶段判定关键信息缺失（且无法用合理默认推进�
 通过 WebSocket 把问题推给前端，等用户在输入框回复后拿到回复文本，继续 Observe→Reflect。
 
 **两种形态，由 ``closes_turn`` 区分**（D2；不为收尾形态另开一个工具，两个职责重叠的工具并存
-模型会乱选，见执行计划 §3-10）：
+模型会乱选）：
 
 - ``closes_turn=False``（默认）：暂停 loop 等回复，拿到回复继续 Observe→Reflect。**非终结**。
 - ``closes_turn=True``：问题连同 1~4 个选项作为本轮收尾发出，**不等回复**。等价于 Anthropic 博客

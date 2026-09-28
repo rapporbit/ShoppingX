@@ -2,7 +2,7 @@
 
 主链路的「检索」一环。封装 :mod:`app.recall` 的编码 + Qdrant dense 召回：把用户这次搜索意图
 （query，已并入本轮域内的 like 偏好词）编码成 dense「请求向量」做召回，返回 top_k 归一候选。
-精确命中/硬约束走 Qdrant payload filter（非 sparse 打分，见 `docs/plans/召回引擎选型思路.md` §4）；
+精确命中/硬约束走 Qdrant payload filter（非 sparse 打分）；
 filter 维度：platform + price_usd_max + min_rating（Qdrant Range）+ brand_exclude（后置过滤）。
 
 精排取舍：原方案的 item_search 只做 dense 召回 + 双通道本地融合，cross-encoder
@@ -112,7 +112,7 @@ def _load_params() -> None:
     # 相关性下限（余弦相似度）：dense 召回永远返回 top-k 最近邻，**不管多远**——库里没货时也吐一堆
     # 「最近的垃圾」，total_recall=20 假装召回满满。floor 滤掉低于阈值的召回，让 total_recall 反映
     # **相关**召回数（纯垃圾如实报 0 → 触发 web_search 兜底 / 空召回硬路径）。
-    # ⚠️ **诚实标注实测局限**：BGE-M3 在本千级杂货库里给**任何真实英文 query 都打 ≥0.48**
+    # ⚠️ **实测局限**：BGE-M3 在本千级杂货库里给**任何真实英文 query 都打 ≥0.48**
     # （连「挖掘机/处方药/活体金鱼」这类库里根本没有的也 0.48-0.53），只有纯乱码 ≤0.40。而「库稀缺但
     # 沾边」0.49-0.60、「命中良好」0.56-0.70 —— 三段严重重叠，**单一绝对阈值无法把「库里没货」和
     # 「有但一般」分开**。故 floor=0.45 实际只挡**乱码级**无关，**挡不住「品类缺货」**（数据稀疏
@@ -360,7 +360,7 @@ async def item_search(
     - plan 判 intent_grounding=web（新说法 / 潮流词）→ 先 web_search 翻成品类词再搜，结果不当候选。
     返回 filtered_out = 库里有但被条件挡住（不是候选，如实说被哪个条件挡的）。
     """
-    # 个性化**不再由系统悄悄拼词**（M4）：长期偏好每轮注入给模型看，由模型自己决定要不要写进
+    # 个性化**不再由系统悄悄拼词**：长期偏好每轮注入给模型看，由模型自己决定要不要写进
     # `query` / `brand_exclude` / `price_usd_max`。个性化因此出现在**工具入参**里——上报、前端
     # 思考过程、日志三处都看得见，且能归因到是模型哪一步加的。原来那条「系统把 like 词拼进
     # query」的腿，和注入给模型的文本是两份来源，模型转述一遍就会重复拼，谁也说不清最终检索词
@@ -396,7 +396,7 @@ async def item_search(
     tower = get_tower_client()
     recall = get_recall_client()
 
-    # 编码做成惰性（阶段 3）：下面三次召回（主 / 放宽重试 / 探测）都经两级缓存，全命中时
+    # 编码做成惰性：下面三次召回（主 / 放宽重试 / 探测）都经两级缓存，全命中时
     # 一次 embedding 往返都不该发——而它是这条链路上更贵的那一跳。真回源时只编码一次。
     vec_box: list[Any] = []
 

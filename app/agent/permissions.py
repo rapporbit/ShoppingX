@@ -1,4 +1,4 @@
-"""写工具的精准放行（批 0 / L3）。
+"""写工具的精准放行。
 
 AgentScope 在 ``PermissionMode.DEFAULT`` 下对**非只读工具**一律发 ``RequireUserConfirmEvent``
 把 reply 挂起等人点确认。本仓的非只读工具（``ask_user`` / ``save_memory`` / 两个终结工具 /
@@ -23,10 +23,10 @@ from agentscope.state import AgentState
 
 # 放行清单。每一项都要能回答「为什么它不需要弹确认」。
 #
-# **交易域为什么也在这里**（L3 时曾计划让它走原生 ``RequireUserConfirmEvent``）：`create_order` /
+# **交易域为什么也在这里**（曾计划让它走原生 ``RequireUserConfirmEvent``）：`create_order` /
 # `cancel_order` 本身**只生成一张持久化的确认卡**（``trade_confirmations`` 表），真正落订单的
 # ``resolve`` 只走 HTTP、由用户在页面上点按钮——模型手里根本没有写订单的能力，工具调用本身
-# 不需要再弹一层确认。需要换回原生通路时，把这两项从表里删掉即可（L0 spike 验过它可跨实例恢复）。
+# 不需要再弹一层确认。需要换回原生通路时，把这两项从表里删掉即可（spike 验过它可跨实例恢复）。
 DEFAULT_ALLOWED_TOOLS: frozenset[str] = frozenset(
     {
         "ask_user",  # 向用户提问，回复通路是自建 Future 桥（见 app/api/clarification.py）
@@ -38,10 +38,10 @@ DEFAULT_ALLOWED_TOOLS: frozenset[str] = frozenset(
         # 另两个终结工具，同一条理由（只读算不上——它们写会话产物并决定 loop 结束，故不标
         # is_read_only，于是必须在这张表里精准放行）。``present_comparison`` 此前漏登记：
         # 它的另一条入口是 REST（前端对比栏按钮，不经 AgentLoop），所以「模型在对话里调它」
-        # 这条路一直没被 DEFAULT 模式挂起过的事实掩盖住了。S3 加 ``present_guide`` 时一并补上，
+        # 这条路一直没被 DEFAULT 模式挂起过的事实掩盖住了。加 ``present_guide`` 时一并补上，
         # 并由 test_orchestrator 的「非只读工具必须全在放行集里」那条测试守着，别再漏第三个。
         "present_comparison",
-        "present_guide",  # 终结工具：选购标准分节答案（S3）
+        "present_guide",  # 终结工具：选购标准分节答案
         "create_order",  # 只出确认卡，决议走 HTTP（见上）
         "cancel_order",  # 取消前必须先 query_order（sequencing 断言），且只有 CONFIRMED 可取消
     }

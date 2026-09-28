@@ -56,7 +56,7 @@ function buildSteps(events: AguiEvent[]): Step[] {
       if (idx != null) rows[idx] = { evt, state };
       else rows.push({ evt, state });
     } else {
-      // 老会话回放里可能还有 `fork` 事件（A4-1 删派发前留下的），落到这里当普通 info 行画，
+      // 老会话回放里可能还有 `fork` 事件（删派发前留下的），落到这里当普通 info 行画，
       // 不再有专属图标与「子任务并行处理中」文案。
       rows.push({ evt, state: "info" });
     }

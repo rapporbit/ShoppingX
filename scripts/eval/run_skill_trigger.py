@@ -1,6 +1,6 @@
-"""SKILL 触发验收：真跑模型，只量「第一批工具调用里有没有那条 ``Skill``」（阶段 S4）。
+"""SKILL 触发验收：真跑模型，只量「第一批工具调用里有没有那条 ``Skill``」。
 
-**为什么必须真跑模型**：阶段 S2 把 skill 正文的加载方式收敛成「模型自觉调 ``Skill(skill=…)``」、
+**为什么必须真跑模型**：skill 正文的加载方式收敛成「模型自觉调 ``Skill(skill=…)``」、
 删掉了全部预注入，于是「这轮该读哪份 skill」从一个可以用纯函数断言的注入判定，变成了模型第一
 次调用时的一个决策。断言注入表已经无从断起——唯一还量得到的是模型自己发出来的那批工具调用。
 
@@ -118,7 +118,7 @@ def _verdict(case: dict, calls: list[dict[str, Any]]) -> tuple[str, str]:
             return "FALSE_FIRE", f"不该读却读了 {read}"
         return "PASS", ""
     if expected in read:
-        # S2 的「同轮发出」口径：skill 该和本轮第一个检索/读取工具一起发，不该白等一次往返。
+        # 「同轮发出」口径：skill 该和本轮第一个检索/读取工具一起发，不该白等一次往返。
         return "PASS", "" if others else "同轮没带业务工具（白等一次往返）"
     if read:
         return "WRONG_SKILL", f"读成了 {read}"
@@ -192,7 +192,7 @@ def _summarize(results: list[dict]) -> dict[str, Any]:
             "rate": round(len(pos_hit) / len(pos), 3) if pos else None,
             "miss": [r["id"] for r in pos if r["verdict"] == "MISS"],
             "wrong_skill": [r["id"] for r in pos if r["verdict"] == "WRONG_SKILL"],
-            # 读对了但没跟业务工具同轮发——S2 分流表「和本轮第一个检索/读取工具同一轮发出」的代价面。
+            # 读对了但没跟业务工具同轮发——分流表「和本轮第一个检索/读取工具同一轮发出」的代价面。
             "lone_skill_round": [r["id"] for r in pos_hit if r["note"]],
         },
         "negative": {

@@ -1,4 +1,4 @@
-"""S0-2：给 `planner_dataset.jsonl` 标 golden。**三组字段三种定法，不是一刀切。**
+"""golden 标注：给 `planner_dataset.jsonl` 标 golden。**三组字段三种定法，不是一刀切。**
 
 - `budget_amount` / `currency` / `clear_budget` → **纯规则**（复用线上 `resolve_budget_currency`
   + `budget_amount_grounded`）。预算是确定性可判的，数字就在原话里；让 LLM 标只会引入抖动，
@@ -45,7 +45,7 @@ REVIEW = DATA_DIR / "planner_golden_review.jsonl"
 REPORT = DATA_DIR / "planner_golden_report.json"
 
 CONCURRENCY = 20  # 会话级并发；每个会话内还有 3 票并发，实际在飞请求数是它的 3 倍
-REQ_TIMEOUT = 150  # 秒。挂起的请求会占死并发槽让 gather 永不返回（M21 实测教训）
+REQ_TIMEOUT = 150  # 秒。挂起的请求会占死并发槽让 gather 永不返回（embedding 精调实测教训）
 
 # ── 规则组：预算 ────────────────────────────────────────────────────────────────
 # 数字 + 可选量级后缀。逗号形式（1,000）与 k/千/万 都要认，口径与 budget_amount_grounded 一致。
@@ -458,7 +458,7 @@ def _rows(session: dict, votes: list[list[dict]]) -> list[dict]:
 
 
 async def annotate(sessions: list[dict], sink) -> dict:
-    """三票并发跑。**逐会话落盘**——M21 的教训：没有增量落盘时任何挂起点都让整跑归零。"""
+    """三票并发跑。**逐会话落盘**——embedding 精调的教训：没有增量落盘时任何挂起点都让整跑归零。"""
     llms = [_llm(c["temperature"]) for c in VOTES]
     sem, stat = asyncio.Semaphore(CONCURRENCY), Counter()
 

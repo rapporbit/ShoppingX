@@ -3,7 +3,7 @@
 建库走便宜快模型（``LLM_FAST``，缺省回落 ``LLM_MAIN``）；信号量全 ETL 共享，
 避免多个生成阶段叠加把 API rate limit 打爆。
 
-模型对象是 AgentScope 的（批 0 / L7）：调用一律经 :mod:`app.agent.invoke` 的
+模型对象是 AgentScope 的：调用一律经 :mod:`app.agent.invoke` 的
 ``call_text`` / ``call_structured``，别自己 ``await model(...)`` ——流式模型直接 await
 拿到的是异步生成器，要迭代到最后一个 chunk 才是完整回答。
 """

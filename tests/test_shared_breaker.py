@@ -1,4 +1,4 @@
-"""跨进程共享熔断的确定性单测（批2-5）。
+"""跨进程共享熔断的确定性单测。
 
 核心是**双进程冒烟**：两个 ``CircuitBreaker`` 实例（模拟 A / B 两个副本，各自的本地计数互不相干）
 共用一份假 Redis 状态，走完「A 打开熔断 → B 拒调 → 恢复窗口过 → B 探测成功记录 → A 侧关闭」。
@@ -191,7 +191,7 @@ async def test_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     assert await shared_breaker.allow(a) is True
     for _ in range(3):
         await shared_breaker.record_failure(a)
-    assert a.state == OPEN  # 纯进程内口径，与批 2 之前逐字一致
+    assert a.state == OPEN  # 纯进程内口径，与拆进程前逐字一致
     assert await shared_breaker.allow(a) is False
     await shared_breaker.record_success(a)
     assert a.state == CLOSED

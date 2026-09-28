@@ -1,8 +1,8 @@
-"""S3 前置件：**rollout profile** —— 量 GRPO 采样这一侧的真实吞吐、延迟与 prefix caching 收益。
+"""GRPO 前置件：**rollout profile** —— 量 GRPO 采样这一侧的真实吞吐、延迟与 prefix caching 收益。
 
 为什么这件事值得单独跑一遍再开训：GRPO 每步的时间 = rollout + 训练两段，而 planner 这个任务
 **rollout 占大头**（一步要采 batch × group_size 条，训练只是一次 LoRA 反传）。开训前不知道
-rollout 多快，就没法判断 group_size / batch 该取多少，也没法估一组实验要跑多久——M23 的时间
+rollout 多快，就没法判断 group_size / batch 该取多少，也没法估一组实验要跑多久——planner RL 的时间
 估算（3~7 小时/组）全挂在这个数上。
 
 **prefix caching 是这里最大一笔省**：训练用的精简 prompt 里，system 段（947 字符 ≈ 全长的
@@ -232,7 +232,7 @@ def profile_variant(
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True, help="本地 snapshot 绝对路径（传 HF 名会重下）")
-    ap.add_argument("--adapter", default="", help="S2 的 LoRA 目录；不传 = 基座")
+    ap.add_argument("--adapter", default="", help="SFT 冷启动的 LoRA 目录；不传 = 基座")
     ap.add_argument("--data", default="planner_sft_dev.jsonl")
     ap.add_argument("--num-prompts", type=int, default=32, help="一步 rollout 的 prompt 数")
     ap.add_argument("--group-size", type=int, default=8, help="GRPO 组大小 = 每 prompt 采样数")

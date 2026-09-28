@@ -45,7 +45,7 @@ class TestTransitionNotices:
         assert "shopping_summary" in result  # 并指路收尾
 
     async def test_search_close_points_to_autopick(self, tmp_path: Path) -> None:
-        """round3 刀 2：自动比价精挑开着时，收线通告指路「等系统结果、直接收尾」，不再让模型
+        """自动比价精挑开着时，收线通告指路「等系统结果、直接收尾」，不再让模型
         自己走 price_compare / item_picker，「无需 price_compare」动机提示也随之失去意义。"""
         with thread_scope("t-tasks-auto", tmp_path):
             set_session_tasks(["recommend"])

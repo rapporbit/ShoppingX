@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# S3 GRPO 的 **rollout server**（ms-swift 4.4.2 的 server 模式）。
+# GRPO 的 **rollout server**（ms-swift 4.4.2 的 server 模式）。
 #
-# 为什么不用 colocate（vLLM 跟训练挤同一张卡）：4090D 只有 24G。S2 实测 4B LoRA 训练本身
+# 为什么不用 colocate（vLLM 跟训练挤同一张卡）：4090D 只有 24G。SFT 冷启动实测 4B LoRA 训练本身
 # 就要 21G（batch 2、不开 gradient checkpointing），再塞一个 vLLM 引擎必 OOM。卡多是这台
-# 机器的优势，rollout 独占一张卡才对得起 ROADMAP 里「六卡摆开」的分配。
+# 机器的优势，rollout 独占一张卡才对得起「六卡摆开」的分配。
 #
-# 独占 GPU 4。GPU 5(A100) 上跑着 M21/M22 留下的 embed / rerank 服务，GPU 6 是本轮 reward
+# 独占 GPU 4。GPU 5(A100) 上跑着 embedding / reranker 精调留下的 embed / rerank 服务，GPU 6 是本轮 reward
 # 检索用的 bge-m3 —— 都别动。
 #
 # 用法：bash run_grpo_rollout_server.sh   # 前台跑，日志直接看；训练脚本连 127.0.0.1:8010
 set -euo pipefail
 
-M23=${M23:-$HOME/m23}
-VENV=${VENV:-$M23/.venv-rl}
+RL_DIR=${RL_DIR:-$HOME/m23}
+VENV=${VENV:-$RL_DIR/.venv-rl}
 BASE=${BASE:-$HOME/.cache/huggingface/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/cdbee75f17c01a7cc42f958dc650907174af0554}
 PORT=${PORT:-8010}
 

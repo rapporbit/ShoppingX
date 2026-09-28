@@ -1,4 +1,4 @@
-"""FastAPI 服务 —— 把主 AgentLoop 暴露给浏览器，落地 M10 前后端闭环。
+"""FastAPI 服务 —— 把主 AgentLoop 暴露给浏览器，落地前后端闭环。
 
 orchestrator 已经把 ``run_agent(query, thread_id, user_id)`` 跑通——本模块只补一层「对外
 接口」，让用户在浏览器里发起任务、实时看事件流、取消、下载产物。
@@ -26,12 +26,12 @@ orchestrator 已经把 ``run_agent(query, thread_id, user_id)`` 跑通——本�
 ``session_created`` 等早期事件——任务已经在 ``create_task`` 里开跑，而 WS 还没连上，这些
 早期事件会因「该 thread 无连接」被丢掉（只剩日志）。本实现改成 **connect-first**：前端先
 本地生成 ``thread_id`` → 连 WS → 收到 ``ws_ready`` 确认连接已登记 → 才 POST 起任务。
-``TaskRequest.thread_id`` 支持客户端指定，正是为此。这样 0 缓冲、0 改 M8 的 ConnectionManager
+``TaskRequest.thread_id`` 支持客户端指定，正是为此。这样 0 缓冲、0 改 ConnectionManager
 就把竞态关死，比在连接层堆事件缓冲更简单可靠。
 
 **安全上做了什么**（公网上线后逐项补上的）：``safe_join``
 防路径穿越、上传大小上限 + magic bytes 类型白名单、user_id 文件名净化、JWT 鉴权（I 块）+ thread
-维度归属校验（M16）、认证限流（:mod:`app.api.ratelimit`）、CORS 白名单。仍未做：多租户数据面隔离。
+维度归属校验、认证限流（:mod:`app.api.ratelimit`）、CORS 白名单。不含多租户数据面隔离。
 """
 
 from __future__ import annotations
@@ -133,7 +133,7 @@ QUEUE_POLL_SECONDS = env_int("QUEUE_POLL_MS", 1000) / 1000
 # 等结果的上限。worker 整批挂掉时，API 侧的 waiter 不能就这么挂着——active_tasks 里留一条永不退休的
 # 记录，会让同 thread 同 query 永远被幂等第 1 层判成 already_running。
 QUEUE_WAIT_TIMEOUT_SEC = env_int("QUEUE_WAIT_TIMEOUT_SEC", 1800)
-# 等「开始跑」的上限（阶段 4-1）。上面那条守的是「跑起来了但永远不收尾」，这条守的是**根本没人领**
+# 等「开始跑」的上限。上面那条守的是「跑起来了但永远不收尾」，这条守的是**根本没人领**
 # ——worker 整批挂了、或队列深度远超消费能力。两者的处置必须不同：那条只能报错认栽（任务可能真在跑，
 # 作废它就是双跑），这条能连消息一起作废，因为「一直是 queued」本身就说明没有任何 worker 碰过它。
 #
@@ -153,8 +153,8 @@ async def lifespan(_app: FastAPI):
     """
     configure_logging()  # A 块：启用 structlog（带 thread_id/user_id 上下文）
     validate_auth_config()  # 开了鉴权却没配密钥 → 启动即 fail-fast，不拖到每请求 500
-    await assert_deployment_deps()  # 阶段 1 条 7：库不是 MySQL / Redis 不通 → 起服即拒
-    await init_db()  # M16：建 users / threads 两张表（幂等，已存在则跳过）
+    await assert_deployment_deps()  # 库不是 MySQL / Redis 不通 → 起服即拒
+    await init_db()  # 建 users / threads 两张表（幂等，已存在则跳过）
     # 后台管理页面改过的参数：库 → env → 各模块 _load_params()。必须在预热与建 agent 之前，
     # 否则本次启动的第一批任务会用着旧值跑（脏数据不会让它抛，见 store.load_into_memory）。
     await config_store.load_into_memory()
@@ -184,7 +184,7 @@ async def lifespan(_app: FastAPI):
         "Qwen 本地" if ok else "无 tokenizer",
     )
 
-    # 参数覆盖对账（阶段 1 条 8）：库是唯一真相，本进程每 30s 跟进一次。worker 那边起的是同一个
+    # 参数覆盖对账：库是唯一真相，本进程每 30s 跟进一次。worker 那边起的是同一个
     # 循环——后台改参数只打在 API 进程上，不对账的话 AgentLoop 所在的 worker 永远用着旧值。
     config_sync_task = asyncio.create_task(config_store.sync_loop())
 
@@ -236,7 +236,7 @@ app.add_middleware(
 
 @app.middleware("http")
 async def _bind_request_id(request: Request, call_next: Any) -> Any:
-    """给每个 HTTP 请求绑一个 request_id，并在响应头回显（阶段 4-5）。
+    """给每个 HTTP 请求绑一个 request_id，并在响应头回显。
 
     入口在中间件而不是各 endpoint 里：``/api/task`` 的三条幂等分支（already_running /
     duplicate / 429）各自提前返回，逐个手绑迟早漏一条——而恰恰是这几条最需要在日志里被找到
@@ -258,7 +258,7 @@ async def _bind_request_id(request: Request, call_next: Any) -> Any:
     return response
 
 
-app.include_router(accounts.router)  # M16：注册 / 登录 / 我是谁 / 我的会话清单
+app.include_router(accounts.router)  # 注册 / 登录 / 我是谁 / 我的会话清单
 app.include_router(admin.router)  # 后台管理：热更新模型档位 / 检索 / 展示参数
 app.include_router(skills.router)  # 买家个人 Skill CRUD + 目录
 app.include_router(files.router)  # 产物下载 / 参考图上传
@@ -274,7 +274,7 @@ class TaskHandle:
     已无该轮上下文时，仍把「正在跑的那一轮」的提问原文回吐给前端重建（query 不落任何持久层，
     只随这个进程内句柄活着——任务一结束句柄即摘除，自然回收）。
 
-    **它不再是「谁在跑」的答案**（阶段 1-2 起真相在 ``threads`` 表，1 条 7 起 loop 只在 worker 里
+    **它不再是「谁在跑」的答案**（现在真相在 ``threads`` 表， loop 只在 worker 里
     跑）：这里的 ``task`` 是 API 侧等结果的影子协程，只服务取消口、``/inflight`` 与事件转发。
     """
 
@@ -310,7 +310,7 @@ class TaskRequest(BaseModel):
     # agent.platform_scope）：语料 99.75% 是 amazon，默认不派注定空军的跨平台 fork；用户主动勾多个
     # 平台才真的跨平台比价。未知平台名在 normalize_platforms 里静默丢弃，不 400。
     platforms: list[str] | None = None
-    # 本轮参考图的文件名（M20 图搜）：先 POST /api/upload 拿到 filename，再随任务带上来。
+    # 本轮参考图的文件名（图搜）：先 POST /api/upload 拿到 filename，再随任务带上来。
     # 只传文件名不传内容——图已在服务端 uploaded/<thread_id>/ 下，image_understand 工具自己去读。
     image_paths: list[str] | None = None
     # 输入框 ``/`` 显式选中的 skill 目录名（``my/<name>`` 个人 / 内置名）。服务端校验归属后把正文
@@ -331,8 +331,9 @@ class TokenRequest(BaseModel):
 async def issue_token(req: TokenRequest) -> dict[str, str]:
     """签发一个 ``sub=user_id`` 的 JWT，供前端 / 测试拿去当 ``Authorization: Bearer``。
 
-    **demo 边界（诚实标注）：** 这是**开发态发证**——只认 user_id、**不验密码**，本质是个「冒名
-    工厂」，仅为让鉴权链路能端到端被验证。真实密码登录 / OAuth / 刷新令牌不在范围内。**它单独由 ``AUTH_DEV_TOKEN`` 把守**（不与 ``AUTH_ENABLED`` 共开
+    **开发态边界：** 这是**开发态发证**——只认 user_id、**不验密码**，本质是个「冒名
+    工厂」，仅为让鉴权链路能端到端被验证。真实密码登录 / OAuth / 刷新令牌不在范围内（与「真实
+    平台 OAuth 不覆盖」一致）。**它单独由 ``AUTH_DEV_TOKEN`` 把守**（不与 ``AUTH_ENABLED`` 共开
     关），否则「开了鉴权」会反手暴露这个工厂、把刚堵的越权洞捅开。未开发证口（默认）一律 404。
     """
     if not (auth_enabled() and dev_token_enabled()):
@@ -347,7 +348,7 @@ async def issue_token(req: TokenRequest) -> dict[str, str]:
 
 
 async def _enforce_quota(user_id: str | None) -> None:
-    """credit 配额闸（M18）：今日额度用尽 → 402，连任务都不给起。
+    """credit 配额闸：今日额度用尽 → 402，连任务都不给起。
 
     放在最前（早于归属登记 / 占槽 / 指纹 / 入队）：额度不够的人不该在系统里留下任何足迹——不该认领
     thread、不该占并发槽、更不该在队列里排。402 Payment Required 是这里语义最准的码：不是没权限
@@ -394,7 +395,7 @@ async def _rollback_claim(
 async def _acquire_hold_or_reject(
     *, run_id: str, user_id: str | None, thread_id: str, kind: str
 ) -> HoldResult:
-    """credit 预授权 + 用户级并发上限（阶段 1-1）：过了才准进门，见 :mod:`app.db.holds`。
+    """credit 预授权 + 用户级并发上限：过了才准进门，见 :mod:`app.db.holds`。
 
     **为什么它不能并进上面那道 ``_enforce_quota``。** 那道闸读的是**事后账本**，同一个人并发发 20
     条时每条都读到「还剩很多」，全部放行。这里在进门时就把「打算花的」占住，后到的请求看见的余额
@@ -420,12 +421,12 @@ async def _acquire_hold_or_reject(
 
 
 async def _claim_thread_if_needed(thread_id: str, user_id: str | None, query: str) -> None:
-    """归属登记（M16）：首轮把 thread 记到本人名下，后续轮顶新 updated_at（侧栏据此排序）。
+    """归属登记：首轮把 thread 记到本人名下，后续轮顶新 updated_at（侧栏据此排序）。
 
     ``claim_thread`` 自带属主校验——拿别人的 thread_id 发消息会被它拒，否则「用他的 tid 说句话」
     就成了把他的会话过户到自己名下。
 
-    **鉴权关闭时也登记一行**（阶段 1-2，归属写空身份、不查 users 表）：这行是幂等第 1 层的载体
+    **鉴权关闭时也登记一行**（归属写空身份、不查 users 表）：这行是幂等第 1 层的载体
     （:mod:`app.db.runs` 的条件更新落在它上面），没有行就没有真相。名字里的 ``if_needed`` 现在
     只剩「按需校验归属」这层意思。
     """
@@ -607,7 +608,7 @@ async def _queued_runner(intent: IntentTask, position: int) -> None:
     三样共用的账本。队列模式下若不在 API 侧留一条记录，这三样会一起失效——而「前端零改动」的前提
     正是它们的行为不变。所以这里用一个廉价的轮询协程占住那个位置，跑完就摘。
 
-    **取消**（批2-4 起）：cancel 这个 waiter 的同时，取消口会经控制面把指令送到 worker，那边照常
+    **取消**：cancel 这个 waiter 的同时，取消口会经控制面把指令送到 worker，那边照常
     上报 ``task_cancelled``。但任务**还在队列里没人领**时没有任何 worker 会为它发事件，前端就停在
     转圈上——所以这里补一条，且只在状态仍是 ``queued`` 时补（已经在跑的那些由 worker 发，避免两份）。
     """
@@ -750,7 +751,7 @@ async def create_task(
 
     原方案的「Checkpoint 防重跑」那一层本项目不做（无 checkpointer，见 dedup 模块 docstring）。
 
-    **任务一律入队（阶段 1 条 7 起没有第二条路）：** 本进程只登记一个等结果的影子协程，AgentLoop
+    **任务一律入队（现在没有第二条路）：** 本进程只登记一个等结果的影子协程，AgentLoop
     跑在 worker 里。原先那套进程内准入池（normal/heavy 双池 + 排队 + 再平衡）随之删除——它守的是
     「本进程同时跑几个 loop」，而本进程一个 loop 都不跑了，留着只会把削峰上限按回单进程那 8 个数。
     背压改由三道跨进程的闸承担：用户级并发（``run_holds``）、队列深度（``QUEUE_MAX_DEPTH``，超了
@@ -794,13 +795,13 @@ async def _submit_admitted(
     # 代价是幂等命中的请求也先占一笔——那几条路各自在 return 前把它还掉，下面三处 release。
     await _acquire_hold_or_reject(run_id=run_id, user_id=user_id, thread_id=thread_id, kind=kind)
 
-    # ── 幂等第 1 层：同 thread 上一个任务还活着。**真相在 DB，不在本进程**（阶段 1-2）──
+    # ── 幂等第 1 层：同 thread 上一个任务还活着。**真相在 DB，不在本进程**──
     #
     # 判定与占位是同一条条件 UPDATE（见 app.db.runs），所以同一个 thread 打到两台副本时，只有
     # 一台的影响行数是 1，另一台按 already_running 把用户领回去。``active_tasks`` 降级为本进程
     # 缓存：它还管着取消口、/inflight 与影子协程的身份校验，但不再是「谁在跑」的答案。
     #
-    # 归属登记（M16）也在这一步：属主校验、首轮插行、顶 updated_at 与占位同在一次提交里。
+    # 归属登记也在这一步：属主校验、首轮插行、顶 updated_at 与占位同在一次提交里。
     claim = await _claim_thread_and_run_or_reject(thread_id, run_id, user_id, req.query)
     old = active_tasks.get(thread_id)
     if not claim.can_start:
@@ -827,7 +828,7 @@ async def _submit_admitted(
     # 客户端（脚本 / 裸 API 调用，服务端兜底生成 tid）才走指纹去重——它们没有 WS 订阅要接，拿回
     # 原 thread_id 正好可以去 /inflight 续看。
     #
-    # **窗口在 Redis（阶段 1-2）**，查与登记是同一条 ``SET NX EX``：多副本下才真的只跑一遍，也不
+    # **窗口在 Redis**，查与登记是同一条 ``SET NX EX``：多副本下才真的只跑一遍，也不
     # 再依赖「查到登记之间没有 await」。判重时要把刚占下的两样都还掉——预扣的额度，以及上面那条
     # 条件更新占下的「在跑」位置（这条路新生成过 thread_id，位置一定是自己抢到的）。
     if not is_replace and req.thread_id is None:
@@ -845,11 +846,11 @@ async def _submit_admitted(
 
     # ── 交给 worker ──
     if is_replace and previous_run_id is not None:
-        # 覆盖重发 = **换一轮**，不是多跑一轮（批2-4 补齐）：除了掐掉 API 侧的影子协程，还要把取消
+        # 覆盖重发 = **换一轮**，不是多跑一轮：除了掐掉 API 侧的影子协程，还要把取消
         # 送到真正在跑它的 worker，否则用户改主意重问一句，旧问题仍在后台烧着 token，两轮的事件
         # 还会同时往同一条 WS 上推。
         #
-        # 按 DB 里读到的**旧 run_id** 送（1-2 起）：旧 run 可能根本不在本进程的 active_tasks 里
+        # 按 DB 里读到的**旧 run_id** 送：旧 run 可能根本不在本进程的 active_tasks 里
         # （它是另一台副本收的），那种情况下按 old.task_id 送就是送了个空。
         #
         # 用 nowait：这里处在 endpoint 的**无 await 区间**里（幂等判定的原子性靠它，见本函数
@@ -991,7 +992,7 @@ async def ws_endpoint(
     新直播事件可能有重叠，但事件都带单调递增的 stream id，前端按 id 去重即可。Redis 降级 / 无
     last_event_id 时补发为空，退回纯直播（现状）。
 
-    **属主校验（M16）：** 握手前先验 ``?token=``——事件流是实时的对话内容，不校验等于把别人的
+    **属主校验：** 握手前先验 ``?token=``——事件流是实时的对话内容，不校验等于把别人的
     整场对话开着直播。校验必须在 ``accept()`` 之前，否则连接已经建立，再关就是「先放进门再赶出去」。
     """
     if not await _ws_authorized(websocket, thread_id, token):
@@ -1039,9 +1040,9 @@ async def cancel_task(
     """取消某个正在跑的长任务。``task.cancel()`` 向协程注入 CancelledError，
     run_agent 任一 await 点被打断 → 上报 task_cancelled。
 
-    属主校验（M16）：不然任何人拿到 thread_id 就能掐断别人正在跑的任务。
+    属主校验：不然任何人拿到 thread_id 就能掐断别人正在跑的任务。
 
-    **任务在 worker 进程里跑（批2-4 补齐）**：所以除了掐掉 API 侧那个等
+    **任务在 worker 进程里跑**：所以除了掐掉 API 侧那个等
     结果的影子协程，还要经控制面把取消送过去——落一个按 ``task_id`` 的标记（管住「还在队列里排队、
     没人领」的那些）+ 发一条广播（管住「已经被某个 worker 领走、正在跑」的那些）。worker 侧收到后
     先放开 ``ask_user`` 的等待再 cancel 任务本体，``run_agent`` 的 finally 照常上报
@@ -1074,7 +1075,7 @@ async def submit_clarification(
     """回答 Agent 通过 ``ask_user`` 提出的澄清问题（HTTP 版）。
 
     **前端不用它**——浏览器那条路仍然是 WS 上的 ``clarification_response`` 帧，契约一字未动。这个
-    口子是给没有 WS 的调用方（脚本 / 压测 / 端到端冒烟）准备的：批2-4 之前它们根本无法回答提问，
+    口子是给没有 WS 的调用方（脚本 / 压测 / 端到端冒烟）准备的：早先它们根本无法回答提问，
     只能干等到 120s 超时。两条路进的是同一个 :func:`app.api.clarification.deliver_reply`，所以
     「本地就有人等 → 就地 resolve；否则查令牌 → 经控制面转发给 worker」的判断只有一份。
 
@@ -1108,7 +1109,7 @@ async def task_inflight(
     一份。故这里以「流里最后一条已是终结类事件」为准判其已结束（Redis 降级取不到事件时退回
     ``task.done()``，此窗口极短、可接受）。
     """
-    await guard_thread(thread_id, auth_uid)  # M16：别人的 thread 不给回吐提问原文与事件流
+    await guard_thread(thread_id, auth_uid)  # 别人的 thread 不给回吐提问原文与事件流
     handle = active_tasks.get(thread_id)
     if handle is None or handle.task.done():
         return {"running": False, "query": None, "images": [], "events": []}
@@ -1123,7 +1124,7 @@ async def get_quota_status(auth_uid: str | None = Depends(get_current_user_id)) 
     """当前登录用户的 credit 余额（前端顶栏余额条 + 额度耗尽提示用）。
 
     **身份只认 token**，不接受任何查询参数——「查谁的余额」由凭证决定，否则改个 URL 就能窥探别人
-    烧了多少。未开鉴权 / 未设配额时返回 ``enabled=false``，前端据此整块隐藏余额条（demo 模式下
+    烧了多少。未开鉴权 / 未设配额时返回 ``enabled=false``，前端据此整块隐藏余额条（免鉴权模式下
     没有可信身份，本来就不设闸，见 :mod:`app.db.quota`）。
     """
     if not quota_enabled() or not auth_uid:
@@ -1144,7 +1145,7 @@ async def get_history(
     会话，正文还在它的 turns.json 里，第一次被点开时惰性迁进库（``thread_id`` 用户可控，故经
     ``_safe_session_dir`` 防路径穿越）。
 
-    属主校验（M16）：这是最要紧的一个口——对话正文全在这里，不校验就等于谁拿到 thread_id
+    属主校验：这是最要紧的一个口——对话正文全在这里，不校验就等于谁拿到 thread_id
     谁就能读别人聊过什么。
     """
     await guard_thread(thread_id, auth_uid)
@@ -1179,7 +1180,7 @@ async def metrics_endpoint() -> Response:
     """Prometheus 抓取端点（A 块）。被 scrape 时即时刷新「当前值」类 gauge——活跃任务 / 任务槽 /
     排队深度 / 断路器状态都是此刻读最准，不必实时维护；计数与耗时类指标则在各打点处实时累积。"""
     metrics.set_active_tasks(len(active_tasks))
-    # 槽位口径随阶段 1 条 7 变了：本进程不跑 loop，"active" 是在等结果的影子协程数，"limit" 是队列
+    # 槽位口径已变：本进程不跑 loop，"active" 是在等结果的影子协程数，"limit" 是队列
     # 深度上限（真正约束并发的是 run_holds 的用户级上限与各 worker 的 WORKER_CONCURRENCY）。
     metrics.set_task_slots(len(active_tasks), QUEUE_MAX_DEPTH)
     try:

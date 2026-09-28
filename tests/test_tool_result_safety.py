@@ -1,6 +1,6 @@
 """工具结果安全的确定性测试（不依赖真实 LLM）：超长结果截断 + 同工具刷屏的循环检测。
 
-（原 test_fork_safety.py。A4 删子 Agent 后，fork 深度上限与派发容错两组测试随之删除。）
+（原 test_fork_safety.py。删子 Agent 后，fork 深度上限与派发容错两组测试随之删除。）
 """
 
 from app.harness.loop_detector import LoopDetector

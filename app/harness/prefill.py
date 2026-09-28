@@ -7,7 +7,7 @@
 线收敛，曾有过的套装 skill 预注入 D1 已删）。那条线是：
 
 * **机制（预取 / 强制）管事实接地** —— planner 拆出的字段、订单。漏了就是幻觉，
-  不可恢复，所以不赌模型。常见实现同样只对读工具做 grounding（``grounding.py``：店铺条款 /
+  不可恢复，所以不赌模型。业界做法同样只对读工具做 grounding（店铺条款 /
   订单 / 没见过的 product_id）。
 * **模型自觉管打法加载** —— skill 正文靠模型读 ``<agent-skills>`` 目录里的 description 自己调
   ``Skill(skill=…)`` 取，**先读完再行动**（prompts.yml 分流表；2026-09-24 前是「与第一条检索
@@ -47,7 +47,7 @@ logger = logging.getLogger("shoppingx.harness.prefill")
 # 一次任务最多看几张图：每张都是一次 VL 往返 + 一段上下文，传一堆图既烧预算又稀释意图。
 MAX_PREFILL_IMAGES = 3
 
-#: 订单 grounding 正则（D4）：用户直说订单时预取 query_order，不靠 prompt 规矩模型先调。
+#: 订单 grounding 正则：用户直说订单时预取 query_order，不靠 prompt 规矩模型先调。
 #: 只认直白说法——查得宽了就会在「买个订书机」这种句子上空跑一次 DB。
 _ORDER_PATTERN = re.compile(
     r"(我的|之前的|上次的)?(订单|order)|(订单|order)\s*(号|id|编号)|物流|发货|收到货|退款|退货"
@@ -113,10 +113,10 @@ async def prefill(session: HarnessSession, agent: Agent) -> None:
     ctx["tool_name"] = "planner"
     ctx["tool_args"] = args
     ctx["tool_result"] = text
-    # 品类知识库预取（round3 刀 4）已于 2026-09-24 删除：卡片是整品类统计，粒度对不上具体需求
+    # 品类知识库预取已于 2026-09-24 删除：卡片是整品类统计，粒度对不上具体需求
     # （「降噪耳机」注入的爆款是监听 / 游戏 / 儿童耳机），category_insight 也一并摘出工具表。
     # 品类常识交给模型自身知识，库外行情走 web_search / research。
-    # 订单 grounding（D4）：问订单的轮次直接把最近几张摆上去，与 planner 的 post_tool_call 并发。
+    # 订单 grounding：问订单的轮次直接把最近几张摆上去，与 planner 的 post_tool_call 并发。
     orders_due = _orders_prefetch_due(out, s.original_query)
     orders_task = asyncio.create_task(_prefetch_orders(s)) if orders_due else None
     ctx = await harness.run("post_tool_call", ctx)
@@ -202,7 +202,7 @@ async def _prefill_vision(session: HarnessSession) -> tuple[list[Any], str]:
 def append_prefilled(agent: Agent, blocks: list[Any]) -> None:
     """预置产物写进 ``state.context``——**不落 state 就等于没发生**。
 
-    每轮的 messages 都从 ``state.context`` 重建（见 L5 那条注入蒸发的坑），只塞进本次请求
+    每轮的 messages 都从 ``state.context`` 重建（否则注入会蒸发），只塞进本次请求
     的 kwargs 里，下一轮就没了：模型会发现自己「调过 planner 却看不到结果」。
     一整轮的 tool_call / tool_result 同住一条 assistant 消息，这里照这个形状拼。
     """

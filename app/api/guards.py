@@ -42,7 +42,7 @@ async def guard_thread(thread_id: str, auth_uid: str | None) -> None:
     cancel / upload）只按 thread_id 寻址、不问归属：thread_id 会出现在 URL 和事件流里，谁拿到
     就能读别人的对话历史、下载他的产物、连他的实时事件流。有了归属表，这里一句校验就封死。
 
-    鉴权关闭时直接放行——demo 模式下没人认领会话，校验无从谈起（见 accounts.assert_owner）。
+    鉴权关闭时直接放行——免鉴权模式下没人认领会话，校验无从谈起（见 accounts.assert_owner）。
     """
     if not auth_enabled() or auth_uid is None:
         return

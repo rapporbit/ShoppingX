@@ -1,7 +1,7 @@
 """召回层检索文本塑形：category 截尾 + 描述边界截断。
 
 建索引时拼 dense 编码文本用（``item_search`` 精排也复用 ``tail_category``）。
-词法/稀疏分词已随选型修订移除——召回改 dense + filter（见 `docs/plans/召回引擎选型思路.md` §4）。
+词法/稀疏分词已随选型修订移除——召回改 dense + filter。
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ def embed_text(item: CleanItem) -> str:
 
     **建索引和训练必须共用这一个函数。** 训练时喂给模型的商品文本，与线上入库编码的文本
     只要差一个字段或一处归一，模型学到的就是另一种输入分布（train/serve skew）——离线指标
-    照涨，线上召回不动。原先它长在 ``scripts/build_item_index.py`` 里，为让 M21 的训练数据
+    照涨，线上召回不动。原先它长在 ``scripts/build_item_index.py`` 里，为让 embedding 精调的训练数据
     管线复用而提到召回层。
     """
     parts = [

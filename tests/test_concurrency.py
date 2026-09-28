@@ -1,7 +1,7 @@
 """请求分档与指纹去重的确定性单测。
 
-- ``classify_request`` / ``estimated_wait_seconds``：档位判定与排队预估（进程内准入池随阶段 1
-  条 7 删除，那批测试一并删掉——它测的东西已经不存在了）。
+- ``classify_request`` / ``estimated_wait_seconds``：档位判定与排队预估（进程内准入池已
+  删除，那批测试一并删掉——它测的东西已经不存在了）。
 - ``dedup``（幂等第 3 层）：窗口内同 (user_id, query) 判重复，窗口外放行。
 """
 
@@ -33,7 +33,7 @@ def test_estimated_wait_divides_by_capacity() -> None:
     assert estimated_wait_seconds(6, 5) > estimated_wait_seconds(5, 5)
 
 
-# ---------- 幂等第 3 层：请求指纹去重（阶段 1-2 起窗口在 Redis）----------
+# ---------- 幂等第 3 层：请求指纹去重（现在窗口在 Redis）----------
 async def test_dedup_first_submit_passes() -> None:
     assert await dedup.check_duplicate("alice", "买旅行三件套", "thread-1") is None
 

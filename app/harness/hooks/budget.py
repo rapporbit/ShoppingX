@@ -6,7 +6,7 @@
                                        越线软收敛 / 硬挡
 
 **顺序契约**：spend 在 search 之前——预算拒绝是事实闸，不该先给被拒的调用记一次检索。
-（A4 删子 Agent 时，fork 次数闸、子搜上限、postfork 直搜闸随之删除。）
+（删子 Agent 时，fork 次数闸、子搜上限、postfork 直搜闸随之删除。）
 
 **效率闸 vs 安全闸**（逃生门见 ``middleware._try_escape``）：依据推定的（websearch）声明
 ``escape_key``，连拒 2 次放行；依据事实的（token / 检索预算）永远硬拒。
@@ -208,7 +208,7 @@ async def route_by_budget(context: dict[str, Any]) -> dict[str, Any] | None:
 
     # Hook 只产**档位名**，由适配器解析成本运行时的模型——「Hook 决策、适配器落地」的分工。
     # 这里曾并存一个 ``model_override`` 键（装模型**对象**），生产代码零处读、只剩每次降档白
-    # 构造一个对象外加「这里在换模型」的假象，已删（批 A2）。
+    # 构造一个对象外加「这里在换模型」的假象，已删。
     context["model_tier"] = "lite"
 
     if tier is Tier.MINIMAL and entered_new_tier:

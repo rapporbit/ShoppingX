@@ -1,6 +1,6 @@
-"""数据库引擎与会话（M16 / M17）——建连接、跑迁移、给路由发 session。
+"""数据库引擎与会话——建连接、跑迁移、给路由发 session。
 
-**建表为什么从 ``create_all`` 换成 Alembic（M17）。** 起初两张表从零建，``create_all`` 最省事。
+**建表为什么从 ``create_all`` 换成 Alembic。** 起初两张表从零建，``create_all`` 最省事。
 但它**只建不存在的表、不改已存在的表**：一旦开始往库里搬东西（收藏、跨会话历史……）就要动表结构，
 而 ``create_all`` 对已有表的字段变更**静默不生效**——本地删库重建看着一切正常，线上那份老库悄悄少
 一列，直到某个查询炸了才发现。趁库里只有两张表、结构还简单时换掉，代价最小。
@@ -13,7 +13,7 @@
 
 **驱动相关的调教全在 :func:`_engine_kwargs` 与 :func:`_tune_sqlite_connection` 两处**（逐条理由见
 它们的 docstring）：SQLite 走「连接级 PRAGMA」（外键 / WAL / busy_timeout），MySQL / PostgreSQL 走
-「连接池参数」（限池 / 预检 / 回收）。**WAL 是批 2 多进程的前提**——API 与 worker 拆成两个进程后，
+「连接池参数」（限池 / 预检 / 回收）。**WAL 是多进程的前提**——API 与 worker 拆成两个进程后，
 默认的 rollback journal 会让它们的读写互相把对方挡在 "database is locked" 上。
 """
 
@@ -121,7 +121,7 @@ def _tune_sqlite_connection(dbapi_conn: Any, _record: Any) -> None:
 
     - ``foreign_keys=ON``：**SQLite 默认不执行外键约束**（为兼容老库）。不显式打开的话，
       ``threads.user_id`` 指向一个不存在的用户也能插进去，外键形同虚设。
-    - ``journal_mode=WAL``：**多进程写同一个库的前提**（批 2 起 API 与 worker 是两个进程）。
+    - ``journal_mode=WAL``：**多进程写同一个库的前提**（现在 API 与 worker 是两个进程）。
       默认的 rollback journal 下，写事务会拿排他锁**把读也挡住**，两个进程稍一并发就互相 "database
       is locked"；WAL 下读写不互斥（读旧快照、写追加到 -wal），只有写与写才排队。
     - ``busy_timeout``：写与写终究要排队，默认 busy handler 是**立刻**抛 "database is locked"——

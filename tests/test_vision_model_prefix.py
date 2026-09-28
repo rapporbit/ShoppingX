@@ -1,7 +1,7 @@
 """直连出口也要认 ``provider/`` 前缀（修 LLM_VISION 带前缀必 404）。
 
 线上现象：``LLM_VISION=dashscope/qwen3.5-flash`` 时 ``image_understand`` 每次都降级，
-服务商原话是 ``The model 'dashscope/qwen3.5-flash' does not exist``。阶段 2-1 把前缀解析
+服务商原话是 ``The model 'dashscope/qwen3.5-flash' does not exist``。寻址层把前缀解析
 放进了 Router 那条路，而视觉档恒走直连、``LLM_PROVIDER_ROUTER=0`` 回退时所有档也走直连——
 直连不剥前缀，于是整串模型名被发给了服务商。
 

@@ -8,7 +8,7 @@ import { platformName, priceKind, shownPrice, splitReasons } from "./productText
 // 商品对比：把用户勾选的几件并排放在一张表里（图 / 平台 / 价格口径 / 理由），一眼看差别。
 // 上半张表全是前端本地已有的结构化字段，离线也在。
 //
-// 「哪件更值、各自适合谁」这一档判断由 C4 的 present_comparison 填进下半张表：点按钮直接打
+// 「哪件更值、各自适合谁」这一档判断由 present_comparison 填进下半张表：点按钮直接打
 // POST /api/threads/{tid}/compare（**不走 AgentLoop**，一次 fast 模型调用），结果按 item_id
 // 逐列填、推荐那列高亮。此前这里是把几件拼成一句话发给 Agent，回来的是一段散文——表填不满，
 // 用户还得自己在文字里找哪句说的是哪件。

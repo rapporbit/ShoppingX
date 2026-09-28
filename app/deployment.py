@@ -1,4 +1,4 @@
-"""部署形态闸：起服前确认「跨进程的真相」真的在（阶段 1 条 7）。
+"""部署形态闸：起服前确认「跨进程的真相」真的在。
 
 API 与 worker 两个进程入口共用这一份——两边各写一份校验，迟早漂成「API 起得来、worker 起不来」
 那种只在滚动发布中途暴露的形态。放在 ``app/`` 顶层而不是 ``app/api/`` 里，是为了让 worker 不必为
@@ -31,7 +31,7 @@ async def ping_redis(url: str) -> None:
 
 
 async def assert_deployment_deps() -> None:
-    """起服前的形态闸（阶段 1 条 7）：**跨进程的真相必须真的在**，否则拒绝启动。
+    """起服前的形态闸：**跨进程的真相必须真的在**，否则拒绝启动。
 
     **为什么是 fail-fast 而不是降级。** 多副本是唯一形态：真相只在 MySQL 与 Redis，进程里没有真相。
     DATABASE_URL 指着 SQLite 时，每台副本各有一份自己的 users / threads / run_holds——配额、归属、

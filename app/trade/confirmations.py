@@ -1,6 +1,6 @@
 """确认记录用例：准备（下单 / 取消）、决议、列表、给模型的交易状态。
 
-``confirmation_service.py`` 的分工：``prepare_*`` 是模型工具与前端表单共用的入口，
+``prepare_*`` 是模型工具与前端表单共用的入口，
 ``resolve`` **只供用户动作入口（HTTP）调用、不注册为模型工具**。approved 才真调
 :func:`place_order` / :func:`cancel_order`，订单幂等键 = ``operation_id``，同一张卡点两次只落
 一张单。

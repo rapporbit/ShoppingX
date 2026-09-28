@@ -6,7 +6,7 @@ AgentScope 一整轮就是一条 assistant 消息（轮内所有 tool_call / too
 content），标记落在它上面等于标了一整轮。formatter 输出的 dict 序列则**就是**线上 payload
 本身，标在这里所见即所得。
 
-**别把命中率归到这个标记头上**（L0 的 S1 实测）：本仓网关（DashScope OpenAI 兼容）是**隐式**
+**别把命中率归到这个标记头上**（实测）：本仓网关（DashScope OpenAI 兼容）是**隐式**
 前缀缓存——带标记组与不带标记的对照组第二次都命中 1024 token。标记继续打，因为成本为零、且
 换 Anthropic 直连时它是必需品；但缓存收益的真正来源是「前缀的字节逐轮不变」，那是注入纪律
 （注入随 state 长驻、不每轮重发）挣来的，不是这一行 JSON。

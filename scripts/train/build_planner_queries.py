@@ -1,6 +1,6 @@
-"""S0-1 源②③：合成 planner 训练用的**购物意图会话**（不是搜索词）。
+"""数据构造源②③：合成 planner 训练用的**购物意图会话**（不是搜索词）。
 
-与 `build_synth_queries.py` 的区别，别搞混——那个是 M21 检索侧的「商品 → 检索词」反推
+与 `build_synth_queries.py` 的区别，别搞混——那个是 embedding 精调检索侧的「商品 → 检索词」反推
 （L1~L4，喂 embedding 对比学习）；**这个是「品类 → 带约束的购物意图」**，喂 planner 的
 SFT / GRPO。两者输入输出方向相反，产物不能互用。
 
@@ -46,7 +46,7 @@ OUT_DIR = PROJECT_ROOT / "data" / "train"
 
 BATCH = 4  # 一次让 LLM 造 4 个会话：再多措辞会趋同，再少浪费 prompt 里的品类卡上下文
 CONCURRENCY = 12
-REQ_TIMEOUT = 150  # 秒。没有它，挂起的请求会占死并发槽让 gather 永不返回（M21 实测教训）
+REQ_TIMEOUT = 150  # 秒。没有它，挂起的请求会占死并发槽让 gather 永不返回（embedding 精调实测教训）
 
 # ── 约束维度矩阵：(取值, 权重)。权重对齐 planner_anchors.jsonl 实测画像 ──────────────
 DIMS: dict[str, list[tuple[str, int]]] = {
@@ -352,7 +352,7 @@ def _parse(text: str, expect: int) -> list[dict] | None:
 async def generate(sessions: list[dict], cards: dict[str, dict], sink) -> int:
     """同品类的会话凑一批（共享品类卡上下文），逐批落盘。
 
-    逐批落盘是 M21 的血泪教训：没有增量落盘时，任何一个挂起点都会让整跑的产出归零。
+    逐批落盘是 embedding 精调的血泪教训：没有增量落盘时，任何一个挂起点都会让整跑的产出归零。
     """
     llm, sem = get_llm(), asyncio.Semaphore(CONCURRENCY)
     by_cat: dict[str, list[dict]] = {}

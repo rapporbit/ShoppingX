@@ -373,7 +373,7 @@ def turn_span(
     except Exception as exc:
         # 业务异常（with 体里抛的，被 contextlib throw 回这个 yield 点）必须**原样穿透**：
         # 早先这里连它一起吞掉又 yield 了第二次，Python 只好报 "generator didn't stop after
-        # throw()" 的 RuntimeError，把真实报错盖死——批 3 验收时 q03 撞上游内容审核，终端只见
+        # throw()" 的 RuntimeError，把真实报错盖死——评测时 q03 撞上游内容审核，终端只见
         # RuntimeError，真凶 ``openai.APIError: ...inappropriate content`` 要往上翻 50 行栈。
         if exc is body_exc:
             raise

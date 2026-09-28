@@ -1,4 +1,4 @@
-"""API ↔ 队列 ↔ worker 的接线（阶段 1 条 7 起是唯一一条路）。
+"""API ↔ 队列 ↔ worker 的接线（现在是唯一一条路）。
 
 分工上这里只管**接线**，队列自身的语义（双流分级 / ack / 重投 / 死信）在 ``tests/test_queue.py``。
 两件事必须分别钉死，因为它们的失败形态完全不同：队列写错是任务跑错地方，接线写错是**契约悄悄变了**
@@ -9,7 +9,7 @@
 会忽略它）。
 
 用 ``InProcessQueue`` 而不是 FakeRedis：接线关心的是「谁调了谁、传了什么」，换成 Redis 只会把
-Stream 协议的噪声引进来，真 Redis 的双进程冒烟另跑（见 docs/plans/批2-进度.md）。
+Stream 协议的噪声引进来，真 Redis 的双进程冒烟另跑。
 """
 
 from __future__ import annotations
@@ -235,7 +235,7 @@ async def test_task_state_404_when_unknown(client: AsyncClient, queue: InProcess
     assert (await client.get("/api/task/nope")).status_code == 404
 
 
-# ---------- 跨进程取消 / 澄清（批2-4）----------
+# ---------- 跨进程取消 / 澄清----------
 #
 # 这里只钉**接线**：取消口有没有把指令送出去、覆盖重发有没有从「多跑一轮」变成「换一轮」、
 # handle_task 有没有把两种 CancelledError 分开。控制面自己的语义（令牌 / origin / 重连）在
@@ -312,7 +312,7 @@ async def test_replace_cancels_the_old_task_in_the_worker(
 ) -> None:
     """覆盖重发 = 换一轮，不是多跑一轮：旧那条要在 worker 侧真的被掐掉。
 
-    批2-2 报告里标注的缺口就是这条。少了它，用户改主意重问一句，旧问题仍在后台烧 token，
+    缺口就是这条。少了它，用户改主意重问一句，旧问题仍在后台烧 token，
     两轮的事件还会同时往同一条 WS 上推。
     """
     _stub_agent(monkeypatch)
@@ -386,7 +386,7 @@ async def test_graceful_shutdown_cancel_ends_the_run_as_interrupted(
     与上一条是同一枚硬币的两面：两种取消都表现为 CancelledError，判据是控制面的进程内标记。差别
     只在收尾文案与用户的下一步——取消是他自己要停，中断要他重发。
 
-    阶段 1-3 前这条路是「往外抛、不 ack、留 PEL」，十分钟后被另一个 worker 领回静默重跑：用户看不
+    早先这条路是「往外抛、不 ack、留 PEL」，十分钟后被另一个 worker 领回静默重跑：用户看不
     见那一跑（页面早关了），账却真的再花一次。
     """
     started = asyncio.Event()
@@ -505,7 +505,7 @@ async def test_clarify_endpoint_404_when_nobody_is_waiting(client: AsyncClient) 
     assert resp.status_code == 404
 
 
-# ---------- 入队等待上限（阶段 4-1）----------
+# ---------- 入队等待上限----------
 #
 # 守的是「worker 整批挂了 / 队列堆到消费不过来」这一类：任务入了队却没人领。老行为是干等到
 # QUEUE_WAIT_TIMEOUT_SEC（30 分钟）才报一句超时，而那条消息仍躺在队列里，十分钟后可能被

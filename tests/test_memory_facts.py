@@ -1,4 +1,4 @@
-"""M1 的记忆事实模型与存取口。
+"""的记忆事实模型与存取口。
 
 断言集中在**换模型之后才成立的那几条语义**上：同 key 覆盖（而非叠加）、constraint 不受注入 cap 限制、
 PII 拒写且不回显 value、中文匹配不靠空格切词、清空要连代数一起加。
@@ -135,7 +135,7 @@ async def test_store_overwrites_by_key_and_clears_with_generation() -> None:
 
 
 # ============================================================
-# M2：save_memory 工具 / 收货国 C1 / 围栏
+# save_memory 工具 / 收货国 C1 / 围栏
 # ============================================================
 
 
@@ -215,7 +215,7 @@ async def test_save_memory_anonymous_says_so_and_write_failure_does_not_lie() ->
 
 @pytest.mark.asyncio
 async def test_dest_country_reads_ship_to_fact() -> None:
-    """C1：收货国第 3 层按 ``SHIP_TO_KEY`` 取事实。旧代码读的 category/polarity 已随 M1 消失，
+    """C1：收货国第 3 层按 ``SHIP_TO_KEY`` 取事实。旧代码读的 category/polarity 已消失，
     不改这里不会报错、只会静默退回默认国，到手价按错国家算——所以这条测试盯的是**不报错的那种错**。
     """
     import tempfile
@@ -258,7 +258,7 @@ def test_save_memory_is_allowed_without_confirm_prompt() -> None:
 
 
 # ---------------------------------------------------------------------------
-# M3：保留期与部署开关
+# 保留期与部署开关
 # ---------------------------------------------------------------------------
 
 

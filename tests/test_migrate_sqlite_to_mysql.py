@@ -1,4 +1,4 @@
-"""SQLite → MySQL 搬数脚本的单测（阶段 1 · 条 9）。
+"""SQLite → MySQL 搬数脚本的单测。
 
 **用 SQLite → SQLite 测**：脚本全程走 SQLAlchemy Core 的表元数据，两头的方言差异由库自己处理，
 这里要验的是脚本自己的逻辑——按依赖顺序搬、时间列归一成 UTC naive、目标非空时拒绝、``--truncate``

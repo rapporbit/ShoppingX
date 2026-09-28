@@ -12,7 +12,7 @@ API 进程只做鉴权、配额、幂等、入队，然后立刻回 ``thread_id`
    会边等边领，永远等不完。
 2. **等在飞任务自然跑完**，最多等 ``WORKER_GRACE_SECONDS``。这段时间里任务照常上报 AGUI 事件、
    照常落盘，用户完全无感。
-3. **超时就取消在飞任务，并当场给它一个定论**（阶段 1-3 改口径）：状态写 ``interrupted``、发
+3. **超时就取消在飞任务，并当场给它一个定论**：状态写 ``interrupted``、发
    ``task_interrupted`` 事件让用户重发、把预扣与 thread 占位还回去，消息**ack 掉**。
 
    早先这里是「不 ack，留在 PEL 里等下一个 worker ``XAUTOCLAIM`` 领回重跑」。那条路有两个说不过去
@@ -22,7 +22,7 @@ API 进程只做鉴权、配额、幂等、入队，然后立刻回 ``thread_id`
    了——这种「没结果」该由用户看见并决定要不要再来一次，不该由队列在背后替他决定。
 
 配套的 K8s 侧写法是 ``terminationGracePeriodSeconds`` 要**大于** ``WORKER_GRACE_SECONDS``，否则
-kubelet 的 SIGKILL 会先到，第 2 步白设。那份 yaml 是批 2 后面一单的事。
+kubelet 的 SIGKILL 会先到，第 2 步白设。那份 yaml 见 deploy/k8s。
 
 **为什么状态表由 worker 写而不是 API 写。** ``GET /api/task/{id}`` 读的 ``TaskStatus`` 是「这条任务
 现在跑到哪了」——只有真正在跑它的进程知道。API 侧写的话必然是猜的（入队即写 running，然后永远不会
@@ -114,7 +114,7 @@ async def handle_task(task: IntentTask, queue: TaskQueue | None = None) -> None:
     等于任务默默消失，而状态表里还写着 running，谁都看不出发生了什么。写状态只是给轮询接口看的
     副产品，不是错误处理本身。
 
-    **取消分两种，收尾都是「正常返回」但状态不同**（批2-4 + 阶段 1-3）。两种都表现为
+    **取消分两种，收尾都是「正常返回」但状态不同**。两种都表现为
     ``CancelledError``，判据是控制面的进程内标记（:func:`app.api.control.was_cancelled_locally`）
     ——只有它知道这一刀是谁砍的：
 
@@ -133,7 +133,7 @@ async def handle_task(task: IntentTask, queue: TaskQueue | None = None) -> None:
     if current is not None:
         control.register_inflight(task.task_id, task.thread_id, current)
     agent_started = False
-    # 绑在整个 handle_task 外层，而不是只靠 run_agent 里那次（阶段 4-5）：取消、关停掐断、
+    # 绑在整个 handle_task 外层，而不是只靠 run_agent 里那次：取消、关停掐断、
     # 重投超限这几条路根本走不到 run_agent，而它们恰恰是最需要跨进程对账的日志。
     # trace_id 与 API 入队那段同值（随 traceparent 带过来）：两边日志按它一筛就是整条线。
     parent = parse_traceparent(task.traceparent)
@@ -178,7 +178,7 @@ async def handle_task(task: IntentTask, queue: TaskQueue | None = None) -> None:
             skill=task.skill or None,
             # API 那次 HTTP 请求的 id：绑回日志上下文，两个进程的日志才拼得成一条线。
             request_id=task.request_id,
-            # 入队时刻：首事件延迟 SLO 的计时起点，**排队等的那几秒也算在内**（阶段 6）。
+            # 入队时刻：首事件延迟 SLO 的计时起点，**排队等的那几秒也算在内**。
             enqueued_at=task.enqueued_at,
             # API 入队 span 的上下文：本轮根 span 挂到它下面，排队与 Agent 两段才是同一条 trace。
             traceparent=task.traceparent,
@@ -356,11 +356,11 @@ async def bootstrap() -> None:
 
 
 async def amain() -> None:
-    # 与 API 同一道形态闸（阶段 1 条 7）：库不是 MySQL / 队列 Redis 不通就别起。起来了也只会空转，
+    # 与 API 同一道形态闸：库不是 MySQL / 队列 Redis 不通就别起。起来了也只会空转，
     # 且空转是无声的——没有任何日志会说「我领不到任务」。
     await assert_deployment_deps()
     await bootstrap()
-    # 参数覆盖对账（阶段 1 条 8）。**这个进程才是真正用这些参数的那个**：后台改模型 / 检索参数打在
+    # 参数覆盖对账。**这个进程才是真正用这些参数的那个**：后台改模型 / 检索参数打在
     # API 进程上，AgentLoop 却在这里跑。挂在 amain 而不是 run_worker 里，是因为 run_worker 还是测试
     # 的注入入口，不该让每个用例都连上库轮询。
     config_sync = asyncio.create_task(config_store.sync_loop())

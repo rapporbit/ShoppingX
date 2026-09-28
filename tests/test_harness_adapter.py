@@ -526,7 +526,7 @@ async def test_payload_prefix_stable_across_rounds_with_injection(
         assert cur[: len(prev)] == prev, "payload 前缀跨轮失配——注入没落进 state.context"
 
 
-# ---------- 主 loop 的用量入账（L7） ----------
+# ---------- 主 loop 的用量入账 ----------
 def _usage(inp: int, out: int) -> ChatUsage:
     return ChatUsage(input_tokens=inp, output_tokens=out, time=0.1)
 
@@ -713,7 +713,7 @@ def test_summary_turn_prose_is_not_merged() -> None:
 
 
 def _guide_turn(body: str, markdown: str) -> Msg:
-    """模型的一条消息：同一条里调 present_guide（S3）并拿到工具排好版的 markdown。"""
+    """模型的一条消息：同一条里调 present_guide并拿到工具排好版的 markdown。"""
     from app.harness.msgs import tool_blocks
 
     blocks: list[object] = [TextBlock(type="text", text=body)] if body else []
@@ -727,7 +727,7 @@ def _guide_turn(body: str, markdown: str) -> Msg:
 
 
 def test_guide_markdown_survives_the_models_tail() -> None:
-    """present_guide 的 markdown 并回 final_text —— 与 chat_fallback 同一条口径（S3）。
+    """present_guide 的 markdown 并回 final_text —— 与 chat_fallback 同一条口径。
 
     不并回的话屏幕上只剩模型补的那句「以上就是选购要点」，落盘 summary.md 与历史回看里那几节
     标准一个字都没有（present_guide 没有商品卡兜底，答案被顶掉就什么都不剩）。

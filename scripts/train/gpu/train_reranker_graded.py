@@ -10,7 +10,7 @@ ApproxNDCG 在二值 label 下会退化成近似 MRR，跟 listwise CE 拉不开
 
               CE loss            ApproxNDCG
   二值 label   r1（已跑，swift）   r4
-  分级 label   r3（ListNet）       r2 ← 原方案
+  分级 label   r3（ListNet）       r2 ← Stage C
 
 只跑 r2 的话，涨了不知道是分级的功劳还是 loss 的功劳，跌了也不知道该怪谁。
 

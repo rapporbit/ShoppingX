@@ -1,4 +1,4 @@
-"""生成召回评测金标集（query → 应被召回的 card_id 列表），原方案。
+"""生成召回评测金标集（query → 应被召回的 card_id 列表）。
 
 **关系是确定性构造的，不靠 LLM 拍脑袋：** 同一个品类下的 bestseller/attribute/price_range
 三张卡天然互为「相关」——查这个品类就该召回它自己的卡。所以 ``relevant`` = 该品类的全部

@@ -1,7 +1,7 @@
 #!/bin/bash
 # 端到端 A/B：自训 reranker 能不能在真实 Agent 链路上兑现离线的那 +19.5% ndcg@8。
 #
-# 姊妹脚本 run_ab_rubric.sh 问的是同一个问题（M21 那次答案是「离线 +12.6% → Rubric +7.66」），
+# 姊妹脚本 run_ab_rubric.sh 问的是同一个问题（embedding 精调那次答案是「离线 +12.6% → Rubric +7.66」），
 # 这次换成精排腿。**不测就是空账**——离线尺子有 92% 的头部商品 ESCI 根本没标过，
 # 那个 +19.5% 里有多少是真的、有多少是尺子噪声，只有端到端能回答。
 #
@@ -15,7 +15,7 @@
 # +3.10pt、品类词只有 +0.59pt，所以这一版 A/B 测的是「形态不改、只换权重」的收益，
 # 是**保守下界**。改 query 形态要动 item_picker 的品类门/域反证那套逻辑，单独一步做。
 #
-# 前置：① GPU 上 rerank_server.py 已起并 ssh -N -L 8091:127.0.0.1:8091 huzhouet
+# 前置：① GPU 上 rerank_server.py 已起并 ssh -N -L 8091:127.0.0.1:8091 gpu-host
 #       ② embed_server 8090 隧道通着（两组都要用 e15）
 #
 # 用法：bash scripts/train/run_ab_reranker.sh
@@ -26,7 +26,7 @@ OUT=data/eval
 mkdir -p "$OUT"
 STAMP=$(date +%m%d_%H%M)
 
-# Agent 单条要跑 5-9 轮 LLM，默认超时会把慢的那几条判死（M21 踩过）
+# Agent 单条要跑 5-9 轮 LLM，默认超时会把慢的那几条判死（embedding 精调踩过）
 export LLM_REQUEST_TIMEOUT=300
 export QDRANT_COLLECTION=globex_items_e15
 export EMBED_BASE_URL=http://127.0.0.1:8090/v1

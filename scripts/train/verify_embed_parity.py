@@ -1,4 +1,4 @@
-"""S1 环境验收：**GPU 机上的本地 bge-m3 与线上 API 的 bge-m3 是不是同一把尺子**。
+"""环境验收：**GPU 机上的本地 bge-m3 与线上 API 的 bge-m3 是不是同一把尺子**。
 
 为什么非验不可：GRPO 的 reward 有 45% 来自「keywords 真打进 Qdrant 搜到了什么」。rollout 一步
 要编码几十条 query，走线上 embedding API 既慢又计费，所以 GPU 机上改用本地 bge-m3 推理。可
@@ -12,7 +12,7 @@
 
 用法（先把 GPU 机的 embed server 转发到本地）::
 
-    ssh -N -L 18095:localhost:8095 huzhouet &
+    ssh -N -L 18095:localhost:8095 gpu-host &
     uv run python scripts/train/verify_embed_parity.py --local-url http://localhost:18095/v1 \\
         --limit 30 --out data/train/embed_parity.json
 """

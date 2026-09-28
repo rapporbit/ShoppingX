@@ -14,7 +14,7 @@
 B 用户那份算不算数」——一个不该存在的问题。所以是两张表、两个 Store、零共享状态。
 
 **策略是假设，不是结论。** 蒸馏的素材是 Rubric 高分轨迹，而 judge 有单样本 0↔100 对翻的抖动
-（记忆 rubric-judge-calibration-pitfalls）。所以：① 写入前必须过门禁重放（3 条同类 query 不
+。所以：① 写入前必须过门禁重放（3 条同类 query 不
 退化，见蒸馏脚本）；② 写进来之后仍带血量——命中回血、连续失败淘汰，让不灵的策略自己退场，
 而不是靠人定期回来清一张只增不减的表。
 
@@ -252,7 +252,7 @@ def match_strategies(
 
     命中判定复用 :func:`app.utils.terms.term_hits` + :func:`normalize_terms`——不是裸 ``in``：
     ``bag`` 不该命中 ``baggage``，「不要皮革」里的 leather 不该算成用户想要皮革。这两个函数是
-    本仓匹配层的单一事实源，另起一套子串匹配正是记忆 memory-bugs-are-silent-inversions 记的
+    本仓匹配层的单一事实源，另起一套子串匹配正是之前踩过的
     那类静默反转的温床。
 
     排序：命中词数多的优先，同分按血量高的优先（活得好的策略更可信），再同分按 trigger 稳定
@@ -290,7 +290,7 @@ def render_strategy_block(strategies: Sequence[Strategy]) -> str:
 
 #: 门禁重放专用：强制注入这批策略（还没进库，正在被验证）。**只有蒸馏脚本会设**——线上路径
 #: 永远读库。用 ContextVar 而不是模块级变量，是为了与本仓其它会话态一致：并发跑多条重放时
-#: 各自的 ContextVar 互不串台（模块级 dict 串台是 demo 踩过的坑，见手册 §12 的「不要照抄」）。
+#: 各自的 ContextVar 互不串台（模块级 dict 会串台）。
 _forced: ContextVar[tuple[Strategy, ...] | None] = ContextVar("forced_strategies", default=None)
 
 

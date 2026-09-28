@@ -1,4 +1,4 @@
-"""阶段 2 第 3 条：fallback 目标的能力门 + 切换可见性。
+"""fallback 目标的能力门 + 切换可见性。
 
 门的形态与计划原文不同（yaml 五列全绿 → 只判工具调用的否决门），理由写在
 :mod:`app.agent.capabilities` 的 docstring 里。这里守两件最容易回退的事：

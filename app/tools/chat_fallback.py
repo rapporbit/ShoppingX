@@ -62,7 +62,7 @@ async def chat_fallback(message: str, item_ids: StrListArg | None = None) -> Cha
                 get_fast_llm(), [("system", _SYSTEM), ("user", "用户没说什么具体的，招呼一句。")]
             )
         except Exception:
-            # 模型调用失败也要补一条 end 事件，否则前端（M8）会看到工具「永远在跑」。
+            # 模型调用失败也要补一条 end 事件，否则前端会看到工具「永远在跑」。
             await monitor.report_tool_end("chat_fallback", error=True)
             raise
     out = ChatFallbackOutput(reply=reply, items=cards)

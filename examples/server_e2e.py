@@ -1,7 +1,7 @@
-"""M10 示例：FastAPI 前后端闭环的协议级端到端演示（真 uvicorn，零真实 LLM）。
+"""示例：FastAPI 前后端闭环的协议级端到端示例（真 uvicorn，零真实 LLM）。
 
-这是 ROADMAP M10 验收点的可执行版——但**把真实主 loop 换成一个桩**（``_stub_run_agent``），
-因为本 worktree 的数据/模型未必够跑一次真链路（见对话决策）。重点不是模型多聪明，而是
+这里**把真实主 loop 换成一个桩**（``_stub_run_agent``），
+因为本 worktree 的数据/模型未必够跑一次真链路。重点不是模型多聪明，而是
 **前后端协议这条路通不通**：connect-first 不丢早期事件、事件按序到达、产物可下载、任务可取消。
 
 跑一遍证明：
@@ -12,9 +12,9 @@
 3. 桩任务依次上报 session_created → tool_start/end → fork → … → task_result（带商品卡 items），
    并把清单写进 ``output/<tid>/summary.md``。
 4. 客户端按序收全事件 → ``GET /api/files/<tid>/summary.md`` 下载清单 → 校验。
-5. 再起一个长任务演示 ``POST /api/task/<tid>/cancel`` → 收到 task_cancelled。
+5. 再起一个长任务测试 ``POST /api/task/<tid>/cancel`` → 收到 task_cancelled。
 
-把真实 ``run_agent`` 接回来（拷好 .env + data/index）后，这个脚本一字不改就是真链路 demo。
+把真实 ``run_agent`` 接回来（拷好 .env + data/index）后，这个脚本一字不改就是真链路。
 
 运行：uv run python examples/server_e2e.py
 """
@@ -70,7 +70,7 @@ async def _stub_run_agent(query: str, thread_id: str, user_id: str | None = None
                 "reason": "防水尼龙非塑料；12 天到手",
             },
             {
-                "item_id": "S2",
+                "item_id": "SFT 冷启动",
                 "platform": "shopee",
                 "title": "OUTBACK WAYFARER 三件套",
                 "landed_usd": 27.3,
@@ -88,7 +88,7 @@ async def _stub_run_agent(query: str, thread_id: str, user_id: str | None = None
 
 
 async def _slow_run_agent(query: str, thread_id: str, user_id: str | None = None) -> dict:
-    """长任务桩：用于演示取消（卡在 await 点等被打断）。"""
+    """长任务桩：用于测试取消（卡在 await 点等被打断）。"""
     session_dir = ensure_session_dir(thread_id)
     with thread_scope(thread_id, session_dir):
         await monitor.report_session_created(session_dir)
@@ -192,7 +192,7 @@ async def main() -> None:
         async with httpx.AsyncClient(timeout=10.0) as http:
             await _run_happy_path(http)
             await _run_cancel_path(http)
-        print("== M10 协议级闭环全部通过：connect-first 不丢事件 / 商品卡 / 下载 / 取消 ==")
+        print("== 协议级闭环全部通过：connect-first 不丢事件 / 商品卡 / 下载 / 取消 ==")
     finally:
         uv_server.should_exit = True
         await server_task

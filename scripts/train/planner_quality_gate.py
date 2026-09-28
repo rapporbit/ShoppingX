@@ -1,17 +1,17 @@
-"""S0-3：合并三源 → 过质量门 → 切分。planner 训练集的最后一道关。
+"""质量门：合并三源 → 过质量门 → 切分。planner 训练集的最后一道关。
 
-三源（见 ROADMAP M23 S0-1）：
+三源：
 - `planner_anchors.jsonl`   真实线上 query（94 条）——量小但**分布最真**
 - `planner_queries.jsonl`   维度矩阵合成——保覆盖面
 - `planner_adversarial.jsonl` bad case 族定向——保长尾
 
 **切分不是随机切的**：94 条真实锚**整体进 dev**。理由是 dev 的职责是回答「训出来的模型在
-线上真实分布上行不行」，用合成数据当 dev 只能回答「在合成分布上行不行」——M21 栽过一次同款：
+线上真实分布上行不行」，用合成数据当 dev 只能回答「在合成分布上行不行」——精调时栽过一次同款：
 ESCI（3 词英文关键词）上涨了 6.6%，但那把尺子量不出线上中文口语的表现。真实数据稀缺时，
 它的最高价值用法是当尺子，不是当训练料。
 
 质量门七项，全部**只报告不静默丢弃**（除精确重复）：数据被门挡掉多少、为什么挡，
-得让人看见。M21 的合成管线是「质量门全过」才敢用的，这里沿用同一条规矩。
+得让人看见。embedding 精调的合成管线是「质量门全过」才敢用的，这里沿用同一条规矩。
 
 用法：``uv run python scripts/train/planner_quality_gate.py``
 """
@@ -206,7 +206,7 @@ def main() -> None:
 
     print("\n切分：" + " / ".join(f"{k}={len(v)}" for k, v in splits.items()))
     print(f"→ {OUT.relative_to(PROJECT_ROOT)}（含 split 字段）")
-    print("下一步 S0-2：跑 golden 标注（budget 走规则、category/domains 走三次投票）")
+    print("下一步：跑 golden 标注（budget 走规则、category/domains 走三次投票）")
 
 
 if __name__ == "__main__":

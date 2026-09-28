@@ -1,4 +1,4 @@
-"""MCP 两侧（批 4-3）。
+"""MCP 两侧。
 
 - :mod:`app.mcp.server` —— **生产侧**：把本仓的只读三工具（``item_search`` / ``price_compare``
   / ``shipping_calc``）暴露成一个 MCP server，供仓外的 Agent / IDE / 别的编排框架消费。

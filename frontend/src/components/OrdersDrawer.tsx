@@ -64,7 +64,7 @@ export function OrdersDrawer({
         </div>
 
         <div className="fav-note">
-          演示用的模拟交易：有订单状态与取消，<b>没有支付、物流与库存</b>。
+          模拟交易：有订单状态与取消，<b>没有支付、物流与库存</b>。
         </div>
         {note ? <div className="drawer-user">{note}</div> : null}
 

@@ -1,6 +1,6 @@
 """accounts：users + threads（基线）
 
-**这条是「基线」，语义特殊。** 它建的表结构与 M16 用 ``create_all`` 建出来的**完全等价**。因此线上
+**这条是「基线」，语义特殊。** 它建的表结构与早期用 ``create_all`` 建出来的**完全等价**。因此线上
 那份老库（有表、无 ``alembic_version``）不需要执行它，只要 ``stamp`` 到这个 revision 即可——
 ``app/db/session.py`` 的 ``init_db()`` 自动完成这件事，见 ``BASELINE_REVISION``。
 **改这条迁移 = 改老库的历史，别改**；结构要演进就往后加新的 revision。

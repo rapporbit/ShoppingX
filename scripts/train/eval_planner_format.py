@@ -1,4 +1,4 @@
-"""S2 的验收闸：**格式正确率**。原方案把 98% 定为切 RL 的前置条件。
+"""SFT 冷启动的验收闸：**格式正确率**。原方案把 98% 定为切 RL 的前置条件。
 
 为什么这条是硬闸而不是「顺便看看」：GRPO 里 schema parse 失败直接 -1.0 一票否决。格式率
 只有 90% 的话，每 10 条 rollout 就有 1 条把整组的优势基线拽下去——组内相对量被格式噪声
@@ -23,7 +23,7 @@ import re
 from collections import Counter
 from pathlib import Path
 
-PASS_LINE = 0.98  # 原方案
+PASS_LINE = 0.98  # 切 RL 的前置门槛
 
 
 def extract_json(text: str) -> dict | None:
@@ -90,7 +90,7 @@ def field_accuracy(pred: dict, gold: dict) -> dict:
     不给部分分），够看趋势就行——真要比分数以 app/eval/planner_reward.py 为准，别拿这里的数
     去和那边的对照。
 
-    **gold 品类为空 → 该条弃权（返回 None），不算错**。dev 92 条里有 24 条是 S0-2 定的机制
+    **gold 品类为空 → 该条弃权（返回 None），不算错**。dev 92 条里有 24 条是 golden 标注定的机制
     弃权样本（无上文的追问碎片，品类判不出来），旧口径把它们一律记为「判错」，天花板被压到
     68/92=0.739 —— 实测 0.522 因此被读成「一半都判错」，实际可判样本上是 0.706。
     分母混进无解的题，得到的就不是判定能力。

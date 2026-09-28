@@ -1,4 +1,4 @@
-"""Agent Skill 的发放（批 4-3）—— 框架原生 ``LocalSkillLoader``，不自建 loader。
+"""Agent Skill 的发放—— 框架原生 ``LocalSkillLoader``，不自建 loader。
 
 **Skill 是什么**：``skills/<name>/SKILL.md``，frontmatter 给 ``name`` / ``description``，正文是
 一段写给模型看的领域打法。框架把**所有 skill 的 name + description + dir**（不是正文）拼成
@@ -13,7 +13,7 @@ prompt」的唯一理由——后者是每轮都付钱。**description 因此是
 **发放范围**：全仓只有主 Agent 一个环，skill 只发给它。
 三个 skill 讲的都是主 Agent 的活——到手价口径、槽位规划、图搜流程。
 
-**与批 4-2 的 ``on_system_prompt`` 钩子怎么相处**（口径，改这里前先读）：两者拼在 system
+**与成功策略的 ``on_system_prompt`` 钩子怎么相处**（口径，改这里前先读）：两者拼在 system
 prompt 的**不同层**，顺序是框架定的，我们不去抢：
 
     [本仓定稿 prompt = 基线正文 + on_system_prompt 钩子追加的策略块] ← agents._assemble
@@ -161,7 +161,7 @@ async def resolve_selected_skill(name: str) -> tuple[str, str] | None:
 def render_selected_skill(name: str, body: str) -> str:
     """用户在输入框 ``/`` 显式选中的 skill：正文拼进**本轮用户消息**（不是 system prompt）。
 
-    口径与常见实现一致：``authority=reference_only``，明说它不是系统指令、不能扩权、不改硬约束；
+    口径：``authority=reference_only``，明说它不是系统指令、不能扩权、不改硬约束；
     正文已在此，模型不必再调 ``Skill`` 读一遍。
     """
     return (

@@ -1,4 +1,4 @@
-# 多副本验收环境（阶段 1）。**一次性的验证台，不是部署形态** —— 验完 down -v 清掉。
+# 多副本验收环境。**一次性的验证台，不是部署形态** —— 验完 down -v 清掉。
 #
 # 验的是 1-1~1-4 那几刀在**两个副本**下是否真成立：预扣与并发上限（holds 表）、同 thread 唯一真相
 # （threads 条件更新）、dedup 窗口（Redis）、关停按 interrupted 收尾、产物共享卷。这些机制在单进程
@@ -8,7 +8,7 @@
 # MySQL 与 Redis 容器、**不发布任何端口**（场景脚本走 docker exec 从容器内打请求）。镜像 tag 是
 # :multi，**绝不能 build 成 :latest** —— 那个 tag 是线上容器重建时用的。
 #
-# 跑法（gcjp 或本机都一样）：
+# 跑法（线上 或本机都一样）：
 #   docker build -f docker/Dockerfile.backend --build-arg UV_EXTRAS=--extra\ db \
 #     -t globex-backend:multi .
 #   docker compose -f docker/docker-compose.multi.yml up -d

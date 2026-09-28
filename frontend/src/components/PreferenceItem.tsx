@@ -2,7 +2,7 @@ import type { MemoryCategory, Preference } from "../types";
 
 // 列表里的一条长期记忆——显示的就是注入给模型的那三个字段（`[category] key: value`）。
 // 页面上看得见的，和模型读得到的是同一份东西；上一版摊开的 polarity / blocking / domain /
-// keywords 随 M4 一起删了，那些字段模型根本没见过。
+// keywords 已删，那些字段模型根本没见过。
 
 const CATEGORY_CN: Record<MemoryCategory, string> = {
   constraint: "硬规则",

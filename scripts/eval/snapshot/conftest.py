@@ -6,9 +6,9 @@ Langfuse（不往生产项目打 trace）、整轮缓存（关，否则新会话
 模型 / 召回 / reranker 走真实 ``.env``。
 
 **跑前**：``QDRANT_URL`` 要能连上 138 万点的 ``globex_items``。本机没有这份库（2026-09-15 查：
-OrbStack 里无 qdrant 容器 / 卷，``data/qdrant`` 为空），用 SSH 隧道只读连 gcjp 线上容器：
-``ssh -fN -L 127.0.0.1:6333:<globex-qdrant 容器内网 IP>:6333 gcjp``（IP 用
-``docker inspect`` 在 gcjp 上查，当天是 172.19.0.4）。
+OrbStack 里无 qdrant 容器 / 卷，``data/qdrant`` 为空），用 SSH 隧道只读连线上容器：
+``ssh -fN -L 127.0.0.1:6333:<globex-qdrant 容器内网 IP>:6333 <prod-host>``（IP 用
+``docker inspect`` 在线上主机查，当天是 172.19.0.4）。
 实测 4 条一遍 $0.0035~0.0081 / 95~107s（deepseek-v4-flash 每百万 token 0.14 / 0.28 / 缓存读
 0.0028，2026-09-15 四遍）。每条实测花费追加到 ``output/snapshot_runs.jsonl``。
 """

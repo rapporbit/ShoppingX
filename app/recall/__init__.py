@@ -1,6 +1,6 @@
 """向量召回 + 汇率/关税/运费 + RAG 知识库（后端内部能力，不暴露给模型）。
 
-公开入口（供 M4 的 item_search / price_compare / shipping_calc 等工具调用）：
+公开入口（供 item_search / price_compare / shipping_calc 等工具调用）：
 - :class:`TowerClient` / :func:`get_tower_client`：query / 商品文本编码
 - :class:`QdrantRecall` / :func:`get_recall_client`：Qdrant hybrid 召回（dense + 稀疏 BM25）
 - :class:`RecallCandidate`：召回候选的归一化结构

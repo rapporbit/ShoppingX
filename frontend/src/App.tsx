@@ -55,7 +55,7 @@ function readLegalRoute(): LegalPage | null {
 }
 
 /**
- * 登录闸（M16）。没有身份就不渲染工作区——不是为了好看，是因为工作区一挂载就会去拉会话清单、
+ * 登录闸。没有身份就不渲染工作区——不是为了好看，是因为工作区一挂载就会去拉会话清单、
  * 偏好、收藏，全都得带 token。未登录时渲染它，只会打出一串注定 401 的请求。
  *
  * 身份也从此**只有一个来源**：后端签发的 token。此前这里硬编码着一个 "demo-user" 常量
@@ -292,7 +292,7 @@ function Workspace({
           : [...cur, item],
     );
   }, []);
-  // 对比栏原先靠这条「替用户说一句话」把几件商品发给 Agent；C4 之后它直接打
+  // 对比栏原先靠这条「替用户说一句话」把几件商品发给 Agent；现在它直接打
   // POST /api/threads/{tid}/compare 拿结构化结论，这条就没有消费者了（详情 / 表单走各自的
   // 确认卡通路）。留着会是一个无人调用的发消息入口，删。
   // 输入框预填（不发送）：追问 chip 与零结果空态用。key 自增保证同文案连点也重填。
@@ -338,7 +338,7 @@ function Workspace({
     );
   };
 
-  // 今日 credit 余额（M18）。开局拉一次；此后**每次任务落地就重拉**——不只是 done：取消和出错
+  // 今日 credit 余额。开局拉一次；此后**每次任务落地就重拉**——不只是 done：取消和出错
   // 同样已经烧掉了 token（后端在 finally 里照记不误），余额条要跟着掉，否则用户会以为「取消了就
   // 不扣」。额度耗尽（402）也走 error 这条路，重拉后 exhausted=true，输入框随即锁上。
   const [quota, setQuota] = useState<Quota | null>(null);
@@ -519,7 +519,7 @@ function Workspace({
 
                           {/* ask_user 的问题：渲染成一条普通 assistant 消息（不是横幅、不是另一种卡）；
                               带 options 时选项挂在气泡下方。只对最新一轮可交互。
-                              两种形态（D2）：等回复那种 status 停在 waiting，点选走 WS 回填本轮；
+                              两种形态：等回复那种 status 停在 waiting，点选走 WS 回填本轮；
                               closes_turn 那种本轮已结束（status=done），选项是「下一步」chips，
                               点选发起新一轮任务——回填到一个没人在等的会话只会石沉大海。 */}
                           {isLast &&

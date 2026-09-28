@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
-# S3：planner 的 GRPO 训练（ms-swift 4.4.2，4 卡 DDP LoRA + 独立 rollout server）。
+# GRPO：planner 的 GRPO 训练（ms-swift 4.4.2，4 卡 DDP LoRA + 独立 rollout server）。
 #
-# **从 SFT 的 LoRA 接着训，不是从基座重来**：S2 把格式正确率从 63% 拉到 100%，那是切 RL 的
+# **从 SFT 的 LoRA 接着训，不是从基座重来**：SFT 冷启动把格式正确率从 63% 拉到 100%，那是切 RL 的
 # 前置条件。丢掉它从基座起步，前几百步会全花在「学会吐 JSON」上，
 # 而那件事监督学习几十分钟就能便宜地办完。
 #
-# **超参按 ROADMAP 定的初值**：group 8 / clip 0.2 / kl 0.03 / lr 1e-6。lr 比 SFT 小两个量级
+# **超参初值**：group 8 / clip 0.2 / kl 0.03 / lr 1e-6。lr 比 SFT 小两个量级
 # 是 RL 的常识性设定——policy 每步只该挪一点点，挪大了 KL 直接炸，格式率会先崩给你看。
 #
 # 前置：先起 rollout server（run_grpo_rollout_server.sh）、embed server(:8095)、Qdrant(:6333)。
 # 用法：bash run_grpo_planner.sh [--max_steps 5 ...]   # 多余参数原样透传给 swift
 set -euo pipefail
 
-M23=${M23:-$HOME/m23}
-VENV=${VENV:-$M23/.venv-rl}
+RL_DIR=${RL_DIR:-$HOME/m23}
+VENV=${VENV:-$RL_DIR/.venv-rl}
 BASE=${BASE:-$HOME/.cache/huggingface/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/cdbee75f17c01a7cc42f958dc650907174af0554}
-SFT_ADAPTER=${SFT_ADAPTER:-$M23/output/sft_r16/v2-20260812-010320/checkpoint-306}
-OUT=${OUT:-$M23/output/grpo_r1}
+SFT_ADAPTER=${SFT_ADAPTER:-$RL_DIR/output/sft_r16/v2-20260812-010320/checkpoint-306}
+OUT=${OUT:-$RL_DIR/output/grpo_r1}
 PORT=${PORT:-8010}
 
-export GLOBEX_REPO=${GLOBEX_REPO:-$M23/repo}          # reward 从这份仓库按文件加载
+export GLOBEX_REPO=${GLOBEX_REPO:-$RL_DIR/repo}          # reward 从这份仓库按文件加载
 export ROLLOUT_EMBED_URL=${ROLLOUT_EMBED_URL:-http://127.0.0.1:8095/v1/embeddings}
 export QDRANT_URL=${QDRANT_URL:-http://127.0.0.1:6333}
 export QDRANT_COLLECTION=${QDRANT_COLLECTION:-globex_items}
@@ -35,9 +35,9 @@ export PLANNER_REWARD_LOG_EVERY=${PLANNER_REWARD_LOG_EVERY:-5}
     --adapters "$SFT_ADAPTER" \
     --tuner_type lora \
     --lora_rank 16 --lora_alpha 32 \
-    --dataset "$M23/planner_grpo_train.jsonl" \
-    --val_dataset "$M23/planner_grpo_dev.jsonl" \
-    --external_plugins "$M23/grpo_planner_plugin.py" \
+    --dataset "$RL_DIR/planner_grpo_train.jsonl" \
+    --val_dataset "$RL_DIR/planner_grpo_dev.jsonl" \
+    --external_plugins "$RL_DIR/grpo_planner_plugin.py" \
     --reward_funcs planner_reward \
     --num_generations 8 \
     --temperature 1.0 \

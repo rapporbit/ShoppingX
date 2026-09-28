@@ -17,7 +17,7 @@ cache_read 各自单价），cache 命中的那部分 input 享折扣——按 t
 出一行新的、从 0 起算，老行留着当历史账单。用 UTC 而非本地时区：服务器时区一改，用户的额度会凭空
 多出或蒸发一段。
 
-**配额只在鉴权开启时生效**（``AUTH_ENABLED=false`` 的 demo / 本地开发不设闸）：关掉鉴权时所有人
+**配额只在鉴权开启时生效**（``AUTH_ENABLED=false`` 的本地开发不设闸）：关掉鉴权时所有人
 共用一个假身份 ``demo-user``，对它记账等于「一个人烧完全体停用」，既不公平也拦不住真正想薅的人
 （不登录就没有身份可限，那道门本来就该由鉴权来关）。
 """
@@ -58,7 +58,7 @@ def guest_daily_quota_usd() -> float:
 
 
 async def daily_quota_usd_for(db: AsyncSession, user_id: str) -> float:
-    """这个人的日上限：访客走 ``GUEST_DAILY_QUOTA_USD``，其余（含查无此人的 demo 假身份）走正式档。
+    """这个人的日上限：访客走 ``GUEST_DAILY_QUOTA_USD``，其余（含查无此人的免鉴权假身份）走正式档。
 
     多一次按主键查 users 的开销：只在任务进门与 ``/api/quota`` 各查一次，不在热路径上。
     """

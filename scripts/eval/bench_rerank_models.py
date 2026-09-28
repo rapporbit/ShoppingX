@@ -3,7 +3,7 @@
 **候选池固定、五个模型共用**：用线上 bge-m3 索引（隧道只读）对 N 条 ESCI query 取 top-K，
 候选文本按线上 ``item_picker._searchable``（title brand category 小写）拼——量的是线上那把尺子。
 
-**两个口径缺一不可**（M22 教训：排序更好的模型判别反而更差，而线上 rerank 分只用于品类门）：
+**两个口径缺一不可**（教训：排序更好的模型判别反而更差，而线上 rerank 分只用于品类门）：
 
 - 排序：候选池按 rerank 分重排后的 ndcg@8 / recall@8 / mrr，对照 ``embed`` 行（不重排）与
   ``ceiling``（池内正例占比 = 排序能到的上限）。

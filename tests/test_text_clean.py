@@ -1,7 +1,7 @@
 """清洗 + 检索文本塑形的确定性单测（embedding 前置，离线）。
 
 覆盖 `app/utils/clean.py:clean_text` 与 `app/recall/text.py` 的 tail_category / clip_sentence /
-分词 / 稀疏项，对齐执行计划 `docs/plans/recall-hybrid-embedding-plan.md` §2/§3。
+分词 / 稀疏项，§3。
 """
 
 from __future__ import annotations
@@ -72,7 +72,7 @@ def test_clip_sentence_prefers_sentence_then_word_boundary() -> None:
     assert len(out2) <= 300 and not out2.endswith(" ") and out2.split()[-1] == "alpha"
 
 
-# ---------- embed_text（建索引与训练数据的共用契约，M21） ----------
+# ---------- embed_text（建索引与训练数据的共用契约） ----------
 def test_embed_text_composition_is_stable() -> None:
     """字段顺序/分隔符是训练数据与线上索引之间的契约，动它等于让已训模型的输入分布漂移。"""
     item = CleanItem(

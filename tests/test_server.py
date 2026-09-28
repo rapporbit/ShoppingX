@@ -1,6 +1,6 @@
-"""M10 验收：FastAPI 接口的确定性测试（不依赖真实 LLM / 真 uvicorn 服务）。
+"""FastAPI 接口的确定性测试（不依赖真实 LLM / 真 uvicorn 服务）。
 
-覆盖 ROADMAP M10 的「工具 / 连接管理 / 取消任务」接口面：
+覆盖「工具 / 连接管理 / 取消任务」接口面：
 - ``POST /api/task`` 起后台任务、登记 active_tasks、客户端可指定 thread_id。
 - ``POST /api/task/{tid}/cancel`` 取消运行中任务 / 不存在任务 404。
 - ``GET /api/files/...`` 下载产物、缺文件 404、路径穿越 400。
@@ -50,7 +50,7 @@ async def client() -> AsyncIterator[AsyncClient]:
 async def _clean_tasks(fake_redis: FakeRedis) -> AsyncIterator[None]:
     """每个用例前换一份全新队列**并起一个消费方**，用例后清 active_tasks 并取消遗留任务。
 
-    阶段 1 条 7 起 API 进程不再直接跑 ``run_agent``：任务一律入队，由 worker 消费。所以单测要自己
+     API 进程不再直接跑 ``run_agent``：任务一律入队，由 worker 消费。所以单测要自己
     扮演那个 worker——否则每条用例的任务都会停在队列里，``started`` 永远等不到。用例里换掉的是
     ``worker.run_agent``（真正跑它的那个名字），不是 ``server.run_agent``。
 
@@ -213,7 +213,7 @@ async def test_inflight_terminal_event_treated_as_ended(
     release.set()
 
 
-# ---------- 背压（进程内准入池随阶段 1 条 7 删除）----------
+# ---------- 背压（进程内准入池已删除）----------
 #
 # 「槽满排队 / 队列满 429 / 覆盖重发不超并发 / 收尾放槽」这四件事现在由队列深度闸 + run_holds 的
 # 用户级并发承担，用例分别在 tests/test_queue_wiring.py（429 与排位）与 tests/test_holds.py（用户
@@ -252,7 +252,7 @@ async def test_same_thread_same_query_is_idempotent(client: AsyncClient, monkeyp
 async def test_idempotency_holds_when_this_process_never_saw_the_run(
     client: AsyncClient, monkeypatch: Any
 ) -> None:
-    """**真相在 DB，不在 active_tasks**（阶段 1-2）：清空本进程的字典（= 另一台副本收到请求），
+    """**真相在 DB，不在 active_tasks**：清空本进程的字典（= 另一台副本收到请求），
     同 thread 同 query 仍被判 already_running，不会各起一个 run。"""
     started, release = asyncio.Event(), asyncio.Event()
     monkeypatch.setattr(worker, "run_agent", _blocking_run(started, release))
@@ -425,7 +425,7 @@ async def test_health(client: AsyncClient) -> None:
     assert body["active_tasks"] == 0
     assert body["queue"]["max_depth"] == server.QUEUE_MAX_DEPTH
     assert body["queue"]["depth"] == 0
-    # 整轮缓存状态（批2-5）：评测脚本靠这一项拒跑，缺了它 run_rubric 就探不到后端开着缓存。
+    # 整轮缓存状态：评测脚本靠这一项拒跑，缺了它 run_rubric 就探不到后端开着缓存。
     assert body["turn_cache"] == {"enabled": False, "entries": 0}
 
 
@@ -558,12 +558,12 @@ async def test_clear_preferences_bumps_purge_generation(
     assert await store.purge_generation(uid) == before + 1
 
 
-# ---------- GET /api/similar：不再按长期记忆过滤（M4）----------
+# ---------- GET /api/similar：不再按长期记忆过滤----------
 async def test_similar_returns_neighbors_unfiltered(client: AsyncClient, monkeypatch: Any) -> None:
     """搜同款不走 AgentLoop，也**不再**自己按记忆挡一遍。
 
     记忆现在只有一种生效方式——模型把它写进工具入参——而这条通路没有模型。留一条看不见的
-    第二生效通路，正是 M4 要消灭的东西。
+    第二生效通路，正是要消灭的东西。
     """
     from app.recall.schemas import RecallCandidate
 
@@ -633,7 +633,7 @@ async def test_download_upload_missing_404(
     assert resp.status_code == 404
 
 
-# ---------- request_id（阶段 4-5：API 与 worker 两个进程的日志关联）----------
+# ---------- request_id（API 与 worker 两个进程的日志关联）----------
 async def test_response_carries_request_id(client: AsyncClient) -> None:
     """每个响应都回显 request_id——出问题时用户截图里就带着它。"""
     resp = await client.get("/api/task/nope/inflight")

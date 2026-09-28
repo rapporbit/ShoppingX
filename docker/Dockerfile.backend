@@ -1,4 +1,4 @@
-# globex 后端（FastAPI + AgentLoop）生产镜像。
+# ShoppingX 后端（FastAPI + AgentLoop）生产镜像。
 # 本地构建后端镜像不现实（VPS 是 amd64、Mac 是 arm64），故在 VPS 上直接 build。
 FROM python:3.11-slim
 
@@ -10,7 +10,7 @@ WORKDIR /app
 # 依赖层单独 COPY：改代码不重装依赖，重建秒级。
 COPY pyproject.toml uv.lock ./
 # redis 已是主依赖（事件回放不再是可选降级路径），无需再点名 extra。
-# UV_EXTRAS 是「要不要装数据库驱动」的开关。阶段 1 条 7 之后，**凡是真跑起来的形态都要 `--extra db`**：
+# UV_EXTRAS 是「要不要装数据库驱动」的开关。**凡是真跑起来的形态都要 `--extra db`**：
 # 起服闸要求 DATABASE_URL 是 MySQL，没有 aiomysql 就连不上库，容器起来就退。prod 与 multi 两份
 # compose 都在 build.args 里传了它，这里的默认空只服务「只想 build 出个壳看看」的场合。
 ARG UV_EXTRAS=""
@@ -23,7 +23,7 @@ COPY prompt/ ./prompt/
 # 是 LocalSkillLoader 静默加载到 0 个 skill——线上三个 skill 整体空转（2026-09-08 部署清单核出）。
 COPY skills/ ./skills/
 COPY scripts/ ./scripts/
-# 数据库迁移（M17）。**漏了这两行 = 容器起不来**：启动时 init_db() 要跑 alembic upgrade，
+# 数据库迁移。**漏了这两行 = 容器起不来**：启动时 init_db() 要跑 alembic upgrade，
 # 找不到 alembic.ini / migrations/ 就直接抛。它俩必须跟着代码一起进镜像、一起版本化——
 # 「镜像里的代码」与「它期望的表结构」本就是一件事，分开发布就会出现代码要新列、库还没升的窗口。
 COPY alembic.ini ./

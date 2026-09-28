@@ -1,4 +1,4 @@
-"""M23 planner RL 的 reward 函数（S1 环境的核心件）。
+"""planner RL 的 reward 函数（训练环境的核心件）。
 
 ```
 R = 0.45 × R_retrieval   # keywords 真打进 Qdrant：must_have 命中率 + 品类纯度
@@ -25,7 +25,7 @@ schema parse 失败 → R = -1.0（一票否决）
    层面掐死，否则训出来的 planner 就是个复读机。
 
 reward 是**纯函数**：输入 PlanOutput 的 dict 与 golden 的 dict，输出 (总分, 分项)。不依赖任何
-RL 框架、不碰会话副作用——S3 换 ms-swift / verl / 自研 loop 都只要包一层。检索那一维需要外部
+RL框架、不碰会话副作用——S3 换 ms-swift / verl / 自研 loop 都只要包一层。检索那一维需要外部
 注入 `retrieve` 回调，本地测试可传桩。
 """
 
@@ -72,7 +72,7 @@ _CJK = re.compile(r"[一-鿿]")
 @dataclass
 class RewardBreakdown:
     """分项明细。训练时只用 `total`，调参与 debug 全靠这些分项——只看总分是查不出
-    「涨分到底涨在哪一维」的，M22 端到端 A/B 无结论就吃过这个亏。"""
+    「涨分到底涨在哪一维」的，reranker 精调端到端 A/B 无结论就吃过这个亏。"""
 
     total: float = 0.0
     retrieval: float | None = None
@@ -133,7 +133,7 @@ def score_econ(plan: dict) -> tuple[float | None, dict]:
     """条数落在 [2,6]、单词别超 4 token、别堆同义词。
 
     同义堆砌的判法是**词面重叠**（"laptop bag" 与 "laptop backpack" 共享 laptop）：dense 检索里
-    堆同义词不会更准，只会把 query 向量拖向词表中心。这不是理论——M21 的「正例全展开」有效、
+    堆同义词不会更准，只会把 query 向量拖向词表中心。这不是理论——精调时「正例全展开」有效、
     「同义扩写」无效，是同一枚硬币的两面。
 
     **无检索词 → 弃权（None），不是 0 分**。这条是实测倒逼改的：dev 92 条里 26 条（28%）

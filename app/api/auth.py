@@ -8,7 +8,7 @@
 **为什么 P1 单做鉴权、不带限流 / 版本 / 幂等。** 越权读是安全洞（拿到别人数据），其余是生产化打磨
 （防滥用 / 平滑演进）——前者优先级严格高于后者。本块只堵洞，限流 / 版本 / 幂等维持 P2 收尾。
 
-**graceful 开关（与项目 demo 连续性的取舍）。** 现有前端不带 token，硬性强制 JWT 会让 demo 打不开。
+**graceful 开关（与本地开发连续性的取舍）。** 现有前端不带 token，硬性强制 JWT 会让本地开发打不开。
 故用 env ``AUTH_ENABLED`` 控制：
 
 - ``AUTH_ENABLED=false``（默认）：保持现状——user_id 由前端传入，记一条 warning 提示「鉴权未开、
@@ -16,12 +16,12 @@
 - ``AUTH_ENABLED=true``：强制 ``Authorization: Bearer <jwt>``，**身份一律取 token 的 sub**，前端传的
   user_id 被忽略 / 校验；越权访问他人资源 403。
 
-**token 怎么来（demo 边界）。** 配套一个 ``POST /api/auth/token`` 的**开发态发证口**（只认 user_id、
+**token 怎么来。** 配套一个 ``POST /api/auth/token`` 的**开发态发证口**（只认 user_id、
 不验密码）——真实 OAuth / 密码登录 / 刷新令牌不在范围内。它只
 为「让鉴权链路能端到端被验证」，绝非生产登录，且单独由 ``AUTH_DEV_TOKEN`` 把守（见
 :func:`dev_token_enabled`）。
 
-**本块的范围边界（诚实标注，勿误读为「全锁了」）。** 本块只堵 **user_id 维度的越权读 Store**——这是
+**本块的范围边界（勿误读为「全锁了」）。** 本块只堵 **user_id 维度的越权读 Store**——这是
 计划里点名的真实漏洞（``/api/preferences/{user_id}`` + 跑任务写偏好的身份）。**thread 维度的资源
 （``/api/history``、``/api/files``、``/ws``、``/api/task/{tid}/cancel``、``/api/upload``）目前仍只按
 thread_id 寻址、无属主校验**：谁知道某个 thread_id（connect-first 下它由前端生成、会出现在 URL /
@@ -48,7 +48,7 @@ _bearer = HTTPBearer(auto_error=False)
 
 
 def auth_enabled() -> bool:
-    """是否开启 JWT 鉴权（env ``AUTH_ENABLED``，默认关——保 demo 连续性，见模块 docstring）。"""
+    """是否开启 JWT 鉴权（env ``AUTH_ENABLED``，默认关——保本地开发连续性，见模块 docstring）。"""
     return env_bool("AUTH_ENABLED", False)
 
 

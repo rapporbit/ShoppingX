@@ -18,7 +18,7 @@
     # 真实 LLM（会烧 token，慎跑）：把并发调小、超时调大
     uv run python scripts/loadtest.py --stages 2,5 --timeout 300
 
-**跑之前先确认整轮缓存是关的**（`TURN_CACHE_ENABLED=0`，批2-5）：开着的话第二个用户开始全是
+**跑之前先确认整轮缓存是关的**（`TURN_CACHE_ENABLED=0`）：开着的话第二个用户开始全是
 缓存命中，压出来的数好看得离谱且毫无意义。脚本会查一次 `/api/health` 并在开着时拒跑。
 """
 
@@ -221,7 +221,7 @@ def render_table(reports: list[StageReport]) -> str:
 
 
 async def assert_turn_cache_off(base_url: str) -> None:
-    """整轮缓存开着就拒跑（与 ``scripts/eval/run_rubric.py`` 同一条口径，理由见批2-5）。
+    """整轮缓存开着就拒跑（与 ``scripts/eval/run_rubric.py`` 同一条口径）。
 
     探测失败只 warn 不拦：后端没起 / 版本老没这个字段时，拦下来只会让人以为压测脚本坏了。
     """

@@ -1,9 +1,9 @@
-"""事件背板（批 2）——把 AGUI 事件从「产生它的进程」送到「挂着那条 WebSocket 的进程」。
+"""事件背板——把 AGUI 事件从「产生它的进程」送到「挂着那条 WebSocket 的进程」。
 
 **解决什么。** 跑 AgentLoop 的是独立 worker 进程，而浏览器的 WebSocket
 连在 API 进程上。事件由 worker 侧的 :class:`ConnectionManager` 发出，那张路由表里一条连接都没有
 ——于是每一条 `tool_start` / `summary_delta` / `task_result` 都静默丢掉，用户对着一个转圈的界面等
-到收尾（`GET /api/task/{id}` 与落盘历史仍然是对的，但实时性没了）。这正是批2-2 报告里点名的
+到收尾（`GET /api/task/{id}` 与落盘历史仍然是对的，但实时性没了）。这正是
 「队列模式此刻不适合上线给前端用」。背板补的就是这一跳：worker 把送不出去的事件广播到 Redis
 Pub/Sub，API 进程订阅同一个频道，收到后查自己的连接表，有就推给前端。
 
@@ -12,7 +12,7 @@ thread 一条流、带 id、可补发）。背板要的是另一件事：**此�
 就该丢掉——Pub/Sub 的「不持久化」在这里不是缺点而是需求，持久化那一半已经由 event_log 承担了。
 两者分工清楚：断线重连的缺口找 Stream 补，实时直播走 Pub/Sub。
 
-**降级方向：静默降级（沿用批2-1 的口径）。** 背板属事件侧，与队列相反——Redis 挂了只是少看几条
+**降级方向：静默降级。** 背板属事件侧，与队列相反——Redis 挂了只是少看几条
 实时事件（收尾结果照样从状态表拿得到、历史照样落盘），绝不能让它把主链路拖垮。所以发布是
 fire-and-forget、订阅循环自己退避重连，任何异常都只打日志。
 
@@ -214,7 +214,7 @@ _resolved = False
 
 
 def get_backplane() -> EventBackplane | None:
-    """返回进程级背板（恒开，阶段 1 条 7 删掉 ``BACKPLANE_ENABLED``）。
+    """返回进程级背板（恒开，已删掉 ``BACKPLANE_ENABLED``）。
 
     Redis 客户端建不起来时返回 ``None`` 降级为单进程行为——跑 API 的进程不该因为背板建不起来就
     起不来，可达性那道闸在 ``server.lifespan`` 里守。

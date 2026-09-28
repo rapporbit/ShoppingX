@@ -10,7 +10,7 @@
 processor 挂进 structlog 管道后，**所有**经 structlog 打出的日志自动过一遍，新代码不必知道它存在。
 这与本项目「机制兜底优于人的自觉」一以贯之。
 
-**诚实标注（两个边界）：**
+**两个边界：**
 
 1. 存量的 stdlib ``logging.getLogger`` 调用**不经过**这条管道（``app/observability/logging.py`` 的
    模块 docstring 已声明这是渐进迁移）。所以本模块只覆盖 structlog 侧；stdlib 侧的日志目前不打码。

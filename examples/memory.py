@@ -1,18 +1,18 @@
-"""M7 示例：长期记忆的「跨会话记住偏好」闭环（离线，不调 LLM）。
+"""示例：长期记忆的「跨会话记住偏好」闭环（离线，不调 LLM）。
 
 复刻一个真实体验问题：
   会话 1：用户说「不要塑料」→ 写进记忆库（持久化）
   会话 1 结束：消息历史丢弃
   会话 2（新会话）：从库里读出「不要塑料」→ 注入本轮上下文 → Agent 记得
 
-演示三件事：
+展示三件事：
   1) 写：``validate_fact``（三条写路径共用的单门，含 PII 过滤）→ ``upsert_facts``，同 key 覆盖。
   2) 注入：``select_tier_one_facts``（全部 constraint + 按新鲜度补位）→ ``render_memory_block``。
   3) 按需召回：``search_facts`` 按主题翻没进注入那批的旧事实（``recall_memories`` 工具走的就是它）。
 
 **注入点不在 system prompt**：记忆每轮都可能变，混进 system 会打断跨轮稳定的 prompt cache
 前缀。真实链路里它是 planner 之后的一条 system 消息（``harness.hooks.context_shaping``），
-这里只演示那条消息的正文怎么来的。
+这里只展示那条消息的正文怎么来的。
 
 运行：uv run python examples/memory.py
 """

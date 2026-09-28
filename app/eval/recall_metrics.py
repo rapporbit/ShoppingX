@@ -59,7 +59,7 @@ def aggregate(rows: list[dict], k: int) -> dict[str, float]:
 # 上面那套是**二值**标注（品类金标只有「相关 / 不相关」）。商品侧的 golden 来自 ESCI，标注天然
 # 分三档：Exact（正例）/ Substitute（可替代）/ Complement（配件）。二值 NDCG 会把「召回了同款
 # 替代品」和「召回了一堆配件」当成一回事——而「搜手机出配件」恰恰是本仓的历史 bad case，尺子
-# 必须能分开它俩。档位取 ESCI 论文的标准 gain（M21 基线 `scripts/train/eval_recall.py` 同款，
+# 必须能分开它俩。档位取 ESCI 论文的标准 gain（`scripts/train/eval_recall.py` 同款，
 # 换 K 不换口径，两份报告可直接对照）。
 GRADED_GAIN = {"positive": 3.0, "substitute": 2.0, "complement": 1.0}
 

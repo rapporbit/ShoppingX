@@ -33,11 +33,11 @@ dependencies = [
     # 服务的部署照样能跑（连不上会熔断降级，语义不变）。
     "redis>=5.0",
     "agentscope>=2.0.7,<3",
-    # MCP 两侧（批 4-3）。agentscope 本来就把它拖进来了（agentscope.mcp 依赖它），但
+    # MCP 两侧。agentscope 本来就把它拖进来了（agentscope.mcp 依赖它），但
     # app/mcp/*.py 是**直接** import mcp.server.fastmcp 的——直接依赖就该写进来，否则哪天
     # agentscope 换掉这条依赖，我们的 server 会在一次 uv sync 之后凭空消失。
     "mcp>=1.9",
-    # provider 寻址层（阶段 2 第 2 条，app/agent/router_model.py）。只用它的 Router 做
+    # provider 寻址层（app/agent/router_model.py）。只用它的 Router 做
     # 「按模型名选出口 + 跨家 fallback」，桶与断路器仍自研。**成本如实记账**：它会拖进
     # boto3 / botocore / tokenizers / huggingface-hub 等 14 个包，镜像会变大——换来的是
     # 「每加一家供应商就重读一遍它的兼容层差异」那部分持续成本没了。
@@ -45,7 +45,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# 换库驱动。阶段 1 条 7 之后，**任何真实部署都要装它**：起服闸要求 DATABASE_URL 是 MySQL，
+# 换库驱动。**任何真实部署都要装它**：起服闸要求 DATABASE_URL 是 MySQL，
 # 没有 aiomysql 就连不上库。留在 optional 而不是并入主依赖，是因为单元测试跑 SQLite fixture、
 # 不需要驱动，而 asyncpg 要编译、装一次好几十秒。部署侧装法：``uv sync --extra db``，或让
 # Dockerfile 的 UV_EXTRAS 带上（prod / multi 两份 compose 都已在 build.args 里传）。
@@ -65,7 +65,7 @@ dev = [
     "types-cachetools>=7.0.0.20260518",
     "aiomysql>=0.3.2",
 ]
-# 训练数据管线（M21）。**刻意不含 torch / ms-swift**：训练在 GPU 机器上另建环境，按 CUDA 版本
+# 训练数据管线。**刻意不含 torch / ms-swift**：训练在 GPU 机器上另建环境，按 CUDA 版本
 # 装；主仓这份只负责「把数据造出来、把指标算出来」，产物是 jsonl，跨机器传。这样部署镜像不会
 # 因为一条训练腿凭空背上几个 GB 的依赖（uv sync 默认只装 dev 组，train 要显式 --group train）。
 train = [

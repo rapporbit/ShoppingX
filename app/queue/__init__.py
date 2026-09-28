@@ -1,6 +1,6 @@
 """削峰任务队列。端口见 :mod:`app.queue.ports`，两份实现在 ``redis_stream`` / ``inprocess``。
 
-对外只暴露一个工厂 :func:`get_task_queue`：进程里全局一份，**恒是 Redis Stream**（阶段 1 条 7 起
+对外只暴露一个工厂 :func:`get_task_queue`：进程里全局一份，**恒是 Redis Stream**（现在
 删掉 ``QUEUE_ENABLED``，队列不再是可选项——多副本是唯一形态，API 与 worker 是不同进程，进程内
 deque 在两边各有一份、谁也收不到谁的任务）。``server.py`` 与 ``worker.py`` 都从它拿队列，谁也不该
 自己 ``RedisStreamQueue(...)``——不然两边各拿一个客户端、各建一次组，连的还可能不是同一个 URL。
@@ -57,7 +57,7 @@ def get_task_queue() -> TaskQueue:
 
     回落曾经是「这个部署没开队列」的兜底，现在没有那种部署了：悄悄改用进程内 deque，等于让 API
     把任务扔进一个没有消费方的队列，用户对着 running 等到天荒地老。真正的 Redis 可达性在启动时
-    由 ``server.lifespan`` 拒绝启动那道闸守（阶段 1 条 7）；入队失败由调用方显式处理（503）。
+    由 ``server.lifespan`` 拒绝启动那道闸守；入队失败由调用方显式处理（503）。
     """
     global _queue
     if _queue is not None:

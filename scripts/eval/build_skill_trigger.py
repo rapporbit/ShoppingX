@@ -1,6 +1,6 @@
-"""生成 SKILL 触发标注集（阶段 S4）。
+"""生成 SKILL 触发标注集。
 
-**量的是什么**：skill 正文改成「模型自觉调 ``Skill(skill=…)`` 取」之后（阶段 S2 推翻预注入），
+**量的是什么**：skill 正文改成「模型自觉调 ``Skill(skill=…)`` 取」之后（替代原先的预注入），
 「这轮该读哪份 skill」不再是一个纯函数的注入判定，而是**模型第一次调用时的一个决策**。所以这
 条验收必须真跑模型，只看第一批工具调用里有没有那条 ``Skill``——见 ``run_skill_trigger.py``。
 
@@ -108,7 +108,7 @@ CASES: list[dict] = [
         "skill": "memory-personalization",
         "bucket": "记住 X",
         "query": "记住我不吃坚果，以后别给我推荐带坚果的零食",
-        "why": "key 怎么起、写哪一条，口径在 memory-personalization（M4 新建）",
+        "why": "key 怎么起、写哪一条，口径在 memory-personalization",
     },
     {
         "id": "mp02_what_do_you_know",

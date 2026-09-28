@@ -2,16 +2,16 @@
 
 主链路的收尾。拿到精挑后的候选，生成面向用户的购物清单（每件配选购理由，对应其硬约束 /
 软偏好），并识别本轮可沉淀的新偏好（如用户明确「不要塑料」「喜欢小众」），输出供长期记忆
-落库（M7 接 Store；M4 先只返回，不落库）。
+落库。
 
 **终结性**（在 ``TERMINAL_TOOLS`` 里）：一旦调用即收尾，主 loop 不再继续。这是对治
 「Agent 不收尾死循环」最直接的一手——给模型一个明确的「话讲完了」的出口。
 
 用 LLM 生成清单文案与偏好识别（``with_structured_output`` 约束结构）。
 
-**返回形态（M9 合龙关键）**：用 ``response_format="content_and_artifact"`` ——给模型/前端看的
+**返回形态**：用 ``response_format="content_and_artifact"`` ——给模型/前端看的
 是可读的清单文案（``content``），完整结构化输出作为 ``artifact`` 挂在 ToolMessage 上，
-前端 M10 直接拿 artifact 渲染商品卡；``run_agent`` 收尾也从中取回结构化清单落产物文件。
+前端直接拿 artifact 渲染商品卡；``run_agent`` 收尾也从中取回结构化清单落产物文件。
 （偏好沉淀已不在此:改由会话结束后独立的记忆管家扫全轮对话统一判定，见 ``app/memory/curator.py``。）
 """
 
@@ -349,7 +349,6 @@ async def _stream_draft(
             # **auto 而不是 forced 单工具**。forced 在现役快档上只回存根：同一个模型、同一份
             # schema、同样流式，forced 臂 reasons **0/9**、auto 臂 **9/9**（off_intent 同样
             # 0/3 → 3/3），而且 auto 还**快 5.9s**（14.2s → 8.3s 中位）。探针
-            # docs/plans/baseline-artifacts/summary_toolchoice_ab.py。
             # 同族坑与同样的修法见 app/agent/invoke.call_structured 的「第四个坑」——那条路
             # 2026-09-08 就改成 auto 优先了，这条自建流式路径当时漏掉，于是 reasons /
             # off_intent 两项能力**从上线起就没生效过**，且全程零报错。
@@ -525,7 +524,7 @@ async def shopping_summary(
         slot_mode = SLOT_MODE_PARALLEL if mode == SLOT_MODE_PARALLEL else ""
         top_ids = _llm_reason_ids(picks, parallel=bool(slot_mode))
         id_map = {c.item_id: c.title for c in picks}
-        # round3 刀 1：文案 / 逐件理由 / off_intent 由**主模型在入参里给**（它本就读过 picks，
+        # 文案 / 逐件理由 / off_intent 由**主模型在入参里给**（它本就读过 picks，
         # 再起一次内部 LLM 只是把同一份上下文重发一遍：实测 5.5s）。入参没给 summary 时才退回
         # 内部快模型生成——保住旧 prompt / 降档模型 / 直接调用这些路径的行为。
         if summary.strip():
@@ -617,7 +616,7 @@ async def shopping_summary(
             )
         out = ShoppingSummaryOutput(summary=draft.summary, items=items)
     except Exception:
-        # 模型调用失败也要补一条 end 事件，否则前端（M8）会看到工具「永远在跑」。
+        # 模型调用失败也要补一条 end 事件，否则前端会看到工具「永远在跑」。
         await monitor.report_tool_end("shopping_summary", error=True)
         raise
     await monitor.report_tool_end("shopping_summary", items=len(out.items))

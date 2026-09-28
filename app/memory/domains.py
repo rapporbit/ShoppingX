@@ -5,7 +5,7 @@
 
 **枚举与中文标签冻结给 planner 训练腿**（``app/eval/planner_reward.py`` 与 ``scripts/train/``
 的 golden / SFT 构建）：训练数据和 reward 按这套域打过分，改了就无法按原口径复现。planner
-运行时已不再输出域（2026-09-25 换成 ``topic_switch``），长期记忆也早在 M4 就不按域过滤了——
+运行时已不再输出域（2026-09-25 换成 ``topic_switch``），长期记忆也早就不按域过滤了——
 别再把它接回运行时的偏好作用范围判定。
 """
 

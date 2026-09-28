@@ -5,12 +5,12 @@
 # - few_shot 全删（-460 tok；fewshot.py 警告伤 flash 档指令遵循）。
 # - workflow：evaluate 三源判断压成一句、删「品类宽时按主流搜」的宽品类覆盖指导、去解释性从句。
 # - tool_policy：删定点两参数「挡什么」的推导，只留结论。
-# - dispatch_policy：同轮多工具调用并行（A4 起无子 Agent，task_dispatch 已删）。
+# - dispatch_policy：同轮多工具调用并行（无子 Agent）。
 # - termination / constraints：P0、货币诚实、空召回硬路径全保留但压密。
 # - security_boundary：删注入例句，留纲领。runtime_context：三标签只留名 + 一句用途。
 #
 #
-# 2026-09-08「刀 1」——按 docs/plans/system_prompt审计-2026-09-08.md 删「别处已经说过 / 已经拦住」
+# 2026-09-08 精简：删「别处已经说过 / 已经拦住」
 # 的条款，6523 → 4540 字符（-30%），加粗 56 → 35 处，语义零损失。删的四类：
 # - 已被 Skill 覆盖：套装 + 多类并列 17 行 → skills/bundle-planning/SKILL.md 逐字都有，prompt 只
 #   留一行桥（「多槽位 → 先读 bundle-planning skill」）。Skill 是「目录常驻、正文按需」，写在这里
@@ -19,7 +19,7 @@
 #   （retrieval=reuse 那 3 行随 2026-09-14 会话状态重构一起删了：每轮都检索，不再有复用轮。）
 # - 段内自重复：workflow 的收尾判据 = <termination>；workflow 的跨平台检索 = dispatch_policy 列表。
 # 口径纪律：**同一条规则只许有一个家**。要改 bundle 打法改 SKILL.md，要改工具边界改 docstring，
-# 别再抄回这里。下一步（刀 2 / 刀 3，未做）见审计文档第 3 节。
+# 别再抄回这里。
 #
 # 历史版本（full ~11k tok / slim ~4.3k tok）已从仓库删除，要翻阅走 git 历史（PROMPT_VARIANT 机制已删）。
 

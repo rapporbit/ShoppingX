@@ -4,7 +4,7 @@
 从另一条路违反了它：`assemble` 把 `pt.like_terms()`（P_t 的**软偏好**，polarity="like"、不分
 blocking）装进了名为 `mem.must` 的字段，picker 再把 `mem.must` 当硬约束拼进 query。
 
-2026-09-09 实测的后果（orchab 三遍同一条 query，见 docs/plans/baseline-artifacts/）：
+2026-09-09 实测的后果（orchab 三遍同一条 query，：
 偏好词每轮不同 → 同一候选 rerank 分数 0.783 vs 0.254 → 品类门判定翻转（oncat 17/26 vs 1/30）
 → 一遍出 8 件、一遍触发补搜回退只出 3 件。
 

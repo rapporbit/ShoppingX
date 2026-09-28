@@ -28,10 +28,10 @@ from typing import Any, Literal, Protocol, runtime_checkable
 
 from app.api.concurrency import RequestClass, classify_request
 
-# ``cancelled`` 与 ``failed`` 分开（批2-4）：轮询方要能区分「跑挂了，可以重试」与「是我自己
+# ``cancelled`` 与 ``failed`` 分开：轮询方要能区分「跑挂了，可以重试」与「是我自己
 # 取消的，别再重试」。把用户取消塞进 failed 会让脚本类调用方一遍遍重投一条它自己刚掐掉的任务。
 #
-# ``interrupted`` 是第三种「没跑完」（阶段 1-3）：worker 排空超时被掐。它与 failed 的差别在**谁该
+# ``interrupted`` 是第三种「没跑完」：worker 排空超时被掐。它与 failed 的差别在**谁该
 # 决定重试**——任务本身没毛病，是进程要走了，所以消息被 ack 掉、由用户按「重发」再来一次，而不是
 # 留在 PEL 里十分钟后被另一个 worker 静默重跑（那一跑用户看不见，账还要再记一次）。
 TaskState = Literal["queued", "running", "done", "failed", "cancelled", "interrupted"]
@@ -64,7 +64,7 @@ class IntentTask:
     skill: str = ""
     kind: RequestClass = "normal"
     enqueued_at: str = field(default_factory=_now_iso)
-    # 跨进程的日志关联 id（阶段 4-5）：API 收到请求时生成，随消息进队列，worker 消费时绑回
+    # 跨进程的日志关联 id：API 收到请求时生成，随消息进队列，worker 消费时绑回
     # 日志上下文，是把两个进程的日志接起来的唯一一根线。
     # **刻意不叫 trace_id**：``run_agent`` 的返回值里已经有一个 trace_id（Langfuse 的，由 worker
     # 侧根 span 生成、只覆盖 run_agent 内部），两个同名不同物的 id 会让排查时对着日志猜是哪个。
@@ -195,7 +195,7 @@ async def cancel_in_flight(tasks: set[asyncio.Task[None]]) -> None:
     上会留一批孤儿协程——进程都在退出了它们还在跑 LLM，消息既没 ack 也没人管。
 
     掐掉之后消息怎么处置由 handler 决定：本仓的 ``worker.handle_task`` 把它按 ``interrupted`` 收尾
-    并让调用方 ack 掉（阶段 1-3）；handler 若原样把取消抛出去，消息就留在 PEL 里等 XAUTOCLAIM 重投。
+    并让调用方 ack 掉；handler 若原样把取消抛出去，消息就留在 PEL 里等 XAUTOCLAIM 重投。
     """
     if not tasks:
         return

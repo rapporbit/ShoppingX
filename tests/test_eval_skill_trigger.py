@@ -1,4 +1,4 @@
-"""SKILL 触发标注集与判定口径（阶段 S4）。
+"""SKILL 触发标注集与判定口径。
 
 这里**不跑模型**——触发率只能真跑（见 ``scripts/eval/run_skill_trigger.py`` 的模块 docstring）。
 本单守的是那条评测链路自己别坏掉的三件事：标注集覆盖得全、判定函数分得清四种错法、以及探针
@@ -91,7 +91,7 @@ def test_verdict_tells_the_four_failure_modes_apart(case: dict, calls: list, exp
 def test_lone_skill_round_is_passed_but_noted() -> None:
     """只发了 ``Skill``、没带业务工具：判 PASS 但留 note。
 
-    S2 的分流表要求「和本轮第一个检索/读取工具同一轮发出」，白等一次往返是延迟账上的损失、
+    分流表要求「和本轮第一个检索/读取工具同一轮发出」，白等一次往返是延迟账上的损失、
     不是触发错误——混进 MISS 会让触发率背上不属于它的锅，所以单列成 ``lone_skill_round``。
     """
     verdict, note = _verdict(POSITIVE, [{"name": "Skill", "skill": "order-care"}])

@@ -1,6 +1,6 @@
 // 后端 HTTP 接口的薄封装。全用同源相对路径——开发期靠 Vite 代理转到 :8000（见 vite.config.ts）。
 //
-// 一律走 authFetch 而不是裸 fetch（M16）：它负责带上 token，并把 401（token 过期 / 被吊销）统一
+// 一律走 authFetch 而不是裸 fetch：它负责带上 token，并把 401（token 过期 / 被吊销）统一
 // 退回登录页。漏一个裸 fetch，那个接口在开了鉴权后会静默 401——前端只会当成「没数据」，不会报错。
 import { authFetch } from "./auth";
 import { loadPlatforms } from "./settings";
@@ -78,7 +78,7 @@ export async function startTaskRequest(
   if (!resp.ok) throw new Error(`启动任务失败：HTTP ${resp.status}`);
 }
 
-// 一个周期（UTC 自然日）内的 credit 余额。enabled=false 表示后端没开配额（demo / 本地），前端
+// 一个周期（UTC 自然日）内的 credit 余额。enabled=false 表示后端没开配额（本地），前端
 // 整块隐藏余额条——不给用户看一个恒为满格、毫无意义的进度条。
 export type Quota = {
   enabled: boolean;
@@ -268,7 +268,7 @@ export async function fetchSimilar(itemId: string, topK = 8): Promise<ProductIte
   }
 }
 
-// ——— 对比栏「让 Agent 帮我比一比」（C4）———
+// ——— 对比栏「让 Agent 帮我比一比」———
 // POST /api/threads/{tid}/compare：一次 fast 模型调用出结构化对比，**不经过 AgentLoop**。
 // 为什么不发一句话让 Agent 回：用户已经亲手勾了这几件并点了按钮，意图百分之百确定，走主环只多
 // 几十秒规划开销，还可能换回一段纯文字——那张表就还是填不满。后端按 item_id 逐列返回，
@@ -301,7 +301,7 @@ export async function compareItems(threadId: string, itemIds: string[]): Promise
   }
 }
 
-// ——— 我的会话清单（M16）———
+// ——— 我的会话清单———
 // 侧栏历史的真源。此前它只活在浏览器的 localStorage 里：换台设备、清个缓存，后端数据明明还在，
 // 用户却再也找不回自己的对话。现在按 token 里的身份从归属表查，登录到哪台机器都是同一份。
 export type SessionMeta = {
@@ -328,7 +328,7 @@ export async function deleteSession(threadId: string): Promise<void> {
 
 // 下载会话产物（summary.md / result.json）。
 //
-// **为什么不是一个 <a href> 直链**：产物接口现在要校验属主（M16），而浏览器对 <a href> 发起的
+// **为什么不是一个 <a href> 直链**：产物接口现在要校验属主，而浏览器对 <a href> 发起的
 // 请求带不上 Authorization 头——直链会稳定 401，用户点了没反应还不知道为什么。所以改成：用带
 // token 的请求把文件取成一段内存数据，再造一个临时链接点它，下载完即回收。
 export async function downloadFile(threadId: string, filename: string): Promise<void> {
@@ -403,7 +403,7 @@ export async function resetAdminConfig(keys?: string[]): Promise<AdminConfig> {
   return (await resp.json()) as AdminConfig;
 }
 
-// --- 订单（批 1 交易域）------------------------------------------------------
+// --- 订单------------------------------------------------------
 // user_id 不出现在任何一条 URL 里：订单的归属由后端从 token 解，前端传什么都不作数。
 // 这与偏好接口（路径带 user_id + 后端校验相等）的口径不同——那边前端要能展示「谁的偏好」，
 // 订单没有这个需求，那就别把一个可篡改的参数摆在那里让人试。

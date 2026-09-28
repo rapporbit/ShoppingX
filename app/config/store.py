@@ -1,6 +1,6 @@
 """参数覆盖的持久化：``config_overrides`` 表 ↔ 覆盖层内存。
 
-**库是唯一真相，内存（``overrides._OVERRIDES``）只是本进程的缓存**（阶段 1 条 8）。这个方向在
+**库是唯一真相，内存（``overrides._OVERRIDES``）只是本进程的缓存**。这个方向在
 2026-09-20 反过来了：在那之前是「内存权威、库是持久影子」，成立的前提写在 overrides.py 头上——
 「部署是 ``--workers 1`` 单进程」。API 与 worker 拆成两个进程之后，那个前提没了：后台改参数打在
 API 进程上，而 AgentLoop 在 worker 里跑，worker 的 ``os.environ`` 纹丝不动。坏得还很安静——前端

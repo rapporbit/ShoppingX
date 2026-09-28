@@ -1,4 +1,4 @@
-// 登录 / 注册页（M16）。未登录时它是整个应用的全部——没有身份就没有会话、没有偏好。
+// 登录 / 注册页。未登录时它是整个应用的全部——没有身份就没有会话、没有偏好。
 import { useState } from "react";
 
 import { login, register, type Session } from "../auth";

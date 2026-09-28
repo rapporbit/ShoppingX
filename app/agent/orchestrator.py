@@ -246,7 +246,7 @@ def _skills_read(messages: Sequence[Msg]) -> list[str]:
 def _experiment_summary(ab_assign: Any, messages: Sequence[Msg]) -> dict[str, Any]:
     """本轮「实验与自进化」归属：提示词版本 / A/B 桶 / 注入的策略 / 读过的 skill。
 
-    MCP 工具**不在这里**：它们不过 harness（见 mcp_registry 的诚实标注）——要看去 Langfuse 的
+    MCP 工具**不在这里**：它们不过 harness（见 mcp_registry 的说明）——要看去 Langfuse 的
     acting span。
     """
     from app.harness.hooks.context_shaping import injected_strategy_keys
@@ -298,7 +298,7 @@ async def run_agent(
     enqueued_at: str = "",
     traceparent: str = "",
 ) -> dict[str, Any]:
-    """:func:`_run_turn` 的薄壳，只多做一件事：把这一轮的**收尾结果**记进 SLO 成功率（阶段 6）。
+    """:func:`_run_turn` 的薄壳，只多做一件事：把这一轮的**收尾结果**记进 SLO 成功率。
 
     **为什么单独一层壳而不是在 _run_turn 里打点**：那函数有多个正常出口（整轮缓存命中会提前
     return），逐个出口补一行迟早漏；而异常侧要区分「用户取消」与「真挂了」，只有在调用边界才
@@ -350,7 +350,7 @@ async def _run_turn(
     它同时是**写工具的幂等锚**：整轮重跑时 run_id 不变，同一轮重复调 ``create_order`` 只落一张
     确认卡（见 :mod:`app.trade.confirmations` 的 ``request_key``），所以它要进 ContextVar。
 
-    ``request_id``：API 那边那次 HTTP 请求的 id，随队列消息带过来（阶段 4-5），只用于日志关联。
+    ``request_id``：API 那边那次 HTTP 请求的 id，随队列消息带过来，只用于日志关联。
     **与返回值里的 ``trace_id`` 无关**——后者是 Langfuse 的，由下面的根 span 自己生成。
 
     ``enqueued_at``：任务入队时刻（ISO 串，同样随队列消息带过来），首事件延迟 SLO 的计时起点。
@@ -377,7 +377,7 @@ async def _run_turn(
             session_dir,
             user_id=user_id,
             run_id=run_id or "",
-            # 队列消息带过来的 HTTP 请求 id（阶段 4-5）：绑回日志上下文，API 那边的几行和这里
+            # 队列消息带过来的 HTTP 请求 id：绑回日志上下文，API 那边的几行和这里
             # 的整轮日志才串得起来。空串 = 不是从队列来的（离线脚本 / 单测），不绑。
             request_id=request_id or None,
         ),
@@ -393,7 +393,7 @@ async def _run_turn(
             parent=traceparent,
         ),
     ):
-        # SLO 计时（阶段 6）：起点是**入队时刻**，所以排队等待也算进首事件延迟——用户不关心
+        # SLO 计时：起点是**入队时刻**，所以排队等待也算进首事件延迟——用户不关心
         # 他等的那 8 秒是队列里排的还是模型在想，只关心「多久有反应」。
         begin_first_event_timer(_parse_enqueued_at(enqueued_at))
         reset_dependency_down()  # 旗子是 ContextVar，同一任务跨轮沿用，开局清掉
@@ -433,7 +433,7 @@ async def _run_turn(
         prior_queries = _prior_queries(prior_state)
         set_prior_queries(prior_queries)
 
-        # 整轮结果缓存（默认关，压测 / 演示用）。**只有干净的第一轮才参与**：带上文的轮次，
+        # 整轮结果缓存（默认关，压测用）。**只有干净的第一轮才参与**：带上文的轮次，
         # 答案依赖的上文根本不在 key 里，命中就是串味。查得到就直接回放，一轮 LLM 都不跑。
         # 「干净的第一轮」= 没有可恢复的 session.json。
         cache_key = await _turn_cache_key(
@@ -472,7 +472,7 @@ async def _run_turn(
 
         # 本轮的截止时刻：与下面那个 asyncio.timeout 同一个预算，区别只在**谁看得见它**。
         # timeout 是从外面一刀砍下来，出站点对它一无所知，只能按自己的超时傻等；deadline 把同一个
-        # 数下传到每个出站点，让「再等也没意义了」当场生效（clamp_timeout，阶段 4-2）。
+        # 数下传到每个出站点，让「再等也没意义了」当场生效（clamp_timeout）。
         set_deadline(MAIN_AGENT_TIMEOUT_SEC)
         try:
             async with asyncio.timeout(MAIN_AGENT_TIMEOUT_SEC):
@@ -522,7 +522,7 @@ async def _run_turn(
 
         messages: list[Msg] = list(agent.state.context)
         # **final_text 取事件泵拿到的那条 Msg，不从 context 尾部取**：on_session_end 的输出审核
-        # 由 HarnessAgentAdapter 在 on_reply 里改写**流出去的**消息（L4），state 里留的是原文。
+        # 由 HarnessAgentAdapter 在 on_reply 里改写**流出去的**消息，state 里留的是原文。
         # 从 context 取等于把未审核的文本发给用户、落进产物和历史——审核就白做了。
         final_text = (final_msg.get_text_content() or "") if final_msg is not None else ""
         # 成功收尾的唯一写点：本轮原话追加进 middle_context，随 AgentState 一起原子落盘。取消 /

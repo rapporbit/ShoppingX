@@ -80,7 +80,7 @@ class WebSearchOutput(BaseModel):
 async def search_web(query: str, max_results: int = 5) -> tuple[WebSearchOutput, bool]:
     """发一次 Tavily 搜索，返回 ``(结果, 是否降级)``。**不报 AGUI 事件**——上报归调用方。
 
-    抽出来是给 ``research``（C2）复用：外呼 / 断路器 / 截断 / 降级 note 只有这一套实现，
+    抽出来是给 ``research``复用：外呼 / 断路器 / 截断 / 降级 note 只有这一套实现，
     否则两个工具各写一遍，将来改截断定数必漏一边。降级（缺 key / 异常 / 熔断）一律返回
     空结果 + note，**不抛**——调用方据 ``note`` 决定怎么说「这条外部信息暂时拿不到」。
     """
@@ -93,7 +93,7 @@ async def search_web(query: str, max_results: int = 5) -> tuple[WebSearchOutput,
     try:
 
         async def _do() -> dict:
-            # 超时收进本轮 deadline（阶段 4-2）：外部事实是补充信息，失败会退化成一条 note，
+            # 超时收进本轮 deadline：外部事实是补充信息，失败会退化成一条 note，
             # 没必要在主 loop 只剩几秒时还按满 20 秒等 Tavily。
             async with httpx.AsyncClient(timeout=clamp_timeout(_HTTP_TIMEOUT)) as client:
                 resp = await client.post(

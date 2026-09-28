@@ -3,13 +3,13 @@
 核心区分：**长上下文 ≠ 长期记忆**。长上下文（消息历史）按 token 涨钱、只在单
 会话有效、随轮数膨胀；长期数据按条目持久化、跨会话共享、只在有新事实时写入。
 
-**长期记忆（偏好 / 约束 / 背景）不在本模块**，见 :mod:`app.memory.fact_store`：M1~M4 把它换成了
+**长期记忆（偏好 / 约束 / 背景）不在本模块**，见 :mod:`app.memory.fact_store`：后来换成了
 ``key / value / category`` 的事实模型，同 key 覆盖写。本模块只剩两样不属于那套建模的东西：
 
 - **行为历史**：「做过什么」的事实快照，既不去重也不合并，每种 kind 留最近几条 + TTL 过期。
 - **收藏**：用户手工攒的商品清单，经 :mod:`app.memory.affinity` 一条窄路进 item_picker 的弱加分。
 
-落地介质是 SQLite（复用 M16/M17 已有的 ``app.db``），不再有后端抽象基类——原来 ABC +
+落地介质是 SQLite（复用 ``app.db``），不再有后端抽象基类——原来 ABC +
 LocalFileStore + RedisStore 那三层各有一处并发写隐患（文件覆盖式 ``write_text`` 丢写、Redis
 ``hget`` + ``hset`` 非原子），而关系库的事务一并管掉，还顺手把「收藏超 200 条裁最旧」从
 「读全量→算 overflow→回写」压成一条 SQL。
@@ -109,7 +109,7 @@ class UserDataStore:
     """用户级持久数据的读写口（**行为历史 / 收藏**），后端是 :mod:`app.db` 的 SQLite。
 
     **偏好那一腿已经不在这里了**：长期记忆改由 :class:`app.memory.fact_store.MemoryFactStore`
-    按 ``key / value / category`` 存 ``memory_facts``（M1~M4）；旧的 ``preferences`` 表已由迁移
+    按 ``key / value / category`` 存 ``memory_facts``；旧的 ``preferences`` 表已由迁移
     ``0016_drop_preferences`` 删除。本类因此改名——原来叫 ``PreferenceStore``，名实不副。
 
     **不再有后端抽象基类**：原来 ABC + LocalFileStore + RedisStore 的三层结构，是为了「离线可跑」

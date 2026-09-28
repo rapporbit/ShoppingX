@@ -41,7 +41,7 @@ TERMINAL_TOOLS = _TERMINAL_TOOLS
 # 两个记忆工具的分工：recall_memories 读（注入只给 tier-one 那批，用户问「我以前买的那双鞋」
 # 时要的恰恰是没进注入的）、save_memory 写（用户当场说「记住 X」时即时生效并给回执）。
 # **没有删除工具**：遗忘 = 用原 key 覆盖写一条新值，彻底删除只在偏好页由用户自己动手
-# （计划 §3.2 第 2 条，与常见实现一致）——模型手里不该有抹掉用户记忆的能力。
+# ——模型手里不该有抹掉用户记忆的能力。
 # 回合后的 curator（app/memory/curator.py）仍是另一条写路径，两条都过 facts.validate_fact
 # 同一道门、按 key 覆盖同一张表，不构成两套语义。
 # category_insight 2026-09-24 摘出：品类卡片是整品类统计，对具体需求常常答非所问（「降噪耳机」
@@ -123,7 +123,7 @@ async def build_toolkit(
     每次调用新建 Toolkit **与工具实例**：Toolkit 带运行态（激活的 tool group 等）不能跨 Agent
     共享，工具实例则因为要挂 per-loop 的中间件而必须一 loop 一份（见 :func:`_make_tools`）。
 
-    批 4-3 起同一份 Toolkit 多管两样东西，都走框架原生：
+    同一份 Toolkit 多管两样东西，都走框架原生：
     **Skill**（``skills_or_loaders``，见 ``app.agent.skills``）与 **MCP**
     （``mcps``，只放只读白名单，见 ``app.agent.mcp_registry``）。它们都进
     Toolkit 的 ``basic`` 组——本仓不用 ToolGroup 表达权限（理由见上方注释），

@@ -1,4 +1,4 @@
-# globex 生产编排（gcjp / shopx.oiuu.de）。与 docker-compose.yml（开发）的三点关键差异：
+# ShoppingX 生产编排（线上 / shopx.oiuu.de）。与 docker-compose.yml（开发）的三点关键差异：
 #
 #   1. **不发布任何端口到宿主**。开发版的 "6333:6333" 会绑 0.0.0.0，而 Docker 直接写 iptables、
 #      绕过 ufw —— 等于把无鉴权的 Qdrant / Redis 挂公网。这里服务间只走内部网络，
@@ -50,7 +50,7 @@ services:
       timeout: 3s
       retries: 5
 
-  # MySQL —— 账户 / 会话归属 / run_holds 的唯一真相（阶段 1 条 7 起 SQLite 不再是合法形态：
+  # MySQL —— 账户 / 会话归属 / run_holds 的唯一真相（现在 SQLite 不再是合法形态：
   # 起服时会校验 DATABASE_URL，不是 MySQL 直接拒绝启动）。老库搬数见
   # scripts/migrate_sqlite_to_mysql.py，搬完把 .env 的 DATABASE_URL 指到这里。
   mysql:
@@ -81,7 +81,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.backend
-      # aiomysql 是 optional-dependency，不传这个 arg 镜像里就没有驱动。阶段 1 条 7 起 DATABASE_URL
+      # aiomysql 是 optional-dependency，不传这个 arg 镜像里就没有驱动。 DATABASE_URL
       # 必须是 MySQL，于是「没装驱动」不再是「降级回 SQLite」，而是起服直接失败。
       args:
         UV_EXTRAS: "--extra db"
@@ -123,10 +123,10 @@ services:
     logging: *default-logging
     env_file: [../.env]
     command: ["python", "-m", "app.worker"]
-    # **三个卷必须与 backend 逐字相同**（阶段 1-4 的硬前提）：产物是 worker 写、API 读——
+    # **三个卷必须与 backend 逐字相同**（硬前提）：产物是 worker 写、API 读——
     # output 里的 summary.md / session.json 由 GET /api/files 与会话恢复读，uploaded 里的参考图
     # 由 image_understand 读。各挂各的卷不会报错，只会让 API 一律 404，表现为「产物莫名其妙没了」。
-    # appdb 同理：账户与会话归属是两个进程共用的真相（SQLite 单文件，MySQL 迁移见阶段 1 条 9）。
+    # appdb 同理：账户与会话归属是两个进程共用的真相（SQLite 单文件，MySQL 迁移见 scripts/migrate_sqlite_to_mysql.py）。
     volumes:
       - ../data:/app/data:ro
       - output:/app/output

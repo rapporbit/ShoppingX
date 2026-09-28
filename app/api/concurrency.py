@@ -1,13 +1,13 @@
 """请求分档：按 thread 的历史轮数把一次提交判成 normal / heavy。
 
-**这个模块曾经是什么（阶段 1 条 7 之前）。** 一套进程内双池准入（normal 5 槽 + heavy 3 槽、有界
+**这个模块曾经是什么（早期）。** 一套进程内双池准入（normal 5 槽 + heavy 3 槽、有界
 等待队列、动态再平衡、覆盖重发的 force_reserve）。它守的是「**本进程**同时跑几个 AgentLoop」。
 
 **为什么整套删掉。** 形态收敛到多副本之后，AgentLoop 不在 API 进程里跑了：API 只负责入队，真正
 跑 loop 的是 N 个 worker。此时进程内池守着的那个数既不是全局并发（每台副本各有一份自己的池），
 也不再对应任何真实资源。并发上限改由三道**跨进程**的闸承担，各守各真正约束得住的那件事：
 
-- 用户级并发 = `run_holds` 里 queued/running 的行数（`MAX_CONCURRENT_RUNS`，阶段 1 条 2，
+- 用户级并发 = `run_holds` 里 queued/running 的行数（`MAX_CONCURRENT_RUNS`，
   真相在 DB）；
 - 全局背压 = 队列深度 `QUEUE_MAX_DEPTH`（超了 429 + Retry-After，见 `server._admit_or_429`）；
 - 实际并行度 = 每个 worker 的 `WORKER_CONCURRENCY` × 副本数。

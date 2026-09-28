@@ -5,7 +5,7 @@
 - 本项目**不自训模型**（无 GPU），query 与商品文本共享同一个现成预训练
   embedding（BGE-M3 等，走 OpenAI 兼容 ``/embeddings`` 在线推理）。
 - endpoint 未就绪时退化到**确定性本地编码**（字符 n-gram 哈希），让建索引与检索
-  在离线 / CI 下也能跑通且结果可复现，从而和真实链路解耦。
+  在离线 / CI 下也能跑通且结果可复现，从而和真实链路解耦（stub）。
 
 **个性化通路（user 塔 + fuse 加权融合）已删**：实践中个性化改走「偏好词并入检索词」
 （见 item_search）+ Qdrant payload filter，向量级融合通路长期零调用，按减法原则移除。
@@ -131,7 +131,7 @@ class TowerClient:
                 resp = await self._get_client().post(
                     "/embeddings",
                     json={"model": self._model, "input": texts},
-                    # per-request 超时收进本轮 deadline（阶段 4-2）：编码是检索的前置，主 loop
+                    # per-request 超时收进本轮 deadline：编码是检索的前置，主 loop
                     # 只剩几秒时按满 30 秒等一次 embedding，等到了也没人用了。
                     timeout=clamp_timeout(_REMOTE_TIMEOUT),
                 )
@@ -146,7 +146,7 @@ class TowerClient:
                 last_exc = exc
                 if attempt < _REMOTE_RETRIES - 1:
                     await asyncio.sleep(2**attempt)  # 1s → 2s → 4s
-        # 退避三次都没成 → 归到「重试无意义」那一档（阶段 4-3）。embedding 是主检索的前置：它挂了
+        # 退避三次都没成 → 归到「重试无意义」那一档。embedding 是主检索的前置：它挂了
         # item_search 必然空手而归，让模型换个检索词再来一次只是把 7 秒退避再走一遍。
         raise DependencyDown("embedding", f"编码 {len(texts)} 条文本失败") from last_exc
 

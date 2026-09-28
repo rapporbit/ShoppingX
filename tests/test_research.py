@@ -145,7 +145,7 @@ async def test_empty_targets_returns_note(patched) -> None:  # noqa: ANN001
 async def test_empty_findings_carries_a_note(monkeypatch: pytest.MonkeyPatch, patched) -> None:
     """搜到了、归纳没报错、但模型回了空 findings —— 必须带 note，不能回一个沉默的空壳。
 
-    这是 C2/C3 快照验收（r02_versus 首次调用）撞到的真实形态：额度照扣、findings 为空、note
+    这是 快照验收（r02_versus 首次调用）撞到的真实形态：额度照扣、findings 为空、note
     也为空，主 agent 只能猜「是没资料还是没归纳出来」，实测它原样重调了一次，两条额度白花。
     """
     calls: list[str] = []

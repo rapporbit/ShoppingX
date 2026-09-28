@@ -8,7 +8,7 @@ export type AguiEvent = {
     | "assistant_call"
     | "tool_start"
     | "tool_end"
-    // 后端 A4-1 删派发后不再下发，仅为老会话回放保留；ActivityFeed 当普通 info 行画。
+    // 后端删派发后不再下发，仅为老会话回放保留；ActivityFeed 当普通 info 行画。
     | "fork"
     | "queue_status"
     // curator 本轮沉淀了新长期偏好（data.preferences: [{content, dedup_key}]）——回复下方画一行
@@ -91,7 +91,7 @@ export type OrderSnapshot = {
   }[];
 };
 
-// 交易确认记录（后端 Confirmation.envelope()，字段名TradeConfirmation）。
+// 交易确认记录（后端 Confirmation.envelope()）。
 // 一张确认卡 = 库里一条记录：pending → approved | rejected，expired 是按时钟算的派生态。
 // 决议**只走 HTTP**（用户点按钮），模型没有对应工具；金额是最小单位整数（分），前端换算显示。
 export type ShippingAddress = {
@@ -171,7 +171,7 @@ export type GuideData = {
   closing: string;
 };
 
-// 本轮的「实验与自进化」归属（批 4）：提示词版本 / A/B 桶号 / 注入了哪几条策略 / 读了哪些 skill。
+// 本轮的「实验与自进化」归属：提示词版本 / A/B 桶号 / 注入了哪几条策略 / 读了哪些 skill。
 // 随 task_result 下发、随 turns 落盘回看。此前这些只在 Langfuse trace 里看得到，产品面全盲。
 // ab_bucket = -1 表示匿名（不参与实验）；in_experiment=false 即对照组 / 匿名 / 实验未开。
 export type TurnExperiment = {

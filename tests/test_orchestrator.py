@@ -198,7 +198,7 @@ def test_save_state_is_atomic(tmp_path: Path) -> None:
 async def test_final_text_comes_from_streamed_msg_not_context(
     monkeypatch: pytest.MonkeyPatch, patched: dict[str, Any]
 ) -> None:
-    """输出审核改写的是**流出去的** Msg（L4 的 on_reply），state 里留的是原文。
+    """输出审核改写的是**流出去的** Msg（on_reply），state 里留的是原文。
 
     从 context 尾部取 final_text 等于把未审核文本发给用户、落进产物和历史——这条真摔过一次，
     单测钉死。
@@ -540,7 +540,7 @@ async def test_allow_tools_is_precise_and_idempotent() -> None:
     granted = await engine.check_permission(TOOLS_BY_NAME["ask_user"], {})
     assert granted.behavior == PermissionBehavior.ALLOW
 
-    # 没进放行表的写工具照样要问——这正是「不用 BYPASS」买到的东西：批 1 的 create_order
+    # 没进放行表的写工具照样要问——这正是「不用 BYPASS」买到的东西：create_order
     # 默认是被拦的，作者必须显式决定放不放。
     outsider = TOOLS_BY_NAME["shopping_summary"]
     state2 = AgentState()
@@ -564,7 +564,7 @@ async def test_every_write_tool_is_allowlisted() -> None:
 
 
 async def test_trade_tools_are_main_only() -> None:
-    """TradeAgent 已删（A1）：交易工具只在主 Agent 手上。"""
+    """TradeAgent 已删：交易工具只在主 Agent 手上。"""
     from app.agent.tool_registry import build_toolkit
 
     main = await build_toolkit()
@@ -663,7 +663,7 @@ async def test_assembled_agent_runs_with_terminal_discipline(
     )
 
 
-# ---------- 本轮 deadline（阶段 4-2）----------
+# ---------- 本轮 deadline----------
 async def test_run_agent_sets_the_turn_deadline(
     monkeypatch: pytest.MonkeyPatch, patched: dict[str, Any]
 ) -> None:

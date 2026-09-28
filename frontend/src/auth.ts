@@ -1,4 +1,4 @@
-// 登录态（M16）：token 的存取、注册 / 登录、带凭证的 fetch。
+// 登录态：token 的存取、注册 / 登录、带凭证的 fetch。
 //
 // 在此之前，前端的"身份"是一行 `const DEMO_USER = "demo-user"` —— 所有访客共用同一个人：谁的偏好
 // 都写进同一个 Store，谁都能看谁的会话。现在身份来自后端签发的 token，user_id 一律由后端从 token

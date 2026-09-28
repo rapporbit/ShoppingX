@@ -4,18 +4,18 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: globex-api
-  namespace: globex
+  name: shoppingx-api
+  namespace: shoppingx
 spec:
   selector:
-    app: globex-api
+    app: shoppingx-api
   ports:
     - name: http
       port: 80
       targetPort: 8000
   # **粘性会话是当前架构的硬要求，不是优化**：`POST /api/task/{thread_id}/cancel` 与
   # `/inflight` 读的是本进程的 active_tasks（影子协程的账本）。请求落到另一个副本，表现是
-  # 「点取消返回 404，任务照跑」。批2-4 已经把取消指令做成跨进程的了，缺的只是「没有本地
+  # 「点取消返回 404，任务照跑」。代码已经把取消指令做成跨进程的了，缺的只是「没有本地
   # handle 时也照发广播」这一小步——那属于代码改动，不该用 yaml 去糊。
   # ClientIP 亲和的局限也要说清楚：它按**源 IP** 分，如果前面还有一层 Ingress/NAT，所有请求
   # 的源 IP 会是同一个，亲和就退化成「全打到一个副本」。真要多副本，得在 Ingress 上按
@@ -25,13 +25,13 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: globex-api
-  namespace: globex
+  name: shoppingx-api
+  namespace: shoppingx
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: globex-api
+      app: shoppingx-api
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -40,7 +40,7 @@ spec:
   template:
     metadata:
       labels:
-        app: globex-api
+        app: shoppingx-api
     spec:
       # API 侧的优雅退出比 worker 简单得多：它手上只有「影子协程」（入队 + 等结果），任务本体在
       # worker 里。30s 足够把在途的 HTTP 响应写完；剩下的由前端重连 WS + GET /api/task/{id} 接上。
@@ -50,7 +50,7 @@ spec:
           # 同一个镜像，api 与 worker 只差一个 command —— 这是「两种进程、一份代码」的落地方式。
           # 换成两个镜像的代价不是麻烦，是**版本可能不一致**：api 已经在发新版事件、worker 还在
           # 跑旧代码，前端收到看不懂的字段，而两边都不报错。
-          image: globex-backend:latest
+          image: shoppingx-backend:latest
           imagePullPolicy: IfNotPresent
           command: ["uvicorn", "app.api.server:app", "--host", "0.0.0.0", "--port", "8000"]
           # 单 uvicorn worker 是硬约束（同 docker/Dockerfile.backend）：active_tasks / 准入池 /
@@ -61,9 +61,9 @@ spec:
               containerPort: 8000
           envFrom:
             - configMapRef:
-                name: globex-config
+                name: shoppingx-config
             - secretRef:
-                name: globex-secrets
+                name: shoppingx-secrets
           resources:
             requests:
               cpu: "250m"
@@ -108,4 +108,4 @@ spec:
       volumes:
         - name: artifacts
           persistentVolumeClaim:
-            claimName: globex-artifacts
+            claimName: shoppingx-artifacts

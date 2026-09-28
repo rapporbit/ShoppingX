@@ -4,7 +4,7 @@
 所以由 :func:`app.agent.prompts.get_system_prompt` 内部默认加载注入：主 Agent 与 fork 子 Agent
 （fallback 到 ``get_system_prompt()``）都自动带上同一份，天然同质、且内容固定不破坏 prompt cache。
 
-示例来自 M11 Rubric 评测定位的 bad case（过度澄清 / 口头收尾 / 非购物乱检索），是「上下文级飞轮」
+示例来自 Rubric 评测定位的 bad case（过度澄清 / 口头收尾 / 非购物乱检索），是「上下文级飞轮」
 的「定位 bad case → 沉淀 few-shot」一环。文件 ``prompt/few_shot.yml`` 可由飞轮迭代更新。
 """
 

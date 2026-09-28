@@ -1,13 +1,13 @@
-"""主 Agent 的装配（批 0 / L3）。
+"""主 Agent 的装配。
 
 一次 AgentLoop 需要三样东西各建一份、彼此对应：**一个 ``HarnessSession``**（控制面状态）、
 **一份 Toolkit**（工具实例上挂着那个 session 的工具适配器）、**一个 Agent**（模型适配器也拿
 同一个 session）。三者绑成一套是硬要求：AgentScope 把模型钩子与工具钩子拆成了两个类，它们
 之间的三条接力通道全靠共享的 session 传（见 ``app/harness/adapter.py``）。
 
-**A4 起是单环**：一个模型一个 loop，持全部业务工具；并行靠同一轮发多个工具调用（框架并发执行）。
-做过 Supervisor-Workers（批 1）与同质 fork（批 0），440 个会话实测派发全是单跳壳后删掉，
-数据留在 ``docs/milestones/``。
+**现在是单环**：一个模型一个 loop，持全部业务工具；并行靠同一轮发多个工具调用（框架并发执行）。
+做过 Supervisor-Workers与同质 fork，440 个会话实测派发全是单跳壳后删掉，
+
 """
 
 from collections.abc import Sequence
@@ -92,7 +92,7 @@ async def _assemble(
         react_config=ReActConfig(max_iters=max_iters),
         # 上下文压缩交给框架默认的 ``ContextConfig``（trigger_ratio 0.8）：超阈值时 LLM 写一份
         # continuation summary 进 ``state.summary``，随 session.json 持久化。摘要是二手上下文，
-        # 这是有意接受的取舍（见 docs/plans 会话状态重构）。
+        # 这是有意接受的取舍。
     )
     return agent, session
 

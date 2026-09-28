@@ -42,7 +42,7 @@ _user_id_var: ContextVar[str | None] = ContextVar("shoppingx_user_id", default=N
 # 脚本 / 单测），此时写工具退回「每次新建一张卡」的老行为。
 _run_id_var: ContextVar[str] = ContextVar("shoppingx_run_id", default="")
 
-# 跨进程的日志关联 id（阶段 4-5）：HTTP 入口生成一次，随 IntentTask 进队列，worker 消费时绑回
+# 跨进程的日志关联 id：HTTP 入口生成一次，随 IntentTask 进队列，worker 消费时绑回
 # 日志上下文。**不是 run_id 的重复**：run_id 只在幂等判定通过、真开出一个 run 之后才有意义，而
 # 被判成 already_running / duplicate 的请求同样要能在日志里被找到——排查「用户点了三次，为什么
 # 只跑了一次」时，串起那三条 HTTP 请求的就是它。也**不是 Langfuse 的 trace_id**（那个由 worker
@@ -60,7 +60,7 @@ def get_request_id() -> str:
     return _request_id_var.get()
 
 
-# 首事件延迟的计时盒（SLO 第二条，阶段 6）：``{"started_at": <入队时刻的 wall clock>}``，
+# 首事件延迟的计时盒（SLO 第二条）：``{"started_at": <入队时刻的 wall clock>}``，
 # 第一条 ``assistant_call`` 上报时把它取走并记进 Histogram，之后的事件读到空盒直接跳过。
 #
 # **为什么是可变 dict 而不是两个裸 ContextVar**：``report_assistant_call`` 由主 loop 的钩子触发，

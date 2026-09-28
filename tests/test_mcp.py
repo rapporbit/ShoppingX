@@ -1,4 +1,4 @@
-"""MCP 两侧（批 4-3）：生产侧 server 的只读契约 + 消费侧接线与读写切分三保证。
+"""MCP 两侧：生产侧 server 的只读契约 + 消费侧接线与读写切分三保证。
 
 集成用例**真起一个本地 MCP server 进程**（自建汇率 server，纯静态表、零外部依赖），验的是
 「Toolkit 真列得出、真调得通」。不打桩：打桩验的是我们自己写的假对象，而这条链路上最容易坏
@@ -70,7 +70,7 @@ def test_enable_tools_whitelist_is_declarative(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("MCP_SEARCH_TOOLS", "convert_currency")
     (client,) = mcp_clients()
     assert client.enable_tools == ["convert_currency"]
-    assert mcp_tool_names() == ["mcp__globex-fx__convert_currency"]
+    assert mcp_tool_names() == ["mcp__shoppingx-fx__convert_currency"]
 
 
 def test_mcp_tool_names_are_whitelisted(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -142,7 +142,7 @@ async def test_main_toolkit_lists_mcp_tools(
     toolkit = await build_toolkit()
     names = {s["function"]["name"] for s in await toolkit.get_tool_schemas()}
     for tool in FX_TOOL_NAMES:
-        assert f"mcp__globex-fx__{tool}" in names
+        assert f"mcp__shoppingx-fx__{tool}" in names
 
 
 async def test_every_mcp_tool_is_read_only(
@@ -169,7 +169,7 @@ async def test_mcp_tool_is_callable_through_toolkit(
     call = ToolCallBlock(
         type="tool_call",
         id="t1",
-        name="mcp__globex-fx__convert_currency",
+        name="mcp__shoppingx-fx__convert_currency",
         input=json.dumps({"amount": 100, "from_currency": "EUR", "to_currency": "USD"}),
     )
     chunks = [chunk async for chunk in toolkit.call_tool(call, AgentState())]
@@ -187,7 +187,7 @@ async def test_unknown_currency_comes_back_as_data_not_protocol_error(
     call = ToolCallBlock(
         type="tool_call",
         id="t2",
-        name="mcp__globex-fx__convert_currency",
+        name="mcp__shoppingx-fx__convert_currency",
         input=json.dumps({"amount": 10, "from_currency": "XYZ"}),
     )
     chunks = [chunk async for chunk in toolkit.call_tool(call, AgentState())]

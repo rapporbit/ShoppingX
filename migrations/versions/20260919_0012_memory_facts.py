@@ -2,7 +2,7 @@
 
 长期记忆换模型：``preferences``（polarity/domain/slug 拼 dedup_key）→ ``memory_facts``
 （user_id + fact_key 唯一，同 key 覆盖）。**不 drop 旧 preferences 表**：留一版作回滚依据，
-数据由 ``scripts/migrate_preferences_to_facts.py`` 单独搬（计划 §4.1 C4）。
+数据由 ``scripts/migrate_preferences_to_facts.py`` 单独搬。
 
 Revision ID: 0012_memory_facts
 Revises: 0011_trade_confirmations
@@ -42,7 +42,7 @@ def upgrade() -> None:
     with op.batch_alter_table('users', schema=None) as batch_op:
         # server_default 是 autogenerate 漏掉的、线上必炸的一项：给一张已有行的表加 NOT NULL 列，
         # 没有默认值时老行填不出值（SQLite batch 重建表、MySQL 直接 ADD COLUMN 都一样）。
-        # 本地测试库每次重建所以照样绿，gcjp 那份老库才会现形。
+        # 本地测试库每次重建所以照样绿，线上 那份老库才会现形。
         batch_op.add_column(
             sa.Column('memory_purge_gen', sa.Integer(), nullable=False, server_default='0')
         )

@@ -6,7 +6,7 @@
 
 本地怎么连：SSH 端口转发即可，不用暴露公网::
 
-    ssh -N -L 8090:localhost:8090 huzhouet          # 本地另开一个终端
+    ssh -N -L 8090:localhost:8090 gpu-host          # 本地另开一个终端
     EMBED_BASE_URL=http://localhost:8090/v1 uv run python scripts/eval/run_rubric.py
 
 编码口径与 `eval_on_gpu.py` / `encode_corpus_gpu.py` 严格一致：CLS 池化 + L2 归一化。三处必须

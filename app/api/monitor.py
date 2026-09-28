@@ -1,6 +1,6 @@
 """AGUI 事件上报 —— 统一封装「Agent 在做什么」并经 WebSocket 推给前端。
 
-设计立场（M4 留桩、M8 接真，工具侧一行不改）：上报接口是**模块级函数**
+设计立场（工具侧一行不改）：上报接口是**模块级函数**
 （``report_tool_start`` / ``report_tool_end`` / ……），工具里只写一句
 ``await monitor.report_tool_start(...)``，既不必拿 ``thread_id``、也不必知道连接在哪——
 这两件事分别由 :mod:`app.api.context` 的 ContextVar 与 :class:`ConnectionManager` 透明处理。
@@ -37,7 +37,7 @@ from app.observability import metrics
 
 logger = logging.getLogger("shoppingx.monitor")
 
-# AGUI 标准事件。前端按这些类型分发展示。（fork 事件随子 Agent 在 A4 删除。）
+# AGUI 标准事件。前端按这些类型分发展示。（fork 事件随子 Agent 已删除。）
 EVENT_SESSION_CREATED = "session_created"
 EVENT_ASSISTANT_CALL = "assistant_call"
 EVENT_TOOL_START = "tool_start"
@@ -47,7 +47,7 @@ EVENT_QUEUE_STATUS = "queue_status"
 EVENT_MEMORY_UPDATED = "memory_updated"
 EVENT_TASK_RESULT = "task_result"
 EVENT_TASK_CANCELLED = "task_cancelled"
-# worker 关停排空超时把这一轮掐掉时发（阶段 1-3）。与 task_cancelled 分开：那条是「用户不要了」，
+# worker 关停排空超时把这一轮掐掉时发。与 task_cancelled 分开：那条是「用户不要了」，
 # 这条是「服务端要走了，这轮没结果，请重发」——前端文案与用户的下一步动作都不一样。
 EVENT_TASK_INTERRUPTED = "task_interrupted"
 EVENT_ERROR = "error"
@@ -72,7 +72,7 @@ EVENT_MODEL_FALLBACK = "model_fallback"
 # 前端刷新时会再 GET 一次列表。
 EVENT_CONFIRMATION_REQUIRED = "confirmation_required"
 EVENT_CONFIRMATION_RESOLVED = "confirmation_resolved"
-# 选购指南卡（S3 的 present_guide）：分节标准 + 假设 + 来源，前端按块渲染成一张卡。
+# 选购指南卡（present_guide）：分节标准 + 假设 + 来源，前端按块渲染成一张卡。
 # 与 items_preview 同一取向：**不瞬态**（进回放存档，刷新页面不该让刚看到的指南消失），
 # 不进活动流（它是结果本身，不是思考行）。正文另有一条路——工具排好的 markdown 经
 # ``adapter._merge_terminal_body`` 并回 final_text，所以历史回看即便不渲染卡也看得到全文。
@@ -343,7 +343,7 @@ async def report_clarification_request(
     有 options → 前端在展示区内嵌一张**可点选卡片**（单选按钮 / 多选清单），用户点鼠标作答、
     不复用聊天框；回传的仍是一段文本（卡片据勾选拼成自然语言），后端契约不变。
 
-    ``closes_turn=True``（D2）时这一问是**本轮的收尾**，后端不等回复、任务随即结束。前端据此
+    ``closes_turn=True``时这一问是**本轮的收尾**，后端不等回复、任务随即结束。前端据此
     改投递方式：选项点选后要发起**新一轮任务**，而不是往 WS 上打 ``clarification_response``
     ——那一头已经没有 waiter 在等，打过去只会被拒收，用户点了却什么都不发生。
     """
@@ -383,7 +383,7 @@ async def report_task_result(
     """任务完成、给出最终回答时上报（前端渲染最终清单 + 商品卡）。
 
     ``items`` 是 ``shopping_summary`` 结构化产出里的精选商品（平台/标题/到手价/选购理由），
-    前端据此渲染商品卡——文本清单给人读、结构化 items 给机器画卡，一条事件两用。M8 老调用
+    前端据此渲染商品卡——文本清单给人读、结构化 items 给机器画卡，一条事件两用。老调用
     点（只传 final_answer）不受影响：缺省 ``None`` 即不带 items 字段。
 
     ``elapsed_ms`` 是本轮总耗时（毫秒），前端在该轮右下角显示「用时」。缺省 ``None`` 即不带。
@@ -400,7 +400,7 @@ async def report_task_result(
     if tokens is not None:
         data["tokens"] = tokens
     if experiment:
-        # 本轮的「实验与自进化」归属（批 4）：提示词版本 / A/B 桶号 / 注入了哪几条策略 / 读了哪些
+        # 本轮的「实验与自进化」归属：提示词版本 / A/B 桶号 / 注入了哪几条策略 / 读了哪些
         # skill。前端画成一行小 chip——这些东西此前只在 Langfuse trace 里看得到，产品面全盲。
         data["experiment"] = experiment
     await _emit(EVENT_TASK_RESULT, "任务完成", data)
@@ -417,7 +417,7 @@ async def report_task_cancelled(thread_id: str | None = None) -> None:
 
 
 async def report_task_interrupted(thread_id: str | None = None) -> None:
-    """worker 关停排空超时、这一轮被掐时上报（阶段 1-3）。
+    """worker 关停排空超时、这一轮被掐时上报。
 
     发这条事件的那一刻消息**已经决定要 ack**：它不会被另一个 worker 捡回去重跑，所以「要不要再来
     一次」由用户按重发决定。不发的话前端只会一直转圈到等待超时，用户既不知道发生了什么、也不知道

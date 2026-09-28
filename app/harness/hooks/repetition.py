@@ -10,7 +10,8 @@
 ``result_nudges`` 必须晚于 ``safety.truncate_result``(10)，否则刚贴上的提示会被截掉。
 
 这里曾有 tool_memo_replay / tool_memo_record 一对（同参数幂等工具回放上次结果、不真执行）。
-2026-09-15 删：round3 后普通轮只跑 1 次 item_search，autopick 不走 pre_tool_call，回放几乎命不中；
+2026-09-15 删：autopick 上线后普通轮只跑 1 次 item_search，autopick 不走 pre_tool_call，
+回放几乎命不中；
 而它是绕过 post_tool_call 的旁路（要自己喂 LoopDetector、缓存要避开尾部通告），复杂度不抵收益。
 同参重复由 LoopDetector 提示 + 检索预算硬挡兜底。
 """

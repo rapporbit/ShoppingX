@@ -1,4 +1,4 @@
-"""M0 工程底座冒烟测试：上下文 / 路径 / 提示词 / LLM 工厂可用。"""
+"""工程底座冒烟测试：上下文 / 路径 / 提示词 / LLM 工厂可用。"""
 
 from pathlib import Path
 
@@ -45,7 +45,7 @@ def test_safe_join_blocks_traversal() -> None:
 
 
 def test_artifact_root_moves_both_output_and_upload(monkeypatch: pytest.MonkeyPatch) -> None:
-    """两个产物根跟着 ``ARTIFACT_ROOT`` 一起搬（阶段 1-4），缺省时仍是项目根。
+    """两个产物根跟着 ``ARTIFACT_ROOT`` 一起搬，缺省时仍是项目根。
 
     **一起搬**是关键：只挪一个的话，worker 写在新卷的 output、API 却去老路径找 uploaded，两边各对
     一半——而这种错不报异常，只表现为「有些产物取不到」。重新 import 模块来验，因为这两个根是模块级
@@ -55,11 +55,11 @@ def test_artifact_root_moves_both_output_and_upload(monkeypatch: pytest.MonkeyPa
 
     import app.utils.path_utils as path_utils
 
-    monkeypatch.setenv("ARTIFACT_ROOT", "/tmp/globex-artifacts")
+    monkeypatch.setenv("ARTIFACT_ROOT", "/tmp/shoppingx-artifacts")
     reloaded = importlib.reload(path_utils)
     try:
-        assert reloaded.OUTPUT_ROOT == Path("/tmp/globex-artifacts/output")
-        assert reloaded.UPLOAD_ROOT == Path("/tmp/globex-artifacts/uploaded")
+        assert reloaded.OUTPUT_ROOT == Path("/tmp/shoppingx-artifacts/output")
+        assert reloaded.UPLOAD_ROOT == Path("/tmp/shoppingx-artifacts/uploaded")
     finally:
         # 必须还原：模块是进程级单例，留着新值会让后面所有用例把产物写到 /tmp 那个根下。
         monkeypatch.delenv("ARTIFACT_ROOT")

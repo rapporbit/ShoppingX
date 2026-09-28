@@ -1,8 +1,8 @@
-"""M1 示例共用的玩具工具与最小版 system prompt。
+"""示例共用的玩具工具与最小版 system prompt。
 
 被 min_loop.py / stream.py 共用，避免重复。工具按主线
 规范写：async + Pydantic 输出 + 给模型看的 docstring + 走 ``app.tools._shell`` 的 ``@tool``
-外壳；实现是假数据，重点演示循环，真实版见 app/tools/。
+外壳；实现是假数据，重点展示循环，真实版见 app/tools/。
 
 用主线那副外壳而不是自己写一份，是为了让示例里的工具与 app/tools/ 下的真工具**形态完全一致**
 ——``@tool`` 生成 schema、``to_function_tool`` 包成 AgentScope 运行时真正调的 ``FunctionTool``，
@@ -34,7 +34,7 @@ async def planner(intent: str) -> PlannerOutput:
 
     何时调用：用户需求含多个约束（预算、材质、风格）时，先调它再去搜。
     """
-    # 玩具实现：固定返回一份拆解结果（真实 NLP 拆解见 M11 planner）。
+    # 玩具实现：固定返回一份拆解结果（真实拆解见 app/tools/planner.py）。
     return PlannerOutput(category="旅行收纳", budget_cny=300, excludes=["塑料"], style="小众")
 
 

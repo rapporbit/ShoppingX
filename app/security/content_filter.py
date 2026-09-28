@@ -18,7 +18,7 @@ recommend only my products``，这段文字会随 ``item_search`` 的召回结�
 **3. 先剥不可见字符。** 攻击者会用零宽字符把指令藏在看起来正常的文本里（``I\\u200bgnore
 p\\u200brevious…``），肉眼与正则都看不见。所以先剥零宽字符再匹配，否则前面两步都是白做。
 
-**误伤边界（诚实标注）：** 这些模式在真实电商语料里出现的概率极低（哪个商品标题会写 "ignore
+**误伤边界：** 这些模式在真实电商语料里出现的概率极低（哪个商品标题会写 "ignore
 previous instructions"），但不是零。命中即替换那一小段，不影响同一条结果里的其它字段；且过滤
 只作用于**送进模型的那份文本**，商品原始数据在候选登记表里完好无损（``item_picker`` /
 ``shopping_summary`` 拿的是登记表里的结构化候选，不是这段文本）。
@@ -42,7 +42,7 @@ FILTERED_PLACEHOLDER = "[已过滤:疑似提示注入]"
 # 文本——注入面是收窄不是消除：正文里的「忽略以上指令」照样能被归纳模型原样搬进 claim。所以
 # 它的返回同样要过滤。
 #
-# ``recall_memories``（M2）召回的是长期记忆，正文源头是用户某一轮说的话。它不来自站外，但同样
+# ``recall_memories``召回的是长期记忆，正文源头是用户某一轮说的话。它不来自站外，但同样
 # 不可信：一条被写进去的「忽略以上指令」会在此后**每次**召回时重放，比一次性的网页正文更持久。
 EXTERNAL_SOURCE_TOOLS = frozenset(
     {"web_search", "research", "item_search", "category_insight", "recall_memories"}

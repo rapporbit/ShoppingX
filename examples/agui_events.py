@@ -1,15 +1,15 @@
-"""M8 示例：AGUI 事件协议 + WebSocket 实时推送（端到端真连接）。
+"""示例：AGUI 事件协议 + WebSocket 实时推送（端到端真连接）。
 
-这个脚本把 M8 的链路完整跑一遍，证明「后台任务每走一步，前端就实时收到一个事件」：
+这个脚本把事件推送链路完整跑一遍，证明「后台任务每走一步，前端就实时收到一个事件」：
 
 1. 起一个最小 FastAPI app，只挂一个 ``/ws/{thread_id}`` 端点——它用的就是
-   :mod:`app.api.monitor` 共享的那个 ConnectionManager（生产服务在 M10 落地，端点逻辑一致）。
+   :mod:`app.api.monitor` 共享的那个 ConnectionManager（生产服务 app.api.server 的端点逻辑一致）。
 2. 用真正的 WebSocket 客户端（``websockets``，随 ``uvicorn[standard]`` 自带）连上去订阅。
 3. 在同进程里模拟一次主 AgentLoop：在 ``thread_scope`` 里依次上报
    session_created → assistant_call → tool_start/tool_end → fork → … → task_result。
 4. 客户端按序收到这些事件并打印。
 
-这就是 ROADMAP M8 验收点「跑一条任务，事件按序经 WS 推出（脚本订阅验证）」的可执行版。
+即「跑一条任务，事件按序经 WS 推出」的可执行验证。
 
 运行：uv run python examples/agui_events.py
 """

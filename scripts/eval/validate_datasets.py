@@ -7,12 +7,12 @@
 
 三个数据集，各自的判据：
 
-- **商品 golden**（ESCI qrels，M21 产物）：query 非空、正例非空、id 不撞、正/替/配三档不重叠
+- **商品 golden**（ESCI qrels）：query 非空、正例非空、id 不撞、正/替/配三档不重叠
   （同一个商品既是正例又是配件，NDCG 的 gain 就取决于判定顺序，指标不可复现）。
 - **Rubric 种子集**（`data/eval/queries.jsonl`）：id 不撞、必填字段齐、多轮 case 的 `query`
   必须等于 `turns[-1]`（run_rubric 只对最后一轮打分，对不上就是「拿 A 的答案对着 B 的尺子打」）。
   另**校验它与 `build_eval_queries.py` 同步**——种子集是回归基线，基线必须能从脚本复现
-  （批 1 踩过：只改 jsonl，下次重建脚本就把改动冲掉了）。
+  （踩过：只改 jsonl，下次重建脚本就把改动冲掉了）。
 - **品类金标**（`data/eval/category_recall.jsonl`）：query 非空、relevant 非空、id 不撞。
 
 用法：

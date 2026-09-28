@@ -1,6 +1,6 @@
 """模型吐出的结构不合形态时的共享容错：字符串化 list（工具入参）与显式 null（结构化输出）。
 
-**为什么存在**：换模型 = 换 tool-call 保真度。qwen3.5-flash（gcjp 会话 d0724e95，2026-07-16）
+**为什么存在**：换模型 = 换 tool-call 保真度。qwen3.5-flash（线上会话 d0724e95，2026-07-16）
 把 ``list[str]`` 参数编码成 JSON **字符串**（``'["塑料","plastic"]'``），Pydantic 校验直接拒，
 item_picker 同参连挂 4 次——校验错误文案对这类模型没有指导性（它「认为」自己传的就是列表），
 重试到被强制收尾。字符串形如 JSON 数组是**无歧义**的：loads 出来就是模型想传的东西，机制层
@@ -45,7 +45,7 @@ StrListArg = Annotated[list[str], BeforeValidator(coerce_stringified_list)]
 def drop_none_values(data: object) -> object:
     """结构化输出 schema 的「显式 null 归一为缺席」：值为 None 的键整个丢掉，让默认值接管。
 
-    同族第三形态（gcjp 会话 cdee1d6d，2026-07-17）：deepseek-v4-flash（关思考 +
+    同族第三形态（线上会话 cdee1d6d，2026-07-17）：deepseek-v4-flash（关思考 +
     function_calling）把 PlanOutput 的 5 个 list 字段吐成显式 ``null``——Pydantic 的
     ``default_factory`` 只兜「字段缺席」，不兜「显式 null」，planner 连挂 2 次。对模型而言
     「没有这项」写成 null 和不写是同一个意思，机制层归一比指望校验错误文案教会它可靠。

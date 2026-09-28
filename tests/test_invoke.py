@@ -76,7 +76,7 @@ def test_to_msgs_accepts_three_shapes() -> None:
     assert to_msgs(msgs) is not msgs and to_msgs(msgs)[0].role == "system"  # Msg 原样透传
 
 
-# ---------- 结构化解壳（L7 实测：DashScope 上的 deepseek-v4-flash） ----------
+# ---------- 结构化解壳（实测：DashScope 上的 deepseek-v4-flash） ----------
 def test_unwraps_parameters_shell() -> None:
     """forced 策略下多包的 ``parameters`` 壳要剥掉，否则字段全落默认值且不报错。"""
     got = _unwrap_structured({"parameters": {"category": "背包", "keywords": ["bag"]}}, _Plan)

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { fetchUploadedImage } from "../api";
 
-// 用户气泡里的参考图（M20 图搜）。图不是附件，是这一轮提问的一部分——用户说「找这个同款」时，
+// 用户气泡里的参考图（图搜）。图不是附件，是这一轮提问的一部分——用户说「找这个同款」时，
 // 「这个」指的就是它。对话里不把它画出来，回看时那句话就没了主语。
 //
 // 取图必须走 fetch → blob → object URL：接口要校验属主，而 <img src> 带不上 Authorization 头

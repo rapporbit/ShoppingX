@@ -2,10 +2,10 @@
 #
 # 注入 system prompt 的 <examples> 块（见 prompts.py:get_system_prompt → fewshot.render_fewshot）。
 # 设计口径：
-# - **全局固定一小组**（不随 query 变）：保住 prompt cache 前缀稳定（M6），主/子 Agent 同一份（同质）。
+# - **全局固定一小组**（不随 query 变）：保住 prompt cache 前缀稳定，主/子 Agent 同一份（同质）。
 # - **精短**：每条只展示「决策范式」不是完整轨迹，控住注入 token（整组目标 < 400 token）。
 # - **专打已诊断的高频失败**：① 信息够却过度澄清；② item_picker 后口头收尾不调工具；③ 非购物乱检索。
-#   这三条来自 M11 Rubric 评测定位的 bad case（q03 / q15 / q10），属上下文级飞轮的「定位→沉淀」闭环。
+#   这三条来自 Rubric 评测定位的 bad case（q03 / q15 / q10），属上下文级飞轮的「定位→沉淀」闭环。
 # - 飞轮迭代：后续可由 scripts 从评测高分轨迹（is_high_score）自动蒸馏补充，替换/扩充本文件。
 
 examples:

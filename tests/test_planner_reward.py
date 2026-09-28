@@ -1,4 +1,4 @@
-"""M23 planner RL 的 reward（`app/eval/planner_reward.py`）。
+"""planner RL 的 reward（`app/eval/planner_reward.py`）。
 
 **为什么这份测试值得写细**：reward 的 bug 不会崩，只会**给出一个方向错误的梯度**——模型老老实实
 朝着错的地方学，训练曲线还很好看。等到 S4 端到端 A/B 才发现，一轮 GRPO 已经烧掉几十 GPU 小时。
@@ -157,7 +157,7 @@ def test_parse_failure_is_vetoed() -> None:
 
 
 class TestNoKeywords:
-    """「不给检索词」的两种情形必须分开处理——这是实测查出的 hacking 漏洞（M23 S3）。"""
+    """「不给检索词」的两种情形必须分开处理——这是实测查出的 hacking 漏洞（GRPO 阶段）。"""
 
     def test_should_retrieve_but_no_keywords_scores_zero(self) -> None:
         """gold 有锚 = 这轮本就该检索。不给词直接罚 0，不许弃权——否则模型只要闭嘴不输出

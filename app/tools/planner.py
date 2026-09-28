@@ -18,11 +18,11 @@ curator 只判长期库，不碰 P_t——双写者时代它曾用更差的输�
 
 用 LLM 做意图理解（结构化输出强约束成 Pydantic）。走 ``get_planner_llm``：结构化抽取不吃思维
 链——实测主档 12~17s（reasoning 占 70%）vs 快档 ~3s，tasks / 排除词 / 预算解析产出一致
-（对照见 latency-audit round2）。
+。
 
 **这一档可以单独换模型**（``LLM_PLANNER``，不配即快档）：planner 是链路外的一次性调用，有自己
 的 prompt 前缀，换模型名不打断主 loop 的前缀缓存——主 loop 内换名会，所以那里只能切 thinking。
-选型实测见 `docs/plans/baseline-artifacts/planner_model_eval.json`（dev92 + planner_reward）。
+选型实测。
 模块级引用便于测试 monkeypatch 成假模型，从而离线可测。
 """
 
@@ -73,7 +73,7 @@ logger = logging.getLogger("shoppingx.planner")
 #   price_compare  —— 跨平台比价
 #   landed_cost    —— 算关税 + 运费（到手价）
 #   category_intel —— 只问品类行情（热卖 / 价位 / 该看哪些维度），不一定要具体商品
-#   place_order / query_order / cancel_order —— 交易意图（批 1 的交易域）。它们与前五个正交：
+#   place_order / query_order / cancel_order —— 交易意图（交易域）。它们与前五个正交：
 #     检索类任务判的是「要给什么」，交易类判的是「要动哪张单」，一轮里可以只有后者（「我的订单
 #     呢」不需要任何检索）。
 ShoppingTask = Literal[
@@ -206,7 +206,7 @@ async def resolve_dest_country_layered(text: str) -> tuple[str, bool]:
             for fact in (await get_fact_store().get_facts(user_id)) if memory_enabled() else []:
                 if fact.key == SHIP_TO_KEY:
                     # key 本身已确定这条讲的是收货地，用无门控匹配——「常用收货地：中国」
-                    # 若再要求语境词反而可能漏掉。M2 起按 key 取，不再按已废的 category/polarity。
+                    # 若再要求语境词反而可能漏掉。现在按 key 取，不再按已废的 category/polarity。
                     code = match_country_name(fact.value)
                     if code:
                         return code, False
@@ -576,7 +576,7 @@ async def planner(intent: str) -> PlanOutput:
             required_any=("category", "keywords", "bundle_slots"),
         )
     except Exception:
-        # 模型调用失败也要补一条 end 事件，否则前端（M8）会看到工具「永远在跑」。
+        # 模型调用失败也要补一条 end 事件，否则前端会看到工具「永远在跑」。
         await monitor.report_tool_end("planner", error=True)
         raise
     # 预算落地闸：这个数在本轮和前几轮原话里都找不到 → 模型编的，置 None。找得到就记下出处，

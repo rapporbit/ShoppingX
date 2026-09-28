@@ -3,7 +3,7 @@
 **只写 `memory_facts`（`MemoryFactStore`），不碰 P_t，也不碰行为历史 / 收藏那张 `UserDataStore`。**
 会话级短期状态的唯一写者仍是 planner（每轮跑、看用户原话、当轮生效，见
 `app.tools.planner._sync_turn_constraints`）；
-curator 退回它唯一做得好的事：判「一贯取向」。M3 把它的输出从 polarity / slug / domain /
+curator 退回它唯一做得好的事：判「一贯取向」。后来把它的输出从 polarity / slug / domain /
 keys_to_supersede 那套换成 `key / value / category` 三字段的事实——`key` 就是身份，同 key 覆盖写，
 冲突消解不再需要模型引用一串 dedup_key（它经常拼错，拼错就删不掉旧的）。
 
@@ -172,7 +172,7 @@ async def curate_turn(user_id: str, query: str, final_text: str) -> list[MemoryF
 
     for fact in new_facts:
         # 本轮累加器 → run_agent 汇总进 learned_preferences，并经 AGUI 推给前端「记住了 …」那行。
-        # 前端那行的 ✕ 目前打的还是旧偏好表的删除接口，M4 改偏好页时一起对齐到 key。
+        # 前端那行的 ✕ 目前打的还是旧偏好表的删除接口，改偏好页时一起对齐到 key。
         record_learned_pref(fact.value, fact.key)
     logger.info("curator user=%s 写入 %d 条事实", user_id, len(new_facts))
     return new_facts

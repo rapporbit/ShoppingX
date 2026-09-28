@@ -1,14 +1,14 @@
-# globex 在 K8s 上的编排 —— 命名空间 / 配置 / 密钥 / 共享卷。
+# shoppingx 在 K8s 上的编排 —— 命名空间 / 配置 / 密钥 / 共享卷。
 #
-# 这一批 yaml 的唯一目的，是把批 2 做出来的「API 收请求、worker 跑 Agent」这套双进程形态，用
+# 这一批 yaml 的唯一目的，是把「API 收请求、worker 跑 Agent」这套双进程形态，用
 # K8s 能理解的方式表达出来：**同一个镜像、两种 command、各自独立扩容**，中间靠 Redis Stream
-# 削峰。除此之外的一切（Ingress、证书、HPA、监控栈）刻意不写，见 README 的「未做」。
+# 削峰。除此之外的一切（Ingress、证书、HPA、监控栈）刻意不写，见 README 的「不包含」。
 #
 # 应用顺序：kubectl apply -f 00- → 10- → 20- → 30- → 40- → 50-（编号即依赖顺序）。
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: globex
+  name: shoppingx
 ---
 # 非密配置。**为什么单独一份 ConfigMap 而不是把 env 写进两个 Deployment**：api 与 worker 必须
 # 看到**同一份**队列地址 / 频道名 / 分流阈值。写两处的失败形态很难查——API 往 db2 入队、worker
@@ -16,44 +16,44 @@ metadata:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: globex-config
-  namespace: globex
+  name: shoppingx-config
+  namespace: shoppingx
 data:
-  # ---- 任务队列（批2-1/2-2）。恒开、无开关：探不到 Redis 的进程会拒绝启动 ----
+  # ---- 任务队列。恒开、无开关：探不到 Redis 的进程会拒绝启动 ----
   QUEUE_REDIS_URL: "redis://redis:6379/2"
-  # 事件背板（批2-3）与控制面（批2-4）同样恒开，各自的 *_REDIS_URL 不配则复用上面这个实例。
-  # ---- 共享熔断（批2-5）。多副本时才有意义：一个副本探到下游挂了，别的副本不必再各撞一遍 ----
+  # 事件背板与控制面同样恒开，各自的 *_REDIS_URL 不配则复用上面这个实例。
+  # ---- 共享熔断。多副本时才有意义：一个副本探到下游挂了，别的副本不必再各撞一遍 ----
   BREAKER_SHARED: "1"
   # ---- 事件回放（断线重连补缺口）与向量 / 全文检索 ----
   EVENT_REDIS_URL: "redis://redis:6379/2"
   QDRANT_URL: "http://qdrant:6333"
   # ---- 库。**单副本 SQLite 是过渡态，不是推荐** ----
-  # 批2-5 给 SQLite 开了 WAL + busy_timeout，同一台机器上多进程写同一个文件是稳的；但放到 K8s
+  # 给 SQLite 开了 WAL + busy_timeout，同一台机器上多进程写同一个文件是稳的；但放到 K8s
   # 上，这个文件在网络卷（NFS/EFS）上，而 SQLite 的锁依赖 POSIX advisory lock —— NFS 上它时灵
-  # 时不灵，坏起来是静默丢写。真上量就把这行换成下面那条 PostgreSQL（批2-5 已按驱动分好池参数，
+  # 时不灵，坏起来是静默丢写。真上量就把这行换成下面那条 PostgreSQL（代码已按驱动分好池参数，
   # 镜像里 uv sync --extra db 装 asyncpg 即可）。
-  DATABASE_URL: "sqlite+aiosqlite:////app/var/globex.db"
-  # DATABASE_URL: "postgresql+asyncpg://globex:***@postgres:5432/globex"
+  DATABASE_URL: "sqlite+aiosqlite:////app/var/shoppingx.db"
+  # DATABASE_URL: "postgresql+asyncpg://shoppingx:***@postgres:5432/shoppingx"
   # ---- worker 优雅退出。这两个数与 50-worker.yaml 的 grace 是一组，改一个必须改另一个 ----
   # WORKER_GRACE_SECONDS 必须 ≥ MAIN_AGENT_TIMEOUT_SEC（300），否则每次发布都会掐掉一批马上
   # 就会自己收尾的任务；50-worker.yaml 的 terminationGracePeriodSeconds 要大于它 + preStop。
   WORKER_CONCURRENCY: "4"
   WORKER_GRACE_SECONDS: "330"
-  # ---- 整轮缓存（批2-5）：压测 / 演示开关，线上必须关。开着跑评测，分数是上一次那份的复读 ----
+  # ---- 整轮缓存：压测开关，线上必须关。开着跑评测，分数是上一次那份的复读 ----
   TURN_CACHE_ENABLED: "0"
   AUTH_ENABLED: "true"
   DEFAULT_DEST_COUNTRY: "CN"
   LANGFUSE_ENABLED: "false"
 ---
 # 密钥占位。**这份文件里一个真 key 都没有，也永远不要有**——它进 git。
-# 真部署时用 `kubectl create secret generic globex-secrets --from-env-file=.env`（.env 不入库），
+# 真部署时用 `kubectl create secret generic shoppingx-secrets --from-env-file=.env`（.env 不入库），
 # 或接 External Secrets / Sealed Secrets。留这份骨架是为了让 Deployment 的 envFrom 有东西可引，
 # 也为了把「需要哪些密钥」这件事写在版本库里。
 apiVersion: v1
 kind: Secret
 metadata:
-  name: globex-secrets
-  namespace: globex
+  name: shoppingx-secrets
+  namespace: shoppingx
 type: Opaque
 stringData:
   OPENAI_API_KEY: "replace-me"
@@ -75,8 +75,8 @@ stringData:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: globex-artifacts
-  namespace: globex
+  name: shoppingx-artifacts
+  namespace: shoppingx
 spec:
   accessModes: ["ReadWriteMany"]
   resources:

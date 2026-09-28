@@ -184,7 +184,7 @@ def _to_text(out: Any) -> str:
         # 定义了紧凑投影（``__str__``，如 item_search / item_picker / price_compare / shipping_calc）
         # 的 Output 走投影：那是给模型看的形态（丢 url / image_url / 未填充的 null 字段、渲染收敛）。
         # 迁 AgentScope 后这里曾一律 model_dump_json，把这些投影全变成了死代码——item_search 一条
-        # 结果 12k 字符里近半是 url / null（round3 刀 5 实测）。投影与 *Output 的一致性
+        # 结果 12k 字符里近半是 url / null（实测）。投影与 *Output 的一致性
         # 由 tests/test_render_projection.py 钉死（曾是运行时 schema 断言）。
         # 没定义投影的照旧全量 JSON。
         if type(out).__str__ is not BaseModel.__str__:
@@ -215,7 +215,7 @@ def to_function_tool(
     - **错误语义一次到位**：实现抛出的异常统一转 ``state=ERROR`` + ``[error] ...`` 文本，
       harness 的 ``result_nudges`` 照读；不再有「Error invoking tool with kwargs」那种外层报错。
     - **形态钉死**：工具 return **单个** ToolChunk（不 yield 增量片段——本仓工具都是一次性产出
-      完整 JSON，而框架对 yield 的多个 chunk 是增量拼接语义，会把结果拼坏。L0 的 S0 spike 实测）。
+      完整 JSON，而框架对 yield 的多个 chunk 是增量拼接语义，会把结果拼坏。spike 实测）。
 
     Args:
         shell: ``@tool`` 声明出来的工具对象。
@@ -237,13 +237,13 @@ def to_function_tool(
             out = _unwrap(await impl(**args))
         except Exception as exc:  # noqa: BLE001 - 工具内部错误不外抛，见模块 docstring
             meta: dict[str, Any] = {"tool": shell.name}
-            # 错误分级（阶段 4-3）：依赖挂了与参数写错在这里分道。metadata 带上 code，
+            # 错误分级：依赖挂了与参数写错在这里分道。metadata 带上 code，
             # adapter 的 ERROR 分支据此贴「别重试」而不是默认的「换个思路再来」。
             if isinstance(exc, DependencyDown):
                 meta[ERROR_CODE_KEY] = DEPENDENCY_DOWN_CODE
                 meta["dependency"] = exc.dependency
                 # 同时给本轮插个旗子：收尾把这次 run 记成 dependency_rejected 而不是
-                # success / failed，免得一次 Qdrant 维护把 SLO 成功率打穿（阶段 6）。
+                # success / failed，免得一次 Qdrant 维护把 SLO 成功率打穿。
                 mark_dependency_down()
             return ToolChunk(
                 content=[TextBlock(type="text", text=f"[error] {type(exc).__name__}: {exc}")],

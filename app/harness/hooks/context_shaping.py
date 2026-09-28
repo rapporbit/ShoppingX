@@ -3,8 +3,8 @@
     on_system_prompt 50  system_prompt_append 装配期给主 Agent 追加两段：按用户原话匹配的在役策略
                                               <learned_strategies>、待决议确认卡 + 本会话订单
                                               <trade_state>（曾是两个 hook，2026-09-15 合一）
-    pre_think        10  tool_result_pruner  工具返回总量超阈值 → 最旧的换占位，削到一半（D3）
-    post_tool_call   50  preference_inject   planner 跑完后注入 tier-one 长期记忆（M2）
+    pre_think        10  tool_result_pruner  工具返回总量超阈值 → 最旧的换占位，削到一半
+    post_tool_call   50  preference_inject   planner 跑完后注入 tier-one 长期记忆
     on_session_end   90  strategy_feedback   给本轮注入过的策略结账：命中回血、连续失败淘汰
 
 **两层压缩的分工**：这里做零成本的粗活（清最旧工具返回），框架的 ``compress_context`` 做花钱的
@@ -36,7 +36,7 @@ logger = logging.getLogger("shoppingx.harness.context_shaping")
 
 
 #: 上下文里工具返回的 token 总量超过它就开始清最旧的几条（0 = 关掉这道清理）。
-#: 24k 是按「普通轮输入 22.5k」（round3 基线）定的：正常一轮碰不到，多轮续聊堆起来才会。
+#: 24k 是按「普通轮输入 22.5k」（延迟优化后的基线）定的：正常一轮碰不到，多轮续聊堆起来才会。
 PRUNE_TOOL_RESULTS_TOKENS = 24000
 
 #: 最近几条工具返回一律不动——模型当前这一步的推理就靠它们，清了等于让它凭空作答。
@@ -171,7 +171,7 @@ async def _strategy_block(context: dict[str, Any]) -> str | None:
 def render_trade_state_block(state: dict[str, Any]) -> str:
     """待决议确认卡 + 本会话订单 → ``<trade_state>`` 块。两边都空就返回空串（不塞空占位）。
 
-    ``agent_state``：**不带地址、不带 hash**——模型只需要知道「有一张卡等着用户点」
+    **不带地址、不带 hash**——模型只需要知道「有一张卡等着用户点」
     和「这轮已经落了哪些单」，好在用户问「我下单了吗」时不瞎答，也不重复出卡。
     """
     pending = state.get("pending_confirmations") or []

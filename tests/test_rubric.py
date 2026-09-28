@@ -1,4 +1,4 @@
-"""M11 验收：Rubric 评测的确定性部分（不依赖真实 LLM）。
+"""Rubric 评测的确定性部分（不依赖真实 LLM）。
 
 judge 调用（生成细则 / 打分）是 LLM 行为，不进单测；这里只锁住**纯函数地基**——一旦地基错了，
 judge 打得再准，聚合出来的分也是错的：
@@ -410,7 +410,7 @@ async def test_p0_recheck_never_runs_when_first_pass_is_clean_or_disabled(
     assert len(calls) == 2 and not result.overall_pass
 
 
-# ---------- prior_context：跨轮 / 跨会话事实注入 judge（批 3-2）----------
+# ---------- prior_context：跨轮 / 跨会话事实注入 judge----------
 def test_prior_block_is_noop_when_empty() -> None:
     """没写前情的 case 必须逐字不变——它们的尺子要与既有基线一致，否则跨批分数不可比。"""
     from app.eval import rubric as R

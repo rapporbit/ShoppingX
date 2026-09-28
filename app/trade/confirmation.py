@@ -1,4 +1,4 @@
-"""交易确认记录（``TradeConfirmation``）。
+"""交易确认记录。
 
 **一张确认卡 = 库里一条记录**，不再是一次性事件。模型工具（``create_order`` / ``cancel_order``）
 和前端表单（``POST /api/threads/{id}/confirmations/orders``）产出的是**同一种记录**；决议（同意 /

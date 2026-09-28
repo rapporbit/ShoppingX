@@ -34,7 +34,7 @@ def thread_scope(
 
     ``user_id`` 缺省（None）时**不动** user_id 上下文，沿用外层已有的绑定。
     ``run_id`` 同理缺省不动：只有 ``run_agent`` 这一个入口知道本轮的 run_id。``request_id``
-    则是从队列消息里读回来的（阶段 4-5）——worker 是另一个进程，ContextVar 传不过去，只能
+    则是从队列消息里读回来的——worker 是另一个进程，ContextVar 传不过去，只能
     随消息带；带回来绑上，两个进程的日志才拼得成一条线。
 
     同一处还把 thread_id / user_id / request_id 绑进 structlog 的日志上下文（A 块）——「请求隔离」

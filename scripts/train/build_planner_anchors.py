@@ -1,4 +1,4 @@
-"""S0-1 源①：从线上真实对话抽取 planner 训练的**分布锚**（不是训练集本身）。
+"""数据构造源①：从线上真实对话抽取 planner 训练的**分布锚**（不是训练集本身）。
 
 **为什么不当训练集**：`var/globex.db` 里 role=user 的消息总共只有 139 条、去重后 95 条，
 其中还有一大半是评测脚本反复跑同几条种子 query 打进去的。这个量级喂不出 4B 的 SFT，
@@ -14,7 +14,7 @@
    不这么做，训出来的模型在线上 1/3 的请求上都是 train/serve skew。
 
 产物：``data/train/planner_anchors.jsonl``，每行一条去重后的真实 query + 轮次位置标记，
-供 S0-2 的合成脚本当 few-shot 模板与分布校验基准（`planner_quality_gate.py` 读它算相似度）。
+供 golden 标注的合成脚本当 few-shot 模板与分布校验基准（`planner_quality_gate.py` 读它算相似度）。
 
 用法：``uv run python scripts/train/build_planner_anchors.py``
 """
@@ -39,7 +39,7 @@ OUT_PATH = PROJECT_ROOT / "data" / "train" / "planner_anchors.jsonl"
 _NORM_RE = re.compile(r"[\s，。,.、！!？?]+")
 
 # 判「带预算 / 带排除」用的粗规则。只为统计画像，不参与标注（golden 的预算走
-# planner.resolve_budget_currency 那套规则解析器，见 ROADMAP M23 S0-2）。
+# planner.resolve_budget_currency 那套规则解析器）。
 _BUDGET_RE = re.compile(r"预算|不超|以内|以下|块|元|美元|人民币|\$|budget")
 _EXCLUDE_RE = re.compile(r"不要|不想|别太|别的|除了|不能|拒绝|讨厌")
 
@@ -109,7 +109,7 @@ def main() -> None:
     by_norm = {_norm(r["text"]): r for r in records}
     # 种子集的 query 基本都被评测跑进过 messages 表（实测 33 条一条不剩全命中），所以这里
     # 几乎不新增记录——真正要捞回来的是**它们的 bucket**（人工分的能力维度：多约束精挑 /
-    # 跨平台比价 / 到手价 …），S0-1 的分层合成靠它定配额，丢了就只能按品类瞎分。
+    # 跨平台比价 / 到手价 …），数据构造的分层合成靠它定配额，丢了就只能按品类瞎分。
     for r in _load_seed():
         hit = by_norm.get(_norm(r["text"]))
         if hit is None:

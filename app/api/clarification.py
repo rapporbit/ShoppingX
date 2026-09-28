@@ -7,7 +7,7 @@ dict 按 ``thread_id`` 做 key 桥接。
 同一 thread 同一时刻最多一个 pending clarification（Agent loop 是串行的）。
 单线程 asyncio、无 await 在 dict 操作之间，不需加锁。
 
-**跨进程那一半（批2-4）。** loop 跑在 worker 进程，那个 Future 住在
+**跨进程那一半。** loop 跑在 worker 进程，那个 Future 住在
 worker 的内存里；用户的回复却是从 API 进程的 WebSocket / HTTP 进来的，``resolve_pending`` 在那边
 找不到任何 pending，回复静默丢掉、Agent 干等到超时。补法是一张**等待令牌**：
 
@@ -204,7 +204,7 @@ async def deliver_reply(thread_id: str, text: str) -> DeliveryResult:
 
     **顺序是「先本地后远端」，不是并列的两条路**：本进程有 pending 就说明 loop 就在这里跑，
     远端广播纯属多余（还会让别的进程收到一条投不出去的指令）。单进程模式在第一行就返回，与
-    批2-4 之前逐字同义。
+    早先逐字同义。
     """
     if resolve_pending(thread_id, text):
         return "local"

@@ -1,6 +1,6 @@
 """行为历史的渲染与写入 —— 把「用户做过什么」接进 AgentLoop 的两端。
 
-**偏好那一腿已经整条摘掉**（M4）：长期记忆改成 ``key / value / category`` 的事实模型，
+**偏好那一腿已经整条摘掉**：长期记忆改成 ``key / value / category`` 的事实模型，
 读走 :func:`app.memory.facts.select_tier_one_facts` + ``render_memory_block``（每轮注入）
 与 ``recall_memories``（按需召回），写走 ``save_memory`` 工具与回合后抽取，两端都只经
 :mod:`app.memory.fact_store`。本模块原有的 ``build_preference_block`` /

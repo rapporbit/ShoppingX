@@ -281,7 +281,7 @@ def test_fallback_model_disabled_when_unset_or_same(monkeypatch: pytest.MonkeyPa
     _clear_factory_caches()
 
 
-# ── 令牌桶挂点（阶段 2 第 4 条）────────────────────────────────────────────────
+# ── 令牌桶挂点────────────────────────────────────────────────
 class _BucketSpy:
     """替掉 gateway 里那两个桶入口，只记「拿什么参数调的」。"""
 

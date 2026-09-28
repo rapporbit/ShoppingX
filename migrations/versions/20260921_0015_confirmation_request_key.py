@@ -1,6 +1,6 @@
 """trade_confirmations 加 request_key（写工具的请求级幂等键）
 
-阶段 3：整轮重跑（队列消息被 PEL 重投、worker 崩了重领）时 run_id 不变，同一轮再调一次
+整轮重跑（队列消息被 PEL 重投、worker 崩了重领）时 run_id 不变，同一轮再调一次
 ``create_order`` 该复用原来那张确认卡，而不是出第二张让用户不知道点哪个。键的形状是
 ``run_id:action:快照 hash``，见 :func:`app.trade.confirmation.request_key`。
 

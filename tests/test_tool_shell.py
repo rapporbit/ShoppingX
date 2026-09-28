@@ -119,7 +119,7 @@ async def test_implementation_error_becomes_error_chunk_not_raise() -> None:
 
 @pytest.mark.asyncio
 async def test_dependency_down_is_tagged_in_metadata() -> None:
-    """依赖不可用要在 metadata 里分出级来（阶段 4-3）。
+    """依赖不可用要在 metadata 里分出级来。
 
     文本对模型是同一种 ``[error] ...``，分级信息只在 metadata 里；adapter 靠它决定贴「别重试、
     直接如实收尾」还是默认的「换个思路再来」。漏标就是静默退回老行为，所以这条断言盯的是
@@ -154,11 +154,9 @@ def test_tools_cover_all_business_tools_with_same_metadata() -> None:
     """运行时壳与声明壳一一对应，元数据取自同一处——描述就是 docstring，漂了就是两套行为。"""
     from app.agent.tool_registry import _BUSINESS_TOOLS, TOOLS, TOOLS_BY_NAME
 
-    # 18 个业务工具（15 + 交易域三件）；task_dispatch 已在 A4 删除，
-    # research 在 C2 加入、present_comparison 在 C4 加入、recall_memories 在 D4 加入、
-    # save_memory 在 M2 加入、forget_preference 在 M4 删除（遗忘 = 同 key 覆盖写）、
-    # present_guide 在 S3 加入（选购标准类答案不再塞进 chat_fallback）、category_insight 在
-    # 2026-09-24 摘出（品类卡片粒度对不上具体需求）
+    # 18 个业务工具（15 + 交易域三件）；task_dispatch 已删除，
+    # forget_preference 已删除（遗忘 = 同 key 覆盖写）、present_guide 接管选购标准类答案
+    # （不再塞进 chat_fallback）、category_insight 于 2026-09-24 摘出（品类卡片粒度对不上具体需求）
     assert len(_BUSINESS_TOOLS) == 18
     assert len(TOOLS) == 18
     for shell in _BUSINESS_TOOLS:
@@ -204,8 +202,8 @@ async def test_build_toolkit_produces_schemas() -> None:
 
     main = await build_toolkit()
     schemas = await main.get_tool_schemas()
-    # 主 Agent 拿全集：18 业务工具（S3 起含 present_guide，2026-09-24 摘出 category_insight）
-    # + 框架内置的 skill 阅读器 Skill（批 4-3：注册了 skill 就自动挂上，只读、权限恒 ALLOW）
+    # 主 Agent 拿全集：18 业务工具（含 present_guide，不含 category_insight）
+    # + 框架内置的 skill 阅读器 Skill（注册了 skill 就自动挂上，只读、权限恒 ALLOW）
     assert len(schemas) == 19
     names = {s["function"]["name"] for s in schemas}
     assert "Skill" in names and "task_dispatch" not in names
@@ -216,7 +214,7 @@ async def test_content_and_artifact_tool_yields_structured_json() -> None:
     """``content_and_artifact`` 型工具（shopping_summary）新壳必须吐**结构化那一份**。
 
     取错通道不会报错，只会让 run_agent 解析不出 items——商品卡不出货、result.json 不落盘，
-    全程静默。L3 的真实 LLM 验收就是这么发现的，这里钉死。
+    全程静默。真实 LLM 验收就是这么发现的，这里钉死。
     """
     resp = await _run(to_function_tool(_artifact_probe), x="买包")
     assert resp.state == ToolResultState.SUCCESS

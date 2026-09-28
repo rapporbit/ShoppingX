@@ -1,12 +1,12 @@
 """体检第三段：算 rerank 段的指标——深度曲线 × query 形态 A/B，一张表出全部结论。
 
-**这把尺子此前不存在。** M21 的 ``eval_recall.py`` 只量召回段（e15 打到 R@1000=.7714、
+**这把尺子此前不存在。** embedding 精调的 ``eval_recall.py`` 只量召回段（e15 打到 R@1000=.7714、
 R@20=.2905），中间 48 个点的排序空间从没被量过；而 reranker 正是吃这块空间的东西。没有这张
 表，「训 reranker 能涨多少」就只能靠猜。
 
 **三条对照，缺一不可：**
 
-- ``embed``    —— 不 rerank，e15 原序截断。这是**线上现状的下界**，也是 M21 基线的复现点。
+- ``embed``    —— 不 rerank，e15 原序截断。这是**线上现状的下界**，也是 embedding 精调基线的复现点。
 - ``intent``   —— 现成 bge-reranker-v2-m3，query = 用户完整意图句。
 - ``category`` —— 同一个模型，query = 粗品类词（线上 ``item_picker`` 的真实用法，且是作弊版）。
 
@@ -17,7 +17,7 @@ R@20=.2905），中间 48 个点的排序空间从没被量过；而 reranker �
 超不过池子里有什么。它同时解释了「加深 K」这个零训练杠杆能值多少。
 
 口径与 ``eval_recall.py`` 逐条对齐（分母取库内正例数、gain 用 E=3/S=2/C=1 分级），否则两张表
-接不上、M21 的基线数就白攒了。
+接不上、embedding 精调的基线数就白攒了。
 
 用法::
 
@@ -41,7 +41,7 @@ OUT_PATH = PROJECT_ROOT / "data" / "train" / "rerank_report.json"
 
 DEPTHS = [20, 50, 100, 200, 500, 1000]  # rerank 候选深度（K）
 GAIN = {"pos": 3.0, "sub": 2.0, "comp": 1.0}
-CUTS = [8, 20]  # 线上展示位 PICK_DISPLAY_CAP=8；20 用于跟 M21 的 recall@20 对齐
+CUTS = [8, 20]  # 线上展示位 PICK_DISPLAY_CAP=8；20 用于跟 embedding 精调的 recall@20 对齐
 
 
 def dcg(gains: list[float]) -> float:

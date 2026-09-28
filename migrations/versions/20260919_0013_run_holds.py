@@ -1,6 +1,6 @@
 """run_holds
 
-credit 预授权表（阶段 1-1）：进门按档位预扣、跑完按真实用量结算，``run_id`` 作幂等键。
+credit 预授权表：进门按档位预扣、跑完按真实用量结算，``run_id`` 作幂等键。
 纯新增一张表，不动任何既有表 —— 回滚就是 drop。
 
 Revision ID: 0013_run_holds

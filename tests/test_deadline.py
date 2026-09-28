@@ -1,4 +1,4 @@
-"""本轮 deadline 的下传（阶段 4-2）。
+"""本轮 deadline 的下传。
 
 主 loop 外面那层 ``asyncio.timeout(MAIN_AGENT_TIMEOUT_SEC)`` 是一刀从外面砍下来的：出站点对它
 一无所知，只能按自己的超时傻等，于是出现「主 loop 只剩 3 秒，这次检索照样按 5 秒等下去」——那 5 秒

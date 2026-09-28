@@ -1,9 +1,9 @@
 #!/bin/bash
-# 单次 BGE-Reranker-v2-m3 精调。跑在 GPU 机器（huzhou / A100 5 号卡），不是本机。
+# 单次 BGE-Reranker-v2-m3 精调。跑在 GPU 机器（GPU 机 / A100 5 号卡），不是本机。
 #
 # 用法: VER=r1 TAG=r1 EPOCHS=2 LR=1e-5 GROUP=8 ./train_reranker.sh
 #
-# 与 M21 的 train_one.sh（embedding）的差异，逐条都是有理由的：
+# 与 embedding 精调的 train_one.sh（embedding）的差异，逐条都是有理由的：
 #
 #   - task_type=reranker + loss_type=listwise_reranker。listwise 是「1 个正例 + n 个负例算一次
 #     组内 softmax CE」，正是 FlagEmbedding 训 reranker 的主流做法。pointwise（BCE 独立判每对
@@ -15,13 +15,13 @@
 #     不发生截断，长度参数就不影响结果**，所以与推理侧 320 并存也不构成 train/serve skew。
 #
 #   - batch 单位是「组」不是「样本」。一组 = 1 正 + 7 负 = 8 个 pair（FlagEmbedding 官方
-#     train_group_size 主流值），BATCH=8 即每步 64 个 pair × 160 token。M21 那边
+#     train_group_size 主流值），BATCH=8 即每步 64 个 pair × 160 token。embedding 精调那边
 #     batch32×128token 用了 13GB，线性外推这里约 32GB，A100-40G 装得下。OOM 就先降 BATCH。
 #
-#   - lr 1e-5：与 M21 实测结论一致（5e-6 两组对照都更差，-1.01/-1.47pt），不照抄原方案的
+#   - lr 1e-5：与 embedding 精调实测结论一致（5e-6 两组对照都更差，-1.01/-1.47pt），不照抄原方案的
 #     5e-6。FlagEmbedding 官方给 reranker 的 6e-5 是 base 尺寸模型的值，568M 的 large 不能用。
 #
-#   - 全参 + gradient_checkpointing，理由同 M21：BGE 系列官方就是全参，LoRA 是 LLM 那边的习惯；
+#   - 全参 + gradient_checkpointing，理由同 embedding 精调：BGE 系列官方就是全参，LoRA 是 LLM 那边的习惯；
 #     checkpointing 拿时间换显存去撑大 batch。
 set -euo pipefail
 cd "$(dirname "$0")"

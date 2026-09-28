@@ -1,6 +1,6 @@
-"""M5 示例：CategoryInsight 的 RAG 链路（召回 → 精排 → 结构化提炼）。
+"""示例：CategoryInsight 的 RAG 链路（召回 → 精排 → 结构化提炼）。
 
-演示 category_insight 怎么把一个品类名变成「行家常识」：
+展示 category_insight 怎么把一个品类名变成「行家常识」：
   KBClient.search（KNN+BM25 Hybrid 粗排）
     → RerankerClient（cross-encoder 精排，剔跑题卡）
     → 按 card_type 分组提炼 → 结构化 CategoryInsightOutput（给主 loop 结论，不给原文）

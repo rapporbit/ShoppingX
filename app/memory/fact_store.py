@@ -1,4 +1,4 @@
-"""长期记忆事实的存取口：六个方法，后端是 `app.db` 的 SQLite（阶段 1 后是 MySQL）。
+"""长期记忆事实的存取口：六个方法，后端是 `app.db` 的 SQLite / MySQL。
 
 **长期记忆只有这一条路**：旧的 `preferences` 表与它的 store 已经删干净（迁移
 `0016_drop_preferences`），`app.memory.store.UserDataStore` 现在只管行为历史与收藏，两者不重叠。
@@ -121,7 +121,7 @@ class MemoryFactStore:
     async def delete_fact(self, user_id: str, key: str) -> bool:
         """按 key 删一条，返回是否真的删掉了。**只由偏好页的 HTTP 接口调用**——
 
-        模型侧的「忘掉 X」走 `save_memory` 覆盖写，不给模型直接删除的能力（计划 §3.2 第 2 条）。
+        模型侧的「忘掉 X」走 `save_memory` 覆盖写，不给模型直接删除的能力。
         """
         if not user_id or not key:
             return False

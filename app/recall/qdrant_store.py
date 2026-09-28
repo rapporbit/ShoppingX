@@ -1,7 +1,7 @@
 """Qdrant 召回客户端（BGE-M3 dense + payload filter），替代 Faiss 召回层。
 
-对齐选型文档 `docs/plans/召回引擎选型思路.md`：召回 = **dense 语义 + 结构化/full-text filter**。
-精确命中/硬约束是 filter 问题、非打分,故**不挂 sparse 打分腿**（§4 scoring vs filtering 转念）。
+召回 = **dense 语义 + 结构化/full-text filter**。
+精确命中/硬约束是 filter 问题、非打分,故**不挂 sparse 打分腿**（scoring vs filtering 转念）。
 
 双后端：
 - ``QDRANT_URL`` 配了 → 连真 server（prod）。
@@ -56,7 +56,7 @@ def _query_timeout() -> int:
 
 @lru_cache(maxsize=1)
 def _remote_breaker() -> CircuitBreaker:
-    """远程 Qdrant 的进程级断路器（阶段 4-4）。
+    """远程 Qdrant 的进程级断路器。
 
     阈值比 reranker（5 次）低：reranker 挂了只是排序退化，多试几次代价小；主检索挂了这一轮
     必然交付不出商品，早一次熔断就少等一次 5 秒超时。恢复窗口 30s 与其余外呼一致。

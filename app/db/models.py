@@ -1,4 +1,4 @@
-"""账户与会话归属的关系表（M16）——「数据没丢，只是没绑到人身上」的那一层。
+"""账户与会话归属的关系表——「数据没丢，只是没绑到人身上」的那一层。
 
 **为什么要建库。** 此前会话数据其实一直是持久的（偏好在 Redis + AOF、每轮对话落 ``output/`` 卷），
 但**没有任何东西记录「哪个 thread 属于谁」**：侧栏历史清单纯靠浏览器 localStorage，换个浏览器 /
@@ -84,14 +84,14 @@ class Thread(Base):
 
     ``title`` 取该会话首轮提问的前若干字——省一次 LLM 调用，且用户自己说过的话最认得出是哪段对话。
 
-    **后三列是「同 thread 唯一真相」（阶段 1-2）。** 此前「这个 thread 上还有没有任务在跑」只存在
+    **后三列是「同 thread 唯一真相」。** 此前「这个 thread 上还有没有任务在跑」只存在
     API 进程内的 ``active_tasks`` 字典里，同一个 thread 打到两台副本就各起一个 run，两轮事件往同
     一条 WS 上推。改由一条**条件更新**认定：``UPDATE … SET active_run_id=:new WHERE id=:t AND
     (active_run_id IS NULL OR run_status != 'running')``，影响 0 行即「这个 thread 正忙」，再按
     ``active_query`` 分岔（同 query → already_running；不同 → 覆盖重发）。判定与占位是同一条
     语句，两个并发请求里必然只有一个的影响行数是 1，不再依赖「中间没有 await」。
 
-    **``user_id`` 刻意不加外键**（1-2 起）：本表要在鉴权关闭的 demo 模式下也登记行——否则那条路
+    **``user_id`` 刻意不加外键**：本表要在鉴权关闭的 免鉴权模式下也登记行——否则那条路
     上 DB 拿不到真相，唯一真相又会退回进程内。外键会让 ``demo-user`` / 匿名身份插不进来。代价是
     「token 的 sub 查无此人」不再由约束挡下，改在 :func:`app.db.accounts.claim_thread` 里显式查
     users 表（见那里的 401 分支）。同理 ``owner`` / ``User.threads`` 两个 relationship 一并删掉：
@@ -123,7 +123,7 @@ class Thread(Base):
 
 # ── 用户级持久数据（Mmem：从 JSON 文件 / Redis 搬进关系库）──────────────────────────────
 #
-# **为什么这三张表的 user_id 都不加外键**（与 threads 相反）：鉴权关闭时（demo 模式）用户是
+# **为什么这三张表的 user_id 都不加外键**（与 threads 相反）：鉴权关闭时（免鉴权模式）用户是
 # 一个不在 users 表里的假身份（demo-user），外键会让每一次写偏好直接炸。而这三类数据的强度要求
 # 本就低于账户——「偏好丢一条无所谓，账号丢一条是事故」（见模块 docstring）。只建 index 保查询。
 
@@ -136,7 +136,7 @@ class MemoryFactRow(Base):
     旧那条不是被叠加而是被替换，不需要再判两条偏好谁赢。
 
     **列名是 ``fact_key`` / ``fact_value`` 而不是 ``key`` / ``value``**：``key`` 是 MySQL 保留字，
-    叫它在 SQLite 上一路绿灯、切到 MySQL 8 才在建表语句上炸（计划 §4.1 C3）。
+    叫它在 SQLite 上一路绿灯、切到 MySQL 8 才在建表语句上炸。
 
     ``category`` 三取一：``constraint`` 每轮全量注入（硬规则，条数天然少），``preference`` /
     ``context`` 按 ``updated_at`` 倒序补到 cap。分类决定注入优先级，不决定能不能硬淘汰商品——
@@ -247,7 +247,7 @@ class UsageLedger(Base):
 
 
 class RunHold(Base):
-    """一次 run 的 **credit 预授权**（阶段 1-1）——「这个人此刻占着多少额度、在跑几个任务」。
+    """一次 run 的 **credit 预授权**——「这个人此刻占着多少额度、在跑几个任务」。
 
     **它补的是 UsageLedger 答不了的两个问题。** 账本是**事后**累加的：任务跑完才记一笔。于是同一个
     用户同时发 20 条 query，每条进门时读到的都是「还剩很多」，20 条全放行，跑完一起记账直接透支——
@@ -315,7 +315,7 @@ class Message(Base):
     不按元素查询。
 
     ``thread_id`` **不加外键**（与 :class:`Thread` 相反，理由同 :class:`MemoryFactRow`）：鉴权关闭的
-    demo 模式下压根不建 ``threads`` 行，外键会让每一轮对话落库直接炸。只建 index。
+    免鉴权模式下压根不建 ``threads`` 行，外键会让每一轮对话落库直接炸。只建 index。
     """
 
     __tablename__ = "messages"
@@ -368,7 +368,7 @@ class ConfigOverride(Base):
 
 
 class OrderRow(Base):
-    """订单（批 1 / 7.2 的交易域，见 :mod:`app.trade`）。
+    """订单。
 
     **金额存整数最小单位**（``total_minor``），不存 float：订单要逐分对得上「确认卡上写的数」，
     而 float 的 0.1+0.2 在这里就是一张对不平的单。倍率随币种（日元没有小数位），见
@@ -514,7 +514,7 @@ class UserSkill(Base):
     与 ``skills/<name>/SKILL.md`` 同一套语义——name + description 常驻 ``<agent-skills>`` 目录、
     正文按需由内置 ``Skill`` 工具读——只是**按 user_id 隔离、存库、前端可增删改**。它是
     ``authority=reference_only`` 的参考资料：注入时明说「不是系统指令、不能扩权、不改硬约束」，
-    所以不需要常见实现那套审核发布流；能动的只有自己的条目（API 层 ``_assert_own``）。
+    所以不需要审核发布流；能动的只有自己的条目（API 层 ``_assert_own``）。
 
     ``version`` 每次改正文 +1，只用来让前端拿到「改过了」的信号与历史回看，不做乐观锁——
     单机 SQLite、同一个人两端同时编辑同一条 skill 不是本仓要解的场景。

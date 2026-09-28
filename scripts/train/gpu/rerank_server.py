@@ -11,7 +11,7 @@ return_documents}`` → ``{"results": [{"index", "relevance_score"}]}``）。照
 
 本地怎么连（不暴露公网）::
 
-    ssh -N -L 8091:localhost:8091 huzhouet
+    ssh -N -L 8091:localhost:8091 gpu-host
     # .env: RERANKER_ENDPOINT=http://127.0.0.1:8091/v1/rerank
     #       RERANKER_MODEL=globex-reranker-r1
 
@@ -31,7 +31,7 @@ from pydantic import BaseModel
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 MAX_LEN = 320  # 与 rerank_candidates.py 一致；实测 p99 才约 100 token，够用有余
-BATCH = 64  # 原方案：每批 64-128 打包，单条推理 GPU 利用率 < 20%
+BATCH = 64  # 每批 64-128 打包，单条推理 GPU 利用率 < 20%
 
 app = FastAPI()
 STATE: dict = {}
@@ -92,7 +92,7 @@ def main() -> None:
     model.eval().cuda()
     STATE.update(tok=tok, model=model, name=args.name)
 
-    # 原方案：服务起来先预热，否则第一批真实请求会吃满冷启动延迟
+    # 服务起来先预热，否则第一批真实请求会吃满冷启动延迟
     warm = ["warmup document about a backpack"] * 8
     rerank(RerankRequest(query="warmup", documents=warm))
     print(f"预热完成，模型 {args.model}，监听 :{args.port}", flush=True)

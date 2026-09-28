@@ -1,7 +1,7 @@
 """后台管理 API：热更新模型档位与检索 / 展示参数（见 :mod:`app.config.registry`）。
 
 **管理员认定走 env 白名单**（``ADMIN_USERNAMES=zjl,someone``），不在库里加 ``is_admin`` 列：
-个人 demo 只有一个管理员，一条 env 就够，零迁移；且「谁是管理员」由部署方掌握，不会因为库被写坏
+单人运维只有一个管理员，一条 env 就够，零迁移；且「谁是管理员」由部署方掌握，不会因为库被写坏
 而多出一个管理员。将来真要在页面上授权他人，再加列不迟。
 
 **鉴权未开时整个后台不可用**（403，而不是放行）。这是本模块最要紧的一条：这些接口能换模型、能
@@ -164,7 +164,7 @@ async def update_config(req: UpdateRequest, admin: str = Depends(require_admin))
     except overrides.ParamValidationError as e:
         raise HTTPException(400, str(e)) from e
 
-    # 先落库再改内存：库是唯一真相（阶段 1 条 8），落库失败就整体不算数。本地这次 apply 只为了让
+    # 先落库再改内存：库是唯一真相，落库失败就整体不算数。本地这次 apply 只为了让
     # 本进程立刻反映到下面的 _snapshot() 回显上——别的进程（worker）靠 store.sync_loop 对账跟进。
     await store.save(normalized, updated_by=admin)
     overrides.apply(normalized)

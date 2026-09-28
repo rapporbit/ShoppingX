@@ -44,7 +44,7 @@ os.environ.setdefault("LANGFUSE_ENABLED", "false")
 # 限流本身的行为由 tests/test_ratelimit.py 显式打开开关来验。
 os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
 
-# 批 4-3：消费侧 MCP 默认关。开发者 .env 里指着一台真 MCP server 时，SearchAgent 的工具集会
+# 消费侧 MCP 默认关。开发者 .env 里指着一台真 MCP server 时，SearchAgent 的工具集会
 # 随「那台机器起没起」在两种形态间飘——同一个用例两次跑出不同的工具表。要验 MCP 通路的用例
 # 自己起进程 + monkeypatch 这个变量（见 tests/test_mcp.py），别靠环境碰巧配着。
 os.environ.setdefault("MCP_SEARCH_URL", "")
@@ -56,7 +56,7 @@ os.environ.setdefault("AUTH_ENABLED", "false")
 os.environ.setdefault("DEV_ADMIN_USERNAME", "")
 os.environ.setdefault("DEV_ADMIN_PASSWORD", "")
 
-# M16：账户库钉到临时文件，且**强制覆盖**（不是 setdefault）——单测会真的写库（注册用户、认领
+# 账户库钉到临时文件，且**强制覆盖**（不是 setdefault）——单测会真的写库（注册用户、认领
 # 会话），若落到开发者的 var/globex.db 上，跑一遍 pytest 就往真实账户表里塞一堆测试用户。每次
 # pytest 启动先删掉旧的临时库，保证从空表开始（用例间的隔离则靠各自用不同用户名）。
 # engine 在 app.db.session 被 import 时就按这个 URL 建好，所以必须在任何 app 导入之前设。
@@ -65,7 +65,7 @@ os.environ.setdefault("DEV_ADMIN_PASSWORD", "")
 # 会互删对方正在用的库文件、再往同一个文件里写——实测一边 42 failed / 45 errors 全是 "no such
 # table"，串行重跑同一份代码却全绿。pid 隔离后各进程一份库，互不可见。
 # 退出时删掉自己那份（含 sqlite 的 -wal / -shm / -journal 伴生文件），否则临时目录越攒越多。
-_TEST_DB = Path(tempfile.gettempdir()) / f"globex-test-accounts-{os.getpid()}.db"
+_TEST_DB = Path(tempfile.gettempdir()) / f"shoppingx-test-accounts-{os.getpid()}.db"
 
 
 def _drop_test_db() -> None:
@@ -139,7 +139,7 @@ class FakeRedis:
 
 @pytest.fixture(autouse=True)
 def _isolate_search_cache() -> Iterator[None]:
-    """检索缓存（阶段 3）一测一份：L2 摘掉、L1 清空。
+    """检索缓存一测一份：L2 摘掉、L1 清空。
 
     **必须 autouse**：L2 的 URL 缺省跟着 ``QUEUE_REDIS_URL`` 走，而开发机的 .env 里那个地址
     往往是通的——不摘掉，测试就会把召回结果写进真 Redis，然后下一次跑测试命中它。症状是
@@ -157,7 +157,7 @@ def _isolate_search_cache() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def fake_redis() -> Iterator[FakeRedis]:
-    """给幂等第 3 层一份进程内的去重窗口（阶段 1-2 起它在 Redis 上）。
+    """给幂等第 3 层一份进程内的去重窗口（现在它在 Redis 上）。
 
     **autouse 是必须的**：这层没有降级形态，Redis 不可达时 ``POST /api/task`` 一律 503（诚实
     优于「看着在去重其实各去各的」）。测试机没有 Redis，不注入的话每条起任务的用例都 503。
@@ -188,7 +188,7 @@ def _clean_memory_tables() -> Iterator[None]:
     ``strategies`` 是第六张，也是唯一**全局**的一张（无 user_id）——上面几张还能靠「用例各用各的
     user_id」兜底，它连这条退路都没有，一个用例写进去的策略会被下一个用例的注入位读到。
 
-    ``threads`` 是第七张（阶段 1-2 起）：它现在除了归属还存「谁在跑」，理由见下面那段注释。
+    ``threads`` 是第七张：它现在除了归属还存「谁在跑」，理由见下面那段注释。
     只有 ``users`` 不清——账户测试自己靠不同用户名隔离，且它们之间没有「同名 user 反复写」。
     """
     yield
@@ -208,7 +208,7 @@ def _clean_memory_tables() -> Iterator[None]:
                 "strategies",
             ):
                 await db.execute(text(f"DELETE FROM {table}"))  # noqa: S608 —— 表名是字面量常量
-            # threads 也清（1-2 起）：这张表原先只存归属，一个用例留下的行顶多影响侧栏清单；
+            # threads 也清：这张表原先只存归属，一个用例留下的行顶多影响侧栏清单；
             # 现在它还存「谁在跑」（幂等第 1 层的真相），而用例里的 thread_id 常是 "t1" 这类硬
             # 编码字面量——上一个用例留下的行会以两种方式串台：run_status 还是 running 就把下一个
             # 用例的请求判成 already_running；归属写着别人的 user_id 就直接 403。
@@ -222,7 +222,7 @@ def _clean_memory_tables() -> Iterator[None]:
 async def queue_worker() -> AsyncIterator[None]:
     """给用例起一份进程内队列 + 一个消费它的「worker」。
 
-    阶段 1 条 7 起 API 进程不再直接跑 ``run_agent``：``POST /api/task`` 只入队，AgentLoop 在 worker
+     API 进程不再直接跑 ``run_agent``：``POST /api/task`` 只入队，AgentLoop 在 worker
     进程里跑。凡是要观察「任务真的跑起来了」的 API 用例都得自己扮演那个 worker，否则任务停在队列
     里，``started`` 事件永远等不到。要换掉跑的东西时 patch 的是 ``worker.run_agent``（真正调它的那
     个名字），不是 ``server.run_agent``——后者已经不存在了。

@@ -1,7 +1,7 @@
 """行为历史与收藏 —— 用户级持久数据里**不属于长期记忆**的那两样。
 
 长期记忆（偏好 / 约束 / 背景）的测试在 ``test_memory_facts.py`` 与 ``test_curator.py``：
-M1~M4 把它换成了 ``key / value / category`` 的事实模型，同 key 覆盖，只经模型上下文生效。
+后来换成了 ``key / value / category`` 的事实模型，同 key 覆盖，只经模型上下文生效。
 原来这里那一大片测试（dedup_key 派生、blocking 授权、域闸 ``_in_scope``、
 ``persist_new_preferences``、``forget_preferences``、like 词拼进检索词）连同被测实现一起删了。
 

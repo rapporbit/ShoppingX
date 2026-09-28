@@ -2,12 +2,12 @@
 #
 # **版本钉死不用 latest**：Qdrant 的 snapshot 内嵌 RocksDB 备份，跨大版本恢复会直接报
 # "failed to restore RocksDB backup"。用 latest 的话，某次 Pod 重建就悄悄升了级，等到要从
-# 快照恢复的那天才发现回不去——那通常正是最不想出意外的一天（见记忆 deployed-on-gcjp-vps）。
+# 快照恢复的那天才发现回不去——那通常正是最不想出意外的一天。
 apiVersion: v1
 kind: Service
 metadata:
   name: qdrant
-  namespace: globex
+  namespace: shoppingx
 spec:
   clusterIP: None
   selector:
@@ -24,7 +24,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: qdrant
-  namespace: globex
+  namespace: shoppingx
 spec:
   serviceName: qdrant
   replicas: 1

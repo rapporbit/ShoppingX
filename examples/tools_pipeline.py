@@ -1,4 +1,4 @@
-"""M4 示例：九大工具的主链路串联（离线，不调 LLM）。
+"""示例：九大工具的主链路串联（离线，不调 LLM）。
 
 把确定性工具按主 loop 的典型次序手工串一遍，看清数据在工具间怎么流：
   item_search（每平台一次，模拟主 loop 的跨平台 fork 并行）
@@ -6,7 +6,7 @@
     → shipping_calc（到手价 = 货价 + 运费 + 关税）
     → item_picker（按预算 + 软偏好精挑，给选购理由）
 
-这不是主 AgentLoop（那在 M9 组装）——这里手动编排，纯粹演示工具的输入输出契约与
+这不是主 AgentLoop（见 main_agent.py）——这里手动编排，纯粹展示工具的输入输出契约与
 「渐进填充」的 ItemCandidate 怎样一路被补全。用本地确定性编码 + data/ 真实索引，离线可跑。
 
 运行：uv run python examples/tools_pipeline.py
@@ -36,7 +36,7 @@ async def main() -> None:
     for t in insight.price_tiers:
         print(f"    {t.tier:8s} ${t.low_usd:.2f} ~ ${t.high_usd:.2f}")
 
-    # 1) 跨平台检索：主 loop 会 fork 并行，这里顺序调演示合流。
+    # 1) 跨平台检索：主 loop 会 fork 并行，这里顺序调用展示合流。
     merged: list[ItemCandidate] = []
     for p in PLATFORMS:
         res = await item_search.ainvoke({"query": QUERY, "platform": p, "top_k": 8})

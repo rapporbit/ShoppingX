@@ -1,4 +1,4 @@
-"""Agent Skill（批 4-3）：目录加载 / 发放范围 / 注入位与批 4-2 策略块的相对次序。
+"""Agent Skill：目录加载 / 发放范围 / 注入位与成功策略块的相对次序。
 
 不测「模型有没有按 description 触发」——那是模型行为，本单不跑真实 LLM。这里测的是**机制**：
 每份 SKILL.md 真被框架的 ``LocalSkillLoader`` 读到、目录块真拼进了 system prompt、worker

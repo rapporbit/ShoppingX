@@ -19,7 +19,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
 
 async def stream_summary_delta(chunk: ChatResponse, emitted: int) -> int:
-    """主模型流式吐 ``shopping_summary`` 入参时，把 summary 的累计文本推给前端（round3 刀 1）。
+    """主模型流式吐 ``shopping_summary`` 入参时，把 summary 的累计文本推给前端。
 
     收尾文案改由主模型在工具入参里写之后，原来收尾工具内部那条 summary_delta 流没了；chunk 是
     累积快照、``ToolCallBlock.input`` 在流式期间是累积的原始 JSON 串，从里面抠 summary 即可。

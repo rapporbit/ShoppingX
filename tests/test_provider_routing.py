@@ -1,4 +1,4 @@
-"""阶段 2 第 2 条：provider / model 寻址 + LiteLLM Router 出口。
+"""provider / model 寻址 + LiteLLM Router 出口。
 
 这组测试要守住的不是「能调通」，而是**两条路发出去的 body 逐字一样**——Router 是换出口，
 不是换协议。任何一次框架/依赖升级把 cache_control 标记裁了、把 extra_body 摊平的方式改了，

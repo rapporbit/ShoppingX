@@ -1,4 +1,4 @@
-"""对 AgentScope 模型做**一次性调用**的薄助手（批 0 / L6 起）。
+"""对 AgentScope 模型做**一次性调用**的薄助手。
 
 不是所有 LLM 调用都跑在 Agent loop 里：评测判官、离线标注投票、记忆管家、偏好解析……这些是
 「给一段 prompt、要一段回答」的单次调用。AgentScope 的模型层没有这种一行写法，要自己处理三件事：
@@ -65,7 +65,7 @@ async def call_text(model: Any, prompt: Prompt) -> str:
 
     **超时由调用方包**（``async with asyncio.timeout(...)``）：本函数只管把一次调用跑完整，
     「等多久算挂了」是各场景自己的事——离线批量标注等得起 150 秒，线上一次判分等不起。
-    挂起的请求会占死并发槽让 ``gather`` 永不返回，批量脚本务必包上（M21 实测教训）。
+    挂起的请求会占死并发槽让 ``gather`` 永不返回，批量脚本务必包上（embedding 精调实测教训）。
     """
     result = await model(to_msgs(prompt))
     if not hasattr(result, "__aiter__"):
@@ -83,7 +83,7 @@ async def call_text(model: Any, prompt: Prompt) -> str:
 def _unwrap_structured(content: Any, schema: type[BaseModel]) -> Any:
     """剥掉供应商给工具入参多包的那层壳。
 
-    实测（批 0 / L7，DashScope 兼容端点）：``deepseek-v4-flash`` 回来的 tool_call 入参是
+    实测（DashScope 兼容端点）：``deepseek-v4-flash`` 回来的 tool_call 入参是
     ``{"parameters": {真正的字段…}}``，回落 auto 策略时又变成 ``{"output": {…}}``；
     同一条请求换 ``qwen3.5-flash`` 则字段直接在顶层。框架不管这层（它把 tool_call 的
     input 原样 json.loads 就返回），而**多包一层不会报错**——业务 schema 的字段全带默认值，
@@ -151,8 +151,8 @@ async def call_structured(
     """给模型一段 prompt，拿回一个**已验证**的 ``schema`` 实例。
 
     AgentScope 的 ``generate_structured_output`` 自带策略梯（forced → auto → no_think → none），
-    所以记忆 structured-output-method-must-be-pinned 里「默认 method 随模型浮动、qwen 系走
-    json_object 打挂 planner」的坑在这条路上结构性不存在，**不用也没法再钉 method**（L0/S2 实测）。
+    所以「默认 method 随模型浮动、qwen 系走
+    json_object 打挂 planner」的坑在这条路上结构性不存在，**不用也没法再钉 method**（实测）。
 
     三处踩过的坑钉在这里：① 结果在 ``StructuredResponse.content``（dict），**不是**
     ``.metadata``——读错字段配上「全字段有默认值」的 schema，``model_validate({})`` 会给出假绿；
@@ -165,7 +165,7 @@ async def call_structured(
     ``auto`` 就回完整参数（q21 五次采样全部拆出三个槽 + 预算 300）。框架的策略梯把 forced 排第一，
     而存根是合法 JSON、全默认值的 schema 照样校验通过——于是永远轮不到 auto，线上多数轮次拿着
     一张空计划在跑（15 次采样 13 次只有 1~4 个字段），planner 的预算 / 品类 / 槽位全靠下游规则
-    兜底。这是批 0 迁移漏掉的第 6 个静默失效。
+    兜底。这是迁移到 AgentScope 时漏掉的第 6 个静默失效。
 
     所以这里**auto 优先**：先显式 ``tool_choice=auto`` 走一次（框架里显式 tool_choice 绕过策略梯），
     模型没调工具（``StructuredOutputError``）或供应商拒绝时，再回落框架默认梯（forced → …）。

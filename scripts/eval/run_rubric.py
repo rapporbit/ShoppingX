@@ -1,4 +1,4 @@
-"""跑 Agent 级 Rubric 评测：种子集每条 query → run_agent → judge 打分 → 汇总报告。ROADMAP M11。
+"""跑 Agent 级 Rubric 评测：种子集每条 query → run_agent → judge 打分 → 汇总报告。
 
 这是「上下文级飞轮」的评测腿（无 GPU）：跑一遍拿到基线分 + bad case 清单，改 prompt/工具/few-shot 后
 **重跑同一种子集**对照分数，确认是真改进而非回退。种子集是稳定回归基线（见 build_eval_queries.py），

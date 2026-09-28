@@ -76,7 +76,7 @@ def _has_tool_calls(msg: Msg | None) -> bool:
 def _persist_injections(agent: Agent, injected: list[Msg] | None) -> None:
     """把本轮新增的注入（漂移纠正 / 断言纠正 / 预算 hint）落进 ``state.context``。
 
-    **不落 state 的代价是缓存塌方**（L5 实测抓到）：``_prepare_model_input`` 每轮都从
+    **不落 state 的代价是缓存塌方**（实测抓到）：``_prepare_model_input`` 每轮都从
     ``state.context`` 重建 messages，注入若只加在这一次的 ``input_kwargs`` 里，下一轮就从历史
     里蒸发了——上一轮 payload 的第 n 条是「[漂移纠正]…」，这一轮第 n 条变成模型的回复，前缀从
     注入点起全部失配。实测一条 9 次模型调用的链，注入那一对的前缀稳定率掉到 0.9，且注入越多掉越狠。
@@ -177,7 +177,7 @@ def _is_rewrite(a: str, b: str) -> bool:
 
 
 def _closing_question(ctx: list[Msg]) -> str:
-    """取本轮 ``ask_user(closes_turn=True)`` 的问题原文；没有这种调用则返回空串（D2）。
+    """取本轮 ``ask_user(closes_turn=True)`` 的问题原文；没有这种调用则返回空串。
 
     判据取自 ``tool_call`` 的入参而不是工具返回：``ask_user`` 两种形态的返回都是一段文本，等回复
     那种回的是**用户说的话**，把它当最终答案就把用户自己的回复复读回去了。入参里的 ``closes_turn``
@@ -222,7 +222,7 @@ class HarnessAgentAdapter(MiddlewareBase):
         s = self._s
         messages: list[Msg] = list(input_kwargs.get("messages") or [])
 
-        # 终结直出（延迟治理 round2 刀 2）：shopping_summary 已产出面向用户的完整清单，此处再
+        # 终结直出：shopping_summary 已产出面向用户的完整清单，此处再
         # 唤起模型只会把同一份清单复述一遍（实测 729 tok / 7.5s，还多一道转录出错风险）。
         # **只认本轮真调过 shopping_summary 的情况**：``messages`` 是多轮上下文，续聊时里面还躺着
         # 上一轮的清单——第二轮用 chat_fallback 收尾（比如「帮我下单第一款」缺地址）若也走这里，
@@ -243,7 +243,7 @@ class HarnessAgentAdapter(MiddlewareBase):
         s.guard.terminal_nudge_retries = 0
         await monitor.report_assistant_call(step=str(s.guard.think_step))
 
-        # 检索合流后自动比价 + 精挑（round3 刀 2）：放在消费 inject 通道之前，它的结果与它触发的
+        # 检索合流后自动比价 + 精挑：放在消费 inject 通道之前，它的结果与它触发的
         # 收线通告 / 偏好注入一并随本轮 hint 落 state。
         await maybe_autopick(s)
 
@@ -411,7 +411,7 @@ class HarnessAgentAdapter(MiddlewareBase):
                 source = name
                 break
         if not reply:
-            # ask_user(closes_turn=True) 的收尾问句同理并回来（D2）：chips 只在当轮可点，刷新后
+            # ask_user(closes_turn=True) 的收尾问句同理并回来：chips 只在当轮可点，刷新后
             # 历史轮不再渲染选项卡，问题原文若不进 final_text，回看这一轮就只剩模型补的那句
             # 「你想看哪个方向？」，问的是什么没了。
             reply, source = _closing_question(ctx), "ask_user"
@@ -424,7 +424,7 @@ class HarnessAgentAdapter(MiddlewareBase):
             parts = [max(parts, key=len)]
         answer = "\n\n".join(parts)
         tail = _text_after(msg, source)
-        # 终结工具之后那段文本**默认当复述丢掉**（docstring 承诺过，此前没做到）。只有三条同时
+        # 终结工具之后那段文本**默认当复述丢掉**（docstring 承诺过的行为）。只有三条同时
         # 成立才认它是答案本体、换过去：工具产出很短（它长出一倍以上）、不是产出的子串、也不是
         # 产出的改写。方向仍是「宁可多带不丢答案」，只是不再让它顺手带上更早迭代的旁白。
         if (
@@ -594,7 +594,7 @@ class HarnessToolAdapter(ToolMiddlewareBase):
             _observe_tool(tool_name, time.monotonic() - start, "error")
             s.failed_tools.add(tool_name)
             meta = dict(last.metadata or {})
-            # 错误分级（阶段 4-3）：依赖挂了的那一档，提示优先于循环提示——LoopDetector 要撞够
+            # 错误分级：依赖挂了的那一档，提示优先于循环提示——LoopDetector 要撞够
             # 阈值才说话，而依赖不可用第一次就该停，等它撞满就是三次超时白等。record 仍照记
             # （硬撞同一个错误本来就是打转，计数不该因为换了条提示就断）。
             if meta.get(ERROR_CODE_KEY) == DEPENDENCY_DOWN_CODE:

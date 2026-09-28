@@ -7,7 +7,7 @@
    贴纸 own 0.30~0.60 vs 真笔袋 0.055，任何阈值要么放垃圾要么杀真品）+ summary 的 slot
    off-intent LLM 兜底（drop_pick_from_report 同步报缺）；
 ③ 总价混加裸价与到手价却声称「含税到手价」（bare_price 口径保险丝 + cost_item 补算）；
-④ 同批并行补搜被逃生门按到达顺序放行一半（批次原子化；按槽授权随 postfork 闸在 A4 删除）。
+④ 同批并行补搜被逃生门按到达顺序放行一半（批次原子化；按槽授权随 postfork 闸已删除）。
 """
 
 from __future__ import annotations

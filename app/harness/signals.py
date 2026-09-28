@@ -26,7 +26,7 @@ def _count_picks(result: str) -> int:
 
     不能拿「item_picker 被调用过」当作「picks 已就绪」：候选全超预算 / 全被排除词淘汰时，
     item_picker 返回的是 ``picks: []``。把「调过」当成 picks_count=1 会有两个后果——收线通告会在
-    一件都没精选出来时指路「直接 shopping_summary 收尾」（→ 空清单，正是典型的失败
+    一件都没精选出来时指路「直接 shopping_summary 收尾」（→ 空清单，正是常见的失败
     模式），且回退闸从此永远不再触发（picks_count 恒 >0）。
     """
     try:

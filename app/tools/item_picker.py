@@ -111,7 +111,7 @@ _W_SLOT_RERANK: float
 PICK_DISPLAY_CAP: int
 PICK_REL_SHOW_RATIO: float
 
-# 每批送 cross-encoder 的候选上限（round3 刀 3，30 → 15）：召回按向量分降序取头部送精排，
+# 每批送 cross-encoder 的候选上限（30 → 15）：召回按向量分降序取头部送精排，
 # 尾部在门生效时直接出局（它们本就是向量分最低的那截）。自动比价精挑（harness.autopick）
 # 后登记表按检索轮次累积（实测 8 次检索 = 240 件），不封顶的话每轮 rerank 延迟随池子线性涨。
 # 增量缓存照常：已按同一 query 打过分的候选不占额度。
@@ -156,7 +156,7 @@ def _load_params() -> None:
     # 亲和词本就是从标题词表里数出来的字面 token（canvas / nylon），再对它算 embedding 相似度
     # 是拿弱证据放大弱证据。
     #
-    # **0.2 的来历（诚实标注：调出来的，不是消融标定的）**：初版取 0.5，真实链路 A/B 打脸——25 件短袖
+    # **0.2 的来历（调出来的，不是消融标定的）**：初版取 0.5，真实链路 A/B 打脸——25 件短袖
     # 真候选、B 组收藏 2 件亚麻，结果 7 件亚麻款霸占前 7，一件 3.8 分的压过了 4.6 分的非亚麻款。因为
     # 一个亲和命中(+0.5)几乎等于评分项拉满(_W_RATING×1.0=0.6)：弱证据事实上成了主导排序因子，越过了
     # 「同等条件下才上浮」的设计意图。0.2 的量级 ≈ 评分差 0.33 分（0.2÷0.6×1.0×5）——够在其它条件接近
@@ -180,7 +180,7 @@ def _load_params() -> None:
     # 放垃圾要么杀真品。垃圾占槽的最终兜底在 shopping_summary 的 slot off-intent（LLM 带槽位
     # 语境判，摘除后按缺货报）。若未来语料/模型换代想再试门，开这个 env 前先重跑标定。
     #
-    # **FLOOR 与 reranker 权重强耦合，换模型必须重标（M22 实测）。** 用 ESCI 四档标注对
+    # **FLOOR 与 reranker 权重强耦合，换模型必须重标（reranker 精调实测）。** 用 ESCI 四档标注对
     # （calib_pairs.jsonl，各档 2000 条）标出来的「误杀正例 E / 挡住无关项 I」：
     #
     #   现成 BAAI/bge-reranker-v2-m3 + 0.20  →  误杀 38.5% / 挡住 88.6%   ← 当前线上
@@ -189,10 +189,10 @@ def _load_params() -> None:
     #
     # ① **纯 listwise 训练会破坏绝对分数校准**（r3 分布从跨满 0~1 压到 .17~.85，真实候选低于
     #    .2 的比例从 58.9% 掉到 11.7%，门等于没开）；联合 pointwise BCE 能把校准拉回来（r6）。
-    # ② **这道门不要换自训模型**（M22 定论）。同等误杀率下 r6 只挡住 81.8%、原版 88.6%，
+    # ② **这道门不要换自训模型**（reranker 精调定论）。同等误杀率下 r6 只挡住 81.8%、原版 88.6%，
     #    而真实 case 上差距远不止于此：query="backpack"、真实商品文本下，原版给真背包 .5951 /
     #    刺绣贴片 .0303 / 手提袋 .0581，r6 给 .3512 / .3609 / .3352——**三条挤在一起且排序反转**。
-    #    根因：M22 的训练负例全采自 e15 top-500（同品类候选），模型学的是「同品类内细排」，
+    #    根因：reranker 精调的训练负例全采自 e15 top-500（同品类候选），模型学的是「同品类内细排」，
     #    跨品类判别信号被稀释；而这道门要的恰恰是跨品类判别。离线 ndcg@8 +26% 说的是前者。
     #    **排序腿和判别腿要的不是一回事**——线上 rerank 分数的三个消费点（本门、槽内逐出、
     #    展示相对门）全是判别用途，item_search 有意不做精排，所以自训模型的排序增益在当前
@@ -263,7 +263,7 @@ class ItemPickerOutput(BaseModel):
             payload["offcat_count"] = self.offcat_count
         # picks 回显**不截标题**：picks 从整池（单平台 30 条）精排而来，模型在 item_search 渲染里
         # 只见过头部 RENDER_CAP 条；截短标题会让它为没见过全名的商品写理由 → 去「核实」白搜一轮
-        # （A0-3 q_backpack 实测）。到手价只留 landed_usd：运费 / 关税 / 重量 / 精排分是工具内部量，
+        # （q_backpack 实测）。到手价只留 landed_usd：运费 / 关税 / 重量 / 精排分是工具内部量，
         # 写理由用不上，收尾按 id hydrate 全量。
         payload["picks"] = compact_candidates(
             self.picks,
@@ -371,7 +371,7 @@ async def _category_relevance(
     ① query 只用干净品类词——套装轮 = 槽 keywords（:func:`slot_query`），普通轮 = P_t 的英文
        品类 **+ must_have 硬约束词**；**绝不拼 prefer 偏好词**，拼了实测排序反转。
 
-       ``must_terms`` 是 M22 加的：离线在 ESCI 上同分母实测，「品类 + 约束关键词」形态比
+       ``must_terms`` 是 reranker 精调加的：离线在 ESCI 上同分母实测，「品类 + 约束关键词」形态比
        「纯品类词」多 +3.10pt vs +0.59pt（recall@8，n=868）——单个品类词把 cross-encoder
        降级成了品类分类器，交叉注意力那点本事全浪费了。传进来的必须是 :func:`_split_specs`
        之后的**普通词**（数值规格另有专道、且原方案明确数值不该进 reranker），
@@ -500,7 +500,7 @@ async def _prepare_inputs(
     """① 入参归一：模型本轮传的词 + 会话记忆 → 归一成英文、拆出数值规格、定下本轮预算。"""
     # 会话级约束的**唯一**入口：本轮 P_t（用户亲口说的「不要 X」）+ 收藏亲和，在 assemble 里
     # 装配一次（见其模块 docstring）。这里只负责把它和模型本轮传的词并起来。
-    # **长期记忆不在这条路上**（M4）：它每轮注入给模型，由模型写进本函数的 exclude_keywords /
+    # **长期记忆不在这条路上**：它每轮注入给模型，由模型写进本函数的 exclude_keywords /
     # must_have 等入参——所以下面这些词表里凡是来自长期记忆的，都是模型显式传进来的。
     mem = await assemble(get_user_id() or "")
     # **匹配词一律归一成英文**（normalize_terms）：商品库是纯英文的（实测 amazon 样本 300 条标题
@@ -533,7 +533,7 @@ async def _prepare_inputs(
     # miss = 补搜轮把所有候选重新打一遍分，白付 reranker 往返。
     #
     # 所以 rerank 那一路只吃**模型显式传的 must_have**（它是模型从用户原话里提的硬约束）。
-    # 用户没给硬约束时 query 退化成纯品类词，那是正确的失效方向——M22 那 +3.10pt 的收益来自
+    # 用户没给硬约束时 query 退化成纯品类词，那是正确的失效方向——reranker 精调那 +3.10pt 的收益来自
     # ESCI 里用户自己写的规格词（"16 inch laptop bag"），本就不该由 LLM 现编的偏好来兑现。
     hard_must, _ = _split_specs(normalize_terms(_merge_terms(must_have)))
     prefer, prefer_specs = _split_specs(normalize_terms(_merge_terms(prefer_keywords)))
@@ -543,7 +543,7 @@ async def _prepare_inputs(
     affinity = [
         t for t in normalize_terms(_merge_terms(mem.affinity)) if t not in prefer and t not in must
     ]
-    # 「长期记忆本轮如何影响了结果」不再由这里上报（M4 删 report_memory_applied）：记忆生效的
+    # 「长期记忆本轮如何影响了结果」不再由这里上报（report_memory_applied 已删）：记忆生效的
     # 唯一形态已经是**模型写进入参**，而入参本来就随 tool_start 事件完整上报给前端。原来那个
     # 事件报的是系统侧悄悄加的词，那条腿没了，事件恒空。
     #
@@ -968,7 +968,7 @@ async def _report_picks(
         "item_picker",
         picked=len(out.picks),
         excluded=len(out.excluded),
-        # 会话级 P_t 本轮贡献的排除 / 减分词数（长期记忆那腿已随 M4 删，不再有系统侧加的词）
+        # 会话级 P_t 本轮贡献的排除 / 减分词数（长期记忆那腿已已删，不再有系统侧加的词）
         session_excluded=len(inputs.mem.exclude),
         session_attenuated=len(inputs.mem.penalty),
         semantic=bool(sem.match or sem.hard or sem.penalty),  # 走了语义打分（论文式6/8）

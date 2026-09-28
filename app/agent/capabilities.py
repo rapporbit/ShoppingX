@@ -1,12 +1,12 @@
-"""fallback 目标的能力门（阶段 2 第 3 条，**收窄版**）。
+"""fallback 目标的能力门（**收窄版**）。
 
 ## 为什么不是计划原文那张 yaml 矩阵
 
 计划写的是「每个 provider 一份 yaml（cache_control / enable_thinking / tool_choice / 流式
 tool call / 存根），fallback 只允许跳到全绿的目标」。落地时收窄成了现在这样，三条理由：
 
-1. **那张表判的是「没报 400」，判不了语义生效。** spike（`docs/plans/spike-litellm-2026-09-20.md`
-   §2.3 标注 1）自己承认：cache_control 两家都「收下」，但 ``cached_tokens`` 全是 0——表里最贵
+1. **那张表判的是「没报 400」，判不了语义生效。** spike 实测
+   自己承认：cache_control 两家都「收下」，但 ``cached_tokens`` 全是 0——表里最贵
    的一列恰恰是这张表证明不了的。
 2. **静态表会过期，过期的表比没有表更危险**：它给「已验证」的假象，而供应商改版不会通知你改 yaml。
 3. **五列全绿是错的阈值。** cache_control / enable_thinking / 流式不支持的后果是变贵、变慢、

@@ -3,7 +3,7 @@
 目的不是训出模型，是拿到「这套配置在这张卡上到底占多少显存、跑多快」的实测数字：
 估算能给出量级，但估算不是证据，显存够不够、MFU 多少，只有真跑过才知道。
 
-**自包含**：不 import 本仓库的 `app` 包——GPU 机上没有这套依赖（M21 已经这么分过一次工，
+**自包含**：不 import 本仓库的 `app` 包——GPU 机上没有这套依赖（embedding 精调已经这么分过一次工，
 主仓不装 torch/ms-swift，训练环境另建）。只需要 torch / transformers / peft，数据是一个
 jsonl（`build_planner_sft.py` 的产物），拷过去即可。
 

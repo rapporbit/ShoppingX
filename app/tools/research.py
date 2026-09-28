@@ -242,7 +242,7 @@ async def research(targets: StrListArg, aspects: StrListArg | None = None) -> Re
         notes.append(f"已丢弃 {dropped} 条出处对不上本次搜索结果的说法。")
     if not findings and not notes:
         # 搜到了、归纳也没抛错，但模型回了空 findings：这是**静默失败**——主环收到一个各字段
-        # 都合法的空壳，note 还是空的，只能当成「查了但没结论」自己猜下一步。C2/C3 快照验收
+        # 都合法的空壳，note 还是空的，只能当成「查了但没结论」自己猜下一步。快照验收
         # 实测（r02_versus 首次调用）就撞上这个：白花 2 条额度，模型原样重调一次才拿到结果。
         # 空 findings 必须带出路，与 _drop_ungrounded / 降级那两条 note 同档。
         notes.append(

@@ -1,6 +1,6 @@
-"""SQLite → MySQL 一次性搬数（后端优化阶段 1 · 条 9）。
+"""SQLite → MySQL 一次性搬数。
 
-gcjp 那份 ``var/globex.db`` 里有真实注册用户、会话、收藏与账单流水，切到 MySQL 不能重来一遍。
+线上 那份 ``var/globex.db`` 里有真实注册用户、会话、收藏与账单流水，切到 MySQL 不能重来一遍。
 本脚本把它整库搬过去，**停写窗口内跑一次**，跑完逐表核对行数，对不上就退出码 1。
 
 **为什么按 SQLAlchemy 的表元数据搬，而不是 ``.dump`` 出 SQL 再灌。** SQLite 的 SQL 方言与 MySQL

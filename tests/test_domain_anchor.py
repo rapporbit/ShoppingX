@@ -75,7 +75,7 @@ async def test_anchor_agreement_enforces_gate(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_must_terms_join_rerank_query(monkeypatch) -> None:
-    """普通轮的 rerank query = 品类 + must 硬约束词（M22）。
+    """普通轮的 rerank query = 品类 + must 硬约束词。
 
     单个品类词把 cross-encoder 降级成品类分类器——离线在 ESCI 上同分母实测，「品类 + 约束
     关键词」比「纯品类词」多 +3.10pt vs +0.59pt（recall@8）。这条锁住拼接行为，也锁住
@@ -105,7 +105,7 @@ async def test_must_terms_join_rerank_query(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_no_must_terms_falls_back_to_category(monkeypatch) -> None:
-    """没有 must（多数轮次的常态）→ 退回纯品类词，行为与 M22 之前一致。"""
+    """没有 must（多数轮次的常态）→ 退回纯品类词，行为与 reranker 精调之前一致。"""
     import app.tools.item_picker as ip
     from app.api.context import set_original_query, set_turn_constraints
     from app.memory.turn_constraints import TurnConstraints

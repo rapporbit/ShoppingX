@@ -1,6 +1,6 @@
 """给 reranker 挖训练负例：**按 e15 的排名分层采样**，而不是只取最像的那几个。
 
-**为什么不复用 M21 挖的那批（``neg_ann_candidates.jsonl``）：** 那批是给 embedding 挖的，
+**为什么不复用 embedding 精调挖的那批（``neg_ann_candidates.jsonl``）：** 那批是给 embedding 挖的，
 只取 top-25，攻的是「近义干扰抑制」。这次要治的病完全不同——体检实测现成 reranker 把候选池
 从 20 加深到 1000，池里正例占比从 .33 涨到 .89，而 recall@8 从 .2426 只动到 .2437，**深池里
 的正例它一个都捞不出来**。要教会的正是「排在 200 名开外的正例长什么样」，负例就必须覆盖到
@@ -15,7 +15,7 @@
 **ESCI 标注的 S/C 一律直接入选，且不过假负闸。** 人工标注优先于模型判据：S（可替代但不是
 要的那个）和 C（互补配件）正是 cross-encoder 最容易打高分的东西，交给闸去筛，最有价值的
 hard negative 会被闸得一个不剩。而未标注的采样候选反过来——ESCI 只标了我们库的 9.2%，深池里
-大量未标注的真相关商品会被误当负例（M21 实测闸掉率 52.24%），那些必须过闸。
+大量未标注的真相关商品会被误当负例（embedding 精调实测闸掉率 52.24%），那些必须过闸。
 
 输出只到「候选 + 文本」为止，闸在 GPU 上跑（``score_negatives.py``），组装在
 ``build_rerank_train.py``。
@@ -141,7 +141,7 @@ def main() -> None:
     ap.add_argument(
         "--input",
         default=str(TRAIN_PATH),
-        help="训练 query 源。换 synth_train.jsonl 即为 M21 那批 LLM 合成 query（50% 中文）",
+        help="训练 query 源。换 synth_train.jsonl 即为那批 LLM 合成 query（50% 中文）",
     )
     ap.add_argument("--out", default=str(OUT_PATH))
     args = ap.parse_args()

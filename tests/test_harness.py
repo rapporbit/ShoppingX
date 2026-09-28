@@ -123,7 +123,7 @@ class TestHarnessMiddleware:
     def test_hook_points_complete(self) -> None:
         assert len(HOOK_POINTS) == 6
         assert "on_session_end" in HOOK_POINTS
-        # 批 4-2 加的装配期钩子：不属于任何一次模型 / 工具调用，跑在 agents._assemble 里。
+        # 加的装配期钩子：不属于任何一次模型 / 工具调用，跑在 agents._assemble 里。
         assert "on_system_prompt" in HOOK_POINTS
 
 
@@ -804,7 +804,7 @@ async def _drive_tool(mw, name: str, handler, args: dict | None = None):
 
 
 class TestTerminalDirectClose:
-    """终结直出（延迟归因 round2 刀2）：shopping_summary 执行后不再唤起模型复述清单。"""
+    """终结直出：shopping_summary 执行后不再唤起模型复述清单。"""
 
     @pytest.mark.asyncio
     async def test_summary_result_short_circuits_model(self, clean_phase) -> None:
@@ -1178,7 +1178,7 @@ class TestPhaseGateTerminalExemption:
 class TestToolErrorNotProgress:
     """``state=ERROR`` 的工具结果（入参校验失败转成的）不算执行成功。
 
-    gcjp 会话 d0724e95（2026-07-16）：qwen3.5-flash 把 list 参数吐成 JSON 字符串，
+    线上会话 d0724e95（2026-07-16）：qwen3.5-flash 把 list 参数吐成 JSON 字符串，
     item_picker 同参连挂 4 次，全被记成「已精挑」——phase_check 底线 3 判据被污染放行
     空清单收尾，收线通告还缀在错误消息尾部教唆模型跳 shopping_summary。
     """
@@ -1530,7 +1530,7 @@ class TestOutputGuardOrdering:
 
         # ② 编排层的顺序：final_text 先于三条消费通路。
         # **只在 run_agent 的函数体里找**：模块里别的函数（如整轮缓存的命中回放）同样会调
-        # append_turn / report_task_result，按全文首次出现来比就会比到它们头上（批2-5 撞过）。
+        # append_turn / report_task_result，按全文首次出现来比就会比到它们头上（）。
         text = open(orch.__file__, encoding="utf-8").read()
         text = text[text.index("async def run_agent(") :]
         final_text = text.index("final_text = (final_msg.get_text_content()")
@@ -1568,7 +1568,7 @@ class TestGateOrderingContracts:
 
 
 # ============================================================
-# 长期记忆注入：planner 之后，给 tier-one 那批（M2）
+# 长期记忆注入：planner 之后，给 tier-one 那批
 # ============================================================
 
 
@@ -1601,7 +1601,7 @@ class TestPreferenceInject:
 
     注入点仍在 planner 之后：它每轮都变，混进 system prompt 前缀会把跨轮的 prompt cache 打断。
     改的是选条口径——域过滤当年是为了挡住 ``memory.assemble`` 的硬淘汰腿（跨域偏好被模型转述进
-    item_picker 就能杀商品）；M2 起记忆只经上下文生效，跨品类硬规则漏掉的代价反而更大。
+    item_picker 就能杀商品）；现在记忆只经上下文生效，跨品类硬规则漏掉的代价反而更大。
     """
 
     async def test_injects_tier_one_facts_after_planner(self) -> None:
@@ -1679,7 +1679,7 @@ class TestBreakerParamErrorExemption:
             reset_tool_breakers()
 
     async def test_exemption_holds_for_the_shared_breaker_too(self, clean_phase) -> None:
-        """批2-5：共享熔断开着时，豁免必须一起生效——否则一个会话的畸形参数会把这个工具对
+        """共享熔断开着时，豁免必须一起生效——否则一个会话的畸形参数会把这个工具对
         **全部副本**熔断，比进程内那次严重得多。判据仍只有 adapter 里那一条 if。"""
         from pydantic import BaseModel, ValidationError
 
@@ -1970,7 +1970,7 @@ async def test_tool_result_pruner_drops_oldest_and_keeps_recent() -> None:
 
 @pytest.mark.asyncio
 async def test_tool_result_pruner_noop_below_threshold() -> None:
-    """没超阈值就一个字都不动——正常一轮（round3 基线输入 22.5k）不该触发它。"""
+    """没超阈值就一个字都不动——正常一轮（基线输入 22.5k）不该触发它。"""
     from agentscope.message import Msg, ToolResultBlock
 
     import app.harness.hooks.context_shaping as cs

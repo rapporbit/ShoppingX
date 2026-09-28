@@ -117,7 +117,7 @@ def get_gateway_throttle() -> GatewayThrottle:
 
     共享是刻意的：网关的 RPM 是按 API key 算的，分开各建各的池子等于把限流让给运气。
 
-    **默认 20 而不是 4**（阶段 2 第 5 条）：4 是单进程时代用来代替限流的——多副本一拆它既挡不住
+    **默认 20 而不是 4**：4 是单进程时代用来代替限流的——多副本一拆它既挡不住
     供应商的配额（N 个进程 × 4），又把本进程的吞吐锁死在 4 条在飞请求上。限流的活现在归
     :mod:`app.agent.token_bucket`（跨副本的 RPM/TPM 双桶）；这里只剩「一个进程别把自己的事件
     循环塞爆」这一件事，20 是给它的。**全局在飞数不做**：RPM 桶作代理——按 RPM 限住起点速率，
@@ -226,7 +226,7 @@ def build_model(
     ``max_retries`` 交给模型自己的重试环（``ChatModelBase.__call__``），Agent 层的
     ``ModelConfig.max_retries`` 另设 0，避免两层重试相乘——同一个 429 被试 9 次那种。
 
-    **出口有两条路**（阶段 2 第 2 条）：默认走 LiteLLM Router（模型名可带 ``provider/`` 前缀，
+    **出口有两条路**：默认走 LiteLLM Router（模型名可带 ``provider/`` 前缀，
     跨供应商 fallback 才成立），``LLM_PROVIDER_ROUTER=0`` 回退直连。没配任何 ``PROVIDER_*``
     时两条路等价——Router 只有一个指向 ``OPENAI_*`` 的 deployment。
 
@@ -262,7 +262,7 @@ def _fallback_refs(role: str) -> list[str]:
     其余档（planner / judge / fast…）都是链路外的一次性调用，失败重来一轮的代价远小于
     「悄悄换到另一家、结构化输出的形状跟着变」。
 
-    能力门（阶段 2 第 3 条）只拦一件事：目标调不了工具。它是**否决门不是放行门**——查不到
+    能力门只拦一件事：目标调不了工具。它是**否决门不是放行门**——查不到
     的目标照样放行，理由见 :mod:`app.agent.capabilities`。
     """
     if role != "main":
@@ -285,7 +285,7 @@ def get_llm() -> ThrottledChatModel:
 def get_fast_llm() -> ThrottledChatModel:
     """快档（AgentScope 侧），对应 :func:`get_fast_llm`——同款模型只关思考，不换弱模型。
 
-    L0 的 S2 spike 实测：同一条 planner 请求，主档 12.7~17.2s，关思考后 4.5~5.1s，
+    spike 实测：同一条 planner 请求，主档 12.7~17.2s，关思考后 4.5~5.1s，
     结构化结果质量无差。这一档的收益是实打实的解码时间，不是玄学。
     """
     return build_model(
@@ -304,8 +304,8 @@ def get_planner_llm() -> ThrottledChatModel:
     messages 里），换模型名不会打断主 loop 的前缀缓存——主 loop 内换名会，所以那里只能切
     thinking。链路外的调用是本仓做模型组合的唯一空间。
 
-    选型依据（2026-09-09，dev92 + `app/eval/planner_reward`，四个候选的完整数据见
-    `docs/plans/baseline-artifacts/planner_model_eval.json`）。planner 占一次任务墙钟约 19%，
+    选型依据（2026-09-09，dev92 + `app/eval/planner_reward`，四个候选）。
+    planner 占一次任务墙钟约 19%，
     是仅次于 shopping_summary 的第二大单点。
 
     | 模型 | reward | 延迟中位 | 该弃权→真弃权 |
@@ -363,7 +363,7 @@ def get_lite_llm() -> ThrottledChatModel:
 # 读同一份取值。此前这条口径散在两处——基座在 agents.py 写死 ``get_llm()``，而
 # ``hooks/reasoning_boost`` 的整个前提是「基座是快档、我只顶第一轮」。两处一脱钩，boost 就
 # 成了「把 reasoning 换成 reasoning」的空操作，主 loop 每轮都在付 thinking 解码，且没有任何
-# 测试会红（见 docs/plans/agent系统审查报告-2026-09-09.md P0-1）。同一处读、同一处用，
+# 测试会红。同一处读、同一处用，
 # 那类静默失效在结构上就不可能再发生。
 TIERS = ("reasoning", "fast", "lite")
 
@@ -436,7 +436,7 @@ def build_judge_llm(temperature: float) -> ThrottledChatModel:
     """判官档、**温度由调用方指定**（离线标注 / 多票投票用），AgentScope 侧。
 
     与 :func:`get_judge_llm` 的区别只在温度来源：那个钉在 env 上（0.0，线上评测的尺子
-    不许自己抖），而 S0-2 的 golden 标注**要的恰恰是三档不同温度**——温度是三票投票的扰动源，
+    不许自己抖），而 golden 标注**要的恰恰是三档不同温度**——温度是三票投票的扰动源，
     三票同温等于把同一次调用重复三遍，一致率虚高、分歧根本暴露不出来。
 
     刻意不加 ``lru_cache``：温度是入参，缓存键会随之膨胀，而这类离线脚本一轮只建三个模型。

@@ -10,11 +10,11 @@
 
 这两列分数的差，就是「线上 rerank 的 query 形态值不值得改」的全部证据。
 
-**模型固定为 ``BAAI/bge-reranker-v2-m3``**：它既是线上 siliconflow 跑的那个，也是 M21 假负闸
+**模型固定为 ``BAAI/bge-reranker-v2-m3``**：它既是线上 siliconflow 跑的那个，也是 embedding 假负闸
 用过的那个（``score_negatives.py``）。体检的对照锚点必须是**线上现状**，不是某个更强的模型——
 否则量出来的提升里，分不清哪些来自换模型、哪些来自换用法。
 
-用法（在 huzhou 上，候选文件先 scp 过去）::
+用法（在 GPU 机 上，候选文件先 scp 过去）::
 
     export HF_ENDPOINT=https://hf-mirror.com
     CUDA_VISIBLE_DEVICES=5 python rerank_candidates.py \\

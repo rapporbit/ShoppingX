@@ -1,5 +1,5 @@
 #!/bin/bash
-# 单次 BGE-M3 对比精调。跑在 GPU 机器（huzhou / A100），不是本机。
+# 单次 BGE-M3 对比精调。跑在 GPU 机器（GPU 机 / A100），不是本机。
 #
 # 用法: VER=v1x TAG=e5 EPOCHS=2 LR=5e-6 TEMP=0.05 ./train_one.sh
 #

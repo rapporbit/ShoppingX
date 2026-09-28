@@ -1,16 +1,16 @@
-"""M9 示例：主 AgentLoop 合龙 —— 一条 query 从入口跑到收尾。
+"""示例：主 AgentLoop 合龙 —— 一条 query 从入口跑到收尾。
 
-这是 ShoppingX 的「装配车间」演示：把九工具 + dispatch fork + 压缩 + 记忆 + 监控串成主链路，
-跑 ROADMAP M9 的验收 query「便宜抗造旅行三件套，预算 300，不要塑料，喜欢小众」，期望全链路：
+这是 ShoppingX 的「装配车间」示例：把九工具 + dispatch fork + 压缩 + 记忆 + 监控串成主链路，
+跑一条典型 query「便宜抗造旅行三件套，预算 300，不要塑料，喜欢小众」，期望全链路：
 
     planner → 跨平台 fork item_search → price_compare → shipping_calc → item_picker
       → shopping_summary（终结性，正常终止）
 
 为了让「Agent 在做什么」肉眼可见，这里给全局 ConnectionManager 挂一条**假连接**，把 AGUI
 事件流实时收下来按序打印（session_created / tool_start / fork / tool_end / … / task_result）
-——这正是 M10 前端要消费的同一条事件流。
+——这正是前端消费的同一条事件流。
 
-跑第二轮还演示长期记忆闭环：第一轮 shopping_summary 沉淀的新偏好（如「不要塑料」），第二轮
+跑第二轮还展示长期记忆闭环：第一轮 shopping_summary 沉淀的新偏好（如「不要塑料」），第二轮
 同一 user_id 起来时会被注入 system prompt，无需用户重复说。
 
 需要真实 LLM（.env 里的 LLM_MAIN / OPENAI_*）。未配置则优雅跳过，不报错。

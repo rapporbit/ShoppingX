@@ -1,6 +1,6 @@
 """在 GPU 机器上跑 cross-encoder，给 ANN 挖出的候选打分——即「假负样本闸」。
 
-**跑在 huzhou（A100），不是本机。** 本机只有 Qdrant 和数据，没有卡；97 万对走 API 太贵。
+**跑在 GPU 机（A100），不是本机。** 本机只有 Qdrant 和数据，没有卡；97 万对走 API 太贵。
 
 两个子命令：
 
@@ -12,7 +12,7 @@
 ``score``  用定好的阈值给候选打分：高于阈值 → ``drop_false_neg``（疑似真相关但没被标注，不能
 当负例）；否则 ``keep``。
 
-用法（在 huzhou 上）::
+用法（在 GPU 机 上）::
 
     export HF_ENDPOINT=https://hf-mirror.com   # huggingface.co 不通，镜像通
     CUDA_VISIBLE_DEVICES=5 python score_negatives.py calibrate --pairs calib_pairs.jsonl

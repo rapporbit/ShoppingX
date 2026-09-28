@@ -31,7 +31,7 @@ import type {
 } from "../types";
 
 // 任务运行状态：idle 未开始 / connecting 正在建 WS / running 任务进行中 / done 收尾 / cancelled / error /
-// interrupted（服务端关停掐断这一轮，见后端 worker 阶段 1-3——与 cancelled 分开是因为用户的下一步不同：
+// interrupted（服务端关停掐断这一轮，见后端 worker——与 cancelled 分开是因为用户的下一步不同：
 // 取消是他自己要停，中断则需要他重发）。
 export type TaskStatus =
   | "idle"
@@ -73,7 +73,7 @@ export type Turn = {
   clarificationOptions?: string[] | null;
   clarificationMultiSelect?: boolean;
   clarificationPreselected?: string[] | null;
-  // ask_user(closes_turn=true)：这一问是本轮的收尾，后端没在等回复（D2）。选项因此是「下一步」
+  // ask_user(closes_turn=true)：这一问是本轮的收尾，后端没在等回复。选项因此是「下一步」
   // chips——点一下要**发起新一轮任务**，不能往 WS 上打 clarification_response，那头没有 waiter，
   // 打过去会被拒收、用户点了什么都不发生。同理本轮状态照常走到 done，不能停在 waiting。
   clarificationClosesTurn?: boolean;
@@ -92,7 +92,7 @@ const TERMINAL: ReadonlySet<TaskStatus> = new Set(["done", "cancelled", "interru
 // 它只是「上次看的是哪段」这个**光标**，不是数据本身——数据在后端，按账号归属。key 定义在 auth.ts，
 // 因为登出时必须连它一起清（否则下一个登录的人会指着上一个人的会话，见那边的注释）。
 
-// 侧栏的会话清单从 GET /api/sessions 来（M16）。改造前它纯活在 localStorage 里：换台设备、清个
+// 侧栏的会话清单从 GET /api/sessions 来。改造前它纯活在 localStorage 里：换台设备、清个
 // 缓存，后端数据明明还在，用户却再也找不回自己的对话。现在清单按 token 里的身份从归属表查，
 // 登录到哪台机器都是同一份。
 function toSessionMeta(s: ApiSessionMeta): SessionMeta {
@@ -110,7 +110,7 @@ function newId(): string {
 
 // 同源 WS 地址：开发期 location.host 是 :5173，Vite 把 /ws 代理到后端 :8000。
 // 断线重连时带 last_event_id（D 块），后端据此从 Redis Stream 补发断开窗口的缺口事件。
-// token 走 query（M16）：浏览器的 WebSocket API 不让设自定义请求头，Authorization 挂不上去，
+// token 走 query：浏览器的 WebSocket API 不让设自定义请求头，Authorization 挂不上去，
 // 只能挂 URL 上——后端在握手前读它验属主（server._ws_authorized）。代价是 URL 更容易被记进各类
 // 访问日志，所以这枚 token 是有过期时间的短期凭证（见 auth.ts 的说明）。
 function wsUrl(threadId: string, lastEventId?: string | null): string {
@@ -473,7 +473,7 @@ export function useShoppingXTask() {
         return;
       }
 
-      // 选购指南卡（S3）：present_guide 一收尾就推，画成一张分节卡。**不进 events**——它是结果
+      // 选购指南卡（GRPO）：present_guide 一收尾就推，画成一张分节卡。**不进 events**——它是结果
       // 本身，混进 ActivityFeed 会多出一行没有工具名的脏行（与 items_preview 同一待遇）。
       if (evt.event === "guide_ready") {
         const guide = evt.data.guide as GuideData | undefined;

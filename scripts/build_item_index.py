@@ -1,6 +1,6 @@
 """从干净商品表构建 Qdrant dense 召回库（BGE-M3 dense + payload）。
 
-对齐 `docs/plans/召回引擎选型思路.md`：召回 = dense + filter（无 sparse 打分腿，§4）。
+召回 = dense + filter（无 sparse 打分腿）。
 **主动更正原方案**：召回从 Faiss 升级到 Qdrant（理由见 `qdrant_store.py`）。流程：
 读干净分平台表 → 拼 embed_text（title|brand|尾3类|描述边界截断 + 轻量归一）→ BGE-M3 编码
 dense → 连同 payload upsert 进 Qdrant 单 collection。

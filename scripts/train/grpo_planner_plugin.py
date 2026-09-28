@@ -1,7 +1,7 @@
 """ms-swift 的 GRPO reward 插件：把 `rollout_env` 接到 swift 的训练循环上。
 
 这一层**只做适配，不含任何评分逻辑**——分怎么打全在 `app/eval/planner_reward.py`，检索怎么跑
-全在 `rollout_env.py`。理由和 S0-5 一样：reward 是决定梯度方向的东西，一旦在框架适配层里
+全在 `rollout_env.py`。理由和 reward 标定一样：reward 是决定梯度方向的东西，一旦在框架适配层里
 掺私货，换个框架（verl / 自研 loop）就得重新验一遍它还准不准。
 
 swift 侧约定（4.4.2）：`--external_plugins <本文件> --reward_funcs planner_reward`。

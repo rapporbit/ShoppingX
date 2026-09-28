@@ -1,4 +1,4 @@
-"""round3 刀 2：检索合流后自动比价 + 精挑（app/harness/autopick.py）。
+"""检索合流后自动比价 + 精挑（app/harness/autopick.py）。
 
 测的是机制：武装 / 解除的触发条件、自动执行后控制面状态与模型亲手调等价、套装轮与关开关
 两条豁免。真实 LLM 不参与（price_compare / item_picker 都是本地计算 + 本地回退 rerank）。
@@ -79,7 +79,7 @@ async def test_autopick_skips_bundle_turn_and_when_disabled(monkeypatch: pytest.
 
 @pytest.mark.asyncio
 async def test_rerank_capped_to_top_k_by_vector_score(monkeypatch: pytest.MonkeyPatch) -> None:
-    """round3 刀 3：每批只把向量分最高的 PICK_RERANK_K 件送 cross-encoder，额度外在门生效时出局。"""
+    """每批只把向量分最高的 PICK_RERANK_K 件送 cross-encoder，额度外在门生效时出局。"""
     import app.tools.item_picker as mod
     from app.api.context import set_turn_constraints
     from app.memory.turn_constraints import TurnConstraints

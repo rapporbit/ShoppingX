@@ -4,7 +4,7 @@
 而且五次是五个进程、五份 KV，谁也不保证显存碎片一样。这里一次加载基座、循环换 `LoRARequest`，
 五个模型吃同一个引擎、同一批 prompt、同一个 reward 链路——**对照的唯一变量就是权重本身**。
 
-口径与 S3 的 dev 评测逐项对齐（greedy / temperature 0 / 同一份 planner_grpo_*.jsonl），
+口径与 GRPO 的 dev 评测逐项对齐（greedy / temperature 0 / 同一份 planner_grpo_*.jsonl），
 所以这里出的数可以直接和 SFT 0.7901、r3 0.8134、r5 0.8302 并排放。
 
 用法：

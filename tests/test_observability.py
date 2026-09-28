@@ -93,7 +93,7 @@ def test_thread_scope_binds_log_context() -> None:
 
 
 def test_thread_scope_binds_request_id_from_queue() -> None:
-    """worker 侧把队列消息带来的 request_id 绑回日志（阶段 4-5）。
+    """worker 侧把队列消息带来的 request_id 绑回日志。
 
     这是跨进程对账的落点：API 进程那几行和 worker 这一整轮，靠这一个字段才拼得起来。
     """

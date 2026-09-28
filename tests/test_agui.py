@@ -1,6 +1,6 @@
-"""M8 验收：AGUI 事件协议 + WebSocket 路由的确定性测试（不依赖真实 LLM / 真 WS 服务）。
+"""AGUI 事件协议 + WebSocket 路由的确定性测试（不依赖真实 LLM / 真 WS 服务）。
 
-覆盖 ROADMAP M8 验收点：
+覆盖：
 - ConnectionManager 按 thread_id 正确路由，未连接 thread 推送是 no-op
 - 重连场景按对象身份注销，不误删新连接
 - 推送失败的死连接被自动摘除

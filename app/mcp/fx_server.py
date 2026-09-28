@@ -1,4 +1,4 @@
-"""自建汇率 MCP server —— 主 Agent 消费的那个「外部 MCP」（A4 前是 SearchAgent）。
+"""自建汇率 MCP server —— 主 Agent 消费的那个「外部 MCP」（早先挂在 SearchAgent 上）。
 
     uv run python -m app.mcp.fx_server --port 8766
 
@@ -9,7 +9,7 @@
 ``MCP_SEARCH_URL`` 指过去即可，接线是同一套，见 ``app/agent/mcp_registry.py``。）
 
 **为什么挑「汇率」这个能力**：当初是给只有 ``item_search`` / ``web_search`` 的 SearchAgent
-补一块折算美元的能力；A4 删掉 SearchAgent 后改挂主 Agent，主要价值变成验证「本仓能吃外部
+补一块折算美元的能力；删掉 SearchAgent 后改挂主 Agent，主要价值变成验证「本仓能吃外部
 MCP」这条通路。
 
 **只读**：两个工具都声明 ``readOnlyHint=True``。这不是文档说明——``agentscope.tool.MCPTool``
@@ -26,7 +26,7 @@ from mcp.types import ToolAnnotations
 
 from app.recall.fx import FX_TO_USD, UnknownCurrencyError, to_base
 
-MCP_SERVER_NAME = "globex-fx"
+MCP_SERVER_NAME = "shoppingx-fx"
 
 #: 消费侧 ``enable_tools`` 白名单要与这里逐字对上（见 ``app.agent.mcp_registry``）。
 FX_TOOL_NAMES: tuple[str, ...] = ("convert_currency", "list_currencies")
@@ -77,7 +77,7 @@ def list_currencies() -> dict:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="globex 汇率 MCP server（streamable HTTP）")
+    parser = argparse.ArgumentParser(description="ShoppingX 汇率 MCP server（streamable HTTP）")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8766)
     args = parser.parse_args()

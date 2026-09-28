@@ -1,6 +1,6 @@
-"""M3 验收：召回基础设施的确定性测试（不依赖真实 embedding / 不依赖 data/ 索引）。
+"""召回基础设施的确定性测试（不依赖真实 embedding / 不依赖 data/ 索引）。
 
-覆盖 ROADMAP M3 验收点（已升级到 Qdrant dense + filter）：
+覆盖（已升级到 Qdrant dense + filter）：
 - QdrantRecall.search 对样例 query 返回带 metadata 的候选（``:memory:`` 自建小库，自洽）
 - to_base 多币种归一正确
 另含 TowerClient（确定性 + 归一 + 双通道融合）与 duty/shipping 估算的边界。
@@ -125,7 +125,7 @@ async def test_recall_single_platform_filter() -> None:
 def test_recall_missing_collection_raises() -> None:
     """没建 collection 直接检索 → 报错，不静默返垃圾。
 
-    错误类型是 ``DependencyDown``（阶段 4-3）：collection 不存在严格说是配置问题而不是「服务挂
+    错误类型是 ``DependencyDown``：collection 不存在严格说是配置问题而不是「服务挂
     了」，但对这一轮请求来说两者后果相同——重试拿不到货。归到同一档，模型据此如实收尾，不会换
     着检索词撞三次。
     """
@@ -157,7 +157,7 @@ def _fresh_qdrant_breaker() -> Iterator[None]:
 def test_qdrant_breaker_stops_sending_after_threshold(
     monkeypatch: pytest.MonkeyPatch, _fresh_qdrant_breaker: None
 ) -> None:
-    """连续失败到阈值后不再发请求（阶段 4-4）。
+    """连续失败到阈值后不再发请求。
 
     测的是「有没有真的省掉那次往返」，不是「有没有抛错」——抛错在熔断前后都成立，只有请求
     计数能证明快速失败真的发生了。

@@ -14,11 +14,11 @@
 如果这时就把信号量还回去，并发上限形同虚设（N 个流可以同时挂着）。所以流式路径把 slot 一直
 持有到**生成器耗尽或被关闭**为止，见 :meth:`ThrottledChatModel._stream_holding_slot`。
 
-**断路器挂在同一层**（阶段 2 第 1 条，口径见 :mod:`app.agent.llm_breaker`）：闸在取 slot 之前，
+**断路器挂在同一层**（口径见 :mod:`app.agent.llm_breaker`）：闸在取 slot 之前，
 记账在调用/流结束之后，首 token 预算在第一片上。放这层是因为它和闸门问的是同一个问题的两半
 ——闸门管「发不发得出去」，断路器管「还值不值得发」。
 
-**令牌桶也在这一层**（阶段 2 第 4 条，见 :mod:`app.agent.token_bucket`）。它和上面那两个的分工
+**令牌桶也在这一层**（见 :mod:`app.agent.token_bucket`）。它和上面那两个的分工
 按「管谁」切：信号量管**本进程**同时在飞几条，桶管**所有副本**一分钟内总共发几条、烧多少 token。
 顺序是断路器 → 桶 → slot：前两道都是「先别发」的判断，占着并发位去做这种判断是浪费。
 """
@@ -53,7 +53,7 @@ def _usage_total(res: Any) -> int:
     """从 ``ChatResponse.usage`` 取「这次一共烧了多少 token」。取不到返回 0（= 不结算）。
 
     输入 + 输出都算：供应商的 TPM 限的是总量，不是只数输入。命中前缀缓存的那部分**照样计入**
-    ——按量付费档没有缓存折扣（计划 §4 第 6 条核过），按打折算会让桶比真实配额放得更宽。
+    ——按量付费档没有缓存折扣（核过），按打折算会让桶比真实配额放得更宽。
     """
     usage = getattr(res, "usage", None)
     if usage is None:
@@ -221,7 +221,7 @@ class ThrottledChatModel(OpenAIChatModel):
     async def _call_api(self, *args: Any, **kwargs: Any) -> Any:
         """每次**尝试**进来时重新打点首 token 预算的起点（重试的坑见 :class:`_Attempt`）。
 
-        顺带把本次请求的超时收到本轮 deadline 以内（阶段 4-2）。放在这一层是因为它**同时覆盖两条
+        顺带把本次请求的超时收到本轮 deadline 以内。放在这一层是因为它**同时覆盖两条
         出口路**：直连那条 openai SDK 认每次调用的 ``timeout``（盖过建客户端时的默认值），Router
         那条 ``_RouterCompletions.create`` 是 ``setdefault``，我们给了它就不再塞自己那份。
         """

@@ -323,7 +323,7 @@ class TestEvidenceTrace:
     def test_legacy_rules_json_without_evidence_field_still_loads(
         self, tmp_path, monkeypatch
     ) -> None:
-        """M14 写的旧 learned_rules.json 没有 evidence_trace 键，新代码必须照样读得出来。"""
+        """写的旧 learned_rules.json 没有 evidence_trace 键，新代码必须照样读得出来。"""
         from app.security import learned_rules as LR
 
         path = tmp_path / "learned_rules.json"

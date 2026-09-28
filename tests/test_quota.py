@@ -1,4 +1,4 @@
-"""M18 用户级 credit 配额：记账 / 周期 / 入口闸 / 单任务上限联动。
+"""用户级 credit 配额：记账 / 周期 / 入口闸 / 单任务上限联动。
 
 **这些用例真正在问的是：「一个人到底能不能烧穿账单」。** token_budget 只保证单次任务不失控，
 对「同一个人连发一百条合规 query」完全无感——本文件盯的就是那道跨会话的闸：账记不记得住（累加 /
@@ -98,7 +98,7 @@ async def test_period_rollover_resets(client: AsyncClient, monkeypatch: Any) -> 
 
 
 async def test_disabled_when_auth_off(client: AsyncClient, monkeypatch: Any) -> None:
-    """鉴权关闭（demo 模式）→ 不设闸：既不记账，也不拦任务，前端见 enabled=false 隐藏余额条。"""
+    """鉴权关闭（免鉴权模式）→ 不设闸：既不记账，也不拦任务，前端见 enabled=false 隐藏余额条。"""
     uid, headers = await _signup(client, "q-demo")
     monkeypatch.setenv("AUTH_ENABLED", "false")
 

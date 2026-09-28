@@ -1,9 +1,9 @@
 #!/bin/bash
-# M22 的 2×2 析因队列：把「分级 label」和「ApproxNDCG loss」两个因素分开量。
+# 的 2×2 析因队列：把「分级 label」和「ApproxNDCG loss」两个因素分开量。
 #
 #              CE loss              ApproxNDCG
 #   二值 label  r1（已跑，ms-swift）  r4
-#   分级 label  r3（ListNet）         r2 ← 原方案
+#   分级 label  r3（ListNet）         r2 ← Stage C
 #
 # 只跑 r2 的话，涨跌都归因不了。三组串行，每组训完立刻用同一份评测集打分，
 # 分数落盘等本地跑 eval_rerank.py——GPU 只出分、口径在本地调，同第 1 步的分工。

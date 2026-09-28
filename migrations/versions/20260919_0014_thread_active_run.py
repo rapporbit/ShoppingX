@@ -1,7 +1,7 @@
 """threads 加 active_run_id / run_status / active_query，并去掉 user_id 外键
 
-阶段 1-2：「同 thread 还有没有任务在跑」从 API 进程内的 ``active_tasks`` 字典搬进 DB，靠一条
-条件更新认定（见 :class:`app.db.models.Thread`）。外键必须去掉——鉴权关闭的 demo 模式下
+「同 thread 还有没有任务在跑」从 API 进程内的 ``active_tasks`` 字典搬进 DB，靠一条
+条件更新认定（见 :class:`app.db.models.Thread`）。外键必须去掉——鉴权关闭的 免鉴权模式下
 ``user_id`` 是不在 users 表里的假身份，带外键就登记不进来，唯一真相又会退回进程内。
 
 **SQLite 去外键只能重建表**（它没有 ``ALTER TABLE … DROP CONSTRAINT``），所以走

@@ -37,7 +37,7 @@ from app.tools.shipping_calc import shipping_calc as _shipping_calc
 from app.utils.path_utils import ensure_session_dir
 from app.utils.thread_ctx import thread_scope
 
-MCP_SERVER_NAME = "globex-readonly"
+MCP_SERVER_NAME = "shoppingx-readonly"
 
 #: 开出去的工具名。**新增一项前先回答「它在没有本仓会话状态时还讲得通吗」**。
 EXPOSED_TOOL_NAMES: tuple[str, ...] = ("item_search", "price_compare", "shipping_calc")
@@ -47,7 +47,7 @@ _READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorld
 mcp = FastMCP(
     MCP_SERVER_NAME,
     instructions=(
-        "globex 跨平台商品检索（只读）。典型链路：item_search 拿候选 → 用返回的 session_id "
+        "ShoppingX 跨平台商品检索（只读）。典型链路：item_search 拿候选 → 用返回的 session_id "
         "调 price_compare 得到到手价排序 → 需要换收货国时再调 shipping_calc。"
     ),
 )
@@ -124,7 +124,7 @@ async def shipping_calc(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="globex 只读工具 MCP server（streamable HTTP）")
+    parser = argparse.ArgumentParser(description="ShoppingX 只读工具 MCP server（streamable HTTP）")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()

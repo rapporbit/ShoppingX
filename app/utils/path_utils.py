@@ -1,11 +1,11 @@
 """路径工具：统一解析上传 / 输出 / 会话目录，并防 ``../`` 路径穿越。
 
-约定（CLAUDE.md §6.3）：
+约定：
 - 任务输出 → ``<ARTIFACT_ROOT>/output/<thread_id>/``
 - 用户上传 → ``<ARTIFACT_ROOT>/uploaded/<thread_id>/``
 - 读用户可控文件名时一律走 :func:`safe_join`，避免 ``../../etc/passwd`` 越权。
 
-**为什么两个根要从同一个 ``ARTIFACT_ROOT`` 派生（阶段 1-4）。** 跑 Agent 的是 worker 进程，而这些
+**为什么两个根要从同一个 ``ARTIFACT_ROOT`` 派生。** 跑 Agent 的是 worker 进程，而这些
 产物的读者是 API 进程（``GET /api/files`` 取 summary.md、``/api/uploads`` 取参考图、会话恢复读
 ``session.json``）。两个进程各自用「自己那份代码的项目根」算路径时，只要它们不在同一个文件系统位置
 （两个容器、两台机器），worker 写完的东西 API 一律 404——而且不报错，表现为「产物莫名其妙没了」。

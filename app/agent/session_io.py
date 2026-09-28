@@ -31,7 +31,7 @@ logger = logging.getLogger("shoppingx.session_io")
 def render_platform_block(enabled: tuple[str, ...]) -> str:
     """渲染 ``<enabled_platforms>``——本轮允许检索的平台（用户在前端设置里勾的，默认只 amazon）。
 
-    并行一律靠主环**同一轮发多个 item_search**（框架并发执行），不派 worker（A3，2026-09-16）。
+    并行一律靠主环**同一轮发多个 item_search**（框架并发执行），不派 worker（2026-09-16）。
     单平台时跨平台泛搜就是一条 item_search；**多类并列与平台数无关**，照常一类一条同轮发——
     曾经一句「不要派检索」把并行来源钉死在平台维度上，多类并列也被拦成串行三次（评测 pl02），
     所以两种切分要分开说。
@@ -85,7 +85,7 @@ def inject_runtime_context(
         parts.append(render_platform_block(enabled_platforms))
     if history_block and history_block != HISTORY_EMPTY:
         parts.append(f"<user_recent_history>\n{history_block}\n</user_recent_history>")
-    # 参考图（M20）：只报**文件名**，图本身不进 messages——主模型是纯文本的，多模态消息塞进来只会
+    # 参考图：只报**文件名**，图本身不进 messages——主模型是纯文本的，多模态消息塞进来只会
     # 报错或被静默忽略。图关在 image_understand 工具里，它的识别结果已由 Harness 在开局预跑写进上文
     # （先于 planner）。这条块只交代「用户是拿图来买东西的」这个意图，免得模型把上文那条
     # image_understand 结果当成无主的噪声。
@@ -113,7 +113,7 @@ def inject_runtime_context(
 def write_session_artifacts(
     session_dir: Path, final_text: str, summary: ShoppingSummaryOutput | None
 ) -> None:
-    """把本次任务产物落到会话目录，供 ``GET /api/files/<thread_id>/<name>`` 下载（M10）。
+    """把本次任务产物落到会话目录，供 ``GET /api/files/<thread_id>/<name>`` 下载。
 
     - ``summary.md``：购物清单文案。**优先用 shopping_summary 的结构化 ``summary`` 字段**
       （那才是精挑清单本体），只有没终结产物时（闲聊兜底）才退回 ``final_text``——否则模型
@@ -172,7 +172,7 @@ async def charge_quota(
     prompt_version: str = "",
     run_id: str = "",
 ) -> None:
-    """把本轮全树成本记进账，**取消路径下也要记完**。``run_id`` 非空时走预扣结算（阶段 1-1）。
+    """把本轮全树成本记进账，**取消路径下也要记完**。``run_id`` 非空时走预扣结算。
 
     为什么绕这一圈而不是直接 ``await add_usage(...)``：本函数跑在 run_agent 的 finally 里，而这条
     路径最常见的触发者恰恰是「用户点了取消」——此时本 task 已被 cancel，直接 await 会在第一个挂起
