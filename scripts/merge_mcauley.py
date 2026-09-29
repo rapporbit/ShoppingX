@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import html
 import json
 import re
 import sys
@@ -50,6 +51,29 @@ def size_tokens(title: str) -> set[str]:
     return {m.group(1) for m in _SIZE_NUM.finditer(title)} | set(_SIZE_SLASH.findall(title))
 
 
+# McAuley store 里的占位值：brand 字段照收，但不加进标题（「Generic Luggage Cover」不像话）。
+_NO_PREFIX_STORES = {"amazon renewed", "generic", "unknown", "artist unknown"}
+_BRAND_STOP = {"the", "by", "and", "for", "of", "a", "an", "co", "inc"}
+_WORD = re.compile(r"[a-z0-9]+")
+_TAG = re.compile(r"<[^>]+>")
+_AMP = re.compile(r"&amp;", re.I)  # 源数据有 &Amp; 这种大小写，html.unescape 不认
+
+
+def strip_html(text: str) -> str:
+    """去标签 + 反转义（``<br>`` → 空格，``&amp;`` / ``&Amp;`` → ``&``），再折叠空白。"""
+    text = html.unescape(_AMP.sub("&", _TAG.sub(" ", text)))
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def needs_brand_prefix(brand: str, title: str) -> bool:
+    """标题缺品牌才加前缀：占位值不加；品牌首个实词已在标题前 3 个词里也不加
+    （``SAXX Underwear Co.`` + ``SAXX Men's ...`` 会叠成两遍）。"""
+    if not brand or brand.lower() in _NO_PREFIX_STORES or brand.lower() in title.lower():
+        return False
+    words = [w for w in _WORD.findall(brand.lower()) if len(w) >= 2 and w not in _BRAND_STOP]
+    return not (words and words[0] in _WORD.findall(title.lower())[:3])
+
+
 def variant_rule(item_id: str, our_title: str, mc: dict) -> int:
     """按定稿规则判 1 / 2 / 3。"""
     if item_id == mc.get("parent_asin"):
@@ -71,13 +95,13 @@ def merge_record(rec: dict, mc: dict | None) -> dict:
         if store and not out.get("brand"):
             out["brand"] = store
         brand = out.get("brand") or ""
-        if brand and brand.lower() not in rec["title"].lower():
+        if needs_brand_prefix(brand, rec["title"]):
             out["title"] = f"{brand} {rec['title']}"
         if rule in (1, 2):
-            feats = clean_features(mc.get("features") or [])
+            feats = clean_features(strip_html(f) for f in mc.get("features") or [])
             out["features"] = feats
             if not out.get("description") and mc.get("description"):
-                out["description"] = mc["description"]
+                out["description"] = strip_html(mc["description"])
             for m in feature_materials(feats, mc.get("details")):
                 if m not in mats:
                     mats.append(m)

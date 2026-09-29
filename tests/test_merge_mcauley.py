@@ -6,7 +6,13 @@ B0179PPE4U 规则① / B07VR8MVLB 规则② / B0B1LPRDVG 规则③。
 
 from __future__ import annotations
 
-from scripts.merge_mcauley import merge_record, size_tokens, variant_rule
+from scripts.merge_mcauley import (
+    merge_record,
+    needs_brand_prefix,
+    size_tokens,
+    strip_html,
+    variant_rule,
+)
 
 
 def _rec(item_id: str, title: str, **kw: object) -> dict:
@@ -91,3 +97,53 @@ def test_size_tokens_and_rule_edges() -> None:
     assert variant_rule("A", "Zip Tote", {"parent_asin": "P", "title": "Zip Tote 14 inch"}) == 3
     # 两边都没尺寸 → 规则②
     assert variant_rule("A", "Zip Tote", {"parent_asin": "P", "title": "Pendleton Zip Tote"}) == 2
+
+
+# ---------- 品牌前缀（2026-09-30 体检：前 3 个词重复 20,653 条） ----------
+def test_prefix_skipped_when_brand_word_already_leads_title() -> None:
+    assert not needs_brand_prefix("SAXX Underwear Co.", "SAXX Men's Underwear – Quest Boxer Briefs")
+    assert not needs_brand_prefix("Minus33 Merino Wool", "Minus33 100% Merino Wool Katmai Mens")
+    assert not needs_brand_prefix("S SMILEFIL", "Smilefil Tufting Roller Brush")  # 单字母 S 不算
+    assert not needs_brand_prefix("Sennheiser Consumer Audio", "Sennheiser HD 300 Closed Back")
+
+
+def test_prefix_skipped_for_placeholder_stores() -> None:
+    for store in ("Amazon Renewed", "Generic", "Unknown", "Artist Unknown"):
+        assert not needs_brand_prefix(store, "Sony RF400 Wireless Headphones (Renewed)")
+
+
+def test_prefix_added_when_title_lacks_brand() -> None:
+    assert needs_brand_prefix("Skechers", "Women's Go Walk Lite-15433 Boat Shoe")
+    assert needs_brand_prefix("The North Face", "Men's Borealis Backpack")  # the 是停用词
+
+
+def test_placeholder_store_still_fills_brand_field() -> None:
+    rec = _rec("B07M6MRQMP", "Sony RF400 Wireless Home Theater Headphones (Renewed)")
+    mc = {"parent_asin": "B07M6MRQMP", "store": "Amazon Renewed", "title": "x"}
+    out = merge_record(rec, mc)
+    assert out["title"] == rec["title"]
+    assert out["brand"] == "Amazon Renewed"
+
+
+# ---------- 网页代码 ----------
+def test_strip_html() -> None:
+    assert (
+        strip_html("Size 34 (Jacket34/Pants31);<br> Size 36")
+        == "Size 34 (Jacket34/Pants31); Size 36"
+    )
+    assert strip_html("Functional &Amp; Practical") == "Functional & Practical"
+    assert strip_html("<p>Soft &quot;cotton&quot;</p>") == 'Soft "cotton"'
+
+
+def test_merge_cleans_html_in_features_and_description() -> None:
+    rec = _rec("B0Z", "Wool Hat")
+    mc = {
+        "parent_asin": "B0Z",
+        "store": "Acme",
+        "title": "Acme Wool Hat",
+        "features": ["<br>", "Soft &amp; warm<br>"],
+        "description": "<p>Classic hat</p>",
+    }
+    out = merge_record(rec, mc)
+    assert out["features"] == ["Soft & warm"]
+    assert out["description"] == "Classic hat"
