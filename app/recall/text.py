@@ -43,7 +43,7 @@ def clip_sentence(text: str, limit: int = 300, min_keep: int = 200) -> str:
 
 
 def embed_text(item: CleanItem) -> str:
-    """dense 编码文本：title | brand | 尾3类 | 描述(边界截断)，整串轻量归一。
+    """dense 编码文本：title | brand | 尾3类 | 描述(边界截断) | 短属性行，整串轻量归一。
 
     **建索引和训练必须共用这一个函数。** 训练时喂给模型的商品文本，与线上入库编码的文本
     只要差一个字段或一处归一，模型学到的就是另一种输入分布（train/serve skew）——离线指标
@@ -55,6 +55,7 @@ def embed_text(item: CleanItem) -> str:
         item.brand,
         tail_category(item.category),
         clip_sentence(item.description, DESC_EMBED_CLIP),
+        item.attr_line,
     ]
     composed = " | ".join(p for p in parts if p)
     return clean_text(composed, strip_html=False)

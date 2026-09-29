@@ -170,17 +170,27 @@ class QdrantRecall:
                 COLLECTION, field_name=field, field_schema=schema, wait=True
             )
 
-    def upsert(self, records: list[ItemRecord], dense: np.ndarray, *, start_id: int) -> None:
+    def upsert(
+        self,
+        records: list[ItemRecord],
+        dense: np.ndarray,
+        *,
+        start_id: int = 0,
+        ids: list[int] | None = None,
+    ) -> None:
         """写入一批 point：dense 向量 + payload（归一字段，供展示与 filter）。
 
         分批发送：server 模式下单请求体受 32MB 限制，整平台一次 upsert（5 万点 ~1.1GB）会
         被拒（400 payload too large）。按 ``UPSERT_BATCH`` 切块，逐块 upsert。
+        ``ids`` 给定时按它覆盖指定 point（增量重编用），否则从 ``start_id`` 顺排。
         """
+        if ids is not None and len(ids) != len(records):
+            raise ValueError("ids 与 records 条数不一致")
         points: list[models.PointStruct] = []
         for offset, (rec, vec) in enumerate(zip(records, dense, strict=True)):
             points.append(
                 models.PointStruct(
-                    id=start_id + offset,
+                    id=ids[offset] if ids is not None else start_id + offset,
                     vector={DENSE_VEC: [float(x) for x in vec]},
                     payload=rec.model_dump(),  # embed_text 已 exclude，不入 payload
                 )

@@ -93,3 +93,20 @@ def test_embed_text_composition_is_stable() -> None:
     # 缺字段不留空档（不出现 " |  | "），否则同一商品有无品牌会编出两种前缀。
     bare = item.model_copy(update={"brand": "", "category": "", "description": ""})
     assert embed_text(bare) == "Canvas Travel Backpack"
+
+
+def test_embed_text_appends_attr_line_last() -> None:
+    """McAuley 短属性行接在描述之后；没有属性行时与补全前逐字一致（未补全商品不用重编）。"""
+    base = dict(
+        platform="amazon",
+        item_id="B000TEST02",
+        title="Falcon-III Backpack",
+        price=152.1,
+        currency="USD",
+        image_url="https://example.com/a.jpg",
+        url="https://example.com/dp/B000TEST02",
+        category="Backpacks",
+    )
+    assert embed_text(CleanItem(**base)) == "Falcon-III Backpack | Backpacks"
+    with_attr = CleanItem(**base, attr_line="Material: nylon; Specs: 35L")
+    assert embed_text(with_attr) == "Falcon-III Backpack | Backpacks | Material: nylon; Specs: 35L"

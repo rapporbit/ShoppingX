@@ -44,7 +44,7 @@ _CURRENCY_FIX = {"GPB": "GBP"}
 
 
 class CleanItem(BaseModel):
-    """清洗后的统一商品记录（13 列）。
+    """清洗后的统一商品记录（13 列 + McAuley 补全 4 列）。
 
     7 个必填字段由质量闸保证非空/有效；其余可空，缺失不丢行。
     """
@@ -66,6 +66,11 @@ class CleanItem(BaseModel):
     description: str = ""
     desc_lang: str = ""
     initial_price: float | None = None
+    # —— McAuley 补全（scripts/merge_mcauley.py，仅 amazon_rag 有；其余平台取默认）——
+    features: list[str] = []
+    materials: list[str] = []
+    attr_line: str = ""  # 「Material: ...; Specs: ...」短属性行，进编码文本
+    parent_rating_count: int | None = None  # 父 ASIN 跨变体合计评论数，比单个变体偏高
 
 
 # 各平台 CSV 列名 → 归一字段（按列表顺序取第一个非空）。eBay 已从表中剔除。

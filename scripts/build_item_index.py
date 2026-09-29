@@ -96,6 +96,9 @@ def _clean_to_record(item: CleanItem) -> ItemRecord:
         url=item.url,
         image_url=item.image_url,
         price_usd=to_base_or_none(item.price, item.currency, "USD"),
+        materials=item.materials,
+        parent_rating_count=item.parent_rating_count,
+        sold=item.sold,
         embed_text=embed_text(item),
     )
 

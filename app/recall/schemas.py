@@ -47,5 +47,8 @@ class ItemRecord(BaseModel):
     url: str = ""
     image_url: str = ""
     price_usd: float | None = None  # 建库时预折算（供 Qdrant payload filter）
+    materials: list[str] = []  # 材质软约束用（抽不到 = 未知，不等于不含）
+    parent_rating_count: int | None = None
+    sold: int | None = None
     # 仅建索引阶段用于编码，不回传给模型，故 dump 时排除以缩小 sidecar 体积。
     embed_text: str = Field(default="", exclude=True)
