@@ -430,9 +430,11 @@ async def append_transition_notice(context: dict[str, Any]) -> dict[str, Any] | 
             return None
         elif "picks_close" not in guard.notified_transitions:
             guard.notified_transitions.add("picks_close")
+            # 不再断言「价格与运费信息已在候选数据中」：跳过比价的轮（见上文 skip hint）landed_usd
+            # 全是 null，模型信了这句就照模板写「到手价按寄往 X 估算」（f53158e7）。
             notice = (
                 f"\n\n[阶段推进] 精挑已完成（{picks} 件），比价阶段就此结束：无需再调用 "
-                "price_compare / shipping_calc / item_picker，价格与运费信息已在候选数据中。"
+                "price_compare / shipping_calc / item_picker。"
                 "请直接调 shopping_summary 给出最终清单。"
             )
 
