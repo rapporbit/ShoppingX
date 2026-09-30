@@ -546,6 +546,47 @@ async def test_item_picker_merges_near_duplicates() -> None:
     assert {"FUJI", "SONY"} <= ids  # 不同卡口是不同商品，不许合并
 
 
+async def test_item_picker_merges_size_variants_sharing_image() -> None:
+    """尺码变体：价格差几毛但共用主图 + 标题只差码数 → 合并（线上 b594ee78 两双 Superstar）。
+
+    共用占位图但标题完全不同的两件**不**合并——同图只替代「同价」这一条，Jaccard 门槛不让。
+    """
+    from app.tools.item_picker import item_picker
+
+    img = "https://m.media-amazon.com/images/I/61uSbEkJnyL._AC_UL320_.jpg"
+    title = "adidas Originals Men's Superstar Shoe Core Black/Footwear White, {} D(M) US"
+    cands = [
+        ItemCandidate(
+            item_id="S105",
+            platform="a",
+            title=title.format("10.5"),
+            price_usd=60.0,
+            rating=4.6,
+            image_url=img,
+        ),
+        ItemCandidate(
+            item_id="S95",
+            platform="a",
+            title=title.format("9.5"),
+            price_usd=60.54,
+            rating=4.5,
+            image_url=img,
+        ),
+        ItemCandidate(
+            item_id="OTHER",
+            platform="a",
+            title="Stainless Steel Water Bottle 32oz Insulated",
+            price_usd=25.0,
+            rating=4.4,
+            image_url=img,
+        ),
+    ]
+    out = await item_picker.ainvoke({"candidates": [c.model_dump() for c in cands]})
+    ids = {c.item_id for c in out.picks}
+    assert "S105" in ids and "S95" not in ids  # 尺码变体合并，留分高的
+    assert "OTHER" in ids  # 同图不同品，不许合并
+
+
 def test_item_search_output_collapses_known_candidates() -> None:
     """重试检索召回的「已入池」候选折叠成 id 列表：全量字段模型已看过，重复回显纯烧 token。"""
     import json as _json

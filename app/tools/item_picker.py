@@ -348,8 +348,15 @@ _NEAR_DUP_JACCARD = 0.6
 
 
 def _near_duplicate(a: ItemCandidate, b: ItemCandidate) -> bool:
-    """同价 + 标题 token 高重合 → 同一商品的变体，最终清单只留一件（留综合分高的）。"""
-    if a.price_usd is None or a.price_usd != b.price_usd:
+    """（同价 或 同主图）+ 标题 token 高重合 → 同一商品的变体，最终清单只留一件（留综合分高的）。
+
+    同主图这条腿补的是尺码变体：Amazon 同款不同码各是一个 ASIN，价格常差几毛（$60.00 vs
+    $60.54）、主图共用一张，只认同价就让两个尺码各占一张卡（b594ee78 adidas Superstar）。
+    Jaccard 门槛照旧，防不同商品共用占位图被误合。
+    """
+    same_price = a.price_usd is not None and a.price_usd == b.price_usd
+    same_image = bool(a.image_url) and a.image_url == b.image_url
+    if not (same_price or same_image):
         return False
     ta = set(re.findall(r"[a-z0-9]+", a.title.lower()))
     tb = set(re.findall(r"[a-z0-9]+", b.title.lower()))
