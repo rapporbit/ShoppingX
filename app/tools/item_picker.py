@@ -111,11 +111,12 @@ _W_SLOT_RERANK: float
 PICK_DISPLAY_CAP: int
 PICK_REL_SHOW_RATIO: float
 
-# 每批送 cross-encoder 的候选上限（30 → 15）：召回按向量分降序取头部送精排，
-# 尾部在门生效时直接出局（它们本就是向量分最低的那截）。自动比价精挑（harness.autopick）
-# 后登记表按检索轮次累积（实测 8 次检索 = 240 件），不封顶的话每轮 rerank 延迟随池子线性涨。
-# 增量缓存照常：已按同一 query 打过分的候选不占额度。
-PICK_RERANK_K = 15
+# 每批送 cross-encoder 的候选上限：召回按向量分降序取头部送精排，尾部在门生效时直接出局。
+# 自动比价精挑（harness.autopick）后登记表按检索轮次累积（实测 8 次检索 = 240 件），不封顶的话
+# 每轮 rerank 延迟随池子线性涨。增量缓存照常：已按同一 query 打过分的候选不占额度。
+# 15 → 30（2026-10-01）：= 单平台召回池（ITEM_SEARCH_SINGLE_POOL_K），整池都能打分。15 时
+# 「adidas 黑色跑鞋」池里 12 双真跑鞋有 8 双排在向量分 18~31 名，没打分就出局，补位的是短裤。
+PICK_RERANK_K = 30
 
 
 def _load_params() -> None:
