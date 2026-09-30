@@ -30,7 +30,7 @@ from app.agent.invoke import call_structured, to_msgs
 from app.agent.llm import get_fast_llm
 from app.agent.prompts import get_shopping_summary_prompt
 from app.api import monitor
-from app.api.context import get_dest_country, is_dest_country_assumed
+from app.api.context import get_dest_country
 from app.harness.token_budget import charge_usage
 from app.tools._args import StrListArg, coerce_stringified_list, drop_none_values
 from app.tools._bundle import (
@@ -408,10 +408,10 @@ def _landed_note(picks: list[ItemCandidate]) -> str:
     if not any(c.landed_usd is not None for c in picks):
         return ""
     dest = get_dest_country().upper()
-    note = f"到手价口径：候选里的 landed_usd 是**按寄往 {dest} 估算**的（含国际运费 + 关税）。"
-    if is_dest_country_assumed():
-        note += "收货国是系统默认值（用户从没说过）——文案里务必提醒他「实际收货地不同请告诉我」。"
-    return note + "文案里必须说清这个口径。\n\n"
+    return (
+        f"到手价口径：候选里的 landed_usd 是**按寄往 {dest} 估算**的（含国际运费 + 关税）。"
+        "文案里必须说清这个口径。\n\n"
+    )
 
 
 def _bundle_note(picks: list[ItemCandidate]) -> str:

@@ -292,12 +292,17 @@ def test_task_kind_follows_heavy_turns_threshold() -> None:
 
 def test_task_dict_roundtrip_and_tolerates_missing_fields() -> None:
     task = IntentTask.create(
-        task_id="a", thread_id="t", query="q", history_turns=99, platforms=["amazon"]
+        task_id="a",
+        thread_id="t",
+        query="q",
+        history_turns=99,
+        platforms=["amazon"],
+        dest_country="JP",
     )
     assert IntentTask.from_dict(task.to_dict()) == task
     # 滚动更新期间旧进程写的 payload 缺新字段——只有三个必需键在就该能跑起来。
     lean = IntentTask.from_dict({"task_id": "a", "thread_id": "t", "query": "q"})
-    assert (lean.kind, lean.platforms, lean.user_id) == ("normal", (), None)
+    assert (lean.kind, lean.platforms, lean.user_id, lean.dest_country) == ("normal", (), None, "")
     assert lean.request_id == "", "老消息没有 request_id，不该炸也不该编一个"
 
 

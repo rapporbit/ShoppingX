@@ -116,10 +116,13 @@ class _RunScope:
     # price_compare / shipping_calc，见 harness.hooks.progress）。
     tasks: list[str] = field(default_factory=list)
 
-    # planner 本轮判定的收货国：(ISO 码, 是否为系统假设值)。收货国决定关税免征额（US $0 vs
-    # CN $7 vs AU $660，差两个数量级）。assumed=True 表示用户从没说过、是 env 默认兜的，此时
-    # 回复必须标注假设，且**不该**把它当用户事实沉进会话 slots / 长期记忆。
-    dest_country: tuple[str, bool] | None = None
+    # planner 本轮判定的收货国（ISO 码，空=planner 还没跑）。收货国决定关税免征额（US $0 vs
+    # CN $7 vs AU $660，差两个数量级）。
+    dest_country: str = ""
+
+    # 前端「寄往」框随本轮任务带来的收货国（ISO 码，空=没带）。run_agent 入口写，planner 解析
+    # 收货国时排在「本轮原话」之后、「前几轮原话」之前。
+    ui_dest_country: str = ""
 
     # 本轮**原始用户 query**（未经任何 LLM 转述）——工具侧唯一的「用户到底说了什么」确定性
     # 信号源。planner 的 category 是 LLM 结构化输出，「合法但错」时下游拿它当锚会
@@ -305,16 +308,16 @@ def reset_session_tasks() -> None:
         st.tasks = []
 
 
-def set_dest_country(country: str, assumed: bool = False) -> None:
-    """记下 planner 本轮确定的收货国（ISO 码）+ 它是不是系统假设的。由 planner 工具写。
+def set_dest_country(country: str) -> None:
+    """记下 planner 本轮确定的收货国（ISO 码）。由 planner 工具写。
 
-    收货国是**确定性判断**（用户原话规则解析 > 会话 slots > 长期记忆 > env 默认），不让模型
+    收货国是**确定性判断**（用户原话 > 界面所选 > 前几轮原话 > 长期记忆 > env 默认），不让模型
     每轮自由填——同 currency 的老教训（「预算 500」曾被轮流猜成 ₹/¥/$）。判完写这里，让
     shipping_calc 读得到，而不是指望模型每次都记得把参数传对。
     """
     st = run_slot(_RunScope)
     if st is not None:
-        st.dest_country = (country.strip().upper(), assumed)
+        st.dest_country = country.strip().upper()
 
 
 def get_dest_country() -> str:
@@ -326,31 +329,21 @@ def get_dest_country() -> str:
     """
     st = peek_run_slot(_RunScope)
     if st is not None and st.dest_country:
-        return st.dest_country[0]
+        return st.dest_country
     return (os.getenv("DEFAULT_DEST_COUNTRY", "CN") or "CN").strip().upper()
 
 
-def is_dest_country_assumed() -> bool:
-    """本轮收货国是不是系统假设的（用户从没说过）。planner 没跑过时按「是」算。
-
-    curate_turn 用它决定要不要把收货国沉进会话 slots：假设值不是用户事实，沉下去会让
-    「系统默认」在下一轮伪装成「用户说过」，越滚越真。
-    """
-    st = peek_run_slot(_RunScope)
-    if st is not None and st.dest_country:
-        return st.dest_country[1]
-    return True
-
-
-def reset_dest_country() -> None:
-    """清掉本会话的收货国（``run_agent`` 开局 + 收尾调）。
-
-    开局清：同 thread 续聊换了收货国时，别让上一轮的国家赖着不走。
-    收尾清：run 状态按 session_dir 为键，不清会无界增长。
-    """
-    st = peek_run_slot(_RunScope)
+def set_ui_dest_country(country: str) -> None:
+    """记下前端「寄往」框本轮带来的收货国（``run_agent`` 入口写，每轮覆盖；空串=没带）。"""
+    st = run_slot(_RunScope)
     if st is not None:
-        st.dest_country = None
+        st.ui_dest_country = (country or "").strip().upper()
+
+
+def get_ui_dest_country() -> str:
+    """读前端「寄往」框的收货国；没带或无会话作用域时返回空串。"""
+    st = peek_run_slot(_RunScope)
+    return st.ui_dest_country if st is not None else ""
 
 
 def begin_learned_prefs() -> None:

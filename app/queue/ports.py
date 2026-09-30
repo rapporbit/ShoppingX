@@ -62,6 +62,8 @@ class IntentTask:
     image_paths: tuple[str, ...] = ()
     # 用户在输入框 ``/`` 显式选中的 skill 目录名（``my/xxx`` 或内置名）；空 = 没选。
     skill: str = ""
+    # 前端「寄往」框选的收货国（ISO 码）；空 = 没带，planner 按原话 / 记忆 / 默认国解析。
+    dest_country: str = ""
     kind: RequestClass = "normal"
     enqueued_at: str = field(default_factory=_now_iso)
     # 跨进程的日志关联 id：API 收到请求时生成，随消息进队列，worker 消费时绑回
@@ -88,6 +90,7 @@ class IntentTask:
         platforms: Sequence[str] | None = None,
         image_paths: Sequence[str] | None = None,
         skill: str | None = None,
+        dest_country: str | None = None,
         request_id: str = "",
     ) -> IntentTask:
         """按历史轮数判池并构造任务——分流阈值的唯一入口，调用方不要自己拿轮数比大小。"""
@@ -99,6 +102,7 @@ class IntentTask:
             platforms=tuple(platforms or ()),
             image_paths=tuple(image_paths or ()),
             skill=skill or "",
+            dest_country=dest_country or "",
             kind=classify_request(history_turns),
             request_id=request_id,
         )
@@ -112,6 +116,7 @@ class IntentTask:
             "platforms": list(self.platforms),
             "image_paths": list(self.image_paths),
             "skill": self.skill,
+            "dest_country": self.dest_country,
             "kind": self.kind,
             "enqueued_at": self.enqueued_at,
             "request_id": self.request_id,
@@ -134,6 +139,7 @@ class IntentTask:
             platforms=tuple(raw.get("platforms") or ()),
             image_paths=tuple(raw.get("image_paths") or ()),
             skill=str(raw.get("skill") or ""),
+            dest_country=str(raw.get("dest_country") or ""),
             kind="heavy" if kind == "heavy" else "normal",
             enqueued_at=raw.get("enqueued_at", ""),
             request_id=str(raw.get("request_id") or ""),

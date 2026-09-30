@@ -23,7 +23,7 @@ import re
 
 # 用户没写收货国时钉死的默认值（确定性兜底，可经 env 调）。默认中国——与 DEFAULT_BUDGET_CURRENCY
 # 的 CNY 同源（面向中文用户）。注意 CN 免征额仅 $7：默认口径下几乎每单都会算出非零关税，
-# 因此 `dest_country_assumed` 为真时**必须**在回复里注明假设（见 prompts.yml <constraints>）。
+# 所以收货国要让用户看得见——前端「寄往」框 + 商品卡「到手价 · 寄往 X」。
 DEFAULT_DEST_COUNTRY = (os.getenv("DEFAULT_DEST_COUNTRY", "CN") or "CN").strip().upper()
 
 # 收货国在会话级 P_t 里的 slot 名（slots 是「单值客观事实、覆盖式 patch」，收货国天然是其中一员）。
@@ -142,7 +142,7 @@ def resolve_dest_country(text: str) -> tuple[str, bool]:
 
     国名必须带收货语境（前置动词或后置名词，见 :data:`_CTX_BEFORE` / :data:`_CTX_AFTER`）
     才算「明示」（``True``）；大写 ISO 码单独出现即算。都没命中则落
-    :data:`DEFAULT_DEST_COUNTRY` 且「非明示」（``False``）——供回复标注「已按寄往 X 估算」。
+    :data:`DEFAULT_DEST_COUNTRY` 且「非明示」（``False``）——调用方据此决定要不要往下一层找。
 
     纯规则、不调模型：与 ``planner.resolve_budget_currency`` 同一套确定性范式。
     仍按 :data:`_COUNTRY_NAME_PATTERNS` 的特异性顺序，第一个命中即返回（印尼先于印度）。

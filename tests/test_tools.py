@@ -1390,9 +1390,8 @@ async def test_planner_returns_structured(monkeypatch: Any) -> None:
     assert out.budget_usd == pytest.approx(300 * 0.14)
     assert "塑料" in out.exclude_keywords
     # 意图信号原样透传（无点名商品）——不被货币回填逻辑覆盖。要推荐就自动补 landed_cost：
-    # 这句话没提收货国 → 兜底默认国（assumed=True），照样算，由收尾文案讲明「按寄往中国估算」。
+    # 这句话没提收货国 → 兜底默认国，照样算（口径由商品卡「到手价 · 寄往 X」展示）。
     assert out.tasks == ["recommend", "landed_cost"]
-    assert out.dest_country_assumed is True
 
 
 async def test_planner_raises_on_empty_structured_output(monkeypatch: Any) -> None:
@@ -1427,7 +1426,6 @@ async def test_planner_auto_adds_landed_cost(monkeypatch: Any) -> None:
     out = await mod.planner.ainvoke({"intent": "推荐几个旅行收纳袋，寄到日本"})
 
     assert out.dest_country == "JP"
-    assert out.dest_country_assumed is False  # 本轮原话 → 不是猜的
     assert out.tasks == ["recommend", "landed_cost"]  # 代码补的，不指望模型每轮判对
 
 

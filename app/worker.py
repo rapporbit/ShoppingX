@@ -176,6 +176,7 @@ async def handle_task(task: IntentTask, queue: TaskQueue | None = None) -> None:
             platforms=list(task.platforms) or None,
             image_paths=list(task.image_paths) or None,
             skill=task.skill or None,
+            dest_country=task.dest_country,
             # API 那次 HTTP 请求的 id：绑回日志上下文，两个进程的日志才拼得成一条线。
             request_id=task.request_id,
             # 入队时刻：首事件延迟 SLO 的计时起点，**排队等的那几秒也算在内**。

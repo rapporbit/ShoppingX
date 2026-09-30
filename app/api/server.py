@@ -316,6 +316,8 @@ class TaskRequest(BaseModel):
     # 输入框 ``/`` 显式选中的 skill 目录名（``my/<name>`` 个人 / 内置名）。服务端校验归属后把正文
     # 拼进本轮用户消息；找不到直接报错，不静默降级成普通搜索（见 orchestrator）。
     skill: str | None = None
+    # 前端「寄往」框选的收货国（ISO 码）。认不出的值 planner 当没带，不 400（同 platforms）。
+    dest_country: str | None = None
 
 
 class TokenRequest(BaseModel):
@@ -710,6 +712,7 @@ def _start_queued(
         platforms=req.platforms,
         image_paths=req.image_paths,
         skill=req.skill,
+        dest_country=req.dest_country,
         # 带上本次 HTTP 请求的 id：worker 是另一个进程，ContextVar 过不去，只能随消息走。
         request_id=_request_id_var.get(),
     )
@@ -898,6 +901,7 @@ async def create_task_async(
             platforms=req.platforms,
             image_paths=req.image_paths,
             skill=req.skill,
+            dest_country=req.dest_country,
             request_id=_request_id_var.get(),
         )
         try:

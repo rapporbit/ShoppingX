@@ -42,6 +42,7 @@ from app.api import monitor
 from app.api.context import (
     get_prior_queries,
     get_session_dir,
+    get_ui_dest_country,
     get_user_id,
     set_dest_country,
     set_session_tasks,
@@ -176,28 +177,34 @@ def budget_source(amount: float, utterances: list[str]) -> str | None:
     return None
 
 
-async def resolve_dest_country_layered(text: str) -> tuple[str, bool]:
-    """四层确定性决定本轮收货国，返回 ``(ISO 码, 是否为「假设值」)``。
+async def resolve_dest_country_layered(text: str) -> str:
+    """五层确定性决定本轮收货国，返回 ISO 码。
 
     优先级（高 → 低），**任一层命中即停**：
     1. 本轮用户明说（「寄到日本」）—— 纯规则解析，见 :func:`app.recall.geo.resolve_dest_country`。
-    2. 前几轮用户原话（新 → 旧）里的明示 —— 本会话说过一次，后面一直生效。
-    3. 长期记忆里 key 为 ``default_ship_to`` 的事实 —— 跨会话记住常用收货地。
-    4. env ``DEFAULT_DEST_COUNTRY`` 默认值。
+    2. 前端「寄往」框随任务带来的国家 —— 用户看得见、点得动的那个值。
+    3. 前几轮用户原话（新 → 旧）里的明示 —— 本会话说过一次，后面一直生效。
+    4. 长期记忆里 key 为 ``default_ship_to`` 的事实 —— 跨会话记住常用收货地。
+    5. env ``DEFAULT_DEST_COUNTRY`` 默认值。
 
-    只有走到第 4 层才算「假设」（返回 ``assumed=True``）——前三层都有用户依据，不该每轮都去
-    骚扰他确认；标 assumed 的目的只是提醒模型「这是系统替你猜的，得在回复里讲明」。
+    不再区分「用户说过」还是「系统推定」：收货国由前端「寄往」框和商品卡「到手价 · 寄往 X」
+    展示给用户，用户看到不对自己改，不靠模型在文案里声明「这是推定的」。
+    本轮原话压过界面所选：框里是上次的选择，用户这句话里的「寄到日本」是更新的意思。
     """
     country, explicit = resolve_dest_country(text)
     if explicit:  # 第 1 层：本轮原话（门控明示）
-        return country, False
+        return country
 
-    for prior in reversed(get_prior_queries()):  # 第 2 层：前几轮原话
+    ui = match_country_name(get_ui_dest_country())  # 第 2 层：界面所选（认不出的值当没带）
+    if ui:
+        return ui
+
+    for prior in reversed(get_prior_queries()):  # 第 3 层：前几轮原话
         country, explicit = resolve_dest_country(prior)
         if explicit:
-            return country, False
+            return country
 
-    user_id = get_user_id()  # 第 3 层：长期记忆（跨会话常用收货地）
+    user_id = get_user_id()  # 第 4 层：长期记忆（跨会话常用收货地）
     if user_id:
         try:
             from app.memory.fact_store import get_fact_store
@@ -209,12 +216,12 @@ async def resolve_dest_country_layered(text: str) -> tuple[str, bool]:
                     # 若再要求语境词反而可能漏掉。现在按 key 取，不再按已废的 category/polarity。
                     code = match_country_name(fact.value)
                     if code:
-                        return code, False
+                        return code
                     break  # 有这条但解析不出国家（写成「欧洲」之类）→ 不再找别条，退默认
         except Exception:  # noqa: BLE001 —— 记忆后端挂了不该崩掉 planner，降级到默认国即可
             pass
 
-    return DEFAULT_DEST_COUNTRY, True  # 第 4 层：系统默认 → 必须在回复里标注假设
+    return DEFAULT_DEST_COUNTRY  # 第 5 层：系统默认
 
 
 # 弱表达标记：命中即说明用户那句话是「避讳」而非「排除」，对应的词必须降级到 soft_dislikes。
@@ -334,10 +341,6 @@ class PlanOutput(BaseModel):
     )
     dest_country: str = Field(
         default="", description="收货国 ISO 码——由系统规则确定性回填，**模型不要填**"
-    )
-    dest_country_assumed: bool = Field(
-        default=False,
-        description="True=用户未明示收货国、已按默认国估算——由系统回填，**模型不要填**",
     )
     # 偏好只有三个桶，**全是原子词**（拿去和商品标题做匹配的），按「方向 × 力度」正交切分：
     # 负硬 → exclude_keywords（淘汰）、负软 → soft_dislikes（减分）、正向 → prefer_keywords
@@ -590,22 +593,21 @@ async def planner(intent: str) -> PlanOutput:
     code, _ = resolve_budget_currency(source if source is not None else intent)
     plan.currency = code
     plan.budget_usd = to_base_or_none(plan.budget_amount, code, "USD")
-    # 收货国确定性：同一套范式（规则解析 > 前几轮原话 > 长期记忆 > 默认国），模型同样无权自由填。
+    # 收货国确定性：同一套范式（本轮原话 > 界面所选 > 前几轮原话 > 长期记忆 > 默认国），
+    # 模型无权自由填。
     # 收货国决定关税免征额（US $0 / CN $7 / AU $660，差两个数量级），判错整条到手价就废了。
     # 写进 ContextVar 供 shipping_calc 机制兜底——不指望模型每次都记得把参数传对。
-    dest, assumed = await resolve_dest_country_layered(intent)
-    plan.dest_country = dest
-    plan.dest_country_assumed = assumed
-    set_dest_country(dest, assumed)
+    plan.dest_country = await resolve_dest_country_layered(intent)
+    set_dest_country(plan.dest_country)
     # 要推荐 → **一律补 landed_cost**（用户没开口也算到手价）。
     #
     # 跨境购物里用户真正想知道的数字是「寄到我这儿一共多少钱」，可他往往不会主动问——因为他不
     # 知道我们会算。于是最有价值的能力被藏在了「用户得先说出『到手价』三个字」后面，默认给出的
     # 是一个他还得自己心算运费关税的平台标价。
     #
-    # 收货国缺失不是不算的理由：上面的四层解析保证它**永远有值**（兜底 DEFAULT_DEST_COUNTRY=CN），
-    # 而 assumed 标记会让收尾文案讲明「按寄往中国估算，实际收货地不同请告诉我」——按默认国算完
-    # 再告诉他口径，比让他先回答一句「你寄哪」多等一轮往返要好。
+    # 收货国缺失不是不算的理由：上面的五层解析保证它**永远有值**（兜底 DEFAULT_DEST_COUNTRY=CN），
+    # 口径由前端「寄往」框和商品卡「到手价 · 寄往 X」展示——按默认国算完、让他看得见能改，
+    # 比让他先回答一句「你寄哪」多等一轮往返要好。
     #
     # 放在代码里而不是 prompt 里：planner 的模型侧纪律仍是「只填用户明确表达的 tasks」（否则它
     # 会顺手把 price_compare 也加上，把轻推荐拖成全流程）。「该不该替他算到手价」是产品决策，
@@ -655,8 +657,7 @@ async def planner(intent: str) -> PlanOutput:
     if plan.budget_usd is not None:
         plan_lines.append(f"预算：≤ ${plan.budget_usd:.0f}")
     if "landed_cost" in plan.tasks:  # 只在要算到手价时显示，否则是噪音
-        suffix = "（默认，用户未指定）" if plan.dest_country_assumed else ""
-        plan_lines.append(f"收货国：{plan.dest_country}{suffix}")
+        plan_lines.append(f"收货国：{plan.dest_country}")
     # 三个偏好桶按「会怎么影响结果」展示，而不是按「是什么维度」——前端「思考过程」里的用户
     # 关心的是「这条约束会淘汰商品还是只压排序」，材质 / 风格的分类对他没有意义。
     if plan.exclude_keywords:
@@ -672,6 +673,8 @@ async def planner(intent: str) -> PlanOutput:
         category=plan.category,
         budget_usd=plan.budget_usd,
         currency=code,
+        # 前端「寄往」框据此同步：用户说「寄到日本」后框跟着变成 JP，下一轮再随任务带回来。
+        dest_country=plan.dest_country,
         result="\n".join(plan_lines),
     )
     return plan

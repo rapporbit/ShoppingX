@@ -1164,8 +1164,8 @@ QUERIES: list[dict] = [
         "constraints": {"task": "landed_cost", "dest": "未明示（走四层解析或澄清）"},
         "expected_path": ["planner", "shipping_calc", "shopping_summary"],
         "probe": (
-            "P0 收货国未明示时要么按默认口径并**讲明是假设**，要么问一句；不许闷头按某国算"
-            "还不说（探 dest_country_assumed 的告知义务）"
+            "P0 到手价必须带收货国口径（商品卡 dest_country 或文案写明寄往哪国均可）；"
+            "不许文案声称到手价、商品却只有售价（landed_usd 为空）"
         ),
     },
     {

@@ -78,7 +78,7 @@ def test_prior_queries_from_state_tolerates_bad_shapes() -> None:
 async def test_dest_country_layer2_reads_prior_queries(tmp_path) -> None:
     with thread_scope("t-prior", tmp_path):
         set_prior_queries(["买个背包，寄到日本", "再便宜点"])
-        assert await resolve_dest_country_layered("换个颜色") == ("JP", False)
+        assert await resolve_dest_country_layered("换个颜色") == "JP"
         # 本轮明示压过前几轮
-        assert (await resolve_dest_country_layered("改寄到英国"))[0] == "GB"
+        assert await resolve_dest_country_layered("改寄到英国") == "GB"
     reset_run_state(tmp_path)

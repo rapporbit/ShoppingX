@@ -52,6 +52,7 @@ from app.api.context import (
     set_deadline,
     set_original_query,
     set_prior_queries,
+    set_ui_dest_country,
 )
 from app.api.run_state import reset_run_state, restore_run_state
 from app.db.quota import remaining_usd
@@ -298,6 +299,7 @@ async def run_agent(
     request_id: str = "",
     enqueued_at: str = "",
     traceparent: str = "",
+    dest_country: str = "",
 ) -> dict[str, Any]:
     """:func:`_run_turn` 的薄壳，只多做一件事：把这一轮的**收尾结果**记进 SLO 成功率。
 
@@ -317,6 +319,7 @@ async def run_agent(
             request_id=request_id,
             enqueued_at=enqueued_at,
             traceparent=traceparent,
+            dest_country=dest_country,
         )
     except asyncio.CancelledError:
         # 用户自己掐的、或 worker 排空掐的：不是服务质量问题，不进分母。
@@ -342,6 +345,7 @@ async def _run_turn(
     request_id: str = "",
     enqueued_at: str = "",
     traceparent: str = "",
+    dest_country: str = "",
 ) -> dict[str, Any]:
     """主 AgentLoop 的入口：一轮任务从这里进、从这里出。
 
@@ -412,6 +416,7 @@ async def _run_turn(
             set_task_cap(quota_left)
 
         set_original_query(query)
+        set_ui_dest_country(dest_country)
         setup_harness()  # 幂等
 
         begin_learned_prefs()

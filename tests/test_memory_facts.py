@@ -232,10 +232,10 @@ async def test_dest_country_reads_ship_to_fact() -> None:
         await get_fact_store().upsert_facts(
             uid, [validate_fact(SHIP_TO_KEY, "常寄德国", "context")]
         )
-        assert await resolve_dest_country_layered("买个背包") == ("DE", False)
+        assert await resolve_dest_country_layered("买个背包") == "DE"
 
-        # 本轮原话仍然压过长期记忆（第 1 层 > 第 3 层）。
-        assert await resolve_dest_country_layered("买个背包，寄到日本") == ("JP", False)
+        # 本轮原话仍然压过长期记忆（本轮原话 > 长期记忆）。
+        assert await resolve_dest_country_layered("买个背包，寄到日本") == "JP"
 
 
 def test_recall_memories_output_is_fenced() -> None:

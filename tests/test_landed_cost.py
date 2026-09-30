@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.api.context import get_dest_country, is_dest_country_assumed
+from app.api.context import get_dest_country
 from app.recall.duty import DE_MINIMIS_USD, estimate_duty
 from app.recall.geo import DEFAULT_DEST_COUNTRY, resolve_dest_country
 from app.tools.schemas import ItemCandidate
@@ -171,35 +171,40 @@ async def test_shipping_calc_dest_changes_landed_cost(tmp_path) -> None:
 # ---------- 4. 四层优先级 ----------
 @pytest.mark.asyncio
 async def test_dest_country_layers(tmp_path, monkeypatch) -> None:
-    """本轮原话 > 前几轮原话 > 默认国；只有落到默认国才算「假设」。"""
+    """本轮原话 > 前几轮原话 > 默认国。"""
     from app.api import context as ctx
     from app.tools.planner import resolve_dest_country_layered
 
     with thread_scope("t-layers", tmp_path):
-        # 第 1 层：本轮原话压过一切（哪怕前几轮说过别的国家）。
+        # 本轮原话压过一切（哪怕前几轮说过别的国家）。
         ctx.set_prior_queries(["寄到新加坡"])
-        assert await resolve_dest_country_layered("寄到日本") == ("JP", False)
+        assert await resolve_dest_country_layered("寄到日本") == "JP"
 
-        # 第 2 层：本轮没提 → 用前几轮原话里的明示，不算「假设」。
-        assert await resolve_dest_country_layered("再推荐几个") == ("SG", False)
+        # 前几轮：本轮没提 → 用前几轮原话里的明示。
+        assert await resolve_dest_country_layered("再推荐几个") == "SG"
 
         # 裸国名（产地/流派修饰）不触发第 1 层 → 仍落到前几轮，不被「英国」劫持。
-        assert await resolve_dest_country_layered("我要英国文学作品") == ("SG", False)
+        assert await resolve_dest_country_layered("我要英国文学作品") == "SG"
 
-        # 第 4 层：既没提、前几轮也没说 → 落默认国，标记为「假设」（回复里必须声明）。
+        # 既没提、前几轮也没说 → 落默认国。
         ctx.set_prior_queries([])
-        assert await resolve_dest_country_layered("再推荐几个") == (DEFAULT_DEST_COUNTRY, True)
+        assert await resolve_dest_country_layered("再推荐几个") == DEFAULT_DEST_COUNTRY
 
 
 @pytest.mark.asyncio
-async def test_assumed_dest_not_persisted_to_slots(tmp_path) -> None:
-    """系统假设的默认国不该被当成用户事实沉进会话状态（否则下一轮它会伪装成「用户说过」）。"""
-    from app.api.context import set_dest_country
+async def test_dest_country_ui_layer(tmp_path) -> None:
+    """前端「寄往」框：本轮原话 > 界面所选 > 前几轮原话；认不出的值当没带。"""
+    from app.api import context as ctx
+    from app.tools.planner import resolve_dest_country_layered
 
-    with thread_scope("t-assumed", tmp_path):
-        set_dest_country(DEFAULT_DEST_COUNTRY, assumed=True)
-        assert is_dest_country_assumed() is True
-        assert get_dest_country() == DEFAULT_DEST_COUNTRY
+    with thread_scope("t-ui-dest", tmp_path):
+        ctx.set_prior_queries(["寄到新加坡"])
+        ctx.set_ui_dest_country("de")
+        assert await resolve_dest_country_layered("再推荐几个") == "DE"  # 界面压过前几轮
+        assert await resolve_dest_country_layered("寄到日本") == "JP"  # 本轮原话压过界面
 
-        set_dest_country("JP", assumed=False)  # 用户明说过
-        assert is_dest_country_assumed() is False
+        ctx.set_ui_dest_country("火星")  # 认不出 → 当没带，落到前几轮
+        assert await resolve_dest_country_layered("再推荐几个") == "SG"
+
+        ctx.set_dest_country("jp")
+        assert get_dest_country() == "JP"
