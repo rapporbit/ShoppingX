@@ -17,6 +17,7 @@ import {
 } from "../api";
 import { THREAD_KEY, wsToken } from "../auth";
 import { mergeConfirmations, readConfirmations } from "../lib/confirmations";
+import { saveDestCountry } from "../settings";
 import type {
   PrepareOrderInput,
   TradeConfirmation,
@@ -450,6 +451,12 @@ export function useShoppingXTask() {
         if (!lastEventIdRef.current || cmpStreamId(evt.id, lastEventIdRef.current) > 0) {
           lastEventIdRef.current = evt.id;
         }
+      }
+      // 收货国回传：planner 解析出本轮收货国后，顶栏「寄往」框同步成它（用户说「寄到日本」框就变
+      // 日本），下一轮随任务带回去。不 return——这条 tool_end 照常进思考流。
+      if (evt.event === "tool_end" && evt.data.tool === "planner") {
+        const dest = evt.data.dest_country;
+        if (typeof dest === "string" && dest) saveDestCountry(dest);
       }
       // 召回预览卡：任务还在跑就先把候选画出来（感知提速的落点）。同轮 batch（跨平台 / 多槽位）时
       // 每条 item_search 各推一批，按 item_id 合并去重。**不进 events**——ActivityFeed 只认 tool_start/tool_end 那套画

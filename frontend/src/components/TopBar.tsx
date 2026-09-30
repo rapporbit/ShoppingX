@@ -1,7 +1,15 @@
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import { Globe, LogOut, Menu, SlidersHorizontal } from "lucide-react";
+import { Check, Globe, LogOut, MapPin, Menu, SlidersHorizontal } from "lucide-react";
+import { useEffect, useState } from "react";
 import { formatResetAt, type Quota } from "../api";
 import type { TaskStatus } from "../hooks/useShoppingXTask";
+import {
+  DEST_OPTIONS,
+  destLabel,
+  loadDestCountry,
+  onDestCountryChange,
+  saveDestCountry,
+} from "../settings";
 import { Tooltip } from "./ui/Tooltip";
 
 // 顶栏三段（对照 daydream.ing）：左侧一颗悬浮胶囊导航（☰ 历史 / 对话 / 收藏 / 订单），正中衬线字标 +
@@ -109,6 +117,50 @@ function AvatarMenu({
   );
 }
 
+// 「寄往」下拉（对照 Amazon 顶栏的 Deliver to）：到手价按哪国算，常驻可见、点一下就改。
+// 值的来源与去向见 settings.ts：用户点选或 planner 回传都写进 localStorage，下一轮随任务带给后端。
+function DestMenu() {
+  const [dest, setDest] = useState(loadDestCountry);
+  useEffect(() => onDestCountryChange(setDest), []);
+  const shown = dest ? destLabel(dest) : "自动";
+  const tip = dest
+    ? `到手价按寄往${shown}估算（含关税 + 国际运费），点此更改`
+    : "未选收货地：按你说过的收货地估算，没说过按中国";
+  return (
+    <DropdownMenu.Root modal={false}>
+      <Tooltip content={tip}>
+        <DropdownMenu.Trigger asChild>
+          <button className="ghost-btn" aria-label={`收货地：${shown}`}>
+            <MapPin size={17} strokeWidth={1.75} />
+            <span>寄往 {shown}</span>
+          </button>
+        </DropdownMenu.Trigger>
+      </Tooltip>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content
+          className="menu dest-menu"
+          align="end"
+          sideOffset={8}
+          collisionPadding={8}
+        >
+          <DropdownMenu.Label className="menu-label">收货国家 / 地区</DropdownMenu.Label>
+          <DropdownMenu.Separator className="menu-sep" />
+          {DEST_OPTIONS.map((o) => (
+            <DropdownMenu.Item
+              key={o.code}
+              className="menu-item"
+              onSelect={() => saveDestCountry(o.code)}
+            >
+              <Check size={15} strokeWidth={1.75} style={{ opacity: o.code === dest ? 1 : 0 }} />
+              {o.label}
+            </DropdownMenu.Item>
+          ))}
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  );
+}
+
 const NAV_ITEMS: { key: TopNavTarget; label: string }[] = [
   { key: "chat", label: "对话" },
   { key: "favorites", label: "收藏" },
@@ -170,6 +222,7 @@ export function TopBar({
           </Tooltip>
         )}
         {quota?.enabled && <QuotaMeter quota={quota} />}
+        <DestMenu />
         {/* 平台入口常驻顶栏并显示已启用个数：跨平台并行检索是本项目最贵的一步，用户该随时看得见
             自己开着几个平台，而不是点进设置才知道。 */}
         <Tooltip content="检索平台设置（默认只搜 Amazon）">

@@ -3,7 +3,7 @@
 // 一律走 authFetch 而不是裸 fetch：它负责带上 token，并把 401（token 过期 / 被吊销）统一
 // 退回登录页。漏一个裸 fetch，那个接口在开了鉴权后会静默 401——前端只会当成「没数据」，不会报错。
 import { authFetch } from "./auth";
-import { loadPlatforms } from "./settings";
+import { loadDestCountry, loadPlatforms } from "./settings";
 import type {
   AdminConfig,
   AguiEvent,
@@ -61,6 +61,8 @@ export async function startTaskRequest(
       thread_id: threadId,
       user_id: userId,
       platforms: loadPlatforms(),
+      // 顶栏「寄往」框的收货国；空串（没选过也没填过下单地址）不带，后端按原话 / 记忆 / 默认国解析。
+      dest_country: loadDestCountry() || undefined,
       image_paths: imagePaths?.length ? imagePaths : undefined,
       // 输入框 / 选中的 skill 目录名；服务端校验归属后把正文注入本轮，找不到会直接报错结束本轮。
       skill: skill || undefined,

@@ -4850,6 +4850,11 @@ button:active:not(:disabled) {
   animation: pop-in 0.16s var(--ease-out);
   transform-origin: var(--radix-dropdown-menu-content-transform-origin);
 }
+/* 「寄往」下拉 21 个国家，矮屏会顶出视口——限高滚动（Radix 给的可用高度变量）。 */
+.dest-menu {
+  max-height: min(420px, var(--radix-dropdown-menu-content-available-height));
+  overflow-y: auto;
+}
 .menu-label {
   padding: 7px 10px 6px;
   font-size: 11.5px;

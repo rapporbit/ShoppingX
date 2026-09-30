@@ -126,6 +126,29 @@ async def test_queue_mode_runs_via_worker_and_clears_handle(
     await asyncio.wait_for(runner, 3.0)
 
 
+async def test_dest_country_travels_from_api_to_run_agent(
+    client: AsyncClient, queue: InProcessQueue, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """顶栏「寄往」框的值：POST /api/task → 队列消息 → worker → run_agent 一路不丢。"""
+    got: list[Any] = []
+
+    async def _fake(query: str, thread_id: str, **kw: Any) -> dict[str, Any]:
+        got.append(kw.get("dest_country"))
+        return {"final_text": "ok"}
+
+    monkeypatch.setattr(worker, "run_agent", _fake)
+    stop = asyncio.Event()
+    runner = asyncio.create_task(
+        worker.run_worker(queue, concurrency=1, stop=stop, install_signals=False)
+    )
+    await client.post(
+        "/api/task", json={"query": "买帐篷", "thread_id": "q-dest", "dest_country": "JP"}
+    )
+    await _wait(lambda: got == ["JP"])
+    stop.set()
+    await asyncio.wait_for(runner, 3.0)
+
+
 async def test_queue_mode_reports_position_and_wait(
     client: AsyncClient, queue: InProcessQueue, monkeypatch: pytest.MonkeyPatch
 ) -> None:
