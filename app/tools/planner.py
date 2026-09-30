@@ -119,7 +119,7 @@ def resolve_budget_currency(text: str) -> tuple[str, bool]:
     """从用户原始意图里**确定性**解析预算币种，返回 ``(ISO 码, 是否明示)``。
 
     命中任一符号/词即「明示」（``True``）；都没命中则落 :data:`DEFAULT_BUDGET_CURRENCY`
-    （默认 CNY）且「非明示」（``False``）——供答案标注「已按 ¥ 理解」或触发一次澄清。
+    （默认 CNY）且「非明示」（``False``）。
     纯规则、不调模型：同一句话永远解析出同一币种（修掉「预算 500 每轮被猜成 ₹/¥/$」的抖动）。
     """
     for code, pattern in _CURRENCY_PATTERNS:
@@ -320,9 +320,6 @@ class PlanOutput(BaseModel):
     )
     currency: str = Field(
         default="", description="预算币种 ISO 码——由系统规则确定性回填，**模型不要填**"
-    )
-    currency_assumed: bool = Field(
-        default=False, description="True=用户未明示币种、已用默认币种——由系统回填，模型不要填"
     )
     budget_usd: float | None = Field(
         default=None,
@@ -588,9 +585,10 @@ async def planner(intent: str) -> PlanOutput:
             plan.budget_amount, source = None, None
     # 货币确定性：无视模型对 currency / budget_usd 的自由猜测，用规则解析币种 + fx 静态表折算回填。
     # 这是修「预算 500 每轮被猜成不同币种 → 预算内空召回退化」的关键一步（确定性，可复现）。
-    code, explicit = resolve_budget_currency(source if source is not None else intent)
+    # 「币种是不是推定的」不再回传：它唯一的用处是让收尾照抄一句「预算已按 X 理解（约 $Y）」，
+    # 没给预算时这个位也是 True，模型照抄就会编一个 $Y 出来。
+    code, _ = resolve_budget_currency(source if source is not None else intent)
     plan.currency = code
-    plan.currency_assumed = not explicit
     plan.budget_usd = to_base_or_none(plan.budget_amount, code, "USD")
     # 收货国确定性：同一套范式（规则解析 > 前几轮原话 > 长期记忆 > 默认国），模型同样无权自由填。
     # 收货国决定关税免征额（US $0 / CN $7 / AU $660，差两个数量级），判错整条到手价就废了。
@@ -674,7 +672,6 @@ async def planner(intent: str) -> PlanOutput:
         category=plan.category,
         budget_usd=plan.budget_usd,
         currency=code,
-        currency_assumed=plan.currency_assumed,
         result="\n".join(plan_lines),
     )
     return plan

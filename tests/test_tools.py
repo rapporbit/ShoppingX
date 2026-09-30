@@ -1385,9 +1385,8 @@ async def test_planner_returns_structured(monkeypatch: Any) -> None:
         {"intent": "想买便宜抗造的旅行三件套，预算300，不要塑料，喜欢小众"}
     )
     assert out.category == "旅行收纳"
-    # 意图里没写币种 → 默认 CNY、标注 assumed，budget_usd 由 fx 静态表确定性折算（300 CNY × 0.14）。
+    # 意图里没写币种 → 默认 CNY，budget_usd 由 fx 静态表确定性折算（300 CNY × 0.14）。
     assert out.currency == "CNY"
-    assert out.currency_assumed is True
     assert out.budget_usd == pytest.approx(300 * 0.14)
     assert "塑料" in out.exclude_keywords
     # 意图信号原样透传（无点名商品）——不被货币回填逻辑覆盖。要推荐就自动补 landed_cost：

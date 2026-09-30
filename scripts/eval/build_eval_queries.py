@@ -994,8 +994,8 @@ QUERIES: list[dict] = [
         },
         "expected_path": ["planner", "item_search", "item_picker", "shopping_summary"],
         "probe": (
-            "P0 清单主体折合人民币不超 200；P1 回复须注明「按人民币理解」这类口径说明"
-            "（currency_assumed 为真时的告知义务），不许闷头按美元选货"
+            "P0 清单主体折合人民币不超 200，不许闷头按美元选货；"
+            "P1 回复里若提到预算，金额与币种须和 planner 解析一致（不得编造折算值）"
         ),
     },
     {
