@@ -122,6 +122,36 @@ async def test_recall_single_platform_filter() -> None:
     assert recall.search(req, top_k=5, platform="nope") == []
 
 
+async def test_recall_brand_filter_keeps_only_named_brands() -> None:
+    """``brands`` 只放行点名的品牌（命中任一即可），无品牌商品一律挡掉。
+
+    品牌词大小写不敏感、按词命中（``adidas`` 命中 ``adidas Originals``）。内存模式的 MatchText
+    是子串匹配、区分大小写，所以这里的 payload 用小写；线上靠 lowercase 全文索引做到不分大小写。
+    """
+    tower = TowerClient(model=None, local_dim=32)
+    fixtures = [
+        ItemRecord(item_id=i, platform="amazon", title=t, brand=b, price=50.0, embed_text=t)
+        for i, t, b in (
+            ("B1", "men's running shoes", ""),
+            ("B2", "adidas men's ultraboost running shoe", "adidas originals"),
+            ("B3", "puma men's running shoe", "puma"),
+            ("B4", "nike men's running shoe", "nike"),
+        )
+    ]
+    recall = QdrantRecall(QdrantClient(location=":memory:"))
+    encoded = await tower.encode_texts([r.embed_text for r in fixtures])
+    recall.ensure_collection(32, recreate=True)
+    recall.upsert(fixtures, np.asarray(encoded, dtype="float32"), start_id=0)
+
+    req = await tower.encode_query("men's running shoes")
+    got = recall.search(req, top_k=10, platform="amazon", brands=["Adidas", " PUMA "])
+    assert {c.item_id for c in got} == {"B2", "B3"}
+    # 不传 / 传空列表 = 不过滤，四条全在。
+    assert len(recall.search(req, top_k=10, platform="amazon", brands=[])) == 4
+    # 库里没有的品牌 → 空结果，不报错。
+    assert recall.search(req, top_k=10, platform="amazon", brands=["asics"]) == []
+
+
 def test_recall_missing_collection_raises() -> None:
     """没建 collection 直接检索 → 报错，不静默返垃圾。
 

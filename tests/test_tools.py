@@ -859,6 +859,30 @@ async def test_item_search_relax_never_loosens_hard_constraints_or_relevance(
     assert all(c.brand.lower() != "nomad" for c in out3.candidates)
 
 
+async def test_item_search_brand_goes_to_recall_filter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """点名品牌走召回层 filter（不是拼进 query 碰运气），且在返回体的 recall_strategy 里看得见。"""
+    import app.tools.item_search as mod
+
+    recall = await _build_tiny_recall()
+    seen: list[Any] = []
+    real_search = recall.search
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs.get("brands"))
+        return real_search(*args, **kwargs)
+
+    monkeypatch.setattr(recall, "search", spy)
+    monkeypatch.setattr(mod, "get_recall_client", lambda: recall)
+    monkeypatch.setattr(mod, "get_tower_client", lambda: TowerClient(model=None, local_dim=32))
+
+    with platform_scope(["amazon", "shopee"]):
+        out = await mod.item_search.ainvoke(
+            {"query": "canvas travel bag", "platform": "amazon", "brand": ["Nomad"]}
+        )
+    assert seen and all(b == ["Nomad"] for b in seen)
+    assert "brand_filter" in out.recall_strategy
+
+
 async def test_item_search_session_exclusion_at_recall_stage(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -64,6 +64,11 @@ def test_key_separates_top_k_and_filters() -> None:
     assert search_cache.make_key("bag", 30, ["amazon"]) != base
     assert search_cache.make_key("bag", 20, ["amazon"], price_usd_max=50) != base
     assert search_cache.make_key("bag", 20, ["amazon"], min_rating=4.0) != base
+    # 品牌过滤进 key，且与大小写 / 顺序无关；不带品牌时 key 与改动前一致（老缓存照常命中）。
+    adidas = search_cache.make_key("bag", 20, ["amazon"], brands=["adidas", "Puma"])
+    assert adidas != base
+    assert search_cache.make_key("bag", 20, ["amazon"], brands=["PUMA ", "Adidas"]) == adidas
+    assert search_cache.make_key("bag", 20, ["amazon"], brands=[]) == base
 
 
 def test_key_changes_with_index_version(monkeypatch: pytest.MonkeyPatch) -> None:

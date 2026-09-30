@@ -76,6 +76,7 @@ def make_key(
     *,
     price_usd_max: float | None = None,
     min_rating: float | None = None,
+    brands: Sequence[str] | None = None,
 ) -> str:
     """把一次召回的**全部入参**压成一个 key。
 
@@ -92,6 +93,10 @@ def make_key(
         "price_max": price_usd_max,
         "min_rating": min_rating,
     }
+    # 品牌过滤只在有值时进 key：不带品牌的召回 key 与改动前逐字节相同，已有缓存照常命中。
+    brand_terms = sorted({b.strip().lower() for b in brands or () if b and b.strip()})
+    if brand_terms:
+        payload["brands"] = brand_terms
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:32]  # noqa: S324 - 做 key 不是签名
     return f"{KEY_PREFIX}{_index_version()}:{digest}"
@@ -262,6 +267,7 @@ async def cached_recall(
     *,
     price_usd_max: float | None = None,
     min_rating: float | None = None,
+    brands: Sequence[str] | None = None,
     fetch: Callable[[], Awaitable[list[RecallCandidate]]],
 ) -> list[RecallCandidate]:
     """读 L1 → L2 → ``fetch()`` 回源，命中即回填两级。
@@ -275,7 +281,14 @@ async def cached_recall(
     if not cache_enabled():
         return await fetch()
 
-    key = make_key(query, top_k, platforms, price_usd_max=price_usd_max, min_rating=min_rating)
+    key = make_key(
+        query,
+        top_k,
+        platforms,
+        price_usd_max=price_usd_max,
+        min_rating=min_rating,
+        brands=brands,
+    )
     cached = _l1_get(key)
     if cached is not None:
         candidates = _load(cached)

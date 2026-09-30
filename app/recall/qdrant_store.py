@@ -159,12 +159,19 @@ class QdrantRecall:
         ``item_id``——它不是检索维度，而是 :meth:`similar`（「搜同款」）按业务 id 反查 point 用的：
         point id 是建库时的自增整数，业务侧只有 item_id，没这个索引就得全表扫 138 万点。
         重复建同名索引 Qdrant 直接返回 ok，故本方法幂等、可重入。
+
+        ``brand`` 建**全文**索引（按词切、转小写）而不是 keyword：库里同一品牌有大小写与后缀变体
+        （``adidas`` / ``Adidas`` / ``adidas Originals``），keyword 精确匹配会把后两种漏掉。
         """
+        brand_index = models.TextIndexParams(
+            type=models.TextIndexType.TEXT, tokenizer=models.TokenizerType.WORD, lowercase=True
+        )
         for field, schema in (
             ("platform", models.PayloadSchemaType.KEYWORD),
             ("price_usd", models.PayloadSchemaType.FLOAT),
             ("rating", models.PayloadSchemaType.FLOAT),
             ("item_id", models.PayloadSchemaType.KEYWORD),
+            ("brand", brand_index),
         ):
             self._client.create_payload_index(
                 COLLECTION, field_name=field, field_schema=schema, wait=True
@@ -207,6 +214,7 @@ class QdrantRecall:
         *,
         price_usd_max: float | None = None,
         min_rating: float | None = None,
+        brands: Sequence[str] | None = None,
     ) -> list[RecallCandidate]:
         """dense 召回 + 多维 payload filter。
 
@@ -217,6 +225,11 @@ class QdrantRecall:
           没勾的平台不该被捞进来，所以那里的 "all" 只等于「全部**启用**平台」而非全库。
         - ``price_usd_max``：预算上限（USD），过滤 payload 的 ``price_usd``（建库时预折算）。
         - ``min_rating``：最低评分，过滤 payload 的 ``rating``。
+        - ``brands``：只要这些品牌（命中任一即可），走 ``brand`` 全文索引的 MatchText。品牌词拼进
+          query 压不过通用词：实测「adidas men's running shoes」前 32 名全是无品牌的
+          「Men's Running Shoes」短标题，第一条 adidas 排第 33，30 条的池子一条都进不来。
+          品牌词先转小写：线上索引 lowercase=True，两边都是小写；本地内存模式的 MatchText 是区分
+          大小写的子串匹配，统一转小写让单测和线上口径一致。
 
         平台名先 ``strip().lower()`` 归一再做 filter（payload 里平台名全小写）：模型可能生成
         ``Amazon``/``AMAZON`` 等等价但不规范的串，不归一会匹配落空、静默召回 0 条。
@@ -238,6 +251,16 @@ class QdrantRecall:
             )
         if min_rating is not None:
             must.append(models.FieldCondition(key="rating", range=models.Range(gte=min_rating)))
+        brand_terms = sorted({b.strip().lower() for b in brands or () if b and b.strip()})
+        if brand_terms:
+            must.append(
+                models.Filter(
+                    should=[
+                        models.FieldCondition(key="brand", match=models.MatchText(text=b))
+                        for b in brand_terms
+                    ]
+                )
+            )
         flt = models.Filter(must=must) if must else None
         dense = [float(x) for x in np.asarray(dense_vec, dtype=np.float32).ravel()]
         with _qdrant_call("dense 检索", self._breaker):

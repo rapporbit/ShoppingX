@@ -3,7 +3,8 @@
 主链路的「检索」一环。封装 :mod:`app.recall` 的编码 + Qdrant dense 召回：把用户这次搜索意图
 （query，已并入本轮域内的 like 偏好词）编码成 dense「请求向量」做召回，返回 top_k 归一候选。
 精确命中/硬约束走 Qdrant payload filter（非 sparse 打分）；
-filter 维度：platform + price_usd_max + min_rating（Qdrant Range）+ brand_exclude（后置过滤）。
+filter 维度：platform + price_usd_max + min_rating（Qdrant Range）+ brand（Qdrant 全文 MatchText）
++ brand_exclude（后置过滤）。
 
 精排取舍：原方案的 item_search 只做 dense 召回 + 双通道本地融合，cross-encoder
 精排是 CategoryInsight/RAG 链路的事。本工具据此**不再做 cross-encoder
@@ -347,15 +348,18 @@ async def item_search(
     price_usd_max: float | None = None,
     min_rating: float | None = None,
     brand_exclude: StrListArg | None = None,
+    brand: StrListArg | None = None,
     slot: str = "",
 ) -> ItemSearchOutput:
     """在单个平台检索商品（dense 召回，长期偏好与硬排除已由系统并入）；跨平台同轮多发、一平台一条。
     参数：query 用品类核心词（场景/人群词交给 item_picker 的 prefer）；platform 见
-    <enabled_platforms>；price_usd_max / min_rating / brand_exclude 召回期过滤；top_k 不用传；
-    slot 只在多槽位轮传槽名（一槽一条、同轮发）。
+    <enabled_platforms>；price_usd_max / min_rating / brand / brand_exclude 召回期过滤；
+    top_k 不用传；slot 只在多槽位轮传槽名（一槽一条、同轮发）。
     造检索词（每次都适用，单品直搜不读 skill 也照做）：
     - 库里是英文标题：把中文口语（抗造 / 小众）翻成英文品类词 + 属性词，原话留在身后。
     - 用户明说的硬条件进 price_usd_max / min_rating / brand_exclude；你猜的进 query 措辞。
+    - 用户点名要某品牌（「推荐 adidas 跑鞋」）→ brand 传英文品牌名（阿迪达斯 → adidas），只召回
+      该品牌；品牌覆盖不全，召回为 0 就如实说库里没找到该品牌，别拿无品牌商品冒充。
     - <user_long_term_memory> 已有的事实直接写进入参，不再问；缺预算尺寸不挡着搜。
     - plan 判 intent_grounding=web（新说法 / 潮流词）→ 先 web_search 翻成品类词再搜，结果不当候选。
     返回 filtered_out = 库里有但被条件挡住（不是候选，如实说被哪个条件挡的）。
@@ -382,6 +386,7 @@ async def item_search(
         price_usd_max=price_usd_max,
         min_rating=min_rating,
         brand_exclude=brand_exclude,
+        brand=brand,
     )
 
     # 单平台放大召回池（供 picker 精排，不进上下文——渲染仍由 __str__ 的 RENDER_CAP 收敛）；跨平台
@@ -416,14 +421,18 @@ async def item_search(
                 search_platforms,
                 price_usd_max=price_max,
                 min_rating=rating_min,
+                brands=brand,
             )
 
+        # 品牌过滤三次召回（主 / 放宽 / 探测）都带：它和平台范围一样是「只在这个圈子里找」，
+        # 不是可放宽的门槛，探测也只回答「这个品牌里有没有货被预算 / 评分挡了」。
         return await cached_recall(
             effective_query,
             top_k,
             search_platforms,
             price_usd_max=price_max,
             min_rating=rating_min,
+            brands=brand,
             fetch=_fetch,
         )
 
@@ -474,6 +483,8 @@ async def item_search(
         strategy.append("memory_exclude")
     if brand_exclude:
         strategy.append("brand_exclude")
+    if brand:
+        strategy.append("brand_filter")
     filtered_out: list[FilteredOutItem] = []
     has_hard_filter = (
         price_usd_max is not None
