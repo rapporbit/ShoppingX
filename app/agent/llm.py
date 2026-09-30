@@ -313,7 +313,7 @@ def get_planner_llm() -> ThrottledChatModel:
     | deepseek-v4-flash（原） | 0.805 | 6.8s | 1/36 |
     | qwen3.6-flash | 0.789 | 3.0s | 8/36 |
     | glm-5.2-fast-preview | 0.801 | 2.1s | 12/36 |
-    | **qwen3.8-flash（现）** | 0.786 | 4.9s | **26/36** |
+    | qwen3.8-flash（2026-09-11 ~ 09-30） | 0.786 | 4.9s | 26/36 |
 
     **总分完全分不出高下**（0.786~0.805 全在噪声内），区分它们的是 reward 看不见的两维：延迟
     差 3 倍，以及「信息不足时会不会硬编」。dev92 里 36 条 golden 判该弃权（追问轮片段，没有
@@ -323,6 +323,16 @@ def get_planner_llm() -> ThrottledChatModel:
     选 qwen3.8-flash 而不是更快的 qwen3.6：抛 1.9s（占用户感知延迟约 5%）换抗硬编强 3 倍。
     planner 的 category 是整条链的锚点，锚错了后面每步都在错误的轨道上跑得飞快，而域漂移是
     prompt 治不死的老账。它也没有矫枉过正——误弃权仅 1 次，R_retrieval 反是四家最高。
+
+    **2026-09-30 换成 deepseek-v4.1-flash。** 上面那张表没单独看预算抽取，而 qwen3.8-flash
+    恰好在这一维上不稳：10 种预算说法（「预算 300」「两百块」「50 美元以内」「100 欧」
+    「under 60 bucks」「5000 日元」…）各采 3 次，qwen3.8-flash 只抽对 11/30，连「50 美元以内」
+    都是 0/3，丢的时候就是直接输出 ``budget_amount: null``（不是存根，也没填进别的字段）；
+    删掉 prompt 里「不要填 budget_usd」那句也只到 12/30，说明是模型问题不是提示词。同一份
+    prompt 下 deepseek-v4.1-flash 30/30。弃权那一列在当前 prompt 下重测：deepseek-v4.1-flash
+    27/36、延迟中位 3.1s，qwen3.8-flash 26/36、3.7s——v4.1 已经没有 v4 那种见片段就硬编的毛病。
+    预算漏抽的代价：主 loop 看得到原话，会自己给 item_search 补 ``price_usd_max``，但精挑的
+    超预算判定和套装的总预算组合只读 planner 的 ``budget_usd``，planner 一漏就整段失效。
 
     **一个必须记住的限定**：dev92 是孤立片段，线上追问轮有前几轮原话作上文，
     那时「沿用上一轮品类」是正确行为、不算硬编。所以那一列测的是「上下文缺失时的行为」，
