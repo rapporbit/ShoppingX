@@ -55,6 +55,9 @@ class ItemCandidate(BaseModel):
     url: str = ""
     image_url: str = ""
     score: float = 0.0  # 召回相似度分
+    # 细类目路径（"Shoes > Athletic > Running > Road Running"），picker 相关性门用来识破标题
+    # 蹭词（板鞋标题写 Running）。空 = 库里没有（约四成商品），不奖不罚。
+    fine_category: str = ""
     # 套装槽位名（槽位轮专用，见 app.tools._bundle）：这件候选是为哪个子品类槽搜的。
     # item_search(slot=…) 经 register_slot 解析成本轮槽表里的规范名后盖章，组合优选按它分组，
     # 前端卡片按它分组展示。
@@ -97,5 +100,6 @@ class ItemCandidate(BaseModel):
             url=rc.url,
             image_url=rc.image_url,
             price_usd=rc.price_usd,
+            fine_category=rc.fine_category,
             score=rc.score,
         )

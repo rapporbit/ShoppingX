@@ -37,6 +37,7 @@ from app.recall.materials import (  # noqa: E402
     feature_specs,
     title_materials,
 )
+from app.utils.clean import fine_category_path  # noqa: E402
 
 _SIZE_NUM = re.compile(
     r"(\d+(?:\.\d+)?)\s*(?:-|\s)?(?:piece|pieces|pc|pcs|pack|set|inch|inches|in\b|\"|”|cm|mm"
@@ -109,6 +110,8 @@ def merge_record(rec: dict, mc: dict | None) -> dict:
                 specs = feature_specs(feats)
         if mc.get("rating_number"):
             out["parent_rating_count"] = int(mc["rating_number"])
+        # 细类目按父 ASIN 取、不看变体规则：规则③只是尺寸/件数冲突，品类不随变体变。
+        out["fine_category"] = fine_category_path(mc.get("categories") or [])
         out["mcauley_rule"] = rule
         out["mcauley_parent_asin"] = mc.get("parent_asin", "")
     out["materials"] = mats

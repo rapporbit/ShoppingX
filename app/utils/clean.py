@@ -71,6 +71,7 @@ class CleanItem(BaseModel):
     materials: list[str] = []
     attr_line: str = ""  # 「Material: ...; Specs: ...」短属性行，进编码文本
     parent_rating_count: int | None = None  # 父 ASIN 跨变体合计评论数，比单个变体偏高
+    fine_category: str = ""  # 细类目路径，见 fine_category_path
 
 
 # 各平台 CSV 列名 → 归一字段（按列表顺序取第一个非空）。eBay 已从表中剔除。
@@ -156,6 +157,23 @@ PLATFORM_FIELDS: dict[str, dict[str, list[str]]] = {
 # 的价格形如 2.29e+01，漏掉指数会把 22.9 解析成 2.29，差一个数量级）。
 _NUM_RE = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
 _WS_RE = re.compile(r"\s+")
+
+
+# McAuley 服饰树第二层是人群（Men / Women / ...），不是品类。路径取自父 ASIN，变体的人群常与
+# 我们这件对不上（「Men's 7.5」挂在 Boys 下），留着只会让 reranker 在人群上扣分。
+_AUDIENCE_LEVELS = frozenset({"Men", "Women", "Boys", "Girls", "Baby"})
+
+
+def fine_category_path(categories: list[str]) -> str:
+    """McAuley ``categories`` → 细类目路径：去根类目、去人群层，用 " > " 连接。
+
+    ``["Clothing, Shoes & Jewelry", "Men", "Shoes", "Fashion Sneakers"]`` → ``"Shoes > Fashion
+    Sneakers"``。只剩根类目或为空时返回 ``""``（= 未知）。
+    """
+    levels = [c.strip() for c in categories if c and c.strip()][1:]
+    if levels and levels[0] in _AUDIENCE_LEVELS:
+        levels = levels[1:]
+    return " > ".join(levels)
 
 
 def _first_nonempty(row: dict[str, str], cols: list[str]) -> str:

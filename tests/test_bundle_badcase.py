@@ -317,6 +317,57 @@ async def test_category_relevance_scores_and_caches(monkeypatch) -> None:
             reset_candidates()
 
 
+@pytest.mark.asyncio
+async def test_category_relevance_fine_category_caps_title_score(monkeypatch) -> None:
+    """标题蹭词骗过 reranker 时，细类目路径分把它压下来；没有细类目的维持标题分。
+
+    线上 b594ee78：板鞋 Superstar 标题写 "Shoe Running"，标题分 0.85；细类目 "Shoes > Fashion
+    Sneakers" 对「跑步鞋」只有 0.22。取小 → 0.22。路径只压分不抬分。
+    """
+    import app.tools.item_picker as ip
+    from app.tools._candidates import compact_candidates, register, reset_candidates
+
+    seen: list[str] = []
+
+    class _Fake:
+        async def score_detailed(self, query, texts):
+            seen.extend(texts)
+            table = {"shoes > fashion sneakers": 0.22, "shoes > athletic > running": 0.99}
+            return [table.get(t, 0.85) for t in texts], True
+
+    monkeypatch.setattr(ip, "get_reranker", lambda: _Fake())
+    with _session("t-rel-fc", [_slot("跑鞋", kw=["running shoes"]), _slot("水杯", kw=["bottle"])]):
+        board = _c("SUPER", "adidas Superstar Shoe Running Black", 60.0, "跑鞋").model_copy(
+            update={"fine_category": "Shoes > Fashion Sneakers"}
+        )
+        runner = _c("BOOST", "adidas Ultraboost 22 Running Shoe", 90.0, "跑鞋").model_copy(
+            update={"fine_category": "Shoes > Athletic > Running"}
+        )
+        unknown = _c("NOCAT", "Men's Running Shoe", 30.0, "跑鞋")
+        register([board, runner, unknown])
+        try:
+            scores, ok, _conf = await ip._category_relevance([board, runner, unknown])
+            assert ok is True
+            assert scores["SUPER"] == 0.22  # 路径分压过标题分
+            assert scores["BOOST"] == 0.85  # 路径 0.99 不抬高标题 0.85
+            assert scores["NOCAT"] == 0.85  # 无细类目：不奖不罚
+            assert seen.count("shoes > fashion sneakers") == 1  # 路径与标题同一请求送
+            assert all("fine_category" not in row for row in compact_candidates([board]))
+        finally:
+            reset_candidates()
+
+
+def test_fine_category_path_strips_root_and_audience() -> None:
+    from app.utils.clean import fine_category_path
+
+    shoes = ["Clothing, Shoes & Jewelry", "Men", "Shoes", "Fashion Sneakers"]
+    assert fine_category_path(shoes) == "Shoes > Fashion Sneakers"
+    kitchen = ["Home & Kitchen", "Kitchen & Dining", "Travel & To-Go Drinkware"]
+    assert fine_category_path(kitchen) == "Kitchen & Dining > Travel & To-Go Drinkware"
+    assert fine_category_path(["Electronics"]) == ""
+    assert fine_category_path([]) == ""
+
+
 def test_slot_relevance_ranks_real_item_above_squatters() -> None:
     """默认形态（逐出门关，w_relevance 排序加分）：真水杯在场时压过高 base 分的贴纸。
 

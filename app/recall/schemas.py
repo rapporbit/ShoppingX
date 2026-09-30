@@ -25,6 +25,7 @@ class RecallCandidate(BaseModel):
     url: str = ""
     image_url: str = ""
     price_usd: float | None = None  # 建库时预折算（Qdrant filter + 渐进填充）
+    fine_category: str = ""  # McAuley 细类目路径（见 clean.fine_category_path），空 = 未知
     score: float = 0.0
 
 
@@ -50,5 +51,6 @@ class ItemRecord(BaseModel):
     materials: list[str] = []  # 材质软约束用（抽不到 = 未知，不等于不含）
     parent_rating_count: int | None = None
     sold: int | None = None
+    fine_category: str = ""
     # 仅建索引阶段用于编码，不回传给模型，故 dump 时排除以缩小 sidecar 体积。
     embed_text: str = Field(default="", exclude=True)

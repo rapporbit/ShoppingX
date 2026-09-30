@@ -436,14 +436,20 @@ async def _category_relevance(
             fresh = sorted(fresh, key=lambda c: c.score or 0.0, reverse=True)[:PICK_RERANK_K]
         if not fresh:
             return True
-        batch, used_remote = await get_reranker().score_detailed(
-            query, [_searchable(c) for c in fresh]
-        )
+        # 有细类目的候选再单独给路径打一分，与标题分取小：卖家把 "Running" 塞进板鞋标题，标题分
+        # 照样高（Superstar 0.85 vs 真跑鞋 0.96），路径不受标题影响（「跑步鞋」× "shoes > fashion
+        # sneakers" 0.22 vs 路跑 0.97）。只拿路径、不拼标题——拼进标题实测只从 0.85 降到 0.80。
+        # 取小 = 细类目只能压分不能抬分；没有细类目 = 维持标题分（不奖不罚）。同一请求里送。
+        with_path = [c for c in fresh if c.fine_category]
+        docs = [_searchable(c) for c in fresh] + [c.fine_category.lower() for c in with_path]
+        batch, used_remote = await get_reranker().score_detailed(query, docs)
         if not used_remote:
             return False
-        for c, s in zip(fresh, batch, strict=True):
-            scores[c.item_id] = float(s)
-            update_fields(c.item_id, rerank_score=float(s), rerank_query=query)
+        path_scores = dict(zip((c.item_id for c in with_path), batch[len(fresh) :], strict=True))
+        for c, s in zip(fresh, batch[: len(fresh)], strict=True):
+            final = min(float(s), float(path_scores.get(c.item_id, s)))
+            scores[c.item_id] = final
+            update_fields(c.item_id, rerank_score=final, rerank_query=query)
         return True
 
     try:

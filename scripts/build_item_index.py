@@ -99,6 +99,7 @@ def _clean_to_record(item: CleanItem) -> ItemRecord:
         materials=item.materials,
         parent_rating_count=item.parent_rating_count,
         sold=item.sold,
+        fine_category=item.fine_category,
         embed_text=embed_text(item),
     )
 

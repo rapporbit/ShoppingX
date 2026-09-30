@@ -33,8 +33,9 @@ from app.tools.schemas import ItemCandidate
 
 logger = logging.getLogger("shoppingx.candidates")
 
-# 喂模型时从候选里剔除的字段：长且模型不用，仅供前端卡片（按 item_id 旁路回填）。
-_MODEL_HIDDEN_FIELDS = frozenset({"url", "image_url"})
+# 喂模型时从候选里剔除的字段：长且模型不用，仅供前端卡片（按 item_id 旁路回填）；
+# fine_category 只给 picker 相关性门用，模型拿它没有决策用途。
+_MODEL_HIDDEN_FIELDS = frozenset({"url", "image_url", "fine_category"})
 
 # 模型**不该拿来做决策**的字段，一律不喂：
 #   score —— 召回相似度。候选本来就按它降序排好了，序位已经把这个信息表达完了；把 0.71 这种
