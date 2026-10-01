@@ -125,6 +125,9 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 # app 不作为 wheel 安装（[tool.uv] package=false），让 pytest 把项目根加入 sys.path。
 pythonpath = ["."]
-addopts = "-ra"
+# -p 固定插件注册顺序：anyio 与 pytest-asyncio 都会认领 async 夹具，谁先注册谁赢，默认顺序取决于
+# site-packages 的目录列举顺序（macOS 有序、Linux ext4 是哈希序）。asyncio 先注册时，anyio 标记
+# 用例的 async 夹具会跑在另一个事件循环里（test_holds 的进程内 worker 整段用例都不被调度）。
+addopts = "-ra -p anyio -p asyncio"
 # llm = 真调模型的快照评测（scripts/eval/snapshot/，花钱），默认 testpaths 不收集，手动 -m llm 跑。
 markers = ["llm: 真调 LLM API 的快照评测，跑前先报耗时与花费"]
