@@ -99,6 +99,7 @@ _W_RATING: float
 _W_CHEAP: float
 _W_PICK_CHEAP: float
 _W_REL: float
+_PATH_WEIGHT: float
 _W_MATCH_HARD: float
 _W_MATCH_HARD_SEM: float
 _W_ATTEN: float
@@ -124,7 +125,7 @@ PICK_RERANK_K = 30
 def _load_params() -> None:
     """从 env 求值本模块的可调参数（导入时跑一次；后台改参数后由覆盖层回调）。"""
     global _W_PREF, _W_RATING, _W_CHEAP, _W_PICK_CHEAP, _W_REL, _W_MATCH_HARD, _W_MATCH_HARD_SEM
-    global _W_ATTEN
+    global _W_ATTEN, _PATH_WEIGHT
     global _W_MATCH_SEM, _W_ATTEN_SEM, _W_AFFINITY, _W_SPEC_CONFLICT
     global _RERANK_FLOOR, _W_RERANK_MISS, _SLOT_RERANK_FLOOR, _W_SLOT_RERANK
     global PICK_DISPLAY_CAP, PICK_REL_SHOW_RATIO
@@ -140,6 +141,9 @@ def _load_params() -> None:
     # 便宜度置 0 在 ESCI / TREC / 两个半区上都更好（池里最便宜那件白拿 0.4，压过相关性差距）。
     _W_REL = env_float("PICK_W_REL", 10.0)
     _W_PICK_CHEAP = env_float("PICK_W_CHEAP", 0.0)
+    # 细类目路径分的软扣分幅度：精排分 = 标题分 × (1 - w + w × 路径分/池内最高路径分)，
+    # w=0.5 即最多打五折（rank-eval 试过 0.5 / 0.8，0.5 与不用路径持平且守住 badcase）。
+    _PATH_WEIGHT = env_float("PICK_PATH_WEIGHT", 0.5)
     # 正向**硬**约束（must_have，如「必须金属」）的加分权重——比软偏好重，强力上浮匹配项。
     # **不做二值淘汰**：库无可靠材质/颜色字段，keep-only 会误杀「是金属但标题没写金属」的候选、
     # 导致空结果；改用「更高权重 Matcher」表达硬软之别——硬拉得更狠、但浮不上来也不淘汰
@@ -278,7 +282,14 @@ class ItemPickerOutput(BaseModel):
         # 写理由用不上，收尾按 id hydrate 全量。
         payload["picks"] = compact_candidates(
             self.picks,
-            drop={"shipping_usd", "duty_usd", "weight_kg", "rerank_score", "rerank_query"},
+            drop={
+                "shipping_usd",
+                "duty_usd",
+                "weight_kg",
+                "rerank_score",
+                "rerank_path",
+                "rerank_query",
+            },
         )
         # excluded / over_budget 是 Output 必填字段，投影必须能 round-trip 回 schema
         # （test_render_projection），只裁可推导的冗余，这两个照带。
@@ -455,38 +466,51 @@ async def _category_relevance(
 
     async def _score(title_q: str, path_q: str, cands: list[ItemCandidate]) -> bool:
         query = title_q if title_q == path_q else f"{title_q} | {path_q}"  # 缓存键
+        raw: dict[str, tuple[float, float | None]] = {}  # item_id → (标题分, 路径分)
         for c in cands:  # 增量缓存命中：query 没变的候选不重复打分
             if c.rerank_score is not None and c.rerank_query == query:
-                scores[c.item_id] = float(c.rerank_score)
-        fresh = [c for c in cands if c.item_id not in scores]
+                raw[c.item_id] = (float(c.rerank_score), c.rerank_path)
+        fresh = [c for c in cands if c.item_id not in raw]
         if len(fresh) > PICK_RERANK_K:  # 向量分高的先送精排，尾部本轮不打分（门生效时出局）
             fresh = sorted(fresh, key=lambda c: c.score or 0.0, reverse=True)[:PICK_RERANK_K]
-        if not fresh:
-            return True
-        # 有细类目的候选再单独给路径打一分，与标题分取小：卖家把 "Running" 塞进板鞋标题，标题分
-        # 照样高（Superstar 0.85 vs 真跑鞋 0.96），路径不受标题影响（「跑步鞋」× "shoes > fashion
-        # sneakers" 0.22 vs 路跑 0.97）。只拿路径、不拼标题——拼进标题实测只从 0.85 降到 0.80。
-        # 取小 = 细类目只能压分不能抬分；没有细类目 = 维持标题分（不奖不罚）。
-        with_path = [c for c in fresh if c.fine_category]
-        titles = [_searchable(c) for c in fresh]
-        paths = [c.fine_category.lower() for c in with_path]
-        reranker = get_reranker()
-        if title_q == path_q:  # 同 query：一个请求送完
-            batch, used_remote = await reranker.score_detailed(title_q, titles + paths)
-            t_scores, p_scores = batch[: len(titles)], batch[len(titles) :]
-        else:
-            (t_scores, ok_t), (p_scores, ok_p) = await asyncio.gather(
-                reranker.score_detailed(title_q, titles),
-                reranker.score_detailed(path_q, paths) if paths else _no_paths(),
-            )
-            used_remote = ok_t and ok_p
-        if not used_remote:
-            return False
-        path_scores = dict(zip((c.item_id for c in with_path), p_scores, strict=True))
-        for c, s in zip(fresh, t_scores, strict=True):
-            final = min(float(s), float(path_scores.get(c.item_id, s)))
-            scores[c.item_id] = final
-            update_fields(c.item_id, rerank_score=final, rerank_query=query)
+        if fresh:
+            with_path = [c for c in fresh if c.fine_category]
+            titles = [_searchable(c) for c in fresh]
+            paths = [c.fine_category.lower() for c in with_path]
+            reranker = get_reranker()
+            if title_q == path_q:  # 同 query：一个请求送完
+                batch, used_remote = await reranker.score_detailed(title_q, titles + paths)
+                t_scores, p_scores = batch[: len(titles)], batch[len(titles) :]
+            else:
+                (t_scores, ok_t), (p_scores, ok_p) = await asyncio.gather(
+                    reranker.score_detailed(title_q, titles),
+                    reranker.score_detailed(path_q, paths) if paths else _no_paths(),
+                )
+                used_remote = ok_t and ok_p
+            if not used_remote:
+                return False
+            path_of = dict(zip((c.item_id for c in with_path), p_scores, strict=True))
+            for c, t in zip(fresh, t_scores, strict=True):
+                p = path_of.get(c.item_id)
+                raw[c.item_id] = (float(t), None if p is None else float(p))
+                update_fields(
+                    c.item_id,
+                    rerank_score=raw[c.item_id][0],
+                    rerank_path=raw[c.item_id][1],
+                    rerank_query=query,
+                )
+        # 细类目路径分只当软扣分（最多打 1-_PATH_WEIGHT 折）、且按池内最高路径分归一：卖家把
+        # "Running" 塞进板鞋标题，标题分照样高（Superstar 0.85 vs 真跑鞋 0.96），路径分识破它
+        # （0.22 vs 0.97）。但路径分绝对值普遍极低（rank-eval 好件中位 0.068，「magnetic
+        # eyelashes」×「…False Eyelashes」0.0011），取小会把真品一起压没（469 条里 144 条整池
+        # <0.1）；池内相对值才可比。验证半 233 条展示 nDCG@3：取小 0.568 → 软扣分 0.656
+        # （不用路径 0.657，但 badcase 板鞋 / 短裤回到前 3）。没有细类目 = 维持标题分。
+        pmax = max((p for _t, p in raw.values() if p is not None), default=0.0)
+        for iid, (t, p) in raw.items():
+            if p is None or pmax <= 0:
+                scores[iid] = t
+            else:
+                scores[iid] = t * (1 - _PATH_WEIGHT + _PATH_WEIGHT * p / pmax)
         return True
 
     try:
@@ -849,7 +873,16 @@ def _score_candidates(
         matched_map[c.item_id] = matched_must + matched
         # 亲和命中单独一路带出去（第 3 位）：它在理由里的措辞必须和「你要的 X」区分开——用户没
         # 说过这个词，冒充成他说的就是编造事实。
-        final = base + _W_PICK_CHEAP * cheapness(c) + (_W_REL * rr if rr is not None else 0.0)
+        if rr is not None:
+            relevance = _W_REL * rr
+        elif not rel.on:
+            # 门没开（planner 没给品类 / 锚分歧 / 精排降级）：召回向量分顶替精排分。不顶替时这批
+            # 只剩评分 + 约束词排序，rank-eval 门关 36 条展示 nDCG@3 0.498，顶替后 0.668
+            # （= 纯向量序 0.670；权重 5~100 结果相同，直接沿用 _W_REL）。
+            relevance = _W_REL * (c.score or 0.0)
+        else:
+            relevance = 0.0
+        final = base + _W_PICK_CHEAP * cheapness(c) + relevance
         scored.append((final, matched_must + matched, matched_aff, c))
 
     scored.sort(key=lambda t: t[0], reverse=True)

@@ -79,9 +79,12 @@ class ItemCandidate(BaseModel):
     # （「没一件命中 → 别包装成完美匹配」）——曾经这判据靠匹配 pick_reason 里的措辞片段
     # （「正好是你要的…」），_build_reason 改一个字 prompt 就静默失效，故改成结构化布尔。
     pref_matched: bool | None = None
-    # 品类一致性分（cross-encoder，picker 相关性门写；None=本轮没打过分）。随 rerank_query
-    # 一起回写登记表做**增量缓存**：补搜轮 picker 重跑时，query 没变的候选跳过重复打分。
+    # cross-encoder 原始分（picker 相关性门写；None=本轮没打过分）：rerank_score = 标题分，
+    # rerank_path = 细类目路径分（无细类目为 None）。存原始分不存组合分——路径分要除以**整批**
+    # 最高路径分，补搜轮新候选进来后旧候选的组合分会变。随 rerank_query 回写登记表做**增量
+    # 缓存**：补搜轮 picker 重跑时，query 没变的候选跳过重复打分。
     rerank_score: float | None = None
+    rerank_path: float | None = None
     rerank_query: str = ""  # 上述分数对应的干净品类 query（缓存失效判据）
 
     @classmethod

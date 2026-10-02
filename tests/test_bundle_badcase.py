@@ -322,7 +322,8 @@ async def test_category_relevance_fine_category_caps_title_score(monkeypatch) ->
     """标题蹭词骗过 reranker 时，细类目路径分把它压下来；没有细类目的维持标题分。
 
     线上 b594ee78：板鞋 Superstar 标题写 "Shoe Running"，标题分 0.85；细类目 "Shoes > Fashion
-    Sneakers" 对「跑步鞋」只有 0.22。取小 → 0.22。路径只压分不抬分。
+    Sneakers" 对「跑步鞋」只有 0.22。路径分按池内最高归一后软扣分（最多打五折，见
+    PICK_PATH_WEIGHT）：0.85 × (0.5 + 0.5 × 0.22/0.99)。路径只压分不抬分。
     """
     import app.tools.item_picker as ip
     from app.tools._candidates import compact_candidates, register, reset_candidates
@@ -348,8 +349,8 @@ async def test_category_relevance_fine_category_caps_title_score(monkeypatch) ->
         try:
             scores, ok, _conf = await ip._category_relevance([board, runner, unknown])
             assert ok is True
-            assert scores["SUPER"] == 0.22  # 路径分压过标题分
-            assert scores["BOOST"] == 0.85  # 路径 0.99 不抬高标题 0.85
+            assert scores["SUPER"] == pytest.approx(0.85 * (0.5 + 0.5 * 0.22 / 0.99))
+            assert scores["BOOST"] == pytest.approx(0.85)  # 池内最高路径：不扣、也不抬
             assert scores["NOCAT"] == 0.85  # 无细类目：不奖不罚
             assert seen.count("shoes > fashion sneakers") == 1  # 路径与标题同一请求送
             assert all("fine_category" not in row for row in compact_candidates([board]))
