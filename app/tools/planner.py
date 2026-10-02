@@ -298,6 +298,14 @@ class PlanOutput(BaseModel):
         ),
     )
     category: str = Field(default="", description="主品类：用户本轮要买的那类东西（中文品类名）")
+    category_en: str = Field(
+        default="",
+        description=(
+            "同一个主品类的**英文通用品类名**（商品标题是英文，系统拿它给标题打相关分）："
+            "只写品类名词本身，如 running shoes / vacuum flask / carry-on luggage；"
+            "**不带**品牌、颜色、性别、尺码、材质、价位（这些另有字段）。没有主品类就留空"
+        ),
+    )
     intent_grounding: IntentGrounding = Field(
         default="internal",
         description=(
@@ -521,6 +529,8 @@ def _sync_turn_constraints(plan: PlanOutput) -> None:
     set_turn_constraints(
         TurnConstraints.build(
             category=plan.category,
+            category_en=plan.category_en,
+            keywords=plan.keywords,
             budget_usd=plan.budget_usd,
             exclude=_atoms(plan.exclude_keywords),
             avoid=_atoms(plan.soft_dislikes),

@@ -16,6 +16,7 @@ planner 每轮读最近几轮原话、**整体重算**本轮仍生效的约束�
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 
 from pydantic import BaseModel, Field
@@ -33,6 +34,22 @@ def _atoms(words: Iterable[str]) -> list[str]:
     return out
 
 
+# 英文品类名里这些修饰词会把精排的路径分 / 标题分压塌（2026-10-02 rank-eval badcase：
+# 「running shoes」路跑路径 0.929，「adidas men's running shoes black」0.151）。
+# 品牌靠 planner 字段说明约束；性别 / 颜色是封闭小词表，机械剔掉。
+_EN_MODIFIERS = re.compile(
+    r"\b(?:men|women|man|woman|boy|girl|kid|unisex|male|female|ladies|lady|"
+    r"black|white|red|blue|green|pink|grey|gray|brown|beige|navy|purple|yellow|"
+    r"silver|gold)(?:'?s|')?\b",
+    re.IGNORECASE,
+)
+
+
+def clean_category_en(text: str) -> str:
+    """英文品类名去性别 / 颜色修饰、压空白、小写；剔完为空就返回空（调用方退回中文品类）。"""
+    return " ".join(_EN_MODIFIERS.sub(" ", text or "").split()).lower()
+
+
 class TurnConstraints(BaseModel):
     """本轮生效约束 P_t（planner 写，run 内有效）。
 
@@ -41,7 +58,8 @@ class TurnConstraints(BaseModel):
       就是拿误杀去赌——「花哨」这种词一旦匹上（「塑料感」连坐 plastic），杀掉的可能正是用户要的。
     - ``prefer_terms``：加分。正向**不做二值淘汰**（数据没有可靠的材质 / 风格字段，keep-only 会
       误杀一大片），所以即便「必须金属」也只作强加分。
-    - ``category``：本轮主品类。
+    - ``category``：本轮主品类（中文）；``category_en``：同一品类的英文名，精排路径分用它；
+      ``keywords``：planner 检索词，精排标题分用它（标题要判具体属性，路径只判品类）。
 
     三个词表在构造时统一成 :func:`_atoms` 形态。消费接口沿用旧名（``dislike_terms`` /
     ``soft_dislike_terms`` / ``like_terms``），下游 assemble / signals / drift / item_picker
@@ -49,6 +67,10 @@ class TurnConstraints(BaseModel):
     """
 
     category: str = Field(default="", description="本轮主品类")
+    category_en: str = Field(default="", description="本轮主品类英文名（已去性别 / 颜色修饰）")
+    keywords: list[str] = Field(
+        default_factory=list, description="planner 检索词（精排给商品标题打分用，路径分不用）"
+    )
     budget_usd: float | None = Field(default=None, description="本轮生效的预算上限 USD，无则 None")
     exclude_terms: list[str] = Field(default_factory=list, description="硬淘汰词")
     avoid_terms: list[str] = Field(default_factory=list, description="软减分词")
@@ -59,6 +81,8 @@ class TurnConstraints(BaseModel):
         cls,
         *,
         category: str = "",
+        category_en: str = "",
+        keywords: Iterable[str] = (),
         budget_usd: float | None = None,
         exclude: Iterable[str] = (),
         avoid: Iterable[str] = (),
@@ -70,6 +94,8 @@ class TurnConstraints(BaseModel):
         pf = [w for w in _atoms(prefer) if w not in ex and w not in av]
         return cls(
             category=category,
+            category_en=clean_category_en(category_en),
+            keywords=[k.strip() for k in keywords if k and k.strip()],
             budget_usd=budget_usd,
             exclude_terms=ex,
             avoid_terms=av,
@@ -79,6 +105,7 @@ class TurnConstraints(BaseModel):
     def is_empty(self) -> bool:
         return (
             not self.category
+            and not self.keywords
             and self.budget_usd is None
             and not self.exclude_terms
             and not self.avoid_terms

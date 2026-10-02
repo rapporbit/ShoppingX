@@ -97,6 +97,8 @@ logger = logging.getLogger("shoppingx.item_picker")
 _W_PREF: float
 _W_RATING: float
 _W_CHEAP: float
+_W_PICK_CHEAP: float
+_W_REL: float
 _W_MATCH_HARD: float
 _W_MATCH_HARD_SEM: float
 _W_ATTEN: float
@@ -121,7 +123,8 @@ PICK_RERANK_K = 30
 
 def _load_params() -> None:
     """从 env 求值本模块的可调参数（导入时跑一次；后台改参数后由覆盖层回调）。"""
-    global _W_PREF, _W_RATING, _W_CHEAP, _W_MATCH_HARD, _W_MATCH_HARD_SEM, _W_ATTEN
+    global _W_PREF, _W_RATING, _W_CHEAP, _W_PICK_CHEAP, _W_REL, _W_MATCH_HARD, _W_MATCH_HARD_SEM
+    global _W_ATTEN
     global _W_MATCH_SEM, _W_ATTEN_SEM, _W_AFFINITY, _W_SPEC_CONFLICT
     global _RERANK_FLOOR, _W_RERANK_MISS, _SLOT_RERANK_FLOOR, _W_SLOT_RERANK
     global PICK_DISPLAY_CAP, PICK_REL_SHOW_RATIO
@@ -129,7 +132,14 @@ def _load_params() -> None:
     # 打分权重：软偏好命中最重（这是「按偏好精挑」的本职），评分次之，价格便宜度再次。
     _W_PREF = 1.0
     _W_RATING = 0.6
-    _W_CHEAP = 0.4
+    _W_CHEAP = 0.4  # 套装轮组合（combine_bundle）用；普通轮见 _W_PICK_CHEAP
+    # 普通轮的精排连续项与便宜度（2026-10-02 rank-eval，scripts/eval/eval_picker_rank.py）：
+    # 精排分原先只当开关（< FLOOR 扣 _W_RERANK_MISS），过了门的 0.95 和 0.25 贡献一样，排序落到
+    # 评分 / 便宜度这些与「是不是要的东西」无关的项上。加 W×精排分（0~1）后，留出验证半
+    # （233 条）展示 nDCG@3 0.551→0.572、前 3 不相关 0.70→0.57 件；W 在 4~50 是平台，取 10。
+    # 便宜度置 0 在 ESCI / TREC / 两个半区上都更好（池里最便宜那件白拿 0.4，压过相关性差距）。
+    _W_REL = env_float("PICK_W_REL", 10.0)
+    _W_PICK_CHEAP = env_float("PICK_W_CHEAP", 0.0)
     # 正向**硬**约束（must_have，如「必须金属」）的加分权重——比软偏好重，强力上浮匹配项。
     # **不做二值淘汰**：库无可靠材质/颜色字段，keep-only 会误杀「是金属但标题没写金属」的候选、
     # 导致空结果；改用「更高权重 Matcher」表达硬软之别——硬拉得更狠、但浮不上来也不淘汰
@@ -366,6 +376,10 @@ def _near_duplicate(a: ItemCandidate, b: ItemCandidate) -> bool:
     return len(ta & tb) / len(ta | tb) >= _NEAR_DUP_JACCARD
 
 
+async def _no_paths() -> tuple[list[float], bool]:
+    return [], True
+
+
 async def _category_relevance(
     survivors: list[ItemCandidate],
     must_terms: list[str] | None = None,
@@ -392,7 +406,8 @@ async def _category_relevance(
     if not survivors:
         return {}, False, False
     slots = get_session_bundle()
-    jobs: list[tuple[str, list[ItemCandidate]]] = []
+    # (标题 query, 路径 query, 候选)：两段同 query 时一个请求送完，不同则各送一次。
+    jobs: list[tuple[str, str, list[ItemCandidate]]] = []
     if len(slots) >= 2:  # 套装轮：按「将归入的槽」分批，各槽用各自的干净 query
         by_slot: dict[str, list[ItemCandidate]] = {}
         for c in survivors:
@@ -400,11 +415,14 @@ async def _category_relevance(
             if slot_name:
                 by_slot.setdefault(slot_name, []).append(c)
         jobs = [
-            (slot_query(s), by_slot[s.name]) for s in slots if slot_query(s) and by_slot.get(s.name)
+            (slot_query(s), slot_query(s), by_slot[s.name])
+            for s in slots
+            if slot_query(s) and by_slot.get(s.name)
         ]
-    else:  # 普通轮：全池一批，query = planner 判的英文主品类
+    else:  # 普通轮：全池一批，query = planner 判的主品类（优先英文名，标题是英文）
         pt = get_turn_constraints()
         category = pt.category.strip() if pt is not None else ""
+        category_en = pt.category_en.strip() if pt is not None else ""
         if category:
             # 锚核验（解锚）：category 是 planner 的 LLM 输出，能反证它的只有用户原文词面。
             # 两侧词表域都判得出且交集为空 → 锚不可信 → 本轮不执法。
@@ -422,13 +440,21 @@ async def _category_relevance(
                 return {}, False, True
             # 锚核验只认 category（它才是与用户原文可互证的那个词）；约束词是在锚已可信之后
             # 才拼上去补判别力的，不参与核验，也就不会把「合法但错的 must」变成新的错锚。
-            jobs = [(" ".join([category, *(must_terms or [])]), list(survivors))]
+            # 打分用英文名：中文品类词打英文标题 / 路径偏低
+            # （rank-eval badcase 前 3 不相关 2→1 件）。
+            # 标题分改用 planner 检索词：标题要判具体属性（ESCI E/S 就差在这），纯品类名判不出；
+            # 路径只判品类，检索词里的品牌 / 颜色会把路径分压塌。
+            # rank-eval 505 条纯精排 nDCG@3 0.623→0.676。
+            path_q = " ".join([category_en or category, *(must_terms or [])])
+            title_q = " ".join(pt.keywords) if pt is not None and pt.keywords else path_q
+            jobs = [(title_q, path_q, list(survivors))]
     if not jobs:
         return {}, False, False
 
     scores: dict[str, float] = {}
 
-    async def _score(query: str, cands: list[ItemCandidate]) -> bool:
+    async def _score(title_q: str, path_q: str, cands: list[ItemCandidate]) -> bool:
+        query = title_q if title_q == path_q else f"{title_q} | {path_q}"  # 缓存键
         for c in cands:  # 增量缓存命中：query 没变的候选不重复打分
             if c.rerank_score is not None and c.rerank_query == query:
                 scores[c.item_id] = float(c.rerank_score)
@@ -440,21 +466,31 @@ async def _category_relevance(
         # 有细类目的候选再单独给路径打一分，与标题分取小：卖家把 "Running" 塞进板鞋标题，标题分
         # 照样高（Superstar 0.85 vs 真跑鞋 0.96），路径不受标题影响（「跑步鞋」× "shoes > fashion
         # sneakers" 0.22 vs 路跑 0.97）。只拿路径、不拼标题——拼进标题实测只从 0.85 降到 0.80。
-        # 取小 = 细类目只能压分不能抬分；没有细类目 = 维持标题分（不奖不罚）。同一请求里送。
+        # 取小 = 细类目只能压分不能抬分；没有细类目 = 维持标题分（不奖不罚）。
         with_path = [c for c in fresh if c.fine_category]
-        docs = [_searchable(c) for c in fresh] + [c.fine_category.lower() for c in with_path]
-        batch, used_remote = await get_reranker().score_detailed(query, docs)
+        titles = [_searchable(c) for c in fresh]
+        paths = [c.fine_category.lower() for c in with_path]
+        reranker = get_reranker()
+        if title_q == path_q:  # 同 query：一个请求送完
+            batch, used_remote = await reranker.score_detailed(title_q, titles + paths)
+            t_scores, p_scores = batch[: len(titles)], batch[len(titles) :]
+        else:
+            (t_scores, ok_t), (p_scores, ok_p) = await asyncio.gather(
+                reranker.score_detailed(title_q, titles),
+                reranker.score_detailed(path_q, paths) if paths else _no_paths(),
+            )
+            used_remote = ok_t and ok_p
         if not used_remote:
             return False
-        path_scores = dict(zip((c.item_id for c in with_path), batch[len(fresh) :], strict=True))
-        for c, s in zip(fresh, batch[: len(fresh)], strict=True):
+        path_scores = dict(zip((c.item_id for c in with_path), p_scores, strict=True))
+        for c, s in zip(fresh, t_scores, strict=True):
             final = min(float(s), float(path_scores.get(c.item_id, s)))
             scores[c.item_id] = final
             update_fields(c.item_id, rerank_score=final, rerank_query=query)
         return True
 
     try:
-        oks = await asyncio.gather(*(_score(q, cands) for q, cands in jobs))
+        oks = await asyncio.gather(*(_score(t, p, cands) for t, p, cands in jobs))
     except Exception:
         logger.warning("相关性门打分失败，本轮停用（失效方向=维持现状）", exc_info=True)
         return {}, False, False
@@ -813,7 +849,8 @@ def _score_candidates(
         matched_map[c.item_id] = matched_must + matched
         # 亲和命中单独一路带出去（第 3 位）：它在理由里的措辞必须和「你要的 X」区分开——用户没
         # 说过这个词，冒充成他说的就是编造事实。
-        scored.append((base + _W_CHEAP * cheapness(c), matched_must + matched, matched_aff, c))
+        final = base + _W_PICK_CHEAP * cheapness(c) + (_W_REL * rr if rr is not None else 0.0)
+        scored.append((final, matched_must + matched, matched_aff, c))
 
     scored.sort(key=lambda t: t[0], reverse=True)
     return _Scored(scored, base_scores, matched_map)
