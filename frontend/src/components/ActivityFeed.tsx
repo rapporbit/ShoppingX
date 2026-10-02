@@ -1,12 +1,30 @@
 import { useEffect, useRef, useState } from "react";
 import type { AguiEvent } from "../types";
-import { CheckCircle2, ChevronRight, Loader2, Sparkles, XCircle } from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
+import type { LucideIcon } from "lucide-react";
+import {
+  BookOpen,
+  Check,
+  CheckCircle2,
+  ChevronDown,
+  Clock,
+  Globe,
+  ListChecks,
+  Loader2,
+  MessageCircleQuestion,
+  Scale,
+  Search,
+  Sparkles,
+  Truck,
+  XCircle,
+} from "lucide-react";
 
-// 「思考过程」活动流 —— 结构与动效对齐 Accio 的 thought-process 组件：
-//   · 运行中标题是一行会扫光的渐变文字（.shimmer-text），实时显示当前在做什么
-//   · 展开/收起用 grid 0fr→1fr 过渡，无需测高
-//   · 每个工具一行：旋转中 → 打勾 / 报错，而不是 start/end 两行流水账
-//   · 任务收尾 600ms 后自动收起，把版面让给最终清单
+// 「思考过程」活动流 —— 形式与动效向 Claude 网页版的思考块看齐：
+//   · 标题只有一行文字 + 箭头；运行中文字扫光（.shimmer-text），换步骤时旧字上滑淡出、新字上滑淡入
+//   · 展开区是一条时间线：左侧竖线串起每步的小图标，右侧是步骤名与一句结果；思考文本直接成段显示
+//   · 展开/收起用 motion 的 height auto + 透明度过渡
+//   · 每个工具一行：旋转中 → 该工具的图标 / 报错，而不是 start/end 两行流水账
+//   · 运行中展开，任务收尾 600ms 后自动收起，把版面让给最终清单
 const TOOL_LABEL: Record<string, string> = {
   planner: "需求拆解",
   chat_fallback: "对话回复",
@@ -64,12 +82,32 @@ function buildSteps(events: AguiEvent[]): Step[] {
   return rows;
 }
 
-const STEP_ICON = {
-  running: Loader2,
-  done: CheckCircle2,
-  error: XCircle,
-  info: Sparkles,
-} as const;
+const TOOL_ICON: Record<string, LucideIcon> = {
+  planner: ListChecks,
+  web_search: Globe,
+  category_insight: BookOpen,
+  item_search: Search,
+  item_picker: Sparkles,
+  price_compare: Scale,
+  shipping_calc: Truck,
+  ask_user: MessageCircleQuestion,
+};
+
+// 收尾类事件也会进 events：在时间线末尾画成一行状态，不展开详情（task_result 的 data 是整份结果）。
+const TERMINAL_LABEL: Record<string, string> = {
+  task_result: "完成",
+  task_cancelled: "已取消",
+  task_interrupted: "已中断",
+};
+
+function stepIcon({ evt, state }: Step): LucideIcon {
+  if (evt.event === "task_result") return CheckCircle2;
+  if (state === "running") return Loader2;
+  if (state === "error" || evt.event === "error") return XCircle;
+  if (evt.event in TERMINAL_LABEL) return XCircle;
+  if (state === "info") return Clock;
+  return TOOL_ICON[String(evt.data?.tool ?? "")] ?? Check;
+}
 
 // 运行中标题：优先播报最后一个还在跑的工具，否则退回「正在思考」。同轮 batch 时多个同名工具
 // 同时在跑，只播报最后一个——标题是给人看进度的，不是列清单。
@@ -86,9 +124,9 @@ function StepRow({ step }: { step: Step }) {
   if (evt.event === "clarification_request") {
     return (
       <div className="step-row">
-        <div className="clarification-row">
-          <span className="clarification-icon">?</span>
-          <span>向用户提问：{String(evt.data?.question ?? "")}</span>
+        <MessageCircleQuestion size={15} strokeWidth={1.75} className="step-icon ask" />
+        <div className="step-body">
+          <p className="step-text ask">向用户提问：{String(evt.data?.question ?? "")}</p>
         </div>
       </div>
     );
@@ -99,43 +137,75 @@ function StepRow({ step }: { step: Step }) {
     const eta = Number(evt.data?.estimated_wait_seconds ?? 0);
     return (
       <div className="step-row">
-        <div className="step-head" style={{ cursor: "default" }}>
-          <Loader2 size={14} strokeWidth={2} className="step-icon running" />
-          <span className="step-label">
+        <Loader2 size={15} strokeWidth={1.75} className="step-icon running" />
+        <div className="step-body">
+          <p className="step-text">
             排队中：前面还有 {ahead} 个任务{eta > 0 ? `，预计等待约 ${eta} 秒` : ""}
-          </span>
+          </p>
         </div>
       </div>
     );
   }
 
-  const Icon = STEP_ICON[state];
+  const Icon = stepIcon(step);
+  const iconState = evt.event === "error" ? "error" : state;
+  const terminal = TERMINAL_LABEL[evt.event];
+  const detail = terminal ? "" : detailText(evt);
+
+  // 思考文本直接成段显示（Claude 网页版同款），不折成「思考 + 一行预览」。
+  if (evt.event === "assistant_call" && detail) {
+    return (
+      <div className="step-row">
+        <Icon size={15} strokeWidth={1.75} className={`step-icon ${iconState}`} />
+        <div className="step-body">
+          <p className="step-text">{detail}</p>
+        </div>
+      </div>
+    );
+  }
+
   const label =
-    evt.event === "session_created"
+    terminal ??
+    (evt.event === "session_created"
       ? "会话已创建，开始规划"
       : evt.event === "assistant_call"
         ? "思考"
-        : toolLabel(String(evt.data?.tool ?? ""));
-  const detail = detailText(evt);
+        : evt.event === "error"
+          ? "出错"
+          : toolLabel(String(evt.data?.tool ?? "")));
   const expandable = Boolean(detail);
 
   return (
     <div className={`step-row ${expandable ? "expandable" : ""}`}>
-      <button
-        type="button"
-        className="step-head"
-        onClick={() => expandable && setOpen((v) => !v)}
-        disabled={!expandable}
-        aria-expanded={expandable ? open : undefined}
-      >
-        <Icon size={14} strokeWidth={2} className={`step-icon ${state}`} />
-        <span className="step-label">{label}</span>
-        {detail && !open && <span className="step-preview">{detail}</span>}
-        {expandable && (
-          <ChevronRight size={13} strokeWidth={2} className={`thought-chev ${open ? "open" : ""}`} />
-        )}
-      </button>
-      {detail && open && <div className="step-detail">{detail}</div>}
+      <Icon size={15} strokeWidth={1.75} className={`step-icon ${iconState}`} />
+      <div className="step-body">
+        <button
+          type="button"
+          className="step-head"
+          onClick={() => expandable && setOpen((v) => !v)}
+          disabled={!expandable}
+          aria-expanded={expandable ? open : undefined}
+        >
+          <span className="step-label">{label}</span>
+          {detail && !open && <span className="step-preview">{detail}</span>}
+          {expandable && (
+            <ChevronDown size={14} strokeWidth={2} className={`thought-chev ${open ? "open" : ""}`} />
+          )}
+        </button>
+        <AnimatePresence initial={false}>
+          {detail && open && (
+            <motion.div
+              className="step-detail-wrap"
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: "auto", opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.2, ease: "easeOut" }}
+            >
+              <div className="step-detail">{detail}</div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
     </div>
   );
 }
@@ -146,7 +216,8 @@ export function ActivityFeed({ events, running }: ActivityFeedProps) {
   const steps = buildSteps(events);
   // 展开态三层：用户显式点过（override 优先）→ 否则跑的时候展开、收尾后自动收起。
   const [override, setOverride] = useState<boolean | null>(null);
-  const [auto, setAuto] = useState(true);
+  // 初值跟 running 走：回看历史轮时直接是收起态，不会先展开再在 600ms 后缩回去。
+  const [auto, setAuto] = useState(running);
   const stepsRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -182,44 +253,69 @@ export function ActivityFeed({ events, running }: ActivityFeedProps) {
 
   if (steps.length === 0 && !running) return null;
 
+  const toolCount = steps.filter((s) => s.state === "done" || s.state === "error").length;
+  const title = running ? headline(steps) : toolCount > 0 ? `思考过程 · ${toolCount} 步` : "思考过程";
+  // 老会话的 activity 里不一定有收尾事件：没有就补一行「完成」，让时间线有个终点。
+  const hasTerminal = steps.some((s) => s.evt.event in TERMINAL_LABEL || s.evt.event === "error");
+
   return (
     <div className="thought">
       <button
         type="button"
-        className={`thought-head ${running ? "is-running" : ""}`}
+        className="thought-head"
         onClick={() => setOverride(!open)}
         aria-expanded={open}
       >
-        <Sparkles size={14} strokeWidth={1.75} className="thought-spark" />
-        <span className={running ? "shimmer-text" : undefined}>
-          {running ? headline(steps) : "查看思考过程"}
+        <span className="thought-title">
+          {/* key=文案：换步骤时旧字上滑淡出、新字从下方淡入。 */}
+          <AnimatePresence mode="wait" initial={false}>
+            <motion.span
+              key={title}
+              className={running ? "shimmer-text" : undefined}
+              initial={{ y: 6, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: -6, opacity: 0 }}
+              transition={{ duration: 0.16, ease: "easeOut" }}
+            >
+              {title}
+            </motion.span>
+          </AnimatePresence>
         </span>
-        <ChevronRight size={14} strokeWidth={2} className={`thought-chev ${open ? "open" : ""}`} />
+        <ChevronDown size={15} strokeWidth={2} className={`thought-chev ${open ? "open" : ""}`} />
       </button>
 
-      {running && (
-        <div className="thought-progress">
-          <i />
-        </div>
-      )}
-
-      <div className={`thought-panel ${open ? "open" : ""}`}>
-        <div className="thought-inner">
-          <div className="thought-divider" />
-          <div className="thought-steps" ref={stepsRef}>
-            {/* key 只用下标：tool_start 就地变成 tool_end（转圈→打勾），行不重挂、不重播入场动画。 */}
-            {steps.map((s, i) => (
-              <StepRow key={i} step={s} />
-            ))}
-            {running && steps.length === 0 && (
-              <div className="skeleton">
-                <span style={{ width: "180px" }} />
-                <span style={{ width: "140px" }} />
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            className="thought-panel"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
+          >
+            <div className="thought-steps" ref={stepsRef}>
+              {/* key 只用下标：tool_start 就地变成 tool_end（转圈→图标），行不重挂、不重播入场动画。 */}
+              {steps.map((s, i) => (
+                <StepRow key={i} step={s} />
+              ))}
+              {!running && steps.length > 0 && !hasTerminal && (
+                <div className="step-row">
+                  <CheckCircle2 size={15} strokeWidth={1.75} className="step-icon" />
+                  <div className="step-body">
+                    <p className="step-text">完成</p>
+                  </div>
+                </div>
+              )}
+              {running && steps.length === 0 && (
+                <div className="skeleton">
+                  <span style={{ width: "180px" }} />
+                  <span style={{ width: "140px" }} />
+                </div>
+              )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

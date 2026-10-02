@@ -731,68 +731,73 @@ button:disabled {
 }
 
 /* ============================ 活动流 / 思考过程 ============================
-   一比一对齐 Accio (phoenix-web) 的思考过程组件，动画参数取自其线上样式表：
-   - 思考中的标题：渐变文字扫光（background-clip:text + background-position 位移），3.2s linear infinite
-   - 展开/收起：CSS Grid 的 0fr→1fr 过渡（无需测高、无 JS），300ms ease-in-out + opacity
-   - 步骤行：progress_activity 旋转 → check_circle 完成 → error 失败，12px 淡色单行截断
-   - 步骤区顶部 mask 渐隐 + 新步骤自动滚到底
+   形式与动效向 Claude 网页版的思考块看齐：
+   - 标题：一行文字 + 箭头，无图标无进度条；运行中文字扫光，换步骤时上滑换字（motion，写在组件里）
+   - 展开/收起：motion 的 height auto + opacity（写在组件里），这里只管 overflow
+   - 展开区是时间线：图标列 + 竖线（.step-row::after），右列是步骤名 / 一句结果 / 思考文本
+   - 步骤区限高内部滚动，顶部 mask 渐隐 + 新步骤自动滚到底
    - 任务完成后延迟 600ms 自动收起，把版面让给最终答案
-   视觉换成本项目的薄荷绿/浅色体系（Accio 用 zinc 灰阶）。 */
+   - 字体走 --sans，14px / 13px、行高 22px、字色 --text-2：这块是要读的内容，不用 12px 淡灰 */
 
 .thought {
   display: flex;
   flex-direction: column;
-  gap: 8px;
   width: 100%;
   min-width: 0;
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 22px;
 }
 
 .thought-head {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   width: fit-content;
-  padding: 0;
+  max-width: 100%;
+  padding: 2px 0;
   border: none;
   background: transparent;
-  color: var(--faint);
-  font-size: 13px;
-  font-weight: 500;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 400;
+  cursor: pointer;
   transition: color 0.15s ease-out;
 }
-.thought-head:not(:disabled):hover {
-  color: var(--text-2);
+.thought-head:hover {
+  color: var(--text);
 }
-.thought-head:not(:disabled):hover .thought-spark {
-  color: var(--accent-strong);
+/* overflow:hidden 兼作换字动画的遮罩：上滑出去的旧字、从下方进来的新字都被这一行的高度裁掉。 */
+.thought-title {
+  display: inline-flex;
+  min-width: 0;
+  overflow: hidden;
 }
-.thought-spark {
-  color: var(--faint);
-  flex-shrink: 0;
-  transition: color 0.15s ease-out;
-}
-.thought-head.is-running .thought-spark {
-  color: var(--accent);
-  animation: thought-spark-pulse 2s ease-in-out infinite;
+.thought-title > span {
+  display: inline-block; /* transform 对纯 inline 不生效 */
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .thought-chev {
   color: inherit;
   flex-shrink: 0;
-  transition: transform 0.15s ease-out;
+  transition: transform 0.2s var(--ease-out);
 }
 .thought-chev.open {
-  transform: rotate(90deg);
+  transform: rotate(180deg);
 }
 
-/* Accio 的思考态文字：整段文字被一条高光从右向左扫过。
-   color 透明 + background-clip:text，让渐变只透过字形显示。 */
+/* 运行中的标题文字：一条高光从右向左扫过。color 透明 + background-clip:text，让渐变只透过字形显示。
+   底色用 --muted（与静止态标题同色），高光用 --text，扫光停下时字色不跳。 */
 .shimmer-text {
   color: transparent;
   background-image: linear-gradient(
     90deg,
-    rgba(138, 141, 147, 0.45) 0% 35%,
-    rgba(28, 29, 31, 0.95) 50%,
-    rgba(138, 141, 147, 0.45) 65% 100%
+    var(--muted) 0% 35%,
+    var(--text) 50%,
+    var(--muted) 65% 100%
   );
   background-size: 200% 100%;
   -webkit-background-clip: text;
@@ -807,143 +812,51 @@ button:disabled {
     background-position: -200% 0;
   }
 }
-@keyframes thought-spark-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.4;
-  }
-}
 
-/* 运行中的细进度条：薄荷绿渐变 + 1.5s ease-in-out 往复扫光（对齐 Accio progress-shimmer）。 */
-.thought-progress {
-  height: 2px;
-  width: 100%;
-  border-radius: 2px;
-  overflow: hidden;
-  opacity: 0.6; /* 下面紧挨着分隔线，压一压免得两条线打架 */
-  background: var(--surface-soft);
-}
-.thought-progress > i {
-  display: block;
-  height: 100%;
-  width: 100%;
-  /* 不定态：一束高光在浅色轨道上来回扫。整条实心绿会被读成「进度 100%」，扫光才读得出「在跑」。 */
-  background: linear-gradient(
-    90deg,
-    transparent 0%,
-    var(--accent) 35%,
-    var(--accent-strong) 50%,
-    var(--accent) 65%,
-    transparent 100%
-  );
-  background-size: 200% 100%;
-  animation: thought-shimmer 1.5s ease-in-out infinite;
-}
-
-/* 展开/收起：grid-template-rows 0fr→1fr。比 max-height 更准（不用猜高度、无跳变）。 */
+/* 高度由 motion 从 0 过渡到 auto，这里只负责裁掉过渡中溢出的内容。 */
 .thought-panel {
-  display: grid;
-  grid-template-rows: 0fr;
-  opacity: 0;
-  transition: grid-template-rows 0.3s ease-in-out, opacity 0.3s ease-in-out,
-    margin-top 0.3s ease-in-out;
-}
-.thought-panel.open {
-  grid-template-rows: 1fr;
-  opacity: 1;
-}
-.thought-inner {
   overflow: hidden;
-  min-height: 0;
-}
-.thought-divider {
-  height: 1px;
-  width: 100%;
-  margin-bottom: 6px;
-  background: rgba(0, 0, 0, 0.06);
 }
 
-/* 步骤区：超过一屏就内部滚动，顶部用 mask 渐隐（Accio 同款），暗示上面还有内容。 */
+/* 步骤区：超过限高就内部滚动，顶部用 mask 渐隐，暗示上面还有内容。 */
 .thought-steps {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  max-height: 260px;
+  max-height: 320px;
   overflow-y: auto;
   scrollbar-width: thin;
-  padding-top: 2px;
-  -webkit-mask-image: linear-gradient(to bottom, transparent, black 8px);
-  mask-image: linear-gradient(to bottom, transparent, black 8px);
+  padding: 10px 0 2px;
+  -webkit-mask-image: linear-gradient(to bottom, transparent, black 10px);
+  mask-image: linear-gradient(to bottom, transparent, black 10px);
 }
 
+/* 时间线的一行：左列图标，右列内容；::after 是从图标下沿连到下一行图标的竖线。 */
 .step-row {
-  width: 100%;
-  min-width: 0;
-  padding: 4px 0;
-}
-.step-head {
+  position: relative;
   display: flex;
-  align-items: center;
-  gap: 8px;
+  align-items: flex-start;
+  gap: 12px;
   width: 100%;
   min-width: 0;
-  padding: 0;
-  border: none;
-  background: transparent;
-  text-align: left;
-  color: var(--faint);
-  transition: color 0.15s ease-out;
-}
-.step-row.expandable .step-head {
-  cursor: pointer;
-}
-.step-row.expandable .step-head:hover {
-  color: var(--text-2);
-}
-.step-icon {
-  flex-shrink: 0;
-  color: var(--faint);
-}
-.step-icon.running {
-  color: var(--accent);
-  animation: step-spin 0.9s linear infinite;
-}
-@keyframes step-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-.step-label {
-  flex-shrink: 0;
-  font-size: 12px;
-  color: inherit;
-}
-.step-preview {
-  min-width: 0;
-  flex: 1;
-  font-size: 12px;
-  color: var(--faint);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.step-detail {
-  margin-top: 2px;
-  padding-left: 22px;
-  font-size: 11.5px;
-  line-height: 1.55;
-  color: var(--muted);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-/* 新步骤入场：淡入 + 轻微上浮（对齐 Accio 的 handoff-row-in）。 */
-.step-row {
+  padding-bottom: 12px;
   animation: step-row-in 0.28s ease-out both;
 }
+.step-row::after {
+  content: "";
+  position: absolute;
+  left: 7px;
+  top: 24px;
+  bottom: 2px;
+  width: 1px;
+  background: var(--border);
+}
+.step-row:last-child {
+  padding-bottom: 2px;
+}
+.step-row:last-child::after {
+  display: none;
+}
+/* 新步骤入场：淡入 + 轻微上浮。 */
 @keyframes step-row-in {
   from {
     opacity: 0;
@@ -955,39 +868,102 @@ button:disabled {
   }
 }
 
-/* 澄清提问行：唯一需要「亮」出来的步骤，用主色描边而非灰阶。 */
-.clarification-row {
+.step-icon {
+  flex-shrink: 0;
+  margin-top: 3.5px; /* (行高 22 - 图标 15) / 2，与右列首行文字垂直居中 */
+  color: var(--muted);
+}
+.step-icon.running {
+  color: var(--text-2);
+  animation: step-spin 0.9s linear infinite;
+}
+.step-icon.error {
+  color: var(--danger);
+}
+.step-icon.ask {
+  color: var(--text);
+}
+@keyframes step-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.step-body {
+  flex: 1;
+  min-width: 0;
+}
+.step-head {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 10px;
-  margin: 4px 0;
-  border: 1px solid var(--accent);
-  border-radius: 6px;
-  background: var(--accent-softer);
-  font-size: 12.5px;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  text-align: left;
   color: var(--text-2);
+  font-size: 14px;
+  line-height: 22px;
+  cursor: default;
+  transition: color 0.15s ease-out;
 }
-.clarification-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
+.step-row.expandable .step-head {
+  cursor: pointer;
+}
+.step-row.expandable .step-head:hover {
+  color: var(--text);
+}
+.step-head .thought-chev {
+  color: var(--faint);
+}
+.step-label {
   flex-shrink: 0;
-  border-radius: 50%;
-  background: var(--accent);
-  color: #fff;
-  font-size: 11px;
-  font-weight: 600;
+  color: inherit;
 }
+.step-preview {
+  min-width: 0;
+  flex: 1;
+  font-size: 13px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 思考文本 / 排队 / 收尾这类不展开的行：直接成段显示。 */
+.step-text {
+  margin: 0;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* 澄清提问行：唯一需要「亮」出来的步骤，用正文色加粗而非灰阶。 */
+.step-text.ask {
+  color: var(--text);
+  font-weight: 500;
+}
+.step-detail-wrap {
+  overflow: hidden;
+}
+.step-detail {
+  padding-top: 4px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 
 /* 骨架占位：400% 宽的渐变横扫（Accio animate-shimmer 同款尺度）。 */
 .skeleton {
   display: flex;
   flex-direction: column;
   gap: 9px;
-  padding: 6px 0 2px 22px;
+  padding: 6px 0 2px 27px; /* 与时间线右列对齐：图标 15 + 间距 12 */
 }
 .skeleton span {
   height: 10px;
@@ -1008,9 +984,7 @@ button:disabled {
 /* 尊重系统「减少动态效果」：扫光/旋转/脉冲一律停掉，只留静态渐变。 */
 @media (prefers-reduced-motion: reduce) {
   .shimmer-text,
-  .thought-progress > i,
   .step-icon.running,
-  .thought-head.is-running .thought-spark,
   .skeleton span,
   .step-row,
   .product-card {
