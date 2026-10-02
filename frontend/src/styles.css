@@ -34,10 +34,13 @@
   --danger: #9e4a3c; /* 砖红，压暗 */
   --danger-soft: #f3e9e6;
 
-  /* 两套字体：--serif 给标题 / Agent 回复 / 品牌名，--sans 给其余一切。字体文件在 main.tsx 里 import。 */
+  /* 两套字体：--serif 给标题 / 品牌名，--sans 给其余一切（Agent 回复正文例外，走 --system）。字体文件在 main.tsx 里 import。 */
   --sans: "Inter Variable", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
     "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   --serif: "Newsreader Variable", "Noto Serif SC", "Songti SC", "Source Han Serif SC", Georgia, serif;
+  /* 系统默认字体：不带任何打包字体，各平台用自己的界面字体（苹方 / 微软雅黑 / Segoe UI）。Agent 回复正文用它。 */
+  --system: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", sans-serif;
 
   /* 阴影分层：sm 给悬浮态的卡片 / 胶囊，md 给浮层菜单，lg 给弹窗与输入框，xl 给全屏弹窗。
      全是同色低透明度的多层叠加，不用单层大模糊——单层在暖白底上会发灰发脏。 */
@@ -665,7 +668,7 @@ button:disabled {
   font-size: 15px;
   border-radius: 24px 24px 8px 24px;
 }
-/* Agent 回复：衬线正文放在极浅的灰底里。清单很长时也不撑满整行，留出右侧呼吸位。 */
+/* Agent 回复：系统默认字体的正文放在极浅的灰底里（2026-10-03 用户要求从衬线改回）。清单很长时也不撑满整行，留出右侧呼吸位。 */
 .final {
   align-self: flex-start;
   max-width: min(100%, 780px);
@@ -675,9 +678,9 @@ button:disabled {
   border-radius: 24px 24px 24px 8px;
 }
 .final .markdown {
-  font-family: var(--serif);
-  font-size: 16.5px;
-  line-height: 1.65;
+  font-family: var(--system);
+  font-size: 15px; /* 与用户气泡同字号；16.5px 是给 x 高度偏小的衬线配的 */
+  line-height: 1.7;
 }
 .final .markdown > :first-child {
   margin-top: 0;
